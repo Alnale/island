@@ -1,0 +1,179 @@
+/* ===== 挂件页面:全透明,只显示灵动岛本体 ===== */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  height: 100%;
+  /* 透明背景是挂件关键:Electron 透明窗口 + 透明页面 = 只有岛可见 */
+  background: transparent;
+  overflow: hidden;
+  user-select: none;
+}
+
+body {
+  font-family:
+    'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', system-ui, -apple-system,
+    'Segoe UI', sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+.widget-root {
+  width: 100vw;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  /* 岛体悬停最宽 500px,窗口 520px,左右各留 10px 呼吸空间 */
+  padding: 0 10px;
+}
+
+/* ===== 操作结果提示(模式/跳转不被平台支持时短暂显示) ===== */
+.widget-hint {
+  position: absolute;
+  bottom: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(16, 18, 24, 0.95);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 999px;
+  padding: 5px 14px;
+  font-size: 0.68rem;
+  letter-spacing: 0.04em;
+  color: rgba(255, 255, 255, 0.85);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+  animation: hintIn 0.25s cubic-bezier(0.34, 1.56, 0.64, 1) backwards;
+  z-index: 20;
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+@keyframes hintIn {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
+}
+
+/* ===== 拖动把手:岛体上方的小横条,按住可移动挂件 =====
+   -webkit-app-region: drag 区域不接收鼠标事件(拖动交给窗口系统),
+   所以把手本身不会挡住岛体交互;悬停微亮提示可拖动 */
+.drag-handle {
+  flex-shrink: 0;
+  width: 100%;
+  height: 18px;
+  -webkit-app-region: drag;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: grab;
+}
+
+.drag-handle::after {
+  content: '';
+  width: 52px;
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.16);
+  box-shadow: 0 0 8px rgba(0, 0, 0, 0.25);
+  transition:
+    background 0.25s ease,
+    box-shadow 0.25s ease;
+}
+
+.drag-handle:hover::after {
+  background: rgba(255, 255, 255, 0.5);
+  box-shadow: 0 0 10px rgba(255, 255, 255, 0.15);
+}
+
+/* ===== 岛体舞台:垂直贴住把手,水平居中 ===== */
+.widget-stage {
+  display: flex;
+  justify-content: center;
+  margin-top: 8px;
+}
+
+/* ===== 挂件版岛体背景:纯色实底,去掉毛玻璃 =====
+   透明窗口下 backdrop-filter 采样不到下层内容(合成失败会导致
+   整层背景不渲染),桌面挂件本就没有"页面背景"可模糊。
+   覆盖为纯黑实底,视觉与 iPhone 灵动岛一致 */
+.widget-stage .island-bg {
+  /* 全不透明实底:避免半透明 alpha 在 Windows 透明窗口合成时的突变 */
+  background: rgb(8, 10, 14);
+  backdrop-filter: none !important;
+}
+
+/* ===== 挂件版:展开/收起动画去掉内容模糊 =====
+   组件用 filter: blur(3px) 做"内容推远"的 3D 感,但逐帧模糊重采样
+   在透明窗口上是动画卡顿的主因;桌面挂件用位移+缩放足以表达,去掉模糊 */
+.widget-stage .island-content {
+  filter: none !important;
+}
+
+/* ===== 挂件版:展开面板更高,歌词独立成行 =====
+   组件默认 208px 高时,绝对定位的歌词(78px 处)会压住进度条,
+   视觉上进度条"贴底"。挂件版面板加高,歌词改回文档流
+   (head → 歌词 → 进度条 → 控制区),各区域互不重叠 */
+.widget-stage .island-demo.expanded {
+  height: 260px;
+}
+
+.widget-stage .island-panel-lyric-inline {
+  position: static;
+  left: auto;
+  top: auto;
+  /* 关键:清掉组件原 CSS 的 translateX(-50%)。组件里它是绝对定位
+     (left 50%)时的水平居中手段;静态定位下若不清理,歌词行切换
+     重建瞬间会先以左移 50% 闪现,再被动画接管回居中 */
+  transform: none;
+  translate: none;
+  width: max-content;
+  max-width: 100%;
+  height: 36px;
+  min-height: 0;
+  align-self: center;
+  justify-content: center;
+  padding: 0 4px;
+  /* 歌词切换动画:静态定位下不再有水平位移,只做淡入 + 轻微上移 */
+  animation: lyricSwapStatic 0.32s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@keyframes lyricSwapStatic {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* ===== 挂件版:紧凑态进度条/粒子时间垂直居中 =====
+   组件用独立属性 translate: 0 -50% 垂直居中,挂件(透明窗口)环境下
+   该属性偶发失效导致元素整体偏下。统一改用 transform 实现垂直居中:
+   - 悬停进度条(.island-extra):transform 需与展开动画 scaleX 合并
+   - 拖动时的粒子时间(.island-time-particles):水平/垂直居中合并 */
+.widget-stage .island-extra {
+  translate: none;
+  transform: translateY(-50%) scaleX(0);
+  transform-origin: left center;
+}
+
+.widget-stage .island-demo:hover .island-extra {
+  transform: translateY(-50%) scaleX(1);
+}
+
+.widget-stage .island-time-particles:not(.island-time-particles--inline) {
+  translate: none;
+  transform: translateX(-50%) translateY(-50%);
+}

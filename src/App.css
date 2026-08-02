@@ -1,0 +1,777 @@
+/* ===== 布局骨架 ===== */
+.app {
+  --state-color: #4ade80;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 0 24px 48px;
+}
+
+.app-header {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 22px 2px 0;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.brand-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  transition:
+    background 0.5s ease,
+    box-shadow 0.5s ease;
+}
+
+.brand-name {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.22em;
+  color: var(--dim);
+}
+
+.header-clock {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.14em;
+  color: var(--faint);
+}
+
+/* ===== 主区 ===== */
+.app-main {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+/* ===== Hero ===== */
+.hero {
+  text-align: center;
+  margin-top: 76px;
+  margin-bottom: 64px;
+}
+
+.hero-kicker {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.28em;
+  color: var(--dim);
+  margin-bottom: 22px;
+}
+
+.hero-kicker-index {
+  color: var(--state-color);
+  transition: color 0.5s ease;
+}
+
+.hero-kicker-line {
+  width: 44px;
+  height: 1px;
+  background: var(--line);
+}
+
+.hero-title {
+  font-family: var(--font-display);
+  font-weight: 900;
+  font-size: clamp(2.6rem, 7vw, 4.2rem);
+  letter-spacing: 0.08em;
+  line-height: 1.15;
+  text-shadow: 0 0 60px color-mix(in srgb, var(--state-color) 26%, transparent);
+  transition: text-shadow 0.6s ease;
+}
+
+.hero-sub {
+  margin-top: 18px;
+  font-size: 0.92rem;
+  color: var(--dim);
+  letter-spacing: 0.06em;
+}
+
+/* ===== 舞台:灵动岛 ===== */
+.stage {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 100%;
+  padding: 56px 0 60px;
+}
+
+.stage-halo {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  translate: -50% -50%;
+  width: 620px;
+  height: 260px;
+  pointer-events: none;
+  background: radial-gradient(
+    ellipse at center,
+    color-mix(in srgb, var(--state-color) 14%, transparent) 0%,
+    transparent 62%
+  );
+  transition: background 0.6s ease;
+}
+
+.stage-track {
+  position: relative;
+  margin-top: 46px;
+  width: min(560px, 84%);
+  height: 1px;
+  background: linear-gradient(
+    to right,
+    transparent,
+    rgba(255, 255, 255, 0.14) 18%,
+    rgba(255, 255, 255, 0.14) 82%,
+    transparent
+  );
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.stage-track::before {
+  content: '';
+  position: absolute;
+  left: 6px;
+  width: 56px;
+  height: 1px;
+  background: linear-gradient(to right, transparent, rgba(255, 255, 255, 0.06));
+}
+
+.stage-track::after {
+  content: '';
+  position: absolute;
+  right: 6px;
+  width: 56px;
+  height: 1px;
+  background: linear-gradient(to left, transparent, rgba(255, 255, 255, 0.06));
+}
+
+.stage-track-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 999px;
+  background: var(--state-color);
+  box-shadow: 0 0 14px color-mix(in srgb, var(--state-color) 70%, transparent);
+  transition:
+    background 0.5s ease,
+    box-shadow 0.5s ease;
+}
+
+/* ===== 控制面板 ===== */
+.panel {
+  width: 100%;
+  max-width: 720px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  padding: 26px 26px 22px;
+  backdrop-filter: blur(12px);
+}
+
+.panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 20px;
+}
+
+.panel-title {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  font-weight: 500;
+  letter-spacing: 0.22em;
+  color: var(--dim);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.panel-title-index {
+  color: var(--state-color);
+  transition: color 0.5s ease;
+}
+
+.panel-title::after {
+  content: '';
+  width: 1px;
+  height: 12px;
+  background: var(--line);
+}
+
+@keyframes badgePulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+/* ===== 特性卡片 ===== */
+.features {
+  width: 100%;
+  max-width: 720px;
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 14px;
+  margin-top: 18px;
+}
+
+.feature-card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  padding: 22px 22px 20px;
+  position: relative;
+  overflow: hidden;
+  transition:
+    border-color 0.3s ease,
+    transform 0.3s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.feature-card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 22px;
+  right: 22px;
+  height: 1px;
+  background: linear-gradient(
+    to right,
+    color-mix(in srgb, var(--state-color) 45%, transparent),
+    transparent
+  );
+  opacity: 0.5;
+  transition: opacity 0.3s ease;
+}
+
+.feature-card:hover {
+  border-color: rgba(255, 255, 255, 0.14);
+  transform: translateY(-2px);
+}
+
+.feature-index {
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  letter-spacing: 0.2em;
+  color: var(--state-color);
+  margin-bottom: 12px;
+  transition: color 0.5s ease;
+}
+
+.feature-title {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 1.05rem;
+  margin-bottom: 8px;
+  letter-spacing: 0.04em;
+}
+
+.feature-desc {
+  font-size: 0.8rem;
+  line-height: 1.75;
+  color: var(--dim);
+}
+
+/* ===== 媒体播放器面板 ===== */
+.media-panel {
+  margin-top: 18px;
+}
+
+.media-now {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.media-art {
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  background: color-mix(in srgb, var(--state-color) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--state-color) 35%, transparent);
+  color: var(--state-color);
+  font-size: 1.15rem;
+  transition:
+    background 0.5s ease,
+    border-color 0.5s ease;
+}
+
+.media-playing .media-art-note {
+  animation: noteFloat 1.6s ease-in-out infinite;
+}
+
+@keyframes noteFloat {
+  0%,
+  100% {
+    transform: translateY(0) rotate(-4deg);
+  }
+  50% {
+    transform: translateY(-3px) rotate(4deg);
+  }
+}
+
+.media-info {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  flex: 1;
+}
+
+.media-title {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 1rem;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.media-artist {
+  font-size: 0.72rem;
+  color: var(--dim);
+  letter-spacing: 0.14em;
+}
+
+.media-time {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--faint);
+  letter-spacing: 0.08em;
+  flex-shrink: 0;
+}
+
+.media-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.media-btn {
+  padding: 9px 18px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--line);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 0.82rem;
+  cursor: pointer;
+  transition:
+    transform 0.25s cubic-bezier(0.22, 1, 0.36, 1),
+    border-color 0.3s ease,
+    background 0.3s ease;
+}
+
+.media-btn:hover {
+  transform: translateY(-1px);
+  border-color: color-mix(in srgb, var(--state-color) 40%, var(--line));
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.media-btn:active {
+  transform: translateY(0);
+}
+
+.media-btn--primary {
+  font-weight: 600;
+  background: color-mix(in srgb, var(--state-color) 16%, transparent);
+  border-color: color-mix(in srgb, var(--state-color) 45%, transparent);
+}
+
+.media-hint {
+  margin-left: auto;
+  font-size: 0.68rem;
+  color: var(--faint);
+  letter-spacing: 0.04em;
+}
+
+/* ===== 系统媒体监听 ===== */
+.sys-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 0.72rem;
+  color: var(--faint);
+  letter-spacing: 0.06em;
+}
+
+.sys-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: #64748b;
+  transition: background 0.3s ease, box-shadow 0.3s ease;
+}
+
+.sys-status.on .sys-status-dot {
+  background: #4ade80;
+  box-shadow: 0 0 8px rgba(74, 222, 128, 0.7);
+  animation: sysPulse 2s ease-in-out infinite;
+}
+
+.sys-status.on {
+  color: #4ade80;
+}
+
+@keyframes sysPulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
+.sys-now {
+  margin-top: 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.sys-track-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.sys-platform {
+  flex-shrink: 0;
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: 0.66rem;
+  letter-spacing: 0.08em;
+  color: var(--platform-color);
+  border: 1px solid color-mix(in srgb, var(--platform-color) 40%, transparent);
+  background: color-mix(in srgb, var(--platform-color) 10%, transparent);
+}
+
+.sys-track {
+  font-size: 0.82rem;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sys-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.sys-progress {
+  margin-top: 8px;
+  font-size: 0.68rem;
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.sys-hint-inline {
+  color: var(--faint);
+  opacity: 0.75;
+}
+
+.sys-hint {
+  margin-top: 12px;
+  font-size: 0.68rem;
+  color: var(--faint);
+  line-height: 1.7;
+}
+
+.sys-hint code {
+  font-family: ui-monospace, monospace;
+  color: var(--text);
+  opacity: 0.8;
+}
+
+/* 监听未连接时的启动引导 */
+.sys-setup {
+  margin-top: 14px;
+  padding: 12px 14px;
+  border: 1px dashed var(--line);
+  border-radius: 12px;
+}
+
+.sys-setup-title {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.sys-setup-desc {
+  margin-top: 6px;
+  font-size: 0.68rem;
+  color: var(--faint);
+  line-height: 1.6;
+}
+
+.sys-setup-cmd {
+  display: block;
+  margin-top: 8px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--line);
+  font-family: ui-monospace, monospace;
+  font-size: 0.7rem;
+  color: var(--text);
+  word-break: break-all;
+}
+
+/* 播放模式切换:三态分段按钮,色点与激活态跟随模式色 */
+.mode-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.mode-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 14px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--line);
+  color: var(--faint);
+  font-family: inherit;
+  font-size: 0.78rem;
+  cursor: pointer;
+  transition:
+    color 0.25s ease,
+    border-color 0.25s ease,
+    background 0.25s ease,
+    transform 0.25s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.mode-btn .mode-btn-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--mode-color);
+  opacity: 0.45;
+  transition: opacity 0.25s ease;
+}
+
+.mode-btn:hover {
+  transform: translateY(-1px);
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--mode-color) 40%, var(--line));
+}
+
+.mode-btn.active {
+  color: var(--mode-color);
+  border-color: color-mix(in srgb, var(--mode-color) 50%, transparent);
+  background: color-mix(in srgb, var(--mode-color) 12%, transparent);
+}
+
+.mode-btn.active .mode-btn-dot {
+  opacity: 1;
+  box-shadow: 0 0 8px var(--mode-color);
+}
+
+/* ===== 灵动岛 API 监控 ===== */
+.api-monitor {
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+
+.api-monitor-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.api-monitor-title {
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  letter-spacing: 0.2em;
+  color: var(--dim);
+}
+
+.api-monitor-live {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.18em;
+  color: var(--faint);
+}
+
+.api-monitor-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--state-color);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--state-color) 70%, transparent);
+  animation: badgePulse 2.4s ease-in-out infinite;
+}
+
+.api-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.api-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.api-row code {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--dim);
+  letter-spacing: 0.06em;
+}
+
+.api-val {
+  font-size: 0.8rem;
+  color: var(--text);
+}
+
+.api-val--on {
+  color: var(--state-color);
+}
+
+.api-log {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  list-style: none;
+  padding: 0;
+}
+
+.api-log li {
+  display: flex;
+  gap: 10px;
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  letter-spacing: 0.04em;
+  color: var(--faint);
+}
+
+.api-log-time {
+  color: var(--dim);
+  flex-shrink: 0;
+}
+
+.api-log-empty {
+  color: var(--faint);
+}
+
+/* ===== 页脚 ===== */
+.app-footer {
+  margin-top: 56px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.2em;
+  color: var(--faint);
+}
+
+.app-footer-sep {
+  color: var(--line);
+}
+
+/* ===== 响应式 ===== */
+@media (max-width: 720px) {
+  .hero {
+    margin-top: 52px;
+    margin-bottom: 44px;
+  }
+
+  .features {
+    grid-template-columns: 1fr;
+  }
+
+  .stage-halo {
+    width: 420px;
+    height: 200px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .reveal {
+    animation: none;
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* ===== 操作结果提示(模式/跳转不被平台支持时短暂显示) ===== */
+.app-hint {
+  position: fixed;
+  top: 18px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 100;
+  background: rgba(16, 18, 24, 0.92);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 999px;
+  padding: 7px 16px;
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+  color: rgba(255, 255, 255, 0.88);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+  animation: appHintIn 0.25s cubic-bezier(0.34, 1.56, 0.64, 1) backwards;
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+@keyframes appHintIn {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
+}

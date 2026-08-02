@@ -1,0 +1,54 @@
+appId: com.dynamicisland.widget
+productName: 灵动岛挂件
+copyright: Copyright © 2026
+
+directories:
+  output: release
+  buildResources: electron
+
+# 打包内容:挂件页面 + Electron 侧脚本(不含演示页面与源码)
+files:
+  - dist-widget/**/*
+  - electron/main.cjs
+  - electron/preload.cjs
+  - electron/bridge.cjs
+  - electron/icon.png
+  - package.json
+
+# 桥接的 PowerShell 读取脚本与 C# 桥接源码放 asar 外
+# (asar 内文件无法被 powershell/csc 直接打开)
+extraResources:
+  - from: electron/smtc-reader.ps1
+    to: bridge/smtc-reader.ps1
+  - from: electron/smtc-bridge.cs
+    to: bridge/smtc-bridge.cs
+
+# 直接复用本地已解压的 Electron(跳过 zip 下载/解压;
+# 安全软件实时监控会锁住新解压的 electron.exe 导致目录重命名失败)
+electronDist: node_modules/electron/dist
+
+# 桥接进程避免从 asar 内 fork(解包到磁盘更稳)
+asarUnpack:
+  - electron/bridge.cjs
+
+win:
+  icon: electron/icon.png
+  target:
+    - target: nsis
+      arch: [x64]
+    - target: portable
+      arch: [x64]
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: false
+  createStartMenuShortcut: true
+  shortcutName: 灵动岛挂件
+  artifactName: 灵动岛挂件-安装版-${version}.${ext}
+
+portable:
+  artifactName: 灵动岛挂件-便携版-${version}.${ext}
+
+npmRebuild: false
