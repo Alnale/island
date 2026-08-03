@@ -33,69 +33,7 @@ body {
   padding: 0 10px;
 }
 
-/* ===== 操作结果提示(模式/跳转不被平台支持时短暂显示) ===== */
-.widget-hint {
-  position: absolute;
-  bottom: 8px;
-  left: 50%;
-  transform: translateX(-50%);
-  background: rgba(16, 18, 24, 0.95);
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  border-radius: 999px;
-  padding: 5px 14px;
-  font-size: 0.68rem;
-  letter-spacing: 0.04em;
-  color: rgba(255, 255, 255, 0.85);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
-  animation: hintIn 0.25s cubic-bezier(0.34, 1.56, 0.64, 1) backwards;
-  z-index: 20;
-  pointer-events: none;
-  white-space: nowrap;
-}
-
-@keyframes hintIn {
-  from {
-    opacity: 0;
-    transform: translateX(-50%) translateY(6px);
-  }
-  to {
-    opacity: 1;
-    transform: translateX(-50%) translateY(0);
-  }
-}
-
-/* ===== 拖动把手:岛体上方的小横条,按住可移动挂件 =====
-   -webkit-app-region: drag 区域不接收鼠标事件(拖动交给窗口系统),
-   所以把手本身不会挡住岛体交互;悬停微亮提示可拖动 */
-.drag-handle {
-  flex-shrink: 0;
-  width: 100%;
-  height: 18px;
-  -webkit-app-region: drag;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  cursor: grab;
-}
-
-.drag-handle::after {
-  content: '';
-  width: 52px;
-  height: 4px;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.16);
-  box-shadow: 0 0 8px rgba(0, 0, 0, 0.25);
-  transition:
-    background 0.25s ease,
-    box-shadow 0.25s ease;
-}
-
-.drag-handle:hover::after {
-  background: rgba(255, 255, 255, 0.5);
-  box-shadow: 0 0 10px rgba(255, 255, 255, 0.15);
-}
-
-/* ===== 岛体舞台:垂直贴住把手,水平居中 ===== */
+/* ===== 岛体舞台:水平居中 ===== */
 .widget-stage {
   display: flex;
   justify-content: center;
@@ -119,44 +57,8 @@ body {
   filter: none !important;
 }
 
-/* ===== 挂件版:展开面板更高,歌词独立成行 =====
-   组件默认 208px 高时,绝对定位的歌词(78px 处)会压住进度条,
-   视觉上进度条"贴底"。挂件版面板加高,歌词改回文档流
-   (head → 歌词 → 进度条 → 控制区),各区域互不重叠 */
-.widget-stage .island-demo.expanded {
-  height: 260px;
-}
-
-.widget-stage .island-panel-lyric-inline {
-  position: static;
-  left: auto;
-  top: auto;
-  /* 关键:清掉组件原 CSS 的 translateX(-50%)。组件里它是绝对定位
-     (left 50%)时的水平居中手段;静态定位下若不清理,歌词行切换
-     重建瞬间会先以左移 50% 闪现,再被动画接管回居中 */
-  transform: none;
-  translate: none;
-  width: max-content;
-  max-width: 100%;
-  height: 36px;
-  min-height: 0;
-  align-self: center;
-  justify-content: center;
-  padding: 0 4px;
-  /* 歌词切换动画:静态定位下不再有水平位移,只做淡入 + 轻微上移 */
-  animation: lyricSwapStatic 0.32s cubic-bezier(0.22, 1, 0.36, 1);
-}
-
-@keyframes lyricSwapStatic {
-  from {
-    opacity: 0;
-    transform: translateY(8px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
+/* ===== 展开面板布局已上移为基础样式(与 Web 演示共用):
+   244px 高 + 歌词文档流 + 控制区内容高度 ===== */
 
 /* ===== 挂件版:紧凑态进度条/粒子时间垂直居中 =====
    组件用独立属性 translate: 0 -50% 垂直居中,挂件(透明窗口)环境下

@@ -73,9 +73,18 @@ public static class SmtcBridge
             var info = session.GetPlaybackInfo();
             var timeline = session.GetTimelineProperties();
             string title = props.Title ?? "";
-            // 新版时间线无 Duration,用 MaxSeekTime 或 EndTime 兜底
-            double duration = timeline.MaxSeekTime.TotalSeconds;
-            if (duration <= 0) duration = timeline.EndTime.TotalSeconds;
+            // 新版时间线无 Duration:时长取时间线跨度(EndTime - StartTime)
+            // 与可 seek 终点(MaxSeekTime - StartTime)的较大值——部分客户端
+            // (如 QQ音乐个别曲目)会把 MaxSeekTime 报成很小的值(实测 7 分
+            // 17 秒的歌报 ~7s),而 EndTime 是完整时长;取大值保证时长不被
+            // 错误截短,任一属性报错/报小都不影响。
+            // 时间线各属性相对同一原点(StartTime),时长与进度都需减去它
+            double startSec = timeline.StartTime.TotalSeconds;
+            double endSec = timeline.EndTime.TotalSeconds;
+            double maxSeekSec = timeline.MaxSeekTime.TotalSeconds;
+            double duration = Math.Max(endSec - startSec, maxSeekSec - startSec);
+            if (duration <= 0) duration = maxSeekSec;
+            if (duration <= 0) duration = endSec;
             // 真实播放模式:从 SMTC PlaybackInfo 读取(客户端写入才会变化;
             // QQ音乐等客户端可能不写/不同步,前端据此显示真实系统状态)
             string playbackMode = "sequence";
@@ -97,7 +106,7 @@ public static class SmtcBridge
                         album = props.AlbumTitle ?? ""
                     },
                 isPlaying = info.PlaybackStatus == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing,
-                position = Math.Round(timeline.Position.TotalSeconds, 2),
+                position = Math.Round(Math.Max(timeline.Position.TotalSeconds - startSec, 0), 2),
                 duration = Math.Round(duration, 2),
                 modeSupported = true,
                 playbackMode

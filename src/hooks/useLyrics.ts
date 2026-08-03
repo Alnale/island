@@ -54,20 +54,29 @@ export function useLyrics(
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     })
       .then(async (res) => {
-        if (!res.ok) {
+        const data = res.ok
+          ? ((await res.json()) as { title: string; lines: LyricLine[] })
+          : null
+        // 过期响应保护:曲目可能已切换(如外部监听短暂回落本地时用本地
+        // 首曲发起了查询),响应晚到会覆盖新曲目的歌词——按当前 key 校验,
+        // 不匹配直接丢弃
+        if (key !== lastKeyRef.current) return
+        if (!data) {
           setLines([])
           setLyricTitle(null)
           return
         }
-        const data = (await res.json()) as { title: string; lines: LyricLine[] }
         setLines(data.lines ?? [])
         setLyricTitle(data.title ?? title)
       })
       .catch(() => {
+        if (key !== lastKeyRef.current) return
         setLines([])
         setLyricTitle(null)
       })
-      .finally(() => setLoading(false))
+      .finally(() => {
+        if (key === lastKeyRef.current) setLoading(false)
+      })
   }, [active, title, artist])
 
   // 播放位置 → 当前歌词行

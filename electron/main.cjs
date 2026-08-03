@@ -6,7 +6,7 @@
  * - 置顶 + 跳过任务栏:不打扰其他窗口
  * - 点击穿透:岛体之外的透明区域鼠标直接穿透给下层窗口,
  *   鼠标移入岛体时才接收点击(渲染端通过 IPC 切换)
- * - 顶部把手区可拖动挂件,位置持久化
+ * - 右键长按拖拽移动挂件(位置自由,不限制在屏幕内)
  * - 托盘常驻:显示/隐藏、置顶、开机自启、退出
  *
  * 系统媒体桥接:以 utilityProcess 启动 esbuild 打包后的
@@ -35,8 +35,8 @@ app.disableHardwareAcceleration()
 // ---------------------------------------------------------------------------
 
 const WINDOW_W = 520
-// 高度容纳:把手 18 + 岛体展开 260(挂件版面板加高)+ 余量
-const WINDOW_H = 320
+// 高度容纳:岛体展开 260(挂件版面板加高)+ 上边距 8 + 余量
+const WINDOW_H = 280
 /** 桥接进程 10 秒内连续崩溃达到该次数则放弃重启(如端口被占用) */
 const BRIDGE_RESTART_WINDOW_MS = 10_000
 const BRIDGE_MAX_RESTARTS = 3
@@ -400,34 +400,92 @@ ipcMain.on('widget:topmost', (_event, on) => {
   saveSettings({ alwaysOnTop: Boolean(on) })
 })
 
-// 右键拖拽移动挂件。
+// 调整窗口高度:背景编辑器视图需要更高空间,离开视图回落常规高度
+ipcMain.on('widget:set-height', (_event, height) => {
+  if (!win) return
+  const h = Number(height)
+  if (!Number.isFinite(h)) return
+  const clamped = Math.max(200, Math.min(2000, Math.round(h)))
+  win.setSize(WINDOW_W, clamped)
+})
+
+// 右键长按拖拽移动挂件。
 // 用"绝对定位"而非"相对位移":窗口位置 = 鼠标当前位置 - 按下时鼠标相对
 // 窗口的偏移。窗口移动后 Chromium 会合成新的指针事件(指针相对窗口位置
 // 变了),若用相对位移计算会形成正反馈(窗口移一点→合成事件→再移→循环),
 // 表现为"鼠标没动窗口自己平移"。绝对定位只依赖当前坐标,不累积误差。
 let dragState = null
+// 屏幕坐标合理范围:真实光标/窗口位置不会超出(多显示器 + 拖出屏幕
+// 也远够余量);超出说明数据异常(如 getPosition 返回异常值污染偏移),
+// 直接丢弃,绝不传给 setPosition——其 int32 参数转换对超界有限值
+// (|v| ≥ 2^31)会抛未捕获异常
+const SANE_POS_LIMIT = 100000
 
 ipcMain.on('widget:drag-start', (_event, sx, sy) => {
   if (!win) return
   if (!Number.isFinite(sx) || !Number.isFinite(sy)) return
   const [wx, wy] = win.getPosition()
+  // 窗口位置异常时拒绝进入拖拽状态,避免污染按下偏移
+  if (
+    !Number.isFinite(wx) ||
+    !Number.isFinite(wy) ||
+    Math.abs(wx) > SANE_POS_LIMIT ||
+    Math.abs(wy) > SANE_POS_LIMIT
+  ) {
+    return
+  }
   // 按下瞬间鼠标相对窗口左上角的偏移(拖动期间保持恒定)
-  dragState = { pressOffsetX: sx - wx, pressOffsetY: sy - wy }
+  const pressOffsetX = sx - wx
+  const pressOffsetY = sy - wy
+  if (!Number.isFinite(pressOffsetX) || !Number.isFinite(pressOffsetY)) return
+  dragState = { pressOffsetX, pressOffsetY }
 })
 
 ipcMain.on('widget:drag-move', (_event, sx, sy) => {
   if (!win || !dragState) return
   if (!Number.isFinite(sx) || !Number.isFinite(sy)) return
-  let x = Math.round(sx - dragState.pressOffsetX)
-  let y = Math.round(sy - dragState.pressOffsetY)
-  if (!Number.isFinite(x) || !Number.isFinite(y)) return
-  // 范围限制:窗口完整保持在鼠标所在屏幕的工作区内(任务栏之外),
-  // 不会被拖出桌面外
-  const display = screen.getDisplayNearestPoint({ x: sx, y: sy })
-  const wa = display.workArea
-  x = Math.max(wa.x, Math.min(x, wa.x + wa.width - WINDOW_W))
-  y = Math.max(wa.y, Math.min(y, wa.y + wa.height - WINDOW_H))
-  win.setPosition(x, y)
+  // 位置自由:窗口 = 鼠标 - 按下偏移,不限制在屏幕内。
+  // 计算后校验:非有限值或超出合理范围(异常输入/偏移被污染)一律丢弃
+  const x = Math.round(sx - dragState.pressOffsetX)
+  const y = Math.round(sy - dragState.pressOffsetY)
+  if (
+    !Number.isFinite(x) ||
+    !Number.isFinite(y) ||
+    Math.abs(x) > SANE_POS_LIMIT ||
+    Math.abs(y) > SANE_POS_LIMIT
+  ) {
+    console.error('[widget] drag-move rejected (invalid position):', x, y, 'cursor:', sx, sy)
+    return
+  }
+  // setPosition 的 int32 参数转换在极端值下仍可能抛异常(防御纵深):
+  // 任何转换失败都被捕获并记录真实值,拖拽不会崩主进程
+  try {
+    win.setPosition(x, y)
+  } catch (err) {
+    console.error(
+      '[widget] drag-move setPosition failed:',
+      JSON.stringify(x),
+      JSON.stringify(y),
+      'cursor:',
+      JSON.stringify(sx),
+      JSON.stringify(sy),
+      err,
+    )
+    return
+  }
+  // 自校正:窗口实际落点与目标不一致(OS 取整等)时重算偏移,
+  // 保证下一次移动继续"跟手",不累积相对偏移;异常落点不采信
+  const [ax, ay] = win.getPosition()
+  if (
+    Number.isFinite(ax) &&
+    Number.isFinite(ay) &&
+    Math.abs(ax) <= SANE_POS_LIMIT &&
+    Math.abs(ay) <= SANE_POS_LIMIT &&
+    (ax !== x || ay !== y)
+  ) {
+    dragState.pressOffsetX = sx - ax
+    dragState.pressOffsetY = sy - ay
+  }
 })
 
 ipcMain.on('widget:drag-end', () => {
@@ -459,6 +517,15 @@ function rebuildTrayMenu() {
       {
         label: '显示 / 隐藏灵动岛',
         click: () => toggleWindow(),
+      },
+      { type: 'separator' },
+      {
+        label: '自定义背景…',
+        click: () => {
+          // 入口在托盘,编辑界面在灵动岛内打开(渲染端切换到背景视图)
+          showWindow()
+          win?.webContents.send('widget:open-background-editor')
+        },
       },
       { type: 'separator' },
       {

@@ -21,15 +21,23 @@ contextBridge.exposeInMainWorld('desktop', {
   setAlwaysOnTop(on) {
     ipcRenderer.send('widget:topmost', Boolean(on))
   },
-  /** 右键拖拽移动挂件:开始(记录基准位置;数值兜底防异常参数) */
+  /** 托盘菜单"自定义背景":订阅回调(渲染端在岛内打开背景编辑器) */
+  onOpenBackgroundEditor(callback) {
+    ipcRenderer.on('widget:open-background-editor', () => callback())
+  },
+  /** 调整窗口高度(背景编辑器视图需要更高空间) */
+  setWindowHeight(height) {
+    ipcRenderer.send('widget:set-height', Number(height))
+  },
+  /** 右键长按拖拽移动挂件:开始(记录基准位置;数值兜底防异常参数) */
   dragStart(screenX, screenY) {
     ipcRenderer.send('widget:drag-start', Number(screenX), Number(screenY))
   },
-  /** 右键拖拽移动挂件:移动(指针屏幕坐标,与窗口同坐标系) */
+  /** 右键长按拖拽移动挂件:移动(指针屏幕坐标,与窗口同坐标系) */
   dragMove(screenX, screenY) {
     ipcRenderer.send('widget:drag-move', Number(screenX), Number(screenY))
   },
-  /** 右键拖拽移动挂件:结束 */
+  /** 右键长按拖拽移动挂件:结束 */
   dragEnd() {
     ipcRenderer.send('widget:drag-end')
   },

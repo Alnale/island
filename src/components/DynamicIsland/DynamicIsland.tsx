@@ -19,6 +19,7 @@ import {
 } from '../../data/islandStates'
 import { formatTime } from '../../utils/format'
 import { PLAY_MODES, type PlaybackMode } from '../../media/playbackModes'
+import { downscaleBackgroundImage } from '../../media/backgroundStore'
 import { ParticleTime } from './ParticleTime'
 import './DynamicIsland.css'
 
@@ -82,6 +83,35 @@ interface DynamicIslandProps {
   theme?: string | null
   /** 选择主题色回调(null = 恢复跟随播放模式);不传则不渲染主题色按钮/视图 */
   onThemeChange?: (color: string | null) => void
+  /** 操作结果提示文本:紧凑态显示在左侧文字区(与歌名同款字体),展开态显示在播放键下方;null 隐藏 */
+  hint?: string | null
+  /** 自定义背景图(data URL);展开态 / 紧凑态各自独立的图片,互不影响。
+   *  渲染在岛体深色底之上,不透明度/裁切可调 */
+  backgroundExpandedImage?: string | null
+  backgroundCompactImage?: string | null
+  /** 背景图不透明度 0-1 */
+  backgroundOpacity?: number
+  /** 背景裁切参数:展开态 / 紧凑态各自独立,互不影响
+   *  (缩放 1 = 铺满 cover,位置百分比 0-100,50 = 居中) */
+  backgroundCrop?: {
+    expanded: { zoom: number; posX: number; posY: number }
+    compact: { zoom: number; posX: number; posY: number }
+  }
+  /** 背景变化(上传新图 / 裁切 / 调整不透明度 / 移除)。
+   *  传入后启用"自定义背景"面板视图(托盘菜单入口,岛内打开) */
+  onBackgroundChange?: (bg: {
+    expandedImage: string | null
+    compactImage: string | null
+    opacity: number
+    expanded: { zoom: number; posX: number; posY: number }
+    compact: { zoom: number; posX: number; posY: number }
+  }) => void
+  /** 外部请求打开背景编辑器(托盘菜单):seq 变化即展开并切换到背景视图 */
+  requestBackgroundSeq?: number
+  /** 面板视图变化回调(宿主据此调整窗口高度:背景视图需要更高空间) */
+  onPanelViewChange?: (view: 'control' | 'list' | 'theme' | 'background') => void
+  /** 面板控制区显示"自定义背景"按钮(Web 演示入口;桌面端入口在托盘菜单) */
+  backgroundButton?: boolean
   /** 对外 API(ref) */
   ref?: Ref<DynamicIslandHandle>
 }
@@ -403,6 +433,15 @@ export function DynamicIsland({
   onRemoveTrack,
   theme: customTheme,
   onThemeChange,
+  hint,
+  backgroundExpandedImage,
+  backgroundCompactImage,
+  backgroundOpacity,
+  backgroundCrop,
+  onBackgroundChange,
+  requestBackgroundSeq,
+  onPanelViewChange,
+  backgroundButton,
   ref,
 }: DynamicIslandProps) {
   const islandRef = useRef<HTMLDivElement>(null)
@@ -464,8 +503,8 @@ export function DynamicIsland({
   const [prevMode, setPrevMode] = useState<PlaybackMode | null>(null)
   const prevModeRef = useRef<PlaybackMode | null>(null)
   // (主题色涟漪已移除:扩散圆会染到岛角,颜色变化由各元素 transition 平滑过渡)
-  // 展开面板视图:媒体控制 / 播放列表 / 主题色
-  const [panelView, setPanelView] = useState<'control' | 'list' | 'theme'>('control')
+  // 展开面板视图:媒体控制 / 播放列表 / 主题色 / 自定义背景
+  const [panelView, setPanelView] = useState<'control' | 'list' | 'theme' | 'background'>('control')
   // 主题色切换的"跑马灯流体"动画:记录颜色与触发位置,动画结束自动清除
   const [ripple, setRipple] = useState<{ id: number; color: string; x: number; y: number } | null>(null)
   const rippleIdRef = useRef(0)
@@ -502,6 +541,8 @@ export function DynamicIsland({
   // 首页歌词显示开关(点击音乐图标切换)
   const [lyricShown, setLyricShown] = useState(true)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  // 背景图片上传输入(自定义背景视图)
+  const bgFileInputRef = useRef<HTMLInputElement>(null)
   // 主题色涟漪:模式切换时颜色从按钮位置扩散到整个岛
   expandedRef.current = expanded
 
@@ -535,9 +576,14 @@ export function DynamicIsland({
   // 本地播放器模式且播放列表为空:紧凑态文字区提示上传(仅提示,
   // 上传入口在展开面板主体);playlist 已传说明是本地模式
   const showUploadPrompt = track == null && playlist != null && playlist.length === 0
-  const text = showUploadPrompt
-    ? '本地暂无音乐,长按上传'
-    : mediaTextFor(state, track, showArtist)
+  // 操作提示优先:紧凑态直接把提示文本放进左侧文字区(与歌名同款字体、
+  // 同套切换动画,不额外加气泡),展开态由面板在播放键下方渲染
+  const text =
+    hint && !expanded
+      ? hint
+      : showUploadPrompt
+        ? '本地暂无音乐,长按上传'
+        : mediaTextFor(state, track, showArtist)
 
   // 媒体模式下文字区循环显示歌名/歌手名;悬浮、拖动进度条或展开期间暂停循环,
   // 避免触发文字切换动画导致岛宽/进度条位置变化
@@ -569,6 +615,16 @@ export function DynamicIsland({
     const island = islandRef.current
     const textEl = textRef.current
     if (!island || !textEl) return
+
+    // 悬停校准:JS 记录的悬停态可能因鼠标事件丢失(点击穿透窗口下偶发)
+    // 而滞留,导致"宽岛无进度条"——以 DOM 实时 :hover 为准,不在悬停
+    // 态就回落自然宽。切歌/换平台等文字变化会触发本 effect 重新计算宽度,
+    // 正是滞留态暴露的时机
+    if (!expandedRef.current && hoveredRef.current && !island.matches(':hover')) {
+      hoveredRef.current = false
+      setHovered(false)
+      onHoverChangeRef.current?.(false)
+    }
 
     const font = getComputedStyle(textEl).font
     const fullTextWidth = measureTextWidth(displayText, font)
@@ -620,6 +676,143 @@ export function DynamicIsland({
   // 展开面板中的媒体控制:绑定曲目且处于媒体状态时显示播放控制,否则显示收起按钮
   const panelHasControls =
     track != null && (state === 'playing' || state === 'idle' || state === 'loading')
+  // 歌词区折叠:用户关闭歌词,或开启但当前曲目未匹配到歌词
+  // (查询中保持展开,避免"展开→折叠→展开"闪动)
+  const lyricFold =
+    !lyricShown || (lyrics !== undefined && !lyrics.loading && lyrics.lines.length === 0)
+  // 裁切参考尺寸:展开态 400×244、紧凑态 280×56(挂件典型宽度);
+  // 两种 UI 形态各自独立的裁切参数,互不影响
+  const BG_CROP_REF_W = 400
+  const BG_CROP_REF_H = 244
+  const BG_COMPACT_REF_W = 280
+  const BG_COMPACT_REF_H = 56
+  const DEFAULT_CROP = { zoom: 1, posX: 50, posY: 50 }
+  const crop = backgroundCrop ?? { expanded: DEFAULT_CROP, compact: DEFAULT_CROP }
+  const expandedCrop = crop.expanded
+  const compactCrop = crop.compact
+  // 当前编辑目标(展开态 / 紧凑态):视口蒙版与滑杆作用于该形态
+  const [bgTarget, setBgTarget] = useState<'expanded' | 'compact'>('expanded')
+  const expandedImage = backgroundExpandedImage ?? null
+  const compactImage = backgroundCompactImage ?? null
+  const activeImage = bgTarget === 'expanded' ? expandedImage : compactImage
+  const activeCrop = bgTarget === 'expanded' ? expandedCrop : compactCrop
+  // 各形态背景图的自然尺寸(计算 cover 基准与可平移余量)
+  const [bgNaturalE, setBgNaturalE] = useState<{ w: number; h: number } | null>(null)
+  useEffect(() => {
+    if (!expandedImage) {
+      setBgNaturalE(null)
+      return
+    }
+    const img = new Image()
+    img.onload = () => setBgNaturalE({ w: img.naturalWidth, h: img.naturalHeight })
+    img.src = expandedImage
+  }, [expandedImage])
+  const [bgNaturalC, setBgNaturalC] = useState<{ w: number; h: number } | null>(null)
+  useEffect(() => {
+    if (!compactImage) {
+      setBgNaturalC(null)
+      return
+    }
+    const img = new Image()
+    img.onload = () => setBgNaturalC({ w: img.naturalWidth, h: img.naturalHeight })
+    img.src = compactImage
+  }, [compactImage])
+  // 背景尺寸 %(相对元素宽度):1x = cover;null = 图片尺寸未知(加载中)
+  const bgSizePctFor = (refW: number, refH: number, zoom: number, w: number, h: number): number =>
+    Math.max(100, (refH / refW) * (w / h) * 100) * zoom
+  const bgSizeExpanded = bgNaturalE
+    ? bgSizePctFor(BG_CROP_REF_W, BG_CROP_REF_H, expandedCrop.zoom, bgNaturalE.w, bgNaturalE.h)
+    : null
+  const bgSizeCompact = bgNaturalC
+    ? bgSizePctFor(
+        BG_COMPACT_REF_W,
+        BG_COMPACT_REF_H,
+        compactCrop.zoom,
+        bgNaturalC.w,
+        bgNaturalC.h,
+      )
+    : null
+  const bgStyleFor = (
+    image: string,
+    sizePct: number | null,
+    posX: number,
+    posY: number,
+  ): CSSProperties => ({
+    backgroundImage: `url("${image}")`,
+    backgroundSize: sizePct ? `${sizePct}%` : 'cover',
+    backgroundPosition: sizePct ? `${posX}% ${posY}%` : '50% 50%',
+  })
+  // 更新当前编辑目标的裁切参数(另一形态的图片与裁切均不受影响)
+  const patchActiveCrop = (patch: Partial<{ zoom: number; posX: number; posY: number }>) => {
+    if (!onBackgroundChange) return
+    const next = { ...activeCrop, ...patch }
+    onBackgroundChange({
+      expandedImage,
+      compactImage,
+      opacity: backgroundOpacity ?? 0.4,
+      expanded: bgTarget === 'expanded' ? next : expandedCrop,
+      compact: bgTarget === 'compact' ? next : compactCrop,
+    })
+  }
+  // 裁切视口拖拽平移:拖动图片选择可见区域(位置 % 相对"图片超出视口"的余量)
+  const bgPanRef = useRef<{
+    pointerId: number
+    startX: number
+    startY: number
+    startPosX: number
+    startPosY: number
+  } | null>(null)
+  const handleBgPanDown = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0 || !onBackgroundChange) return
+    event.currentTarget.setPointerCapture(event.pointerId)
+    bgPanRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      startPosX: activeCrop.posX,
+      startPosY: activeCrop.posY,
+    }
+  }
+  const handleBgPanMove = (event: React.PointerEvent<HTMLDivElement>) => {
+    const pan = bgPanRef.current
+    if (!pan || event.pointerId !== pan.pointerId || !onBackgroundChange) return
+    const natural = bgTarget === 'expanded' ? bgNaturalE : bgNaturalC
+    if (!natural) return
+    const sizePct = bgTarget === 'expanded' ? bgSizeExpanded : bgSizeCompact
+    if (sizePct === null) return
+    const el = event.currentTarget
+    const vw = el.clientWidth
+    const vh = el.clientHeight
+    const overflowW = (sizePct / 100 - 1) * vw
+    const overflowH = (sizePct / 100) * vw * (natural.h / natural.w) - vh
+    const dx = event.clientX - pan.startX
+    const dy = event.clientY - pan.startY
+    const clamp01 = (v: number) => Math.max(0, Math.min(100, v))
+    const nextX = overflowW > 0 ? clamp01(pan.startPosX - (dx / overflowW) * 100) : 50
+    const nextY = overflowH > 0 ? clamp01(pan.startPosY - (dy / overflowH) * 100) : 50
+    if (nextX !== activeCrop.posX || nextY !== activeCrop.posY) {
+      patchActiveCrop({ posX: nextX, posY: nextY })
+    }
+  }
+  const handleBgPanEnd = (event: React.PointerEvent<HTMLDivElement>) => {
+    const pan = bgPanRef.current
+    if (pan && pan.pointerId === event.pointerId) bgPanRef.current = null
+  }
+  // 滚轮缩放(以视口中心为锚:位置 % 不变,中心内容保持)
+  const handleBgWheel = (event: React.WheelEvent<HTMLDivElement>) => {
+    if (!onBackgroundChange) return
+    event.preventDefault()
+    const factor = event.deltaY < 0 ? 1.1 : 1 / 1.1
+    const next = Math.max(1, Math.min(4, activeCrop.zoom * factor))
+    if (next === activeCrop.zoom) return
+    patchActiveCrop({ zoom: next })
+  }
+  // 双击复位当前形态的裁切(cover 居中)
+  const handleBgDoubleClick = () => {
+    if (!onBackgroundChange) return
+    if (activeCrop.zoom === 1 && activeCrop.posX === 50 && activeCrop.posY === 50) return
+    patchActiveCrop({ zoom: 1, posX: 50, posY: 50 })
+  }
 
   const ratioFromPointer = (event: PointerEvent<HTMLDivElement>, bar: HTMLDivElement): number => {
     const rect = bar.getBoundingClientRect()
@@ -630,6 +823,8 @@ export function DynamicIsland({
   // (紧凑条与展开面板条共用同一套逻辑,由调用方传入条元素)
   const handleBarPointerDown = (event: PointerEvent<HTMLDivElement>, bar: HTMLDivElement) => {
     if (duration <= 0) return
+    // 仅左键:右键留给挂件层的"长按拖拽移动挂件"
+    if (event.button !== 0) return
     event.preventDefault()
     event.stopPropagation() // 不向上冒泡为岛体长按
     // 按下瞬间记录"文字区实际渲染宽度"供粒子时间居中。
@@ -679,6 +874,8 @@ export function DynamicIsland({
   const hasTextGestures = Boolean(onSwipeLeft || onSwipeRight)
   const handleTextPointerDown = (event: PointerEvent<HTMLSpanElement>) => {
     if (!hasTextGestures) return
+    // 仅左键:右键留给挂件层的"长按拖拽移动挂件"
+    if (event.button !== 0) return
     swipeRef.current = {
       startX: event.clientX,
       startY: event.clientY,
@@ -806,10 +1003,39 @@ export function DynamicIsland({
     if (files.length > 0) onUploadTracks?.(files)
   }
 
+  /** 上传背景图:读取为 data URL 后一键应用(cover 居中),之后可裁切微调 */
+  const handleBackgroundFileChange = (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    if (!file || !onBackgroundChange) return
+    const reader = new FileReader()
+    reader.onload = () => {
+      if (typeof reader.result === 'string') {
+        // 先降采样(形变逐帧重栅格化大图是卡顿主因),再一键应用到当前形态
+        // (该形态 cover 居中,另一形态的图片与裁切不受影响)
+        void downscaleBackgroundImage(reader.result).then((small) => {
+          onBackgroundChange({
+            expandedImage: bgTarget === 'expanded' ? small : expandedImage,
+            compactImage: bgTarget === 'compact' ? small : compactImage,
+            opacity: backgroundOpacity ?? 0.4,
+            expanded: bgTarget === 'expanded' ? DEFAULT_CROP : expandedCrop,
+            compact: bgTarget === 'compact' ? DEFAULT_CROP : compactCrop,
+          })
+        })
+      }
+    }
+    reader.readAsDataURL(file)
+  }
+
   // 长按:紧凑态长按展开,展开态长按收起——按到 450ms 直接形变,不等待松手。
   // 压感全程渐进(无静止停顿);触发收起时保持最深压感并行收缩(一边 3D 压感
   // 一边收起),松手或动画结束后回弹归位
   const handleIslandPointerDown = (event: PointerEvent<HTMLDivElement>) => {
+    // 仅响应左键:右键不触发按压/长按(右键拖拽已移除,右键按下不做任何事)
+    if (event.button !== 0) return
+    // 背景编辑器视图:禁用按压/长按收起(裁切视口/控件的点按会冒泡到这里,
+    // 只能通过返回键收起),避免编辑中被误缩回
+    if (panelView === 'background') return
     const prev = pressRef.current
     if (prev) window.clearTimeout(prev.timer)
     const startX = event.clientX
@@ -882,9 +1108,9 @@ export function DynamicIsland({
       suppressClickRef.current = false
       return
     }
-    // 展开状态:点按岛体收起
+    // 展开状态:点按岛体收起(背景编辑器视图除外——只能通过返回键)
     if (expandedRef.current) {
-      changeExpanded(false)
+      if (panelView !== 'background') changeExpanded(false)
       return
     }
     if (!onChange) return
@@ -933,8 +1159,11 @@ export function DynamicIsland({
 
   const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     if (event.key === 'Escape' && expandedRef.current) {
-      event.preventDefault()
-      changeExpanded(false)
+      // 背景编辑器视图:Esc 不收起(只能通过返回键)
+      if (panelView !== 'background') {
+        event.preventDefault()
+        changeExpanded(false)
+      }
       return
     }
     if (event.key === 'Enter' || event.key === ' ') {
@@ -943,15 +1172,18 @@ export function DynamicIsland({
     }
   }
 
-  // 展开期间:点按岛外任意位置或按 Esc 收起
+  // 展开期间:点按岛外任意位置或按 Esc 收起(背景编辑器视图除外——
+  // 只能通过返回键收起,避免编辑中被误缩回)
   useEffect(() => {
     if (!expanded) return
     const onDocPointerDown = (event: globalThis.PointerEvent) => {
       const island = islandRef.current
-      if (island && !island.contains(event.target as Node)) changeExpanded(false)
+      if (island && !island.contains(event.target as Node) && panelView !== 'background') {
+        changeExpanded(false)
+      }
     }
     const onDocKeyDown = (event: globalThis.KeyboardEvent) => {
-      if (event.key === 'Escape') changeExpanded(false)
+      if (event.key === 'Escape' && panelView !== 'background') changeExpanded(false)
     }
     document.addEventListener('pointerdown', onDocPointerDown)
     document.addEventListener('keydown', onDocKeyDown)
@@ -959,7 +1191,25 @@ export function DynamicIsland({
       document.removeEventListener('pointerdown', onDocPointerDown)
       document.removeEventListener('keydown', onDocKeyDown)
     }
-  }, [expanded, changeExpanded])
+  }, [expanded, changeExpanded, panelView])
+
+  // 外部请求(托盘菜单"自定义背景")打开面板视图:seq 变化即展开并切换
+  useEffect(() => {
+    if (!requestBackgroundSeq) return
+    setPanelView('background')
+    setExpandedWidth(
+      Math.max(
+        EXPANDED_MIN_WIDTH_PX,
+        Math.min(EXPANDED_WIDTH_PX, window.innerWidth - EXPANDED_VIEWPORT_MARGIN_PX),
+      ),
+    )
+    changeExpanded(true)
+  }, [requestBackgroundSeq, changeExpanded])
+
+  // 面板视图变化通知宿主(背景视图需要更高的岛体与窗口)
+  useEffect(() => {
+    onPanelViewChange?.(panelView)
+  }, [panelView, onPanelViewChange])
 
   // 卸载时清理长按计时器 / 按压渐进循环 / 收起与动画延迟
   useEffect(
@@ -1053,7 +1303,7 @@ export function DynamicIsland({
   return (
     <div
       ref={islandRef}
-      className={`island-demo${stateClass ? ` ${stateClass}` : ''}${modeClass ? ` ${modeClass}` : ''}${expanded ? ' expanded' : ''}${press ? ' is-pressed' : ''}${collapsing ? ' island-collapsing' : ''}${animating ? ' is-animating' : ''}`}
+      className={`island-demo${stateClass ? ` ${stateClass}` : ''}${modeClass ? ` ${modeClass}` : ''}${expanded ? ' expanded' : ''}${press ? ' is-pressed' : ''}${collapsing ? ' island-collapsing' : ''}${animating ? ' is-animating' : ''}${lyricFold ? ' island-lyric-off' : ''}${panelView === 'background' ? ' island-bg-view' : ''}`}
       role="button"
       tabIndex={0}
       aria-label={`灵动岛,当前状态:${ISLAND_STATES[state].label},点击切换,长按展开`}
@@ -1075,7 +1325,26 @@ export function DynamicIsland({
       onPointerUp={handleIslandPointerEnd}
       onPointerCancel={handleIslandPointerEnd}
     >
-      <div className="island-bg" aria-hidden="true" />
+      <div className="island-bg" aria-hidden="true">
+        {/* 自定义背景:覆盖在深色底之上,不透明度可调;内容层在其上 */}
+        {(expandedImage || compactImage) && (
+          <div
+            className="island-bg-image"
+            style={
+              {
+                opacity: backgroundOpacity ?? 1,
+                // 展开态 / 紧凑态各自独立的图片与裁切参数(CSS 按形态切换)
+                '--bg-img-e': expandedImage ? `url("${expandedImage}")` : 'none',
+                '--bg-size-e': bgSizeExpanded ? `${bgSizeExpanded}%` : undefined,
+                '--bg-pos-e': `${expandedCrop.posX}% ${expandedCrop.posY}%`,
+                '--bg-img-c': compactImage ? `url("${compactImage}")` : 'none',
+                '--bg-size-c': bgSizeCompact ? `${bgSizeCompact}%` : undefined,
+                '--bg-pos-c': `${compactCrop.posX}% ${compactCrop.posY}%`,
+              } as CSSProperties
+            }
+          />
+        )}
+      </div>
       <div className="island-content">
         <div className="island-icon">
           <div className="icon-floater">{ISLAND_STATES[state].icon(state)}</div>
@@ -1190,7 +1459,7 @@ export function DynamicIsland({
           {/* 双行歌词:面板级绝对定位(水平居中、固定在歌手行下方),
               脱离文档流——歌词显隐不影响进度条/控制键位置 */}
           <div
-            className="island-panel-lyric-inline"
+            className={`island-panel-lyric-inline${lyricFold ? ' lyric-hidden' : ''}`}
             key={lyrics?.currentIndex ?? -1}
           >
             <p
@@ -1318,6 +1587,36 @@ export function DynamicIsland({
                 </button>
               )}
               {/* 主题色:右下角(模式按钮左侧),切换到主题色视图 */}
+              {/* 自定义背景入口(仅 Web 演示显示;桌面端入口在托盘菜单):
+                  切换到背景编辑器视图 */}
+              {onBackgroundChange && backgroundButton && (
+                <button
+                  type="button"
+                  className="island-ctl island-ctl--bg"
+                  aria-label="自定义背景"
+                  title="自定义背景"
+                  onClick={(event) => {
+                    event.stopPropagation()
+                    setPanelView('background')
+                  }}
+                >
+                  <svg
+                    className="island-ctl-svg"
+                    width="16"
+                    height="16"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth={2}
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  >
+                    <rect x="3" y="3" width="18" height="18" rx="2" />
+                    <circle cx="8.5" cy="8.5" r="1.5" />
+                    <path d="M21 15l-5-5L5 21" />
+                  </svg>
+                </button>
+              )}
               {onThemeChange && (
                 <button
                   type="button"
@@ -1358,7 +1657,6 @@ export function DynamicIsland({
                       : PLAY_MODES[mode].label
                   }
                   disabled={systemActive && !modeSupported}
-                  style={{ '--mode-color': PLAY_MODES[mode].color } as CSSProperties}
                   onClick={(event) => {
                     event.stopPropagation()
                     onCycleMode()
@@ -1467,6 +1765,13 @@ export function DynamicIsland({
                   <line x1="19" y1="5" x2="19" y2="19" />
                 </svg>
               </button>
+              {/* 操作提示:播放键正下方(纯文本,与面板次级文字同款,无气泡;
+                  面板控制区始终贴底,提示固定落在按钮下方 16px 内边距区) */}
+              {hint && (
+                <div className="island-hint-play" role="status">
+                  {hint}
+                </div>
+              )}
             </div>
           ) : (
             <div className="island-panel-dismiss">
@@ -1724,6 +2029,265 @@ export function DynamicIsland({
               </div>
             </div>
           ) : null}
+          {/* 自定义背景视图(托盘菜单入口,岛内打开):
+              一键上传即应用(cover 居中),之后可用双形态蒙版裁切
+              (展开态视口拖拽平移 + 紧凑态胶囊预览,岛体本身即实时预览);
+              无预览区——上传后默认就已更换 */}
+          {panelView === 'background' && onBackgroundChange ? (
+            <div className="island-panel-bg">
+              <div className="island-panel-list-head">
+                <span className="island-panel-list-count">自定义背景</span>
+              </div>
+              {/* 分段切换始终可见:即使当前形态没有图片(刚被移除),也能切到
+                  另一形态继续管理其图片与裁切 */}
+              <div
+                className={`island-bg-seg${bgTarget === 'compact' ? ' island-bg-seg--compact' : ''}`}
+                role="tablist"
+                aria-label="裁切目标"
+              >
+                {/* 滑动指示条:随目标切换回弹平移 */}
+                <span className="island-bg-seg-thumb" aria-hidden="true" />
+                <button
+                  type="button"
+                  className={bgTarget === 'expanded' ? 'on' : ''}
+                  onClick={(event) => {
+                    event.stopPropagation()
+                    setBgTarget('expanded')
+                  }}
+                >
+                  展开态
+                </button>
+                <button
+                  type="button"
+                  className={bgTarget === 'compact' ? 'on' : ''}
+                  onClick={(event) => {
+                    event.stopPropagation()
+                    setBgTarget('compact')
+                  }}
+                >
+                  紧凑态
+                </button>
+              </div>
+              {activeImage ? (
+                <>
+                  {/* 裁切区:当前形态的蒙版视口(拖拽平移/滚轮缩放/双击复位) */}
+                  <div className="island-bg-crop">
+                    <div
+                      className={`island-bg-viewport${bgTarget === 'compact' ? ' island-bg-viewport--compact' : ''}`}
+                      onPointerDown={handleBgPanDown}
+                      onPointerMove={handleBgPanMove}
+                      onPointerUp={handleBgPanEnd}
+                      onPointerCancel={handleBgPanEnd}
+                      onWheel={handleBgWheel}
+                      onDoubleClick={handleBgDoubleClick}
+                      style={bgStyleFor(
+                        activeImage ?? '',
+                        bgTarget === 'expanded' ? bgSizeExpanded : bgSizeCompact,
+                        activeCrop.posX,
+                        activeCrop.posY,
+                      )}
+                    >
+                      <span className="island-bg-mask-tag">
+                        {bgTarget === 'expanded' ? '展开态' : '紧凑态'}
+                      </span>
+                      <span className="island-bg-hint">拖拽平移 · 滚轮缩放 · 双击复位</span>
+                    </div>
+                  </div>
+                  <div className="island-bg-controls">
+                    <div className="island-bg-sliders">
+                      <label className="island-bg-slider">
+                        <span className="island-bg-opacity-row">
+                          <span>缩放</span>
+                          <span>{activeCrop.zoom.toFixed(1)}x</span>
+                        </span>
+                        <input
+                          type="range"
+                          min={100}
+                          max={400}
+                          value={Math.round(activeCrop.zoom * 100)}
+                          onChange={(event) => {
+                            event.stopPropagation()
+                            patchActiveCrop({ zoom: Number(event.target.value) / 100 })
+                          }}
+                        />
+                      </label>
+                      <label className="island-bg-slider">
+                        <span className="island-bg-opacity-row">
+                          <span>不透明度</span>
+                          <span>{Math.round((backgroundOpacity ?? 0.4) * 100)}%</span>
+                        </span>
+                        <input
+                          type="range"
+                          min={0}
+                          max={100}
+                          value={Math.round((backgroundOpacity ?? 0.4) * 100)}
+                          onChange={(event) => {
+                            event.stopPropagation()
+                            onBackgroundChange({
+                              expandedImage,
+                              compactImage,
+                              opacity: Number(event.target.value) / 100,
+                              expanded: expandedCrop,
+                              compact: compactCrop,
+                            })
+                          }}
+                        />
+                      </label>
+                    </div>
+                    <div className="island-bg-actions">
+                      <button
+                        type="button"
+                        className="island-ctl island-ctl--upload"
+                        onClick={(event) => {
+                          event.stopPropagation()
+                          bgFileInputRef.current?.click()
+                        }}
+                      >
+                        <svg
+                          className="island-ctl-svg"
+                          width="15"
+                          height="15"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth={2}
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        >
+                          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                          <polyline points="17 8 12 3 7 8" />
+                          <line x1="12" y1="3" x2="12" y2="15" />
+                        </svg>
+                        <span>更换图片</span>
+                      </button>
+                      {(activeCrop.zoom !== 1 || activeCrop.posX !== 50 || activeCrop.posY !== 50) && (
+                        <button
+                          type="button"
+                          className="island-ctl island-ctl--clear"
+                          onClick={(event) => {
+                            event.stopPropagation()
+                            patchActiveCrop({ zoom: 1, posX: 50, posY: 50 })
+                          }}
+                        >
+                          <svg
+                            className="island-ctl-svg"
+                            width="14"
+                            height="14"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth={2.2}
+                            strokeLinecap="round"
+                          >
+                            <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+                            <path d="M3 3v5h5" />
+                          </svg>
+                          <span>重置裁切</span>
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        className="island-ctl island-ctl--clear"
+                        onClick={(event) => {
+                          event.stopPropagation()
+                          // 移除当前形态的背景(另一形态不受影响)
+                          onBackgroundChange({
+                            expandedImage: bgTarget === 'expanded' ? null : expandedImage,
+                            compactImage: bgTarget === 'compact' ? null : compactImage,
+                            opacity: backgroundOpacity ?? 0.4,
+                            expanded: bgTarget === 'expanded' ? DEFAULT_CROP : expandedCrop,
+                            compact: bgTarget === 'compact' ? DEFAULT_CROP : compactCrop,
+                          })
+                        }}
+                      >
+                        <svg
+                          className="island-ctl-svg"
+                          width="14"
+                          height="14"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth={2.2}
+                          strokeLinecap="round"
+                        >
+                          <line x1="18" y1="6" x2="6" y2="18" />
+                          <line x1="6" y1="6" x2="18" y2="18" />
+                        </svg>
+                        <span>移除背景</span>
+                      </button>
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <div className="island-bg-empty">
+                  <p className="island-bg-empty-text">
+                    上传一张图片作为{bgTarget === 'expanded' ? '展开态' : '紧凑态'}背景,
+                    岛体将实时预览
+                  </p>
+                  <button
+                    type="button"
+                    className="island-ctl island-ctl--upload"
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      bgFileInputRef.current?.click()
+                    }}
+                  >
+                    <svg
+                      className="island-ctl-svg"
+                      width="15"
+                      height="15"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth={2}
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    >
+                      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                      <polyline points="17 8 12 3 7 8" />
+                      <line x1="12" y1="3" x2="12" y2="15" />
+                    </svg>
+                    <span>上传图片</span>
+                  </button>
+                </div>
+              )}
+              {/* 扁平返回键:独占一行,纯文本式(无按钮底/边框),背景编辑器的唯一收起方式 */}
+              <div className="island-panel-list-foot island-bg-foot">
+                <button
+                  type="button"
+                  className="island-bg-back"
+                  onClick={(event) => {
+                    event.stopPropagation()
+                    changeExpanded(false)
+                  }}
+                >
+                  <svg
+                    className="island-ctl-svg"
+                    width="15"
+                    height="15"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth={2}
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  >
+                    <polyline points="15 18 9 12 15 6" />
+                  </svg>
+                  <span>返回</span>
+                </button>
+              </div>
+            </div>
+          ) : null}
+          {/* 背景图片上传(隐藏输入,由"上传图片"按钮触发) */}
+          <input
+            ref={bgFileInputRef}
+            type="file"
+            accept="image/*"
+            hidden
+            onClick={(event) => event.stopPropagation()}
+            onChange={handleBackgroundFileChange}
+          />
           {/* 上传音乐文件选择(隐藏输入,由"上传音乐"按钮触发) */}
           <input
             ref={fileInputRef}

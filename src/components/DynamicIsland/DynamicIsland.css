@@ -239,8 +239,24 @@
    宽度/高度由组件内 JS 以 px 弹簧过渡,圆角瞬切(矮胶囊上 44px 无感);
    紧凑内容上浮推远,扩展面板流入覆盖岛体 */
 .island-demo.expanded {
-  height: 208px;
+  /* 展开面板高度:内边距 36 + 头部 58 + 歌词 42 + 进度条 24 + 间距 36 + 控制区 48 = 244
+     (与桌面挂件一致) */
+  height: 244px;
   border-radius: 44px;
+}
+
+/* 歌词关闭:岛体高度收缩 42px(折叠歌词行,244 → 202),
+   复用岛体自带 height 弹簧过渡做形变动画;进度条/控制区位置不动。
+   height 过渡放慢到 0.42s 让折叠形变更从容(其余过渡与基础列表一致,
+   需随 .island-demo 的过渡列表同步;仅作用于 lyric-off 方向的收起) */
+.island-demo.expanded.island-lyric-off {
+  height: 202px;
+  transition:
+    width 0.33s cubic-bezier(0.34, 1.56, 0.64, 1),
+    height 0.42s cubic-bezier(0.34, 1.56, 0.64, 1),
+    box-shadow 0.3s ease,
+    border-color 0.3s ease,
+    transform 0.35s cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
 .island-demo.expanded .island-content {
@@ -445,10 +461,10 @@
   width: 100%;
   height: 4px;
   border-radius: 999px;
+  /* 灰色轨道全宽显示(与紧凑进度条 .island-progress 同款),
+     填充渐变由 ::after 单独缩放 */
   background: rgba(255, 255, 255, 0.12);
   overflow: hidden;
-  transform: scaleX(var(--progress-ratio, 0));
-  transform-origin: left center;
 }
 
 .island-panel-progress-fill::after {
@@ -462,13 +478,12 @@
     color-mix(in srgb, var(--state-color, #4ade80) 55%, #000)
   );
   box-shadow: 0 0 10px color-mix(in srgb, var(--state-color, #4ade80) 45%, transparent);
+  /* 只缩放填充本身:轨道(元素背景)保持全宽,与紧凑进度条同构 */
+  transform: scaleX(var(--progress-ratio, 0));
+  transform-origin: left center;
 }
 
-/* 加载中:不确定进度,扫光(与紧凑态同款动画) */
-.island-demo.loading .island-panel-progress-fill {
-  transform: none;
-}
-
+/* 加载中:不确定进度,扫光(与紧凑态同款动画;填充渐变隐藏,扫光为 ::before) */
 .island-demo.loading .island-panel-progress-fill::after {
   display: none;
 }
@@ -490,7 +505,9 @@
    播放列表按钮左下角、播放模式按钮右下角对称 */
 .island-panel-controls {
   position: relative;
-  flex: 1;
+  /* 控制区为内容高度(按钮贴进度条,无居中留白):
+     面板固定内容恰好填满 244px,与桌面挂件一致 */
+  flex: none;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -566,7 +583,7 @@
   stroke-width: 2.6; /* 播放三角形粗描边圆角连接,饱满 */
 }
 
-/* 播放模式按钮:右下角(与左下角播放列表对称),图标跟随模式色,边框淡染;
+/* 播放模式按钮:右下角(与左下角播放列表对称),图标跟随主题色淡染;
    外部平台监听时禁用(播放模式仅对本地歌单有效) */
 .island-ctl--mode {
   position: absolute;
@@ -574,9 +591,11 @@
   bottom: 0;
   width: 34px;
   height: 34px;
-  color: var(--mode-color, #4ade80);
-  border-color: color-mix(in srgb, var(--mode-color, #4ade80) 35%, transparent);
-  background: color-mix(in srgb, var(--mode-color, #4ade80) 10%, transparent);
+  /* 跟随岛体主题色(与其它控件一致):默认流下主题色即播放模式色,
+     自定义主题色后按钮同步变色,不再与主题隔离 */
+  color: var(--state-color, #4ade80);
+  border-color: color-mix(in srgb, var(--state-color, #4ade80) 35%, transparent);
+  background: color-mix(in srgb, var(--state-color, #4ade80) 10%, transparent);
 }
 
 /* 主题色按钮:右下角(模式按钮左侧),随主题色淡染;仅宿主传入
@@ -584,6 +603,19 @@
 .island-ctl--theme {
   position: absolute;
   right: 40px;
+  bottom: 0;
+  width: 34px;
+  height: 34px;
+  color: var(--state-color, #4ade80);
+  border-color: color-mix(in srgb, var(--state-color, #4ade80) 35%, transparent);
+  background: color-mix(in srgb, var(--state-color, #4ade80) 10%, transparent);
+}
+
+/* 自定义背景按钮:右下角(主题色按钮左侧),随主题色淡染;
+   仅 Web 演示显示(桌面端入口在托盘菜单) */
+.island-ctl--bg {
+  position: absolute;
+  right: 80px;
   bottom: 0;
   width: 34px;
   height: 34px;
@@ -1133,36 +1165,63 @@
 }
 
 /* ===== 首页双行歌词 =====
-   面板级绝对定位:水平居中(left 50% + 反移半宽)、
-   垂直固定在歌手行下方(top 78px)。脱离文档流,
-   歌词显示/隐藏/行切换完全不影响进度条与控制键位置 */
+   文档流布局(head → 歌词 → 进度条 → 控制区),各区域互不重叠
+   (与桌面挂件一致;旧版绝对定位会压住进度条,已废弃)。
+   高度 42px:两行歌词(0.78rem × 1.4 ≈ 35px)底部留足余量,
+   避免 j/g/y 等下沿字母被 overflow: hidden 裁切 */
 .island-panel-lyric-inline {
-  position: absolute;
-  left: 50%;
-  top: 78px;
-  transform: translateX(-50%);
+  position: static;
+  left: auto;
+  top: auto;
+  transform: none;
+  translate: none;
   z-index: 1;
   display: flex;
   flex-direction: column;
   gap: 2px;
-  animation: lyricSwap 0.32s cubic-bezier(0.22, 1, 0.36, 1);
-  height: 40px;
+  animation: lyricSwapStatic 0.32s cubic-bezier(0.22, 1, 0.36, 1);
+  height: 42px;
   min-height: 0;
   overflow: hidden;
   justify-content: center;
   text-align: center;
   width: max-content;
-  max-width: calc(100% - 110px);
+  max-width: 100%;
+  align-self: center;
+  padding: 0 4px;
+  /* 歌词开/关折叠过渡(与岛体 height 弹簧过渡同步):
+     展开方向用回弹曲线(scaleY 过冲产生弹性回落),
+     收起方向由 .lyric-hidden 自己的 transition 接管(无过冲) */
+  transform-origin: top center;
+  transition:
+    max-height 0.38s cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 0.32s ease,
+    transform 0.45s cubic-bezier(0.34, 1.7, 0.64, 1);
 }
 
-@keyframes lyricSwap {
+/* 歌词关闭:歌词块折叠收起(在文档流中,折叠带动岛体高度收缩)。
+   max-height 优先于 height,可压缩任意行高;
+   收起方向用无过冲缓动——scaleY 过冲会翻转为负值(镜像),不能复用展开曲线 */
+.island-panel-lyric-inline.lyric-hidden {
+  max-height: 0;
+  opacity: 0;
+  pointer-events: none;
+  animation: none; /* 关闭时禁用入场动画,防残留闪现 */
+  transform: scaleY(0);
+  transition:
+    max-height 0.38s cubic-bezier(0.4, 0, 0.6, 1),
+    opacity 0.28s ease,
+    transform 0.32s cubic-bezier(0.4, 0, 0.6, 1);
+}
+
+@keyframes lyricSwapStatic {
   from {
     opacity: 0;
-    transform: translateX(-50%) translateY(10px);
+    transform: translateY(8px);
   }
   to {
     opacity: 1;
-    transform: translateX(-50%) translateY(0);
+    transform: translateY(0);
   }
 }
 
@@ -1500,4 +1559,289 @@
   100% {
     transform: translateX(320%);
   }
+}
+
+/* ===== 展开面板操作提示(模式同步/进度跳转不被平台支持时短暂显示) =====
+   纯文本(与面板次级文字同款,无气泡背景),渲染在播放键正下方:
+   面板控制区始终贴底(底部内边距 16px),top: 100% 即按钮下方、
+   落在内边距区内,由岛体 overflow: hidden 裁剪,不超出灵动岛范围;
+   pointer-events: none 不拦截控件交互 */
+.island-hint-play {
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 0.78rem;
+  letter-spacing: 0.04em;
+  color: rgba(255, 255, 255, 0.55);
+  pointer-events: none;
+  animation: islandHintIn 0.3s ease backwards;
+}
+
+@keyframes islandHintIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* ===== 自定义背景 =====
+   背景图图层覆盖在岛体深色底之上,不透明度可调(0 = 纯深色底);
+   圆角跟随岛体形变,pointer-events 穿透,内容层在其上。
+   展开态 / 紧凑态各自独立的图片与裁切参数(组件经 CSS 变量注入,互不影响):
+   - 默认(紧凑态):--bg-img-c / --bg-size-c / --bg-pos-c
+   - 展开态:--bg-img-e / --bg-size-e / --bg-pos-e */
+.island-bg-image {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background-image: var(--bg-img-c, none);
+  background-size: var(--bg-size-c, cover);
+  background-position: var(--bg-pos-c, 50% 50%);
+  pointer-events: none;
+}
+
+.island-demo.expanded .island-bg-image {
+  background-image: var(--bg-img-e, none);
+  background-size: var(--bg-size-e, cover);
+  background-position: var(--bg-pos-e, 50% 50%);
+}
+
+/* 背景编辑器视图:岛体加高容纳裁切区(挂件窗口同步加高;
+   Web 演示页面自然伸展,与桌面端一致) */
+.island-demo.expanded.island-bg-view {
+  height: 440px;
+}
+
+/* ===== 自定义背景视图(托盘菜单入口,岛内打开) =====
+   无预览区(岛体本身即实时预览):展开态蒙版视口可拖拽平移,
+   紧凑态胶囊预览展示另一种 UI 形态下的裁切结果 */
+.island-panel-bg {
+  position: absolute;
+  inset: 0;
+  padding: 16px 28px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  animation: listViewIn 0.3s cubic-bezier(0.34, 1.56, 0.64, 1) backwards;
+}
+
+/* 裁切区:分段切换目标 + 对应形态的蒙版视口 */
+.island-bg-crop {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* 分段切换:展开态 / 紧凑态,各自独立的裁切参数。
+   选中指示为滑动胶囊(transform 平移,弹簧回弹曲线),
+   文字层在指示条之上 */
+.island-bg-seg {
+  position: relative;
+  display: flex;
+  align-self: center;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 999px;
+}
+
+.island-bg-seg-thumb {
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  left: 2px;
+  /* 单按钮宽度:等宽两钮,50% - 3px 恰好盖住第一个 */
+  width: calc(50% - 3px);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--state-color, #4ade80) 22%, transparent);
+  transform: translateX(0);
+  /* 弹簧回弹 + 轻微过冲,切换优雅有弹性 */
+  transition: transform 0.45s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.island-bg-seg--compact .island-bg-seg-thumb {
+  /* 平移自身宽度 + 中缝 2px → 恰好盖住第二个按钮 */
+  transform: translateX(calc(100% + 2px));
+}
+
+.island-bg-seg button {
+  position: relative;
+  z-index: 1;
+  border: none;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.55);
+  font-size: 0.66rem;
+  letter-spacing: 0.06em;
+  padding: 4px 16px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: color 0.25s ease;
+}
+
+.island-bg-seg button.on {
+  color: #fff;
+}
+
+/* 展开态蒙版视口:400×244 等比例(310px 宽 = 189px 高),
+   圆角蒙版(44px 随视口缩放),拖拽平移 / 滚轮缩放 / 双击复位;
+   背景图实时按裁切参数渲染。
+   尺寸与面板内容总高匹配(440px 岛体),返回键不被截断。
+   切到紧凑态时:圆角**瞬切**(避免"矩形裁切到圆角"的裁切动画),
+   高度与取景以弹簧曲线过渡,一气呵成 */
+.island-bg-viewport {
+  position: relative;
+  width: 310px;
+  height: 189px; /* 310 × 244 / 400 */
+  align-self: center;
+  border-radius: 28px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background-color: rgb(8, 10, 14);
+  background-size: cover;
+  background-position: center;
+  cursor: grab;
+  touch-action: none;
+  transition:
+    height 0.45s cubic-bezier(0.34, 1.56, 0.64, 1),
+    background-size 0.45s cubic-bezier(0.34, 1.56, 0.64, 1),
+    background-position 0.45s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.island-bg-viewport:active {
+  cursor: grabbing;
+}
+
+/* 紧凑态蒙版视口:胶囊形(280×56 参考比例,310px 宽 = 62px 高) */
+.island-bg-viewport--compact {
+  height: 62px; /* 310 × 56 / 280 */
+  border-radius: 999px;
+}
+
+.island-bg-mask-tag {
+  position: absolute;
+  left: 8px;
+  bottom: 6px;
+  font-size: 0.58rem;
+  letter-spacing: 0.08em;
+  color: rgba(255, 255, 255, 0.65);
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.85);
+  pointer-events: none;
+}
+
+/* 操作提示:视口右上角,与蒙版标签同风格 */
+.island-bg-hint {
+  position: absolute;
+  right: 8px;
+  top: 6px;
+  font-size: 0.56rem;
+  letter-spacing: 0.04em;
+  color: rgba(255, 255, 255, 0.5);
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.85);
+  pointer-events: none;
+}
+
+/* 控制区:缩放 / 不透明度滑杆并排一行 + 操作按钮 */
+.island-bg-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.island-bg-sliders {
+  display: flex;
+  gap: 12px;
+}
+
+.island-bg-slider {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.island-bg-opacity-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.68rem;
+  letter-spacing: 0.04em;
+  color: rgba(255, 255, 255, 0.55);
+}
+
+.island-bg-slider input[type='range'] {
+  width: 100%;
+  accent-color: var(--state-color, #4ade80);
+  cursor: pointer;
+}
+
+/* 操作行:更换图片 / 重置裁切 / 移除背景 */
+.island-bg-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.island-bg-actions .island-ctl {
+  flex: 1;
+}
+
+/* 扁平返回键:独占一行、占满整行(更长更易点);
+   强调色描边一圈提示 + 半透明强调色底,悬停加深 */
+.island-bg-foot {
+  margin-top: 2px;
+}
+
+.island-bg-back {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  border: 1px solid color-mix(in srgb, var(--state-color, #4ade80) 40%, transparent);
+  background: color-mix(in srgb, var(--state-color, #4ade80) 14%, transparent);
+  color: color-mix(in srgb, var(--state-color, #4ade80) 75%, #fff 25%);
+  font-size: 0.74rem;
+  letter-spacing: 0.1em;
+  padding: 7px 0;
+  border-radius: 999px;
+  cursor: pointer;
+  transition:
+    color 0.2s ease,
+    background 0.2s ease,
+    border-color 0.2s ease;
+}
+
+.island-bg-back:hover {
+  color: #fff;
+  background: color-mix(in srgb, var(--state-color, #4ade80) 20%, transparent);
+  border-color: color-mix(in srgb, var(--state-color, #4ade80) 65%, transparent);
+}
+
+.island-ctl--clear {
+  color: rgba(255, 255, 255, 0.75);
+  border-color: rgba(255, 255, 255, 0.18);
+}
+
+/* 未设置背景时的空态引导 */
+.island-bg-empty {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+}
+
+.island-bg-empty-text {
+  font-size: 0.78rem;
+  letter-spacing: 0.04em;
+  color: rgba(255, 255, 255, 0.5);
 }

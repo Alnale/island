@@ -8,10 +8,17 @@ import { rgba } from '../../utils/color'
 const MAX_PARTICLES = 1200
 /** 画布左右留白(粒子浮动空间) */
 const PAD_PX = 8
-/** 画布高度(容纳大字 + 光晕浮动) */
+/** 画布高度(容纳大字 + 光晕浮动;内联模式保持同高,面板头部布局不变) */
 const HEIGHT_PX = 36
-/** 粒子时间字号:比岛内普通文字(0.95rem)更大,细字重,字形更轻盈 */
-const TIME_FONT = '300 26px system-ui, -apple-system, "Segoe UI", sans-serif'
+/** 粒子时间字体:与岛内文字同栈(Noto Sans SC / 苹方 / 雅黑),
+ *  300 细字重 + 轻微字距,呼应岛内数字排版风格。
+ *  紧凑态(拖动覆盖标题)用大字,内联(展开面板与歌名同行)用小字 */
+const FONT_STACK =
+  '"Noto Sans SC", "PingFang SC", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif'
+const TIME_FONT = `300 26px ${FONT_STACK}`
+const INLINE_TIME_FONT = `300 18px ${FONT_STACK}`
+/** 粒子时间字距(em,数字更舒展;画布 letterSpacing 与 measureText 一致) */
+const TIME_TRACKING_EM = 0.06
 
 interface Particle {
   x: number
@@ -50,6 +57,12 @@ export function ParticleTime({ seconds, centerX, color, inline = false }: Partic
   const rafRef = useRef(0)
   const colorRef = useRef(color)
   colorRef.current = color
+  // 模式相关样式(内联小字 + 粒子等比缩放;挂载后不变,用 ref 供回调读取)
+  const styleRef = useRef({ font: TIME_FONT, scale: 1 })
+  styleRef.current = {
+    font: inline ? INLINE_TIME_FONT : TIME_FONT,
+    scale: inline ? 18 / 26 : 1,
+  }
   const [size, setSize] = useState({ w: 0, h: HEIGHT_PX })
 
   /** 栅格化时间字符串 → 粒子目标点(自适应步长,粒子数封顶) */
@@ -60,7 +73,9 @@ export function ParticleTime({ seconds, centerX, color, inline = false }: Partic
       const dpr = window.devicePixelRatio || 1
       const ctx = off.getContext('2d', { willReadFrequently: true })
       if (!ctx) return null
-      ctx.font = TIME_FONT
+      const { font } = styleRef.current
+      ctx.font = font
+      ctx.letterSpacing = `${TIME_TRACKING_EM}em`
       const textW = ctx.measureText(text).width
       const w = Math.ceil(textW) + PAD_PX * 2
       const h = HEIGHT_PX
@@ -68,7 +83,8 @@ export function ParticleTime({ seconds, centerX, color, inline = false }: Partic
       off.height = Math.ceil(h * dpr)
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
       ctx.clearRect(0, 0, w, h)
-      ctx.font = TIME_FONT
+      ctx.font = font
+      ctx.letterSpacing = `${TIME_TRACKING_EM}em`
       ctx.textBaseline = 'middle'
       ctx.fillStyle = '#fff'
       ctx.fillText(text, PAD_PX, h / 2 + 1) // +1 光学居中
@@ -150,6 +166,8 @@ export function ParticleTime({ seconds, centerX, color, inline = false }: Partic
       if (ctx) {
         ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
         ctx.clearRect(0, 0, canvas.width / dpr, canvas.height / dpr)
+        // 粒子半径随字号等比缩放(内联小字用小粒子,保持字形观感一致)
+        const s = styleRef.current.scale
         for (const p of particlesRef.current) {
           p.x += (p.tx - p.x) * 0.14
           p.y += (p.ty - p.y) * 0.14
@@ -158,12 +176,12 @@ export function ParticleTime({ seconds, centerX, color, inline = false }: Partic
           // 光晕(跟随状态色),细字用更小的弥散半径
           ctx.fillStyle = rgba(colorRef.current, 0.3)
           ctx.beginPath()
-          ctx.arc(px, py, 3, 0, Math.PI * 2)
+          ctx.arc(px, py, 3 * s, 0, Math.PI * 2)
           ctx.fill()
           // 白色核心(半径略大,字形更实)
           ctx.fillStyle = 'rgba(255, 255, 255, 0.92)'
           ctx.beginPath()
-          ctx.arc(px, py, 1.5, 0, Math.PI * 2)
+          ctx.arc(px, py, 1.5 * s, 0, Math.PI * 2)
           ctx.fill()
         }
       }

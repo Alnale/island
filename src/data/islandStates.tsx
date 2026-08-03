@@ -172,9 +172,13 @@ export const ISLAND_STATES: Record<IslandState, IslandStateConfig> = {
         viewBox="0 0 24 24"
         fill="none"
         stroke="currentColor"
-        strokeWidth={2}
+        strokeWidth={2.2}
+        strokeLinecap="round"
       >
-        <polygon points="5,4 15,12 5,20" />
+        {/* 暂停:两条圆角短竖条,与面板暂停键同一语言(细描边版),
+           语义明确为"已暂停" */}
+        <line x1="8" y1="5" x2="8" y2="19" />
+        <line x1="16" y1="5" x2="16" y2="19" />
       </svg>
     ),
   },

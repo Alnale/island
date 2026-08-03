@@ -7,6 +7,15 @@ import {
 import { ISLAND_STATES, type IslandState, type TrackInfo } from './data/islandStates'
 import { useLyrics } from './hooks/useLyrics'
 import { useSystemMedia, type SystemControlAction } from './hooks/useSystemMedia'
+import {
+  clearBackgroundImage,
+  DEFAULT_BG_CROP,
+  downscaleBackgroundImage,
+  loadBackgroundImage,
+  migrateLegacyBackground,
+  saveBackgroundImage,
+  type BackgroundState,
+} from './media/backgroundStore'
 import { MODE_ORDER, PLAY_MODES, type PlaybackMode } from './media/playbackModes'
 import { SYSTEM_PLATFORMS } from './media/systemPlatforms'
 import { useMediaPlayer } from './media/useMediaPlayer'
@@ -99,13 +108,103 @@ export default function App() {
       // 忽略存储失败
     }
   }, [])
-  // 操作不支持提示(模式/跳转被客户端拒绝时,与挂件一致)
+  // 操作不支持提示(模式/跳转被客户端拒绝时,与挂件一致):
+  // 经 hint prop 在岛内显示(紧凑态 = 左侧文字区,展开态 = 播放键下方)
   const [hint, setHint] = useState<string | null>(null)
   const hintTimerRef = useRef(0)
   const showHint = useCallback((text: string) => {
     setHint(text)
     window.clearTimeout(hintTimerRef.current)
     hintTimerRef.current = window.setTimeout(() => setHint(null), 2600)
+  }, [])
+  // 自定义背景(与桌面挂件一致:双形态图片 + 裁切,持久化同键;
+  // Web 演示入口 = 面板背景按钮,桌面端 = 托盘菜单)
+  const [background, setBackground] = useState<BackgroundState>(() => {
+    let opacity = 0.4
+    const expanded = { ...DEFAULT_BG_CROP }
+    const compact = { ...DEFAULT_BG_CROP }
+    const readCrop = (
+      c: Partial<{ zoom: number; posX: number; posY: number }> | null | undefined,
+    ): { zoom: number; posX: number; posY: number } => ({
+      zoom: typeof c?.zoom === 'number' && c.zoom >= 1 && c.zoom <= 4 ? c.zoom : DEFAULT_BG_CROP.zoom,
+      posX:
+        typeof c?.posX === 'number' && c.posX >= 0 && c.posX <= 100 ? c.posX : DEFAULT_BG_CROP.posX,
+      posY:
+        typeof c?.posY === 'number' && c.posY >= 0 && c.posY <= 100 ? c.posY : DEFAULT_BG_CROP.posY,
+    })
+    try {
+      const raw = localStorage.getItem('widget-background')
+      if (raw) {
+        const parsed = JSON.parse(raw) as {
+          opacity?: unknown
+          expanded?: Partial<{ zoom: number; posX: number; posY: number }>
+          compact?: Partial<{ zoom: number; posX: number; posY: number }>
+          zoom?: unknown
+          posX?: unknown
+          posY?: unknown
+        }
+        if (parsed && typeof parsed === 'object') {
+          if (typeof parsed.opacity === 'number' && parsed.opacity >= 0 && parsed.opacity <= 1) {
+            opacity = parsed.opacity
+          }
+          if (parsed.expanded && typeof parsed.expanded === 'object') {
+            Object.assign(expanded, readCrop(parsed.expanded))
+          } else if (
+            typeof parsed.zoom === 'number' ||
+            typeof parsed.posX === 'number' ||
+            typeof parsed.posY === 'number'
+          ) {
+            Object.assign(
+              expanded,
+              readCrop({
+                zoom: typeof parsed.zoom === 'number' ? parsed.zoom : undefined,
+                posX: typeof parsed.posX === 'number' ? parsed.posX : undefined,
+                posY: typeof parsed.posY === 'number' ? parsed.posY : undefined,
+              }),
+            )
+          }
+          if (parsed.compact && typeof parsed.compact === 'object') {
+            Object.assign(compact, readCrop(parsed.compact))
+          }
+        }
+      }
+    } catch {
+      // 忽略存储失败
+    }
+    return { expandedImage: null, compactImage: null, opacity, expanded, compact }
+  })
+  useEffect(() => {
+    void migrateLegacyBackground().then(() => {
+      loadBackgroundImage('expanded').then((img) => {
+        if (!img) return
+        downscaleBackgroundImage(img).then((small) => {
+          if (small !== img) saveBackgroundImage(small, 'expanded').catch(() => {})
+          setBackground((prev) => ({ ...prev, expandedImage: small }))
+        })
+      })
+      loadBackgroundImage('compact').then((img) => {
+        if (!img) return
+        downscaleBackgroundImage(img).then((small) => {
+          if (small !== img) saveBackgroundImage(small, 'compact').catch(() => {})
+          setBackground((prev) => ({ ...prev, compactImage: small }))
+        })
+      })
+    })
+  }, [])
+  const handleBackgroundChange = useCallback((bg: BackgroundState) => {
+    setBackground(bg)
+    try {
+      localStorage.setItem(
+        'widget-background',
+        JSON.stringify({ opacity: bg.opacity, expanded: bg.expanded, compact: bg.compact }),
+      )
+    } catch {
+      // 忽略存储失败
+    }
+    if (bg.expandedImage) saveBackgroundImage(bg.expandedImage, 'expanded').catch(() => {})
+    else clearBackgroundImage('expanded').catch(() => {})
+    if (bg.compactImage) saveBackgroundImage(bg.compactImage, 'compact').catch(() => {})
+    else clearBackgroundImage('compact').catch(() => {})
   }, [])
   // 系统媒体监听激活(外部平台正在播放):数据与控制优先走系统,本地播放器让位
   const externalActive = system.active && system.track != null && useExternalSource
@@ -177,14 +276,13 @@ export default function App() {
       player.cycleMode()
     }
   }
-  // 外部平台进度条拖动:跳转系统媒体进度(需客户端支持 TryChangePlaybackPosition);
-  // 1.2s 后检测进度是否真的跳了,没跳提示
+  // 外部平台进度条拖动:跳转系统媒体进度(需客户端支持 TryChangePlaybackPosition)。
+  // seek 是否生效由 useSystemMedia 内部验证(对照系统真实位置,超时回退),
+  // 返回 false 即平台不支持跳转,给出提示
   const islandSeek = externalActive
     ? (seconds: number) => {
-        void system.control('seek', seconds).then(() => {
-          window.setTimeout(() => {
-            if (Math.abs(system.position - seconds) > 3) showHint('当前平台不支持进度跳转')
-          }, 1200)
+        void system.control('seek', seconds).then((accepted) => {
+          if (accepted === false) showHint('当前平台不支持进度跳转')
         })
       }
     : undefined
@@ -222,12 +320,6 @@ export default function App() {
       className="app"
       style={{ '--state-color': stateColor } as CSSProperties}
     >
-      {/* 操作结果提示(模式/跳转不被平台支持时短暂显示) */}
-      {hint && (
-        <div className="app-hint" role="status">
-          {hint}
-        </div>
-      )}
       <header className="app-header reveal">
         <div className="brand">
           <span className="brand-dot" style={{ background: stateColor, boxShadow: `0 0 10px ${stateColor}` }} />
@@ -290,6 +382,13 @@ export default function App() {
             onTogglePlay={externalActive ? islandToggle : player.toggle}
             onUploadTracks={!externalActive ? player.addTracks : undefined}
             onRemoveTrack={!externalActive ? player.removeTrack : undefined}
+            hint={hint}
+            backgroundExpandedImage={background.expandedImage}
+            backgroundCompactImage={background.compactImage}
+            backgroundOpacity={background.opacity}
+            backgroundCrop={{ expanded: background.expanded, compact: background.compact }}
+            onBackgroundChange={handleBackgroundChange}
+            backgroundButton
           />
           <div className="stage-track" aria-hidden="true">
             <span

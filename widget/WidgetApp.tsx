@@ -1,26 +1,55 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+} from 'react'
 import { DynamicIsland } from '../src/components/DynamicIsland'
 import type { IslandState, TrackInfo } from '../src/data/islandStates'
 import { useLyrics } from '../src/hooks/useLyrics'
 import { useSystemMedia, type SystemControlAction } from '../src/hooks/useSystemMedia'
+import {
+  clearBackgroundImage,
+  DEFAULT_BG_CROP,
+  downscaleBackgroundImage,
+  loadBackgroundImage,
+  migrateLegacyBackground,
+  saveBackgroundImage,
+  type BackgroundState,
+} from '../src/media/backgroundStore'
 import { PLAY_MODES, type PlaybackMode } from '../src/media/playbackModes'
 import { useMediaPlayer } from '../src/media/useMediaPlayer'
 
 const THEME_STORAGE_KEY = 'widget-theme-color'
+/** 背景裁切/不透明度参数持久化键(图片本体在 IndexedDB) */
+const BACKGROUND_KEY = 'widget-background'
+/** 旧版单独存储的不透明度键(兼容读取) */
+const BACKGROUND_OPACITY_KEY = 'widget-background-opacity'
+/** 挂件窗口常规高度(与 electron/main.cjs 的 WINDOW_H 一致) */
+const WINDOW_H = 280
+/** 背景编辑器视图的窗口高度(岛体加高到 440 + 余量) */
+const BG_VIEW_WINDOW_H = 480
+
+/** 默认裁切(cover 居中,与 backgroundStore 一致) */
+const DEFAULT_CROP = DEFAULT_BG_CROP
 
 /**
  * 桌面挂件版灵动岛:
  * 只渲染灵动岛本体(无演示页面),数据源与完整版一致——
  * 系统媒体监听(SMTC)优先,本地播放器兜底。
  *
- * 鼠标穿透由 stage 容器(包裹整个岛体与展开面板)的 mouseenter/leave 驱动,
+ * 鼠标穿透由 stage 容器(岛体 + 展开面板)的 mouseenter/leave 驱动,
  * 事件冒泡不受组件内部 hover 屏蔽影响:进入岛体才接收鼠标,离开立即穿透,
  * 展开面板期间移出也能可靠恢复(修复"面板收不回来"的卡死感)。
+ * 移动挂件:右键长按(~0.4s)进入拖拽模式后拖动(主进程按屏幕工作区
+ * 钳制,不会拖出桌面);快速右键点击/快速右键拖动不做任何事。
  */
 export default function WidgetApp() {
   const player = useMediaPlayer()
   const system = useSystemMedia()
-  // 操作结果提示(上传提醒/模式/跳转不被客户端接受时显示)
+  // 操作结果提示(模式/跳转不被客户端接受时在岛内短暂显示:
+  // 紧凑态 = 左侧文字区文字,展开态 = 播放键下方,均为岛体原生文本样式)
   const [hint, setHint] = useState<string | null>(null)
   const hintTimerRef = useRef(0)
   const showHint = useCallback((text: string) => {
@@ -59,6 +88,110 @@ export default function WidgetApp() {
     } catch {
       // 忽略存储失败
     }
+  }, [])
+  // 自定义背景(托盘菜单"自定义背景"入口,岛内视图编辑):
+  // 图片持久化到 IndexedDB,裁切/不透明度参数走 localStorage
+  const [background, setBackground] = useState<BackgroundState>(() => {
+    let opacity = 0.4
+    const expanded = { ...DEFAULT_CROP }
+    const compact = { ...DEFAULT_CROP }
+    const readCrop = (
+      c: Partial<{ zoom: number; posX: number; posY: number }> | null | undefined,
+    ): { zoom: number; posX: number; posY: number } => ({
+      zoom: typeof c?.zoom === 'number' && c.zoom >= 1 && c.zoom <= 4 ? c.zoom : DEFAULT_CROP.zoom,
+      posX:
+        typeof c?.posX === 'number' && c.posX >= 0 && c.posX <= 100 ? c.posX : DEFAULT_CROP.posX,
+      posY:
+        typeof c?.posY === 'number' && c.posY >= 0 && c.posY <= 100 ? c.posY : DEFAULT_CROP.posY,
+    })
+    try {
+      const raw = localStorage.getItem(BACKGROUND_KEY)
+      if (raw) {
+        const parsed = JSON.parse(raw) as {
+          opacity?: unknown
+          expanded?: Partial<{ zoom: number; posX: number; posY: number }>
+          compact?: Partial<{ zoom: number; posX: number; posY: number }>
+          // 旧版单形态字段(迁移:旧裁切归展开态,紧凑态保持默认)
+          zoom?: unknown
+          posX?: unknown
+          posY?: unknown
+        }
+        if (parsed && typeof parsed === 'object') {
+          if (typeof parsed.opacity === 'number' && parsed.opacity >= 0 && parsed.opacity <= 1) {
+            opacity = parsed.opacity
+          }
+          if (parsed.expanded && typeof parsed.expanded === 'object') {
+            Object.assign(expanded, readCrop(parsed.expanded))
+          } else if (
+            typeof parsed.zoom === 'number' ||
+            typeof parsed.posX === 'number' ||
+            typeof parsed.posY === 'number'
+          ) {
+            Object.assign(
+              expanded,
+              readCrop({
+                zoom: typeof parsed.zoom === 'number' ? parsed.zoom : undefined,
+                posX: typeof parsed.posX === 'number' ? parsed.posX : undefined,
+                posY: typeof parsed.posY === 'number' ? parsed.posY : undefined,
+              }),
+            )
+          }
+          if (parsed.compact && typeof parsed.compact === 'object') {
+            Object.assign(compact, readCrop(parsed.compact))
+          }
+        }
+      } else {
+        // 兼容旧版:单独存储的不透明度
+        const old = Number(localStorage.getItem(BACKGROUND_OPACITY_KEY))
+        if (Number.isFinite(old) && old >= 0 && old <= 1) opacity = old
+      }
+    } catch {
+      // 忽略存储失败
+    }
+    return { expandedImage: null, compactImage: null, opacity, expanded, compact }
+  })
+  // 托盘菜单请求打开背景编辑器:seq 递增触发岛内展开并切换视图
+  const [bgEditorSeq, setBgEditorSeq] = useState(0)
+  useEffect(() => {
+    // 旧版单图迁移后,恢复两个槽位的背景图(IndexedDB);
+    // 旧版本可能存了未降采样的大图,降采样后再用并回存
+    // (形变逐帧重栅格化大图是卡顿主因)
+    void migrateLegacyBackground().then(() => {
+      loadBackgroundImage('expanded').then((img) => {
+        if (!img) return
+        downscaleBackgroundImage(img).then((small) => {
+          if (small !== img) saveBackgroundImage(small, 'expanded').catch(() => {})
+          setBackground((prev) => ({ ...prev, expandedImage: small }))
+        })
+      })
+      loadBackgroundImage('compact').then((img) => {
+        if (!img) return
+        downscaleBackgroundImage(img).then((small) => {
+          if (small !== img) saveBackgroundImage(small, 'compact').catch(() => {})
+          setBackground((prev) => ({ ...prev, compactImage: small }))
+        })
+      })
+    })
+    window.desktop?.onOpenBackgroundEditor?.(() => setBgEditorSeq((s) => s + 1))
+  }, [])
+  const handleBackgroundChange = useCallback((bg: BackgroundState) => {
+    setBackground(bg)
+    try {
+      localStorage.setItem(
+        BACKGROUND_KEY,
+        JSON.stringify({ opacity: bg.opacity, expanded: bg.expanded, compact: bg.compact }),
+      )
+    } catch {
+      // 忽略存储失败
+    }
+    if (bg.expandedImage) saveBackgroundImage(bg.expandedImage, 'expanded').catch(() => {})
+    else clearBackgroundImage('expanded').catch(() => {})
+    if (bg.compactImage) saveBackgroundImage(bg.compactImage, 'compact').catch(() => {})
+    else clearBackgroundImage('compact').catch(() => {})
+  }, [])
+  // 背景编辑器视图需要更高空间:同步调整窗口高度,离开视图回落
+  const handlePanelViewChange = useCallback((view: string) => {
+    window.desktop?.setWindowHeight(view === 'background' ? BG_VIEW_WINDOW_H : WINDOW_H)
   }, [])
   // 实时系统状态引用(异步检测用)
   const systemRef = useRef(system)
@@ -139,15 +272,13 @@ export default function WidgetApp() {
       player.cycleMode()
     }
   }
-  // 外部平台进度条拖动:跳转系统媒体进度(需客户端支持 TryChangePlaybackPosition);
-  // 1.2s 后检测进度是否真的跳了,没跳说明客户端不支持,给出提示
+  // 外部平台进度条拖动:跳转系统媒体进度(需客户端支持 TryChangePlaybackPosition)。
+  // seek 是否生效由 useSystemMedia 内部验证(对照系统真实位置,超时回退),
+  // 返回 false 即平台不支持跳转,给出提示
   const islandSeek = externalActive
     ? (seconds: number) => {
-        void system.control('seek', seconds).then(() => {
-          window.setTimeout(() => {
-            const pos = systemRef.current.position
-            if (Math.abs(pos - seconds) > 3) showHint('当前平台不支持进度跳转')
-          }, 1200)
+        void system.control('seek', seconds).then((accepted) => {
+          if (accepted === false) showHint('当前平台不支持进度跳转')
         })
       }
     : undefined
@@ -167,77 +298,134 @@ export default function WidgetApp() {
     window.desktop?.pointer(true)
   }, [])
   const handleStageLeave = useCallback(() => {
+    // 拖拽中不关闭穿透:鼠标可能已移出岛体(如窗口被屏幕边缘钳制),
+    // 窗口仍需接收指针事件(依赖指针捕获持续送达)
+    if (dragRef.current?.dragging) return
     window.desktop?.pointer(false)
   }, [])
   // 兜底:鼠标移出窗口(forward 模式下 leave 可能丢失)
   const handleRootMouseLeave = useCallback(() => {
+    if (dragRef.current?.dragging) return
     window.desktop?.pointer(false)
   }, [])
 
-  // 右键拖拽移动挂件:按住右键拖动岛体/展开面板,窗口跟随移动。
-  // 捕获阶段拦截(先于组件内部交互处理器),右键不触发长按展开/按压。
-  // 过滤"坐标未变"的事件:窗口移动会让 Chromium 合成重复指针事件,
-  // 丢弃它们可阻断自移动的正反馈
-  const dragRef = useRef<{ pointerId: number; moved: boolean } | null>(null)
-  const dragLastPosRef = useRef<{ x: number; y: number } | null>(null)
-  const handlePointerDownCapture = useCallback(
-    (event: React.PointerEvent<HTMLDivElement>) => {
-      if (event.button !== 2) return
-      event.stopPropagation()
-      event.preventDefault()
-      event.currentTarget.setPointerCapture(event.pointerId)
-      dragRef.current = { pointerId: event.pointerId, moved: false }
-      dragLastPosRef.current = { x: event.screenX, y: event.screenY }
-      window.desktop?.dragStart(event.screenX, event.screenY)
-    },
-    [],
-  )
-  const handlePointerMoveCapture = useCallback(
-    (event: React.PointerEvent<HTMLDivElement>) => {
+  // 右键长按拖拽移动挂件:按住右键 400ms 内不移动(位移 < 阈值)
+  // 进入拖拽模式,之后拖动窗口跟随鼠标——长按区分"快速右键拖动",
+  // 那不做任何事。配合指针捕获,拖拽期间即使鼠标移出岛体/窗口
+  // (屏幕边缘钳制场景)事件仍持续送达(OS 捕获 + 穿透保持接收),
+  // 松手后按指针实际位置恢复穿透状态
+  const DRAG_HOLD_MS = 400
+  const DRAG_HOLD_SLOP_PX = 8
+  const dragRef = useRef<{
+    pointerId: number
+    startX: number
+    startY: number
+    /** 拖拽激活基准:长按期间实时更新,激活时以最新位置为基准
+     *  (避免"按下点与指针"的固定偏移——长按期间的手抖) */
+    actX: number
+    actY: number
+    timer: number
+    dragging: boolean
+    lastX: number
+    lastY: number
+  } | null>(null)
+
+  const handleDragPointerDown = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.button !== 2) return
+    // 自愈:若此前丢失 pointerup 残留拖拽状态,先清掉
+    const prev = dragRef.current
+    if (prev) window.clearTimeout(prev.timer)
+    event.preventDefault()
+    event.currentTarget.setPointerCapture(event.pointerId)
+    const startX = event.screenX
+    const startY = event.screenY
+    // 起点坐标异常(合成/边缘事件)不进入长按,避免把 NaN 传给主进程
+    if (!Number.isFinite(startX) || !Number.isFinite(startY)) return
+    dragRef.current = {
+      pointerId: event.pointerId,
+      startX,
+      startY,
+      actX: startX,
+      actY: startY,
+      timer: window.setTimeout(() => {
+        const drag = dragRef.current
+        if (!drag || drag.pointerId !== event.pointerId) return
+        // 长按成立:进入拖拽模式,以长按期间的最新位置为基准
+        drag.dragging = true
+        window.desktop?.dragStart(drag.actX, drag.actY)
+      }, DRAG_HOLD_MS),
+      dragging: false,
+      lastX: startX,
+      lastY: startY,
+    }
+  }, [])
+
+  const handleDragPointerMove = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = dragRef.current
+    if (!drag || event.pointerId !== drag.pointerId) return
+    if (!Number.isFinite(event.screenX) || !Number.isFinite(event.screenY)) return
+    if (!drag.dragging) {
+      // 长按期间轻微移动(阈值内):更新激活基准,拖拽开始时以最新位置
+      // 为准,消除"按下点与指针"的固定偏移
+      drag.actX = event.screenX
+      drag.actY = event.screenY
+      // 长按成立前移动超阈值:取消(快速右键拖动不生效)
+      if (
+        Math.hypot(event.screenX - drag.startX, event.screenY - drag.startY) >
+        DRAG_HOLD_SLOP_PX
+      ) {
+        window.clearTimeout(drag.timer)
+        dragRef.current = null
+      }
+      return
+    }
+    // 窗口移动后 Chromium 合成坐标相同/亚像素差异的指针事件:
+    // 与上次发送坐标偏差 < 0.5px 的一律丢弃,阻断自移动正反馈与抖动
+    // (真实位移由主进程 Math.round 吸收,亚像素移动本就无效果)
+    if (
+      Math.abs(event.screenX - drag.lastX) < 0.5 &&
+      Math.abs(event.screenY - drag.lastY) < 0.5
+    ) {
+      return
+    }
+    drag.lastX = event.screenX
+    drag.lastY = event.screenY
+    window.desktop?.dragMove(event.screenX, event.screenY)
+  }, [])
+
+  const handleDragPointerEnd = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = dragRef.current
+    if (!drag || event.pointerId !== drag.pointerId) return
+    window.clearTimeout(drag.timer)
+    dragRef.current = null
+    if (!drag.dragging) return
+    window.desktop?.dragEnd()
+    // 拖拽期间穿透保持接收鼠标;结束后按指针实际位置恢复
+    // (指针已移出岛体则立即恢复穿透,避免残留"接收"状态)
+    const el = document.elementFromPoint(event.clientX, event.clientY)
+    window.desktop?.pointer(el !== null && event.currentTarget.contains(el))
+  }, [])
+
+  // 卸载时清理右键长按计时器
+  useEffect(
+    () => () => {
       const drag = dragRef.current
-      if (!drag || event.pointerId !== drag.pointerId) return
-      event.stopPropagation()
-      // 坐标异常或与上次相同(合成事件):跳过,避免窗口自移动
-      if (!Number.isFinite(event.screenX) || !Number.isFinite(event.screenY)) return
-      const last = dragLastPosRef.current
-      if (last && last.x === event.screenX && last.y === event.screenY) return
-      dragLastPosRef.current = { x: event.screenX, y: event.screenY }
-      drag.moved = true
-      window.desktop?.dragMove(event.screenX, event.screenY)
-    },
-    [],
-  )
-  const handlePointerUpCapture = useCallback(
-    (event: React.PointerEvent<HTMLDivElement>) => {
-      const drag = dragRef.current
-      if (!drag || event.pointerId !== drag.pointerId) return
-      event.stopPropagation()
-      dragRef.current = null
-      dragLastPosRef.current = null
-      // 有位移才算拖拽(右键单击不移动,也不做任何事)
-      if (drag.moved) window.desktop?.dragEnd()
+      if (drag) window.clearTimeout(drag.timer)
     },
     [],
   )
 
   return (
     <div className="widget-root" onMouseLeave={handleRootMouseLeave}>
-      {/* 操作结果提示(模式/跳转不被客户端支持时短暂显示) */}
-      {hint && (
-        <div className="widget-hint" role="status">
-          {hint}
-        </div>
-      )}
-      <div className="drag-handle" aria-hidden="true" />
       <div
         className="widget-stage"
         onMouseEnter={handleStageEnter}
         onMouseLeave={handleStageLeave}
         onContextMenu={(event) => event.preventDefault()}
-        onPointerDownCapture={handlePointerDownCapture}
-        onPointerMoveCapture={handlePointerMoveCapture}
-        onPointerUpCapture={handlePointerUpCapture}
-        onPointerCancelCapture={handlePointerUpCapture}
+        onPointerDown={handleDragPointerDown}
+        onPointerMove={handleDragPointerMove}
+        onPointerUp={handleDragPointerEnd}
+        onPointerCancel={handleDragPointerEnd}
       >
         <DynamicIsland
           state={islandState}
@@ -250,7 +438,7 @@ export default function WidgetApp() {
           onTextDoubleClick={islandToggle}
           mode={externalActive ? externalMode : player.mode}
           onCycleMode={handleCycleMode}
-          themeColor={islandTheme}
+          themeColor={islandTheme ?? undefined}
           systemActive={externalActive}
           systemPlatform={externalActive ? system.platform : undefined}
           onToggleSource={system.active && system.track ? handleToggleSource : undefined}
@@ -264,6 +452,14 @@ export default function WidgetApp() {
           onRemoveTrack={!externalActive ? player.removeTrack : undefined}
           theme={customTheme}
           onThemeChange={applyCustomTheme}
+          hint={hint}
+          backgroundExpandedImage={background.expandedImage}
+          backgroundCompactImage={background.compactImage}
+          backgroundOpacity={background.opacity}
+          backgroundCrop={{ expanded: background.expanded, compact: background.compact }}
+          onBackgroundChange={handleBackgroundChange}
+          requestBackgroundSeq={bgEditorSeq}
+          onPanelViewChange={handlePanelViewChange}
         />
       </div>
     </div>
