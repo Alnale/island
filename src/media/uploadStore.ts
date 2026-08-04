@@ -11,40 +11,24 @@ export interface StoredUpload {
   data: ArrayBuffer
 }
 
+import { idbRun, openIdb } from './idb'
+
 const DB_NAME = 'island-uploads'
 const STORE = 'tracks'
 
-let dbPromise: Promise<IDBDatabase> | null = null
-
 function openDb(): Promise<IDBDatabase> {
-  if (!dbPromise) {
-    dbPromise = new Promise((resolve, reject) => {
-      const req = indexedDB.open(DB_NAME, 1)
-      req.onupgradeneeded = () => {
-        if (!req.result.objectStoreNames.contains(STORE)) {
-          req.result.createObjectStore(STORE, { keyPath: 'key' })
-        }
-      }
-      req.onsuccess = () => resolve(req.result)
-      req.onerror = () => reject(req.error)
-    })
-  }
-  return dbPromise
+  return openIdb(DB_NAME, 1, (db) => {
+    if (!db.objectStoreNames.contains(STORE)) {
+      db.createObjectStore(STORE, { keyPath: 'key' })
+    }
+  })
 }
 
 function run<T>(
   mode: IDBTransactionMode,
   fn: (store: IDBObjectStore) => IDBRequest<T>,
 ): Promise<T> {
-  return openDb().then(
-    (db) =>
-      new Promise<T>((resolve, reject) => {
-        const tx = db.transaction(STORE, mode)
-        const req = fn(tx.objectStore(STORE))
-        req.onsuccess = () => resolve(req.result)
-        req.onerror = () => reject(req.error)
-      }),
-  )
+  return openDb().then((db) => idbRun(db, STORE, mode, fn))
 }
 
 /** 保存上传文件,返回存储 key */

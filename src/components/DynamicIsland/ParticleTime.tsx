@@ -19,6 +19,12 @@ const TIME_FONT = `300 26px ${FONT_STACK}`
 const INLINE_TIME_FONT = `300 18px ${FONT_STACK}`
 /** 粒子时间字距(em,数字更舒展;画布 letterSpacing 与 measureText 一致) */
 const TIME_TRACKING_EM = 0.06
+/** 粒子"收敛"判定阈值(px):与目标距离小于该值视为已静止(0.14 阻尼,
+ *  约 0.8s 内收敛;阈值放大可更早停帧,字形观感无差异) */
+const SETTLE_EPSILON = 0.08
+/** 停帧判定:文本最后变化超过该时长且粒子已收敛时,画一帧静态后挂起
+ *  动画循环(常驻 60fps 绘制是 CPU 大头,尤其软件渲染下) */
+const STOP_FRAME_AFTER_MS = 600
 
 interface Particle {
   x: number
@@ -47,6 +53,9 @@ interface ParticleTimeProps {
  * 时间字符串先栅格化到离屏画布,按透明度采样出粒子目标点;
  * 粒子以阻尼逼近目标,时间变化(拖动经过分钟边界)时自动"变形"到新数字。
  * 组件仅在拖动期间挂载,卸载即停止动画。
+ *
+ * 性能:粒子收敛且文本久未变化时画完一帧即停帧(暂停/静止的展开面板
+ * 不持续烧 CPU),文本变化 / 拖动时自动恢复动画。
  */
 export function ParticleTime({ seconds, centerX, color, inline = false }: ParticleTimeProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -63,6 +72,8 @@ export function ParticleTime({ seconds, centerX, color, inline = false }: Partic
     font: inline ? INLINE_TIME_FONT : TIME_FONT,
     scale: inline ? 18 / 26 : 1,
   }
+  // 文本最后变化时刻(性能时钟):停帧判定用
+  const lastChangeRef = useRef(0)
   const [size, setSize] = useState({ w: 0, h: HEIGHT_PX })
 
   /** 栅格化时间字符串 → 粒子目标点(自适应步长,粒子数封顶) */
@@ -150,59 +161,87 @@ export function ParticleTime({ seconds, centerX, color, inline = false }: Partic
     [rasterize],
   )
 
-  // 挂载:初始化目标点并启动动画循环
-  useEffect(() => {
+  /** 启动(或重启)动画循环:粒子阻尼逼近目标。
+   *  每帧批量绘制(先全部光晕、再全部白色核心——fillStyle 状态切换
+   *  由每粒子 2 次降为 2 次/帧);粒子收敛且文本久未变化时画完本帧
+   *  即停帧,文本变化 / 拖动时由外部调用重启 */
+  const startAnimation = useCallback(() => {
     const canvas = canvasRef.current
     if (!canvas) return
-    offRef.current = document.createElement('canvas')
+    cancelAnimationFrame(rafRef.current)
     const dpr = window.devicePixelRatio || 1
-    // 用挂载时刻的初始秒数(拖动开始的瞬间)
-    lastTextRef.current = formatTime(seconds)
-    applyTargets(lastTextRef.current)
-
     const tick = (now: number) => {
       const t = now / 1000
       const ctx = canvas.getContext('2d')
       if (ctx) {
         ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
         ctx.clearRect(0, 0, canvas.width / dpr, canvas.height / dpr)
-        // 粒子半径随字号等比缩放(内联小字用小粒子,保持字形观感一致)
         const s = styleRef.current.scale
-        for (const p of particlesRef.current) {
+        const particles = particlesRef.current
+        // 第一遍:推进位置 + 画光晕(同色批量)
+        const halo = rgba(colorRef.current, 0.3)
+        let moving = false
+        for (const p of particles) {
           p.x += (p.tx - p.x) * 0.14
           p.y += (p.ty - p.y) * 0.14
+          if (
+            Math.abs(p.tx - p.x) > SETTLE_EPSILON ||
+            Math.abs(p.ty - p.y) > SETTLE_EPSILON
+          ) {
+            moving = true
+          }
           const px = p.x + Math.sin(t * 3 + p.phase) * 0.4
           const py = p.y + Math.cos(t * 2.2 + p.phase) * 0.4
           // 光晕(跟随状态色),细字用更小的弥散半径
-          ctx.fillStyle = rgba(colorRef.current, 0.3)
+          ctx.fillStyle = halo
           ctx.beginPath()
           ctx.arc(px, py, 3 * s, 0, Math.PI * 2)
           ctx.fill()
-          // 白色核心(半径略大,字形更实)
-          ctx.fillStyle = 'rgba(255, 255, 255, 0.92)'
+        }
+        // 第二遍:白色核心(半径略大,字形更实;同一 fillStyle 批量)
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.92)'
+        for (const p of particles) {
+          const px = p.x + Math.sin(t * 3 + p.phase) * 0.4
+          const py = p.y + Math.cos(t * 2.2 + p.phase) * 0.4
           ctx.beginPath()
           ctx.arc(px, py, 1.5 * s, 0, Math.PI * 2)
           ctx.fill()
         }
+        // 粒子收敛且文本 600ms 内未变化:本帧已是静态画面,
+        // 停帧直到文本再次变化(暂停/静止的展开面板不再烧 CPU)
+        if (!moving && now - lastChangeRef.current > STOP_FRAME_AFTER_MS) return
       }
       rafRef.current = requestAnimationFrame(tick)
     }
     rafRef.current = requestAnimationFrame(tick)
+  }, [])
+
+  // 挂载:初始化目标点并启动动画循环
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    offRef.current = document.createElement('canvas')
+    // 用挂载时刻的初始秒数(拖动开始的瞬间)
+    lastTextRef.current = formatTime(seconds)
+    applyTargets(lastTextRef.current)
+    startAnimation()
 
     return () => {
       cancelAnimationFrame(rafRef.current)
       particlesRef.current = []
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [applyTargets])
+  }, [applyTargets, startAnimation])
 
   // 时间变化(拖动跨秒/跨分钟):重新栅格化,粒子向新数字变形
   useEffect(() => {
     const text = formatTime(seconds)
     if (text === lastTextRef.current) return
     lastTextRef.current = text
+    lastChangeRef.current = performance.now()
     applyTargets(text)
-  }, [seconds, applyTargets])
+    startAnimation()
+  }, [seconds, applyTargets, startAnimation])
 
   return (
     <canvas

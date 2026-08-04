@@ -27,9 +27,13 @@
   cursor: pointer;
   user-select: none;
   -webkit-touch-callout: none; /* 触屏长按不弹系统菜单 */
+  /* 外部阴影(分层柔化):近层紧贴、远层虚化,透明度低、模糊大,
+     不再突兀(此前的单层 0.3 黑投影 + 悬浮主题色发光已废弃);
+     不做主题色发光 */
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.08),
-    0 8px 25px rgba(0, 0, 0, 0.3);
+    0 2px 6px rgba(0, 0, 0, 0.16),
+    0 10px 24px rgba(0, 0, 0, 0.14);
   animation: islandEnter 0.6s cubic-bezier(0.34, 1.56, 0.64, 1) backwards;
 }
 
@@ -102,28 +106,29 @@
   opacity: 1;
 }
 
-/* 悬停上浮由 JS 合并进 transform(与按压态互斥),阴影/边框跟随主题色 */
+/* 悬停上浮由 JS 合并进 transform(与按压态互斥),边框跟随主题色;
+   阴影仅轻微加深(两层同步略扩),不做主题色发光 */
 .island-demo:hover {
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.08),
-    0 12px 35px rgba(0, 0, 0, 0.4),
-    0 0 20px color-mix(in srgb, var(--state-color, #4ade80) 20%, transparent);
+    0 3px 8px rgba(0, 0, 0, 0.18),
+    0 14px 30px rgba(0, 0, 0, 0.16);
   border-color: color-mix(in srgb, var(--state-color, #4ade80) 30%, transparent);
 }
 
 .island-demo.error:hover {
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.08),
-    0 12px 35px rgba(0, 0, 0, 0.4),
-    0 0 20px rgba(239, 68, 68, 0.2);
+    0 3px 8px rgba(0, 0, 0, 0.18),
+    0 14px 30px rgba(0, 0, 0, 0.16);
   border-color: rgba(239, 68, 68, 0.4);
 }
 
 .island-demo.warning:hover {
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.08),
-    0 12px 35px rgba(0, 0, 0, 0.4),
-    0 0 20px rgba(245, 158, 11, 0.2);
+    0 3px 8px rgba(0, 0, 0, 0.18),
+    0 14px 30px rgba(0, 0, 0, 0.16);
   border-color: rgba(245, 158, 11, 0.4);
 }
 
@@ -133,7 +138,8 @@
 .island-demo.is-pressed {
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.05),
-    0 3px 10px rgba(0, 0, 0, 0.35);
+    0 1px 4px rgba(0, 0, 0, 0.2),
+    0 4px 12px rgba(0, 0, 0, 0.16);
 }
 
 /* 加载状态:图标旋转 */
@@ -340,7 +346,7 @@
 .island-panel-icon-tag {
   font-size: 0.56rem;
   letter-spacing: 0.06em;
-  color: rgba(255, 255, 255, 0.45);
+  color: var(--text-dim, rgba(255, 255, 255, 0.45));
   white-space: nowrap;
   max-width: 64px;
   overflow: hidden;
@@ -382,7 +388,7 @@
   gap: 6px;
   font-size: 0.62rem;
   letter-spacing: 0.16em;
-  color: rgba(255, 255, 255, 0.42);
+  color: var(--text-dim, rgba(255, 255, 255, 0.42));
 }
 
 .island-panel-state-dot {
@@ -404,7 +410,7 @@
 .island-panel-title {
   font-size: 1rem;
   font-weight: 600;
-  color: #fff;
+  color: var(--text-color, #fff);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -415,7 +421,7 @@
 
 .island-panel-artist {
   font-size: 0.78rem;
-  color: rgba(255, 255, 255, 0.55);
+  color: var(--text-dim, rgba(255, 255, 255, 0.55));
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -431,7 +437,7 @@
 
 .island-panel-time {
   font-size: 0.68rem;
-  color: rgba(255, 255, 255, 0.5);
+  color: var(--text-dim, rgba(255, 255, 255, 0.5));
   font-variant-numeric: tabular-nums;
   min-width: 32px;
 }
@@ -529,9 +535,10 @@
   align-items: center;
   justify-content: center;
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.08);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  color: #fff;
+  /* 0.12:蒙版层下调亮按钮底色(0.08 叠在深蒙版上发黑) */
+  background: rgba(255, 255, 255, 0.12);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  color: var(--text-color, #fff);
   cursor: pointer;
   transition:
     background 0.2s ease,
@@ -598,9 +605,10 @@
   background: color-mix(in srgb, var(--state-color, #4ade80) 10%, transparent);
 }
 
-/* 主题色按钮:右下角(模式按钮左侧),随主题色淡染;仅宿主传入
-   onThemeChange 时渲染 */
-.island-ctl--theme {
+/* 设置按钮:右下角(模式按钮左侧),随主题色淡染;
+   仅 Web 演示显示(桌面端入口在托盘菜单),打开设置视图
+   (自定义背景 / 帮助手册 / 主题色) */
+.island-ctl--settings {
   position: absolute;
   right: 40px;
   bottom: 0;
@@ -611,39 +619,349 @@
   background: color-mix(in srgb, var(--state-color, #4ade80) 10%, transparent);
 }
 
-/* 自定义背景按钮:右下角(主题色按钮左侧),随主题色淡染;
-   仅 Web 演示显示(桌面端入口在托盘菜单) */
-.island-ctl--bg {
-  position: absolute;
-  right: 80px;
-  bottom: 0;
-  width: 34px;
-  height: 34px;
-  color: var(--state-color, #4ade80);
-  border-color: color-mix(in srgb, var(--state-color, #4ade80) 35%, transparent);
-  background: color-mix(in srgb, var(--state-color, #4ade80) 10%, transparent);
-}
-
-/* ===== 主题色视图(与播放列表视图对称) ===== */
-.island-panel-theme {
-  position: absolute;
-  inset: 0;
-  padding: 16px 28px 14px;
+/* ===== 设置视图(托盘菜单/演示设置按钮入口,岛内打开) =====
+   设置类功能总入口:自定义背景 / 帮助手册 / 主题色;
+   容器/头部/底部复用播放列表视图(island-panel-list) */
+.island-settings-items {
+  /* 入口较多(背景/帮助/主题色/字体)时纵向滚动,头部/底部固定 */
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  animation: listViewIn 0.3s cubic-bezier(0.34, 1.56, 0.64, 1) backwards;
+  gap: 10px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.15) transparent;
 }
 
-/* 左右分栏:左预设色板 / 右常驻 RGB 自定义 */
-.island-theme-layout {
+.island-settings-item {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 10px 0;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  /* 0.08:蒙版层下调亮底色 */
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-color, #fff);
+  font-size: 0.8rem;
+  letter-spacing: 0.06em;
+  font-family: inherit;
+  cursor: pointer;
+  transition:
+    background 0.2s ease,
+    border-color 0.2s ease;
+}
+
+.island-settings-item .island-ctl-svg {
+  color: var(--state-color, #4ade80);
+}
+
+.island-settings-item:hover {
+  background: rgba(255, 255, 255, 0.09);
+  border-color: color-mix(in srgb, var(--state-color, #4ade80) 45%, transparent);
+}
+
+/* ===== 字体设置视图(设置视图"字体"入口,岛内打开) =====
+   内容紧凑适配 244px 面板:预览单行 + 上传/移除按钮行 +
+   颜色模式分段 + (自定义时)色板单行 + hex 输入行。
+   gap 用双类名覆盖:单类 .island-font-view 声明在 .island-panel-list
+   (gap: 8px)之前,同特异性下会被后者覆盖(实测间距 8px 而非 4px,
+   内容超高把自定义颜色区挤出容器裁掉) */
+.island-panel-list.island-font-view {
+  padding: 12px 28px 8px;
+  gap: 4px;
+}
+
+/* 字体视图:自定义颜色已独立成页(字体视图"自定义"入口),
+   本视图不再内嵌色板/hex 输入,内容固定紧凑,岛体 200px
+   (折叠掉多余空间,返回键贴底,不空一大块) */
+.island-demo.expanded.island-font-view {
+  height: 200px;
+}
+
+/* 字体视图返回键贴底:折叠模式下吸收剩余空间,视觉不空档 */
+.island-font-foot {
+  margin-top: auto;
+}
+
+/* 上传错误提示(预览行状态位):红色高亮 */
+.island-font-status--error {
+  color: #f87171;
+}
+
+/* 预览行:示例文字(当前字体渲染)+ 字体名 + 启用状态 + 粗细档位 */
+.island-font-preview {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 22px;
+}
+
+.island-font-sample {
+  flex-shrink: 0;
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: var(--text-color, #fff);
+}
+
+.island-font-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.74rem;
+  color: var(--text-color, #fff);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.island-font-status {
+  flex-shrink: 0;
+  font-size: 0.62rem;
+  letter-spacing: 0.06em;
+  color: var(--text-dim, rgba(255, 255, 255, 0.5));
+}
+
+/* 字体粗细档位:常规 / 中等 / 粗体(预览行右侧小胶囊) */
+.island-font-weights {
+  flex-shrink: 0;
+  display: flex;
+  gap: 3px;
+}
+
+.island-font-weight {
+  min-width: 24px;
+  height: 20px;
+  padding: 0 5px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: transparent;
+  color: var(--text-dim, rgba(255, 255, 255, 0.55));
+  font-size: 0.6rem;
+  font-family: inherit;
+  cursor: pointer;
+  transition:
+    color 0.2s ease,
+    border-color 0.2s ease,
+    background 0.2s ease;
+}
+
+.island-font-weight.on {
+  color: #fff;
+  border-color: color-mix(in srgb, var(--state-color, #4ade80) 60%, transparent);
+  background: color-mix(in srgb, var(--state-color, #4ade80) 15%, transparent);
+}
+
+/* 上传/字体库/恢复默认按钮行:统一中性胶囊(与背景操作行同款),
+   覆盖 island-ctl--upload 的强调色,视觉整齐 */
+.island-font-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.island-font-actions .island-ctl {
+  flex: 1;
+  width: auto;
+  height: 30px;
+  padding: 0 10px;
+  gap: 5px;
+  font-size: 0.68rem;
+  white-space: nowrap;
+  color: var(--text-color, #fff);
+  border-color: rgba(255, 255, 255, 0.24);
+  background: rgba(255, 255, 255, 0.09);
+}
+
+.island-font-actions .island-ctl:hover {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.12);
+  border-color: rgba(255, 255, 255, 0.32);
+}
+
+/* 颜色模式分段:复用背景编辑器的滑动胶囊切换(略紧凑) */
+.island-font-seg {
+  align-self: center;
+}
+
+.island-font-seg button {
+  position: relative;
+  padding: 3px 12px;
+}
+
+/* 自定义模式下分段按钮上的当前颜色小圆点(绝对定位,不影响按钮宽度,
+   否则两钮不等宽会破坏滑动胶囊 50% 的位移计算) */
+.island-font-seg-dot {
+  position: absolute;
+  right: 3px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.4);
+}
+
+/* 预设色板:单行(7 × 34px + 间距 6×8 = 286px,面板内容宽 344px 内一行放下)。
+   双类名:单类 .island-font-presets 声明在 .island-theme-presets(gap:12px)
+   之前,同特异性下会被后者覆盖——gap 12px 时总宽恰好 310px 贴着容器宽,
+   像素级舍入会触发换行成两排;8px 留出余量 */
+.island-theme-presets.island-font-presets {
+  gap: 8px;
+  flex: none;
+}
+
+/* ===== 颜色页(字体自定义颜色 / 主题色共用) =====
+   色板 + 岛内自绘取色器(SV 面 + 色相条)+ hex 输入。
+   岛体 352px(挂件窗口 364px,宿主按视图高度映射):
+   固定项约 198px(头部 14 + 色板 34 + 色相条 12 + hex 行 43 +
+   返回键 33 + 间距 32 + 内边距 30),取色面 flex:1 吃满剩余约 152px */
+.island-demo.expanded.island-font-color-view,
+.island-demo.expanded.island-theme-view {
+  height: 352px;
+}
+
+.island-color-main {
   flex: 1;
   min-height: 0;
   display: flex;
-  align-items: center;
-  gap: 14px;
+  flex-direction: column;
+  gap: 10px;
 }
 
+.island-color-main .island-font-custom-row {
+  width: 100%;
+}
+
+/* 取色面:横向 = 饱和度(白 → 纯色),纵向 = 明度(纯色 → 黑),
+   指针拖动取色(与进度条同款 capture 模式)。
+   明度黑渐变必须拆成独立 ::after 层:两层渐变叠在同一 background 上时,
+   黑渐变会在接近底边处提前淡出,底部露出一条亮色带(像素实测黑渐变
+   止于 ~92% 高度);独立层 + inset:0 铺满,底部实黑无亮线 */
+.island-font-sv {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  border-radius: 12px;
+  cursor: crosshair;
+  touch-action: none;
+  background: linear-gradient(to right, #fff, hsl(var(--sv-hue, 0deg) 100% 50%));
+}
+
+.island-font-sv::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  background: linear-gradient(to top, #000, rgba(0, 0, 0, 0));
+}
+
+.island-font-sv-cursor {
+  position: absolute;
+  z-index: 1;
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  border: 2px solid #fff;
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.65),
+    0 2px 6px rgba(0, 0, 0, 0.5);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
+/* 色相条:横向彩虹渐变,拖动选色相 */
+.island-font-hue {
+  position: relative;
+  height: 12px;
+  border-radius: 999px;
+  cursor: crosshair;
+  touch-action: none;
+  background: linear-gradient(
+    to right,
+    hsl(0 100% 50%),
+    hsl(60 100% 50%),
+    hsl(120 100% 50%),
+    hsl(180 100% 50%),
+    hsl(240 100% 50%),
+    hsl(300 100% 50%),
+    hsl(360 100% 50%)
+  );
+}
+
+.island-font-hue-thumb {
+  position: absolute;
+  top: 50%;
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  border: 2px solid #fff;
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.65),
+    0 2px 6px rgba(0, 0, 0, 0.5);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
+/* 自定义颜色面板:独立卡片(边框 + 半透明底),与上方色板明确区分,
+   一眼可辨 hex 输入 + 系统拾色器 */
+.island-font-custom-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.island-font-custom-label {
+  flex-shrink: 0;
+  font-size: 0.66rem;
+  letter-spacing: 0.06em;
+  color: var(--text-dim, rgba(255, 255, 255, 0.5));
+}
+
+.island-font-hex {
+  flex: 1;
+  min-width: 0;
+  height: 28px;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 8px;
+  color: var(--text-color, #fff);
+  font-size: 0.74rem;
+  font-family: inherit;
+  font-variant-numeric: tabular-nums;
+  padding: 2px 8px;
+  text-align: center;
+  outline: none;
+  transition:
+    border-color 0.2s ease,
+    background 0.2s ease;
+}
+
+.island-font-hex:focus {
+  border-color: color-mix(in srgb, var(--state-color, #4ade80) 60%, transparent);
+  background: rgba(255, 255, 255, 0.12);
+}
+
+/* 当前色预览圆点(hex 行右侧,替换原系统取色器按钮) */
+.island-font-preview-dot {
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  border-radius: 999px;
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--state-color, #4ade80) 35%, transparent);
+  transition: background 0.15s ease;
+}
+
+/* ===== 主题色视图 =====
+   与字体自定义颜色页共用颜色页布局(island-color-main):
+   预设色板(跟随播放模式 + 常用色)+ 岛内自绘取色器(SV 面 + 色相条,
+   复用 IslandColorPicker)+ hex 输入。岛体 352px(与 font-color 同) */
 .island-theme-presets {
   flex: 1;
   min-width: 0;
@@ -653,81 +971,6 @@
   align-items: center;
   justify-content: center;
   gap: 12px;
-}
-
-/* 右侧自定义取色:常驻显示,输入 RGB 即生效(无弹出层) */
-.island-theme-custom {
-  flex-shrink: 0;
-  width: 118px;
-  border-left: 1px solid rgba(255, 255, 255, 0.1);
-  padding-left: 14px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.island-theme-custom-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 0.66rem;
-  letter-spacing: 0.04em;
-  color: rgba(255, 255, 255, 0.55);
-}
-
-.island-theme-custom-preview {
-  flex-shrink: 0;
-  width: 22px;
-  height: 22px;
-  border-radius: 999px;
-  border: 2px solid rgba(255, 255, 255, 0.25);
-  box-shadow: 0 0 8px color-mix(in srgb, var(--state-color, #4ade80) 40%, transparent);
-  transition: background 0.3s ease;
-}
-
-.island-theme-rgb-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 0.66rem;
-  color: rgba(255, 255, 255, 0.5);
-}
-
-.island-theme-rgb-key {
-  flex-shrink: 0;
-  width: 14px;
-  text-align: center;
-  font-weight: 600;
-}
-
-.island-theme-rgb-row input {
-  flex: 1;
-  min-width: 0;
-  background: rgba(255, 255, 255, 0.08);
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  border-radius: 8px;
-  color: #fff;
-  font-size: 0.72rem;
-  font-family: inherit;
-  padding: 3px 6px;
-  text-align: center;
-  font-variant-numeric: tabular-nums;
-  outline: none;
-  transition:
-    border-color 0.2s ease,
-    background 0.2s ease;
-}
-
-.island-theme-rgb-row input:focus {
-  border-color: color-mix(in srgb, var(--state-color, #4ade80) 60%, transparent);
-  background: rgba(255, 255, 255, 0.12);
-}
-
-/* number 输入框去掉上下箭头(更贴近挂件风格) */
-.island-theme-rgb-row input::-webkit-outer-spin-button,
-.island-theme-rgb-row input::-webkit-inner-spin-button {
-  -webkit-appearance: none;
-  margin: 0;
 }
 
 .island-theme-swatch {
@@ -782,7 +1025,7 @@
 .island-panel-empty-text {
   font-size: 0.72rem;
   letter-spacing: 0.04em;
-  color: rgba(255, 255, 255, 0.5);
+  color: var(--text-dim, rgba(255, 255, 255, 0.5));
 }
 
 /* ===== 主题色切换的涟漪动画 =====
@@ -939,7 +1182,10 @@
 }
 
 /* ===== 播放列表视图 =====
-   双视图切换:列表从右侧滑入覆盖控制视图 */
+   双视图切换:列表从右侧滑入覆盖控制视图。
+   蒙版不在面板上(由岛体层 .island-panel-mask 统一提供):
+   面板自带蒙版会随 maskPanelIn 淡入动画一起透明,切换视图的瞬间
+   背景图透出闪烁;持久蒙版独立一层、始终不透明 */
 .island-panel-list {
   position: absolute;
   inset: 0;
@@ -947,18 +1193,31 @@
   display: flex;
   flex-direction: column;
   gap: 8px;
-  animation: listViewIn 0.3s cubic-bezier(0.34, 1.56, 0.64, 1) backwards;
+  animation: maskPanelIn 0.3s ease backwards;
 }
 
-@keyframes listViewIn {
+/* 全部面板进入动画统一纯淡入:蒙版随位移回弹会像整块左右甩动,
+   淡入更安静 */
+@keyframes maskPanelIn {
   from {
     opacity: 0;
-    transform: translateX(16px) scale(0.98);
   }
   to {
     opacity: 1;
-    transform: translateX(0) scale(1);
   }
+}
+
+/* 设置类视图持久蒙版:独立一层(z-index 0,在岛体背景之上、面板之下),
+   不参与面板淡入动画。视图切换(设置 ↔ 子视图)瞬间蒙版始终不透明,
+   背景图不会闪烁透出;面板自身不再带蒙版背景。
+   0.55 不透明度:0.78 时背景图几乎全黑、控件叠在深底上发黑
+   (用户反馈"全黑了",尤其返回键/上传键),降为 0.55 兼顾可读与透光 */
+.island-panel-mask {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  background: rgba(8, 10, 14, 0.55);
+  pointer-events: none;
 }
 
 .island-panel-list-head {
@@ -970,7 +1229,7 @@
 
 .island-panel-list-count {
   font-size: 0.66rem;
-  color: rgba(255, 255, 255, 0.4);
+  color: var(--text-dim, rgba(255, 255, 255, 0.4));
   letter-spacing: 0.06em;
 }
 
@@ -1024,7 +1283,7 @@
   flex-shrink: 0;
   width: 20px;
   font-size: 0.62rem;
-  color: rgba(255, 255, 255, 0.35);
+  color: var(--text-dim, rgba(255, 255, 255, 0.35));
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.04em;
 }
@@ -1043,7 +1302,7 @@
 
 .island-track-title {
   font-size: 0.82rem;
-  color: #fff;
+  color: var(--text-color, #fff);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1055,7 +1314,7 @@
 
 .island-track-artist {
   font-size: 0.64rem;
-  color: rgba(255, 255, 255, 0.45);
+  color: var(--text-dim, rgba(255, 255, 255, 0.45));
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1064,7 +1323,7 @@
 .island-track-duration {
   flex-shrink: 0;
   font-size: 0.64rem;
-  color: rgba(255, 255, 255, 0.35);
+  color: var(--text-dim, rgba(255, 255, 255, 0.35));
   font-variant-numeric: tabular-nums;
 }
 
@@ -1079,7 +1338,7 @@
   border-radius: 999px;
   border: none;
   background: none;
-  color: rgba(255, 255, 255, 0.35);
+  color: var(--text-dim, rgba(255, 255, 255, 0.35));
   cursor: pointer;
   opacity: 0;
   transition:
@@ -1100,8 +1359,71 @@
 .island-track-empty {
   padding: 14px 10px;
   font-size: 0.72rem;
-  color: rgba(255, 255, 255, 0.3);
+  color: var(--text-dim, rgba(255, 255, 255, 0.3));
   text-align: center;
+}
+
+/* ===== 帮助手册视图(托盘菜单入口,岛内打开):操作引导列表 =====
+   容器/头部/底部复用播放列表视图(island-panel-list),
+   仅条目样式独立:序号列(主题色)+ 操作姿势 + 作用 */
+.island-help-items {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.15) transparent;
+}
+
+.island-help-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  border-radius: 10px;
+  transition: background 0.2s ease;
+}
+
+.island-help-item:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.island-help-index {
+  flex-shrink: 0;
+  width: 20px;
+  font-size: 0.62rem;
+  color: color-mix(in srgb, var(--state-color, #4ade80) 70%, transparent);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.04em;
+}
+
+.island-help-meta {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.island-help-title {
+  font-size: 0.8rem;
+  color: var(--text-color, #fff);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.island-help-desc {
+  font-size: 0.64rem;
+  color: var(--text-dim, rgba(255, 255, 255, 0.45));
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* 列表底部:上传音乐 + 返回 */
@@ -1122,9 +1444,17 @@
 }
 
 .island-ctl--upload {
-  color: var(--state-color, #4ade80);
-  border-color: color-mix(in srgb, var(--state-color, #4ade80) 35%, transparent);
-  background: color-mix(in srgb, var(--state-color, #4ade80) 10%, transparent);
+  /* 参考背景编辑器"更换图片"等按钮的中性胶囊设计:
+     半透明白底 + 细描边 + 白字,悬停加深(不再用强调色实底) */
+  color: var(--text-color, #fff);
+  border-color: rgba(255, 255, 255, 0.24);
+  background: rgba(255, 255, 255, 0.09);
+}
+
+.island-ctl--upload:hover {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.12);
+  border-color: rgba(255, 255, 255, 0.32);
 }
 
 .island-ctl--list {
@@ -1158,7 +1488,7 @@
 }
 
 .island-ctl--lyric.on {
-  color: #fff;
+  color: var(--text-color, #fff);
   background: color-mix(in srgb, var(--state-color, #4ade80) 85%, transparent);
   border-color: transparent;
   box-shadow: 0 0 10px color-mix(in srgb, var(--state-color, #4ade80) 45%, transparent);
@@ -1229,7 +1559,7 @@
   margin: 0;
   font-size: 0.78rem;
   line-height: 1.4;
-  color: rgba(255, 255, 255, 0.35);
+  color: var(--text-dim, rgba(255, 255, 255, 0.35));
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1243,7 +1573,7 @@
 /* 当前句:主题色光晕,下一句淡色,
    切换时整组从下方滑入(歌词向上推进感) */
 .island-lyric-line.active {
-  color: #fff;
+  color: var(--text-color, #fff);
   font-size: 0.92rem;
   font-weight: 600;
   letter-spacing: 0.02em;
@@ -1348,7 +1678,7 @@
   mask-repeat: no-repeat;
   /* 文字切换由组件内 JS 控制淡出/淡入,不参与岛体形变 */
   position: relative;
-  color: white;
+  color: var(--text-color, #fff);
 }
 
 /* 截断省略号:仅在文字被截断时渲染,跟随文字整体淡入淡出 */
@@ -1577,7 +1907,7 @@
   text-overflow: ellipsis;
   font-size: 0.78rem;
   letter-spacing: 0.04em;
-  color: rgba(255, 255, 255, 0.55);
+  color: var(--text-dim, rgba(255, 255, 255, 0.55));
   pointer-events: none;
   animation: islandHintIn 0.3s ease backwards;
 }
@@ -1614,14 +1944,30 @@
 }
 
 /* 背景编辑器视图:岛体加高容纳裁切区(挂件窗口同步加高;
-   Web 演示页面自然伸展,与桌面端一致) */
+   Web 演示页面自然伸展,与桌面端一致)。
+   岛体高度跟随编辑目标折叠/展开:切到紧凑态时把多余岛体部分
+   折叠掉(只留紧凑内容所需空间),切回展开态展开恢复;
+   高度过渡与视口同款弹簧曲线,折叠/展开一气呵成。
+   离开背景视图(返回设置)时本类移除,高度回落由 .island-demo
+   基础 height 弹簧过渡(0.33s)平滑接管 */
 .island-demo.expanded.island-bg-view {
   height: 440px;
+  transition: height 0.45s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+/* 紧凑态编辑:折叠多余岛体部分(内容 = 头部 + 分段 + 紧凑视口
+   310×62 + 控制区 + 返回,合计约 277px;取 288px 留字体渲染余量,
+   返回键不被截断) */
+.island-demo.expanded.island-bg-view.island-bg-view--compact {
+  height: 288px;
 }
 
 /* ===== 自定义背景视图(托盘菜单入口,岛内打开) =====
    无预览区(岛体本身即实时预览):展开态蒙版视口可拖拽平移,
-   紧凑态胶囊预览展示另一种 UI 形态下的裁切结果 */
+   紧凑态胶囊预览展示另一种 UI 形态下的裁切结果。
+   蒙版由岛体层 .island-panel-mask 统一提供:编辑控件压在用户自定义
+   背景图上时保证可读性;裁切视口(预览框)自身不透明显示原图,
+   蒙版只在其周边可见,不影响预览 */
 .island-panel-bg {
   position: absolute;
   inset: 0;
@@ -1629,7 +1975,7 @@
   display: flex;
   flex-direction: column;
   gap: 8px;
-  animation: listViewIn 0.3s cubic-bezier(0.34, 1.56, 0.64, 1) backwards;
+  animation: maskPanelIn 0.3s ease backwards;
 }
 
 /* 裁切区:分段切换目标 + 对应形态的蒙版视口 */
@@ -1676,7 +2022,7 @@
   z-index: 1;
   border: none;
   background: transparent;
-  color: rgba(255, 255, 255, 0.55);
+  color: var(--text-dim, rgba(255, 255, 255, 0.55));
   font-size: 0.66rem;
   letter-spacing: 0.06em;
   padding: 4px 16px;
@@ -1686,7 +2032,7 @@
 }
 
 .island-bg-seg button.on {
-  color: #fff;
+  color: var(--text-color, #fff);
 }
 
 /* 展开态蒙版视口:400×244 等比例(310px 宽 = 189px 高),
@@ -1718,6 +2064,23 @@
   cursor: grabbing;
 }
 
+/* 旧图淡出层:background-image 不支持过渡,切换编辑形态(展开态 ↔
+   紧凑态)时旧图快照覆盖在新图上淡出(crossfade),图片不生硬瞬切;
+   深色底兜底透明 PNG,圆角跟随视口 */
+.island-bg-viewport-fade {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background-color: rgb(8, 10, 14);
+  opacity: 1;
+  pointer-events: none;
+  transition: opacity 0.32s ease;
+}
+
+.island-bg-viewport-fade.out {
+  opacity: 0;
+}
+
 /* 紧凑态蒙版视口:胶囊形(280×56 参考比例,310px 宽 = 62px 高) */
 .island-bg-viewport--compact {
   height: 62px; /* 310 × 56 / 280 */
@@ -1730,8 +2093,8 @@
   bottom: 6px;
   font-size: 0.58rem;
   letter-spacing: 0.08em;
-  color: rgba(255, 255, 255, 0.65);
-  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.85);
+  color: var(--text-dim, rgba(255, 255, 255, 0.65));
+  /* 无文字投影:0 1px 4px 黑投影在紧凑态胶囊视口里让文字显得模糊 */
   pointer-events: none;
 }
 
@@ -1742,8 +2105,8 @@
   top: 6px;
   font-size: 0.56rem;
   letter-spacing: 0.04em;
-  color: rgba(255, 255, 255, 0.5);
-  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.85);
+  color: var(--text-dim, rgba(255, 255, 255, 0.5));
+  /* 无文字投影:同上 */
   pointer-events: none;
 }
 
@@ -1772,7 +2135,7 @@
   justify-content: space-between;
   font-size: 0.68rem;
   letter-spacing: 0.04em;
-  color: rgba(255, 255, 255, 0.55);
+  color: var(--text-dim, rgba(255, 255, 255, 0.55));
 }
 
 .island-bg-slider input[type='range'] {
@@ -1788,12 +2151,68 @@
   gap: 8px;
 }
 
+/* 三个按钮统一为中性胶囊(同高 32px、图标+文字、半透明底+描边):
+   不再区分强调/危险色,悬停统一加深;
+   覆盖 island-ctl--upload 的强调色与 island-ctl--clear 的圆形形态 */
 .island-bg-actions .island-ctl {
   flex: 1;
+  width: auto;
+  height: 32px;
+  padding: 0 10px;
+  gap: 5px;
+  font-size: 0.68rem;
+  white-space: nowrap;
+  color: var(--text-color, #fff);
+  border-color: rgba(255, 255, 255, 0.24);
+  background: rgba(255, 255, 255, 0.09);
+}
+
+.island-bg-actions .island-ctl:hover {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.12);
+  border-color: rgba(255, 255, 255, 0.32);
+}
+
+/* 重置裁切:常驻渲染,收起时折叠为 0 宽(overflow hidden 裁文字)。
+   用精确的 width 过渡(而非 max-width:max-width 是上限,展开后期
+   宽度"虚"着长,回弹也发生在内容宽度之外不可见);
+   width 0 → 96 插值平滑,回弹过冲在 96 附近可见(右侧留白先扩再收)。
+   方向性过渡:展开强回弹弹簧(0.34,1.9,0.64,1,过冲约 15%),
+   收起 easeOut 无过冲优雅减速 */
+.island-bg-actions .island-ctl--reset {
+  /* 覆盖基类 flex: 1,宽度改由 width 控制(basis auto 回退到 width) */
+  flex: 0 0 auto;
+  width: 0;
+  padding: 0;
+  border-width: 0;
+  opacity: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  pointer-events: none;
+  transition:
+    width 0.3s cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 0.2s ease,
+    padding 0.3s cubic-bezier(0.22, 1, 0.36, 1),
+    border-width 0.3s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.island-bg-actions .island-ctl--reset.on {
+  width: 96px;
+  padding: 0 10px;
+  border-width: 1px;
+  opacity: 1;
+  pointer-events: auto;
+  transition:
+    width 0.35s cubic-bezier(0.34, 1.9, 0.64, 1),
+    opacity 0.2s ease,
+    padding 0.35s cubic-bezier(0.34, 1.9, 0.64, 1),
+    border-width 0.35s cubic-bezier(0.34, 1.9, 0.64, 1);
 }
 
 /* 扁平返回键:独占一行、占满整行(更长更易点);
-   强调色描边一圈提示 + 半透明强调色底,悬停加深 */
+   背景UI参考背景编辑器"更换图片"等按钮的中性胶囊设计:
+   半透明白底 + 细描边 + 白字,悬停加深(不再用强调色实底,叠在
+   蒙版上发黑) */
 .island-bg-foot {
   margin-top: 2px;
 }
@@ -1804,9 +2223,9 @@
   justify-content: center;
   gap: 6px;
   width: 100%;
-  border: 1px solid color-mix(in srgb, var(--state-color, #4ade80) 40%, transparent);
-  background: color-mix(in srgb, var(--state-color, #4ade80) 14%, transparent);
-  color: color-mix(in srgb, var(--state-color, #4ade80) 75%, #fff 25%);
+  border: 1px solid rgba(255, 255, 255, 0.24);
+  background: rgba(255, 255, 255, 0.09);
+  color: var(--text-color, #fff);
   font-size: 0.74rem;
   letter-spacing: 0.1em;
   padding: 7px 0;
@@ -1820,12 +2239,12 @@
 
 .island-bg-back:hover {
   color: #fff;
-  background: color-mix(in srgb, var(--state-color, #4ade80) 20%, transparent);
-  border-color: color-mix(in srgb, var(--state-color, #4ade80) 65%, transparent);
+  background: rgba(255, 255, 255, 0.12);
+  border-color: rgba(255, 255, 255, 0.32);
 }
 
 .island-ctl--clear {
-  color: rgba(255, 255, 255, 0.75);
+  color: var(--text-dim, rgba(255, 255, 255, 0.75));
   border-color: rgba(255, 255, 255, 0.18);
 }
 
@@ -1843,5 +2262,312 @@
 .island-bg-empty-text {
   font-size: 0.78rem;
   letter-spacing: 0.04em;
-  color: rgba(255, 255, 255, 0.5);
+  color: var(--text-dim, rgba(255, 255, 255, 0.5));
+}
+
+/* ===== 库页面(字体库 / 图片库):搜索 + 列表/网格 + 上传/返回 =====
+   大面板(440px 岛体,挂件窗口同步加高)容纳搜索与滚动区 */
+.island-demo.expanded.island-lib-view {
+  height: 440px;
+}
+
+.island-lib-view {
+  padding: 14px 28px 12px;
+}
+
+/* 背景视图头部右侧的"图片库"链接入口 */
+/* 图片库入口:图标 + 文字 + 数量徽标的中性胶囊(与设置视图按钮同款设计:
+   半透明白底 + 细描边,悬停加深);图标用主题色,悬停微缩放 */
+.island-lib-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.24);
+  background: rgba(255, 255, 255, 0.09);
+  color: var(--text-color, #fff);
+  font-size: 0.66rem;
+  letter-spacing: 0.06em;
+  cursor: pointer;
+  padding: 3px 10px;
+  border-radius: 999px;
+  transition:
+    background 0.2s ease,
+    border-color 0.2s ease;
+}
+
+.island-lib-link .island-lib-link-svg {
+  color: var(--state-color, #4ade80);
+  transition: transform 0.2s ease;
+}
+
+.island-lib-link:hover {
+  background: rgba(255, 255, 255, 0.12);
+  border-color: rgba(255, 255, 255, 0.32);
+}
+
+.island-lib-link:hover .island-lib-link-svg {
+  transform: scale(1.14);
+}
+
+/* 搜索框 */
+.island-lib-search {
+  width: 100%;
+  height: 28px;
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 999px;
+  /* 库页面固定白色系,不随字体颜色(深色字时名称/文字会不可见) */
+  color: #fff;
+  font-size: 0.72rem;
+  font-family: inherit;
+  padding: 0 12px;
+  outline: none;
+  transition:
+    border-color 0.2s ease,
+    background 0.2s ease;
+}
+
+.island-lib-search::placeholder {
+  color: rgba(255, 255, 255, 0.4);
+}
+
+.island-lib-search:focus {
+  border-color: color-mix(in srgb, var(--state-color, #4ade80) 60%, transparent);
+  background: rgba(255, 255, 255, 0.1);
+}
+
+/* 字体列表(可滚动) */
+.island-lib-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.15) transparent;
+}
+
+.island-lib-row {
+  display: flex;
+  align-items: center;
+  /* 内容超高时禁止被列表压缩(与网格 auto 行高同样的压缩问题:
+     flex 列表会把行压到贴近 min-content,行内元素被裁) */
+  flex-shrink: 0;
+  border-radius: 10px;
+  transition: background 0.2s ease;
+}
+
+.island-lib-row:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.island-lib-row.active {
+  background: color-mix(in srgb, var(--state-color, #4ade80) 12%, transparent);
+}
+
+.island-lib-row-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 10px;
+  background: none;
+  border: none;
+  color: inherit;
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+  border-radius: 10px;
+}
+
+.island-lib-row-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.8rem;
+  color: #fff;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.island-lib-row-sub {
+  flex-shrink: 0;
+  font-size: 0.6rem;
+  letter-spacing: 0.05em;
+  color: rgba(255, 255, 255, 0.4);
+}
+
+.island-lib-row.active .island-lib-row-sub {
+  color: var(--state-color, #4ade80);
+}
+
+/* 行内操作按钮:编辑(悬停变白)/ 删除(悬停变红) */
+.island-lib-row-act {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  margin-right: 2px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  border: none;
+  background: none;
+  color: rgba(255, 255, 255, 0.45);
+  cursor: pointer;
+  transition:
+    color 0.2s ease,
+    background 0.2s ease;
+}
+
+.island-lib-row-act:hover {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.island-lib-row-del:hover {
+  color: #f87171;
+  background: rgba(248, 113, 113, 0.12);
+}
+
+/* 行内编辑名称输入框(Enter 提交 / Esc 取消 / 失焦提交) */
+.island-lib-edit-input {
+  flex: 1;
+  min-width: 0;
+  height: 26px;
+  margin: 4px 8px;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid color-mix(in srgb, var(--state-color, #4ade80) 55%, transparent);
+  border-radius: 8px;
+  color: #fff;
+  font-size: 0.74rem;
+  font-family: inherit;
+  padding: 0 8px;
+  outline: none;
+}
+
+/* 图片库网格:2 列大卡片(缩略图 + 常驻名称行 + 悬停编辑/删除)。
+   名称行常驻卡片底部,不随 hover 显隐。
+   行高必须显式指定:auto 行高 + align-content:start 时,内容一旦
+   超高(卡片实高约 125px),Chromium 会把行压缩到恰好填满容器
+   (实测 3 行 → 97px/行、17 行 → 26px/行,即 (高度-间距)/行数),
+   卡片被压扁、名称被 overflow:hidden 裁掉,且内容永不过高、
+   网格永远无法滚动。显式行高后行不再被压缩,名称完整、可滚动 */
+.island-lib-grid {
+  list-style: none;
+  margin: 0;
+  padding: 2px 2px 0;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  grid-auto-rows: 128px;
+  gap: 10px;
+  align-content: start;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.2) transparent;
+}
+
+/* 空状态占整行并垂直居中 */
+.island-lib-grid > .island-track-empty {
+  grid-column: 1 / -1;
+  align-self: center;
+}
+
+.island-lib-card {
+  position: relative;
+  border-radius: 10px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.04);
+  transition:
+    border-color 0.2s ease,
+    transform 0.15s ease;
+}
+
+.island-lib-card:hover {
+  border-color: rgba(255, 255, 255, 0.32);
+  transform: translateY(-1px);
+}
+
+.island-lib-card.applied {
+  border-color: var(--state-color, #4ade80);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--state-color, #4ade80) 60%, transparent);
+}
+
+.island-lib-card.editing {
+  border-color: color-mix(in srgb, var(--state-color, #4ade80) 55%, transparent);
+}
+
+.island-lib-card-main {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  color: inherit;
+  font-family: inherit;
+  text-align: left;
+}
+
+.island-lib-card-thumb {
+  width: 100%;
+  height: 96px;
+  background-size: cover;
+  background-position: center;
+  background-color: rgb(8, 10, 14);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.island-lib-card-name {
+  display: block;
+  padding: 6px 10px 7px;
+  font-size: 0.7rem;
+  line-height: 1.3;
+  /* 固定白字:跟随 --text-color 时深色字会使名称不可见 */
+  color: #fff;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.island-lib-card-acts {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  display: flex;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+
+.island-lib-card:hover .island-lib-card-acts,
+.island-lib-card.editing .island-lib-card-acts {
+  opacity: 1;
+}
+
+.island-lib-card-acts .island-lib-row-act {
+  margin-right: 0;
+  background: rgba(8, 10, 14, 0.72);
+}
+
+.island-lib-edit-input--card {
+  margin: 6px;
+  width: calc(100% - 12px);
+}
+
+/* 库页面底部:上传 + 返回 */
+.island-lib-foot {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
 }

@@ -21,9 +21,9 @@ contextBridge.exposeInMainWorld('desktop', {
   setAlwaysOnTop(on) {
     ipcRenderer.send('widget:topmost', Boolean(on))
   },
-  /** 托盘菜单"自定义背景":订阅回调(渲染端在岛内打开背景编辑器) */
-  onOpenBackgroundEditor(callback) {
-    ipcRenderer.on('widget:open-background-editor', () => callback())
+  /** 托盘菜单"设置":订阅回调(渲染端在岛内展开设置视图) */
+  onOpenSettings(callback) {
+    ipcRenderer.on('widget:open-settings', () => callback())
   },
   /** 调整窗口高度(背景编辑器视图需要更高空间) */
   setWindowHeight(height) {

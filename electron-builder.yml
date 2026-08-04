@@ -47,6 +47,13 @@ nsis:
   createStartMenuShortcut: true
   shortcutName: 灵动岛挂件
   artifactName: 灵动岛挂件-安装版-${version}.${ext}
+  # 卸载时连同用户数据一并删除(%APPDATA%\dynamic-island:
+  # settings.json / localStorage / 上传音乐·背景·字体 IndexedDB)
+  # electron-builder 26 无勾选框,确认卸载即删除
+  deleteAppDataOnUninstall: true
+  # 自定义 NSIS 脚本:在开始菜单补「卸载 灵动岛挂件」快捷方式
+  # (electron-builder 26 辅助安装默认不生成独立的卸载入口)
+  include: electron/nsis-custom.nsi
 
 portable:
   artifactName: 灵动岛挂件-便携版-${version}.${ext}

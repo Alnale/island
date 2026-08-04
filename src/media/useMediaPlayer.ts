@@ -64,6 +64,12 @@ export function useMediaPlayer(): MediaPlayer {
   const phaseRef = useRef<PlayerPhase>('idle')
   const modeRef = useRef<PlaybackMode>('sequence')
   const timerRef = useRef<number | null>(null)
+  // 本会话创建的 blob URL(删除曲目 / 卸载时 revoke,防常驻应用内存泄漏)
+  const blobUrlsRef = useRef<Set<string>>(new Set())
+  /** timeupdate 节流:位置推进无需逐事件重渲染全树(高频率事件源) */
+  const lastPositionUpdateRef = useRef(0)
+  /** 系统媒体会话进度同步节流(秒级,仅用于系统媒体面板显示) */
+  const lastSessionSyncRef = useRef(0)
   tracksRef.current = tracks
   phaseRef.current = phase
   modeRef.current = mode
@@ -161,14 +167,18 @@ export function useMediaPlayer(): MediaPlayer {
       const uploaded = await Promise.all(
         files
           .filter((f) => f.type.startsWith('audio/'))
-          .map(async (f) => ({
-            title: f.name.replace(/\.[^.]+$/, ''),
-            artist: '本地音乐',
-            duration: 0,
-            url: URL.createObjectURL(f),
-            source: 'uploaded' as const,
-            storageKey: await saveUpload(f).catch(() => undefined),
-          })),
+          .map(async (f) => {
+            const url = URL.createObjectURL(f)
+            blobUrlsRef.current.add(url)
+            return {
+              title: f.name.replace(/\.[^.]+$/, ''),
+              artist: '本地音乐',
+              duration: 0,
+              url,
+              source: 'uploaded' as const,
+              storageKey: await saveUpload(f).catch(() => undefined),
+            }
+          }),
       )
       if (uploaded.length === 0) return
       const next = [...tracksRef.current, ...uploaded]
@@ -191,6 +201,10 @@ export function useMediaPlayer(): MediaPlayer {
       setTracks(next)
       // 同步删除 IndexedDB 持久化记录
       if (target.storageKey) removeUpload(target.storageKey).catch(() => {})
+      // 释放该曲目的 blob URL(本会话创建的才 revoke,内置曲目不受影响)
+      if (target.url?.startsWith('blob:') && blobUrlsRef.current.delete(target.url)) {
+        URL.revokeObjectURL(target.url)
+      }
       if (removeIndex === cur) {
         // 删除当前播放:切到相邻(新列表原位置,越界取最后);列表清空则真正停止
         const playAt = Math.min(removeIndex, next.length - 1)
@@ -239,13 +253,20 @@ export function useMediaPlayer(): MediaPlayer {
     const onPlay = () => setPhase('playing')
     const onPause = () => setPhase((p) => (p === 'playing' ? 'idle' : p))
     const onTimeUpdate = () => {
+      // 节流:timeupdate 事件密集触发(部分浏览器/高倍速下远超显示需求),
+      // 200ms 内多次事件合并为一次 setPosition,播放感知无差异
+      const now = performance.now()
+      if (now - lastPositionUpdateRef.current < 200) return
+      lastPositionUpdateRef.current = now
       setPosition(audio.currentTime)
-      // 同步系统媒体会话的进度(供系统媒体面板显示)
+      // 同步系统媒体会话的进度(供系统媒体面板显示),节流到秒级
       if (
+        now - lastSessionSyncRef.current >= 1000 &&
         'mediaSession' in navigator &&
         Number.isFinite(audio.duration) &&
         audio.duration > 0
       ) {
+        lastSessionSyncRef.current = now
         navigator.mediaSession.setPositionState({
           duration: audio.duration,
           playbackRate: 1,
@@ -279,9 +300,20 @@ export function useMediaPlayer(): MediaPlayer {
       }
     })
 
+    const blobUrls = blobUrlsRef.current // Set 实例挂载后不变,可安全捕获
     return () => {
       audio.pause()
       audioRef.current = null
+      // eslint-disable-next-line react-hooks/exhaustive-deps -- 计时器需读取清理时刻的最新值
+      const pendingTimer = timerRef.current
+      if (pendingTimer !== null) {
+        window.clearTimeout(pendingTimer)
+        timerRef.current = null
+      }
+      // 释放本会话创建的全部 blob URL(StrictMode 双挂载时首个挂载
+      // 的 loadUploads 已被 cancelled,不会重复登记,安全)
+      for (const url of blobUrls) URL.revokeObjectURL(url)
+      blobUrls.clear()
     }
     // 一次性挂载 effect:replayCurrent/nextRef 均为稳定引用,无需重挂 audio
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -293,14 +325,18 @@ export function useMediaPlayer(): MediaPlayer {
     loadUploads()
       .then((items) => {
         if (cancelled || items.length === 0) return
-        const restored: TrackInfo[] = items.map((it) => ({
-          title: it.name.replace(/\.[^.]+$/, ''),
-          artist: '本地音乐',
-          duration: 0,
-          url: URL.createObjectURL(new Blob([it.data], { type: it.type })),
-          source: 'uploaded' as const,
-          storageKey: it.key,
-        }))
+        const restored: TrackInfo[] = items.map((it) => {
+          const url = URL.createObjectURL(new Blob([it.data], { type: it.type }))
+          blobUrlsRef.current.add(url)
+          return {
+            title: it.name.replace(/\.[^.]+$/, ''),
+            artist: '本地音乐',
+            duration: 0,
+            url,
+            source: 'uploaded' as const,
+            storageKey: it.key,
+          }
+        })
         setTracks((prev) => {
           const next = [...prev, ...restored]
           tracksRef.current = next

@@ -169,11 +169,25 @@ export function useSystemMedia(): SystemMediaState {
           if (stopped) return
           setActive(true)
           setPlatform(recognizePlatform(data.sourceAppId))
-          setTrack(
-            data.track?.title
-              ? { title: data.track.title, artist: data.track.artist ?? '', album: data.track.album }
-              : null,
-          )
+          // 曲目内容未变时保持旧对象引用:setTrack 每次传新对象会强制
+          // 父组件每秒重渲染(即使曲目/进度都没变化),这里按字段比较
+          setTrack((prev) => {
+            const next = data.track?.title
+              ? {
+                  title: data.track.title,
+                  artist: data.track.artist ?? '',
+                  album: data.track.album,
+                }
+              : null
+            if (
+              prev?.title === next?.title &&
+              prev?.artist === next?.artist &&
+              prev?.album === next?.album
+            ) {
+              return prev
+            }
+            return next
+          })
           // 时长可信度:位置已明显超过上报时长(>5s)说明时长本身不可信
           // (如 QQ音乐个别曲目 EndTime 固定 ~8s 而实际播放数分钟),视为
           // 未知(0)→ 进度条切不确定态、不显示假的总时长;不做外部查询
@@ -265,11 +279,14 @@ export function useSystemMedia(): SystemMediaState {
     }
   }, [rememberSeekSupport])
 
-  // 250ms tick 驱动重渲染:显示进度按"基准 + 播放流逝"重算
+  // 250ms tick 驱动重渲染:显示进度 = 基准 + 播放流逝(仅播放中需要推进)。
+  // 暂停时位置冻结在基准上、未连接时无进度可推——两种情况都无需渲染,
+  // 常驻 interval 会让暂停/空闲状态每秒白渲 4 次整棵组件树
   useEffect(() => {
+    if (!active || !userPlaying) return
     const id = window.setInterval(() => setTick((t) => t + 1), TICK_MS)
     return () => window.clearInterval(id)
-  }, [])
+  }, [active, userPlaying])
   playingRef.current = userPlaying
 
   // 显示进度:校准基准 + 播放以来的本地流逝时间(平滑无回跳);

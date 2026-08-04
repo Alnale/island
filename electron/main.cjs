@@ -312,40 +312,120 @@ function createWindow() {
             console.log('[widget] stress:', result)
           }
           if (process.env.WIDGET_SCREENSHOT_MODE === 'test') {
-            // 综合交互测试:展开 → 取色面板 → 应用主题色 → 收起
-            const result = await win.webContents.executeJavaScript(`(async () => {
+            // 综合交互测试(全视图巡检):长按展开 → 托盘设置 → 主题色(应用/恢复)
+            // → 字体 → 字体库 → 背景 → 帮助 → 逐级返回收起(设置类视图只能经返回键退出)
+            const sleep = (ms) => new Promise((res) => setTimeout(res, ms))
+            const expanded = await win.webContents.executeJavaScript(`(async () => {
               const sleep = (ms) => new Promise((res) => setTimeout(res, ms))
-              const out = {}
               const island = document.querySelector('.island-demo')
               const r = island.getBoundingClientRect()
               const x = r.left + r.width / 2
               const y = r.top + r.height / 2
-              const press = (t) => {
-                island.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, clientX: x, clientY: y, pointerId: 1, isPrimary: true, button: 0 }))
-                setTimeout(() => island.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, clientX: x, clientY: y, pointerId: 1, isPrimary: true, button: 0 })), t)
-              }
-              // 1. 长按展开
-              press(600)
+              island.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, clientX: x, clientY: y, pointerId: 1, isPrimary: true, button: 0 }))
+              setTimeout(() => island.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, clientX: x, clientY: y, pointerId: 1, isPrimary: true, button: 0 })), 600)
               await sleep(1100)
-              out.expanded = island.classList.contains('expanded')
-              // 2. 主题色按钮存在
-              const themeBtn = document.querySelector('.island-ctl--theme')
-              out.themeButton = !!themeBtn
-              // 3. 点击切换到主题色视图
-              themeBtn.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+              return island.classList.contains('expanded')
+            })()`)
+            console.log('[widget] test expanded:', expanded)
+            // 歌词开关提示:默认已开,先关再开,播放键下方显示来源提示
+            const lyricHint = await win.webContents.executeJavaScript(`(async () => {
+              const sleep = (ms) => new Promise((res) => setTimeout(res, ms))
+              const btn = document.querySelector('.island-ctl--lyric')
+              if (!btn) return false
+              btn.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+              await sleep(150)
+              btn.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+              await sleep(150)
+              const hintEl = document.querySelector('.island-hint-play')
+              return !!hintEl && hintEl.textContent.includes('网易云')
+            })()`)
+            console.log('[widget] test lyricHint:', lyricHint)
+            // 托盘"设置"入口:展开并切换到设置视图(渲染端 requestSettingsSeq)
+            win.webContents.send('widget:open-settings')
+            await sleep(600)
+            const result = await win.webContents.executeJavaScript(`(async () => {
+              const sleep = (ms) => new Promise((res) => setTimeout(res, ms))
+              const out = {}
+              const island = document.querySelector('.island-demo')
+              const settingsItem = (text) =>
+                [...document.querySelectorAll('.island-settings-item')].find((s) => s.textContent.includes(text))
+              // 1. 设置视图
+              out.settingsShown = !!document.querySelector('.island-settings-items')
+              // 2. 主题色视图:取色器渲染 + 应用/恢复
+              settingsItem('主题色').dispatchEvent(new MouseEvent('click', { bubbles: true }))
               await sleep(400)
-              out.pickerShown = !!document.querySelector('.island-panel-theme')
-              // 4. 点击红色预设,主题色生效
+              out.pickerShown = !!document.querySelector('.island-theme-view .island-font-sv')
               const swatch = [...document.querySelectorAll('.island-theme-swatch')].find((s) => s.title === '#f87171')
               swatch.dispatchEvent(new MouseEvent('click', { bubbles: true }))
               await sleep(400)
               out.themeApplied = island.style.getPropertyValue('--state-color') === '#f87171'
-              // 5. 恢复默认(跟随播放模式色块)
               document.querySelector('.island-theme-swatch--follow').dispatchEvent(new MouseEvent('click', { bubbles: true }))
               await sleep(400)
               out.themeReset = island.style.getPropertyValue('--state-color') !== '#f87171'
-              // 6. 点击岛体收起(模拟点击面板外空白)
-              document.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, clientX: 10, clientY: 60, pointerId: 2, isPrimary: true, button: 0 }))
+              document.querySelector('.island-theme-view .island-bg-back').dispatchEvent(new MouseEvent('click', { bubbles: true }))
+              await sleep(400)
+              out.backToSettings = !!document.querySelector('.island-settings-items')
+              // 3. 字体视图 → 字体库 → 返回
+              settingsItem('字体').dispatchEvent(new MouseEvent('click', { bubbles: true }))
+              await sleep(400)
+              out.fontShown = !!document.querySelector('.island-font-view')
+              const libBtn = [...document.querySelectorAll('.island-font-actions .island-ctl')].find((s) => s.textContent.includes('字体库'))
+              libBtn.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+              await sleep(400)
+              out.fontLibraryShown = !!document.querySelector('.island-lib-view .island-lib-search')
+              document.querySelector('.island-lib-foot .island-ctl--back').dispatchEvent(new MouseEvent('click', { bubbles: true }))
+              await sleep(400)
+              out.backToFont = !!document.querySelector('.island-font-view')
+              document.querySelector('.island-font-foot .island-bg-back').dispatchEvent(new MouseEvent('click', { bubbles: true }))
+              await sleep(400)
+              out.backToSettings2 = !!document.querySelector('.island-settings-items')
+              // 4. 背景视图 → 不透明度按形态独立(紧凑态改滑杆,展开态不受影响)→ 返回
+              settingsItem('自定义图片背景').dispatchEvent(new MouseEvent('click', { bubbles: true }))
+              await sleep(400)
+              out.bgShown = !!document.querySelector('.island-panel-bg')
+              out.bgSegShown = !!document.querySelector('.island-bg-seg')
+              const opSlider = () => document.querySelectorAll('.island-bg-slider input[type=range]')[1]
+              const segBtn = (text) => [...document.querySelectorAll('.island-bg-seg button')].find((b) => b.textContent.includes(text))
+              if (opSlider()) {
+                const setVal = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
+                const dragTo = async (v) => {
+                  setVal.call(opSlider(), v)
+                  opSlider().dispatchEvent(new Event('input', { bubbles: true }))
+                  opSlider().dispatchEvent(new Event('change', { bubbles: true }))
+                  await sleep(300)
+                }
+                // 展开态改 40
+                await dragTo('40')
+                const expandedA = opSlider().value
+                // 切紧凑态:滑杆应显示紧凑态原值(≠ 40,不受展开态改动影响)
+                segBtn('紧凑态').dispatchEvent(new MouseEvent('click', { bubbles: true }))
+                await sleep(300)
+                const compactShown = opSlider().value
+                // 紧凑态改 70
+                await dragTo('70')
+                const compactB = opSlider().value
+                // 切回展开态:应仍为 40(紧凑态的改动不生效于展开态)
+                segBtn('展开态').dispatchEvent(new MouseEvent('click', { bubbles: true }))
+                await sleep(300)
+                const expandedB = opSlider().value
+                out.opacityIndependent =
+                  compactShown !== expandedA && compactB === '70' && expandedB === expandedA
+                out.opacityDebug = JSON.stringify({ expandedA, compactShown, compactB, expandedB })
+              } else {
+                out.opacityIndependent = 'n/a (无背景图时无滑杆)'
+              }
+              document.querySelector('.island-panel-bg .island-bg-back').dispatchEvent(new MouseEvent('click', { bubbles: true }))
+              await sleep(400)
+              out.backToSettings3 = !!document.querySelector('.island-settings-items')
+              // 5. 帮助视图 → 返回
+              settingsItem('帮助手册').dispatchEvent(new MouseEvent('click', { bubbles: true }))
+              await sleep(400)
+              out.helpShown = !!document.querySelector('.island-help-items')
+              document.querySelector('.island-panel-list:has(.island-help-items) .island-bg-back').dispatchEvent(new MouseEvent('click', { bubbles: true }))
+              await sleep(400)
+              out.backToSettings4 = !!document.querySelector('.island-settings-items')
+              // 6. 设置 → 返回收起(设置视图只能经返回键退出)
+              document.querySelector('.island-panel-list:has(.island-settings-items) .island-bg-back').dispatchEvent(new MouseEvent('click', { bubbles: true }))
               await sleep(900)
               out.collapsed = !island.classList.contains('expanded')
               return JSON.stringify(out)
@@ -520,11 +600,12 @@ function rebuildTrayMenu() {
       },
       { type: 'separator' },
       {
-        label: '自定义背景…',
+        label: '设置…',
         click: () => {
-          // 入口在托盘,编辑界面在灵动岛内打开(渲染端切换到背景视图)
+          // 入口在托盘,设置面板在灵动岛内打开(渲染端展开并切换到设置视图,
+          // 内含自定义图片背景 / 帮助手册 / 主题色三个入口)
           showWindow()
-          win?.webContents.send('widget:open-background-editor')
+          win?.webContents.send('widget:open-settings')
         },
       },
       { type: 'separator' },

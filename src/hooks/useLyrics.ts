@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 
 /** 本地桥接歌词代理地址(scripts/system-media-bridge.ts 提供) */
 const LYRIC_BASE = 'http://127.0.0.1:8765/system-media/lyric'
@@ -93,5 +93,10 @@ export function useLyrics(
     setCurrentIndex(idx)
   }, [lines, position])
 
-  return { loading, lyricTitle, lines, currentIndex }
+  // memo 化返回值:歌词字段未变时保持对象引用稳定
+  // (宿主的 DynamicIsland 已包 React.memo,引用变化会使其无法跳过渲染)
+  return useMemo(
+    () => ({ loading, lyricTitle, lines, currentIndex }),
+    [loading, lyricTitle, lines, currentIndex],
+  )
 }

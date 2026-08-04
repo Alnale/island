@@ -11,11 +11,25 @@ import {
   clearBackgroundImage,
   DEFAULT_BG_CROP,
   downscaleBackgroundImage,
+  deleteImageItem,
+  genImageId,
   loadBackgroundImage,
+  loadImageItems,
   migrateLegacyBackground,
   saveBackgroundImage,
+  saveImageItem,
   type BackgroundState,
+  type ImageLibraryItem,
 } from './media/backgroundStore'
+import {
+  deleteFontItem,
+  loadFontItems,
+  loadFontSettings,
+  saveFontItem,
+  saveFontSettings,
+  type FontColorMode,
+  type FontLibraryItem,
+} from './media/fontStore'
 import { MODE_ORDER, PLAY_MODES, type PlaybackMode } from './media/playbackModes'
 import { SYSTEM_PLATFORMS } from './media/systemPlatforms'
 import { useMediaPlayer } from './media/useMediaPlayer'
@@ -118,9 +132,10 @@ export default function App() {
     hintTimerRef.current = window.setTimeout(() => setHint(null), 2600)
   }, [])
   // 自定义背景(与桌面挂件一致:双形态图片 + 裁切,持久化同键;
-  // Web 演示入口 = 面板背景按钮,桌面端 = 托盘菜单)
+  // Web 演示入口 = 设置视图,桌面端 = 托盘"设置"菜单)
   const [background, setBackground] = useState<BackgroundState>(() => {
-    let opacity = 0.4
+    // 不透明度按形态独立(旧版单一数值自动迁移为双槽位)
+    let opacity: { expanded: number; compact: number } = { expanded: 0.4, compact: 0.4 }
     const expanded = { ...DEFAULT_BG_CROP }
     const compact = { ...DEFAULT_BG_CROP }
     const readCrop = (
@@ -145,7 +160,20 @@ export default function App() {
         }
         if (parsed && typeof parsed === 'object') {
           if (typeof parsed.opacity === 'number' && parsed.opacity >= 0 && parsed.opacity <= 1) {
-            opacity = parsed.opacity
+            // 旧版单一数值:迁移为双槽位(两形态同值,保持旧外观)
+            opacity = { expanded: parsed.opacity, compact: parsed.opacity }
+          } else if (parsed.opacity && typeof parsed.opacity === 'object') {
+            const o = parsed.opacity as { expanded?: unknown; compact?: unknown }
+            opacity = {
+              expanded:
+                typeof o.expanded === 'number' && o.expanded >= 0 && o.expanded <= 1
+                  ? o.expanded
+                  : 0.4,
+              compact:
+                typeof o.compact === 'number' && o.compact >= 0 && o.compact <= 1
+                  ? o.compact
+                  : 0.4,
+            }
           }
           if (parsed.expanded && typeof parsed.expanded === 'object') {
             Object.assign(expanded, readCrop(parsed.expanded))
@@ -205,6 +233,109 @@ export default function App() {
     else clearBackgroundImage('expanded').catch(() => {})
     if (bg.compactImage) saveBackgroundImage(bg.compactImage, 'compact').catch(() => {})
     else clearBackgroundImage('compact').catch(() => {})
+    // 自动入库:新出现的背景图(上传/图片库选择)加入图片库,同名同图不重复
+    for (const dataUrl of [bg.expandedImage, bg.compactImage]) {
+      if (!dataUrl) continue
+      if (imageLibraryRef.current.some((img) => img.dataUrl === dataUrl)) continue
+      const item: ImageLibraryItem = {
+        id: genImageId(),
+        name: `背景图 ${imageLibraryRef.current.length + 1}`,
+        dataUrl,
+        createdAt: Date.now(),
+      }
+      imageLibraryRef.current = [...imageLibraryRef.current, item]
+      setImageLibrary(imageLibraryRef.current)
+      void saveImageItem(item).catch(() => {})
+    }
+  }, [])
+  // 自定义字体库(设置视图"字体"入口):库条目 IndexedDB,当前字体 id 与颜色 localStorage
+  const [font, setFont] = useState<{
+    currentFontId: string | null
+    colorMode: FontColorMode
+    colorValue: string | null
+    weight: number
+  }>(() => {
+    const s = loadFontSettings()
+    return {
+      currentFontId: s.currentFontId,
+      colorMode: s.colorMode,
+      colorValue: s.colorValue,
+      weight: s.weight,
+    }
+  })
+  const [fontLibrary, setFontLibrary] = useState<FontLibraryItem[]>([])
+  const fontLibraryRef = useRef<FontLibraryItem[]>([])
+  const fontRef = useRef(font)
+  fontRef.current = font
+  useEffect(() => {
+    void loadFontItems().then((items) => {
+      fontLibraryRef.current = items
+      setFontLibrary(items)
+    })
+  }, [])
+  // 全量同步字体库(增/删/改名):新数组逐条写入,不在新数组的旧条目删除;
+  // 若当前应用字体被删,回退系统默认
+  const handleFontLibraryChange = useCallback((items: FontLibraryItem[]) => {
+    const newIds = new Set(items.map((f) => f.id))
+    for (const item of items) void saveFontItem(item).catch(() => {})
+    for (const item of fontLibraryRef.current) {
+      if (!newIds.has(item.id)) void deleteFontItem(item.id).catch(() => {})
+    }
+    fontLibraryRef.current = items
+    setFontLibrary(items)
+    if (fontRef.current.currentFontId && !newIds.has(fontRef.current.currentFontId)) {
+      setFont((prev) => ({ ...prev, currentFontId: null }))
+      saveFontSettings({ ...fontRef.current, currentFontId: null })
+    }
+  }, [])
+  const handleFontAdd = useCallback((item: FontLibraryItem) => {
+    void saveFontItem(item).catch(() => {})
+    fontLibraryRef.current = [...fontLibraryRef.current, item]
+    setFontLibrary(fontLibraryRef.current)
+    setFont((prev) => ({ ...prev, currentFontId: item.id }))
+    saveFontSettings({ ...fontRef.current, currentFontId: item.id })
+  }, [])
+  const handleFontSelect = useCallback((id: string | null) => {
+    setFont((prev) => ({ ...prev, currentFontId: id }))
+    saveFontSettings({ ...fontRef.current, currentFontId: id })
+  }, [])
+  const handleFontColorChange = useCallback(
+    (colorMode: FontColorMode, colorValue: string | null) => {
+      // auto 模式保留自定义色值(值为 null 时不覆盖),切回 custom 不丢失
+      setFont((prev) => {
+        const next = { ...prev, colorMode }
+        if (colorValue !== null) next.colorValue = colorValue
+        return next
+      })
+      saveFontSettings({
+        ...fontRef.current,
+        colorMode,
+        colorValue: colorValue !== null ? colorValue : fontRef.current.colorValue,
+      })
+    },
+    [],
+  )
+  const handleFontWeightChange = useCallback((weight: number) => {
+    setFont((prev) => ({ ...prev, weight }))
+    saveFontSettings({ ...fontRef.current, weight })
+  }, [])
+  // 图片库(背景视图"图片库"入口):条目 IndexedDB
+  const [imageLibrary, setImageLibrary] = useState<ImageLibraryItem[]>([])
+  const imageLibraryRef = useRef<ImageLibraryItem[]>([])
+  useEffect(() => {
+    void loadImageItems().then((items) => {
+      imageLibraryRef.current = items
+      setImageLibrary(items)
+    })
+  }, [])
+  const handleImageLibraryChange = useCallback((items: ImageLibraryItem[]) => {
+    const newIds = new Set(items.map((img) => img.id))
+    for (const item of items) void saveImageItem(item).catch(() => {})
+    for (const item of imageLibraryRef.current) {
+      if (!newIds.has(item.id)) void deleteImageItem(item.id).catch(() => {})
+    }
+    imageLibraryRef.current = items
+    setImageLibrary(items)
   }, [])
   // 系统媒体监听激活(外部平台正在播放):数据与控制优先走系统,本地播放器让位
   const externalActive = system.active && system.track != null && useExternalSource
@@ -388,7 +519,18 @@ export default function App() {
             backgroundOpacity={background.opacity}
             backgroundCrop={{ expanded: background.expanded, compact: background.compact }}
             onBackgroundChange={handleBackgroundChange}
-            backgroundButton
+            settingsButton
+            fontLibrary={fontLibrary}
+            currentFontId={font.currentFontId}
+            fontColor={{ mode: font.colorMode, value: font.colorValue }}
+            onFontAdd={handleFontAdd}
+            onFontLibraryChange={handleFontLibraryChange}
+            onFontSelect={handleFontSelect}
+            onFontColorChange={handleFontColorChange}
+            fontWeight={font.weight}
+            onFontWeightChange={handleFontWeightChange}
+            imageLibrary={imageLibrary}
+            onImageLibraryChange={handleImageLibraryChange}
           />
           <div className="stage-track" aria-hidden="true">
             <span

@@ -4,49 +4,52 @@
  * 启动时恢复;透明度走 localStorage(小数值)。
  */
 
+import { idbRun, openIdb } from './idb'
+
 const DB_NAME = 'island-background'
 const STORE = 'bg'
+/** 图片库 objectStore(多图管理,按 id 存条目) */
+const LIB_STORE = 'library'
 /** 旧版单图键(迁移用) */
 const LEGACY_IMAGE_KEY = 'image'
 
-let dbPromise: Promise<IDBDatabase> | null = null
-
 function openDb(): Promise<IDBDatabase> {
-  if (!dbPromise) {
-    dbPromise = new Promise((resolve, reject) => {
-      const req = indexedDB.open(DB_NAME, 1)
-      req.onupgradeneeded = () => {
-        if (!req.result.objectStoreNames.contains(STORE)) {
-          req.result.createObjectStore(STORE)
-        }
-      }
-      req.onsuccess = () => resolve(req.result)
-      req.onerror = () => reject(req.error)
-    })
-  }
-  return dbPromise
+  return openIdb(DB_NAME, 2, (db) => {
+    if (!db.objectStoreNames.contains(STORE)) {
+      db.createObjectStore(STORE)
+    }
+    if (!db.objectStoreNames.contains(LIB_STORE)) {
+      db.createObjectStore(LIB_STORE)
+    }
+  })
 }
 
+/** 在图片库 store 上执行事务(写操作,忽略结果) */
+function runLib(
+  mode: IDBTransactionMode,
+  fn: (store: IDBObjectStore) => IDBRequest,
+): Promise<void> {
+  return openDb()
+    .then((db) => idbRun(db, LIB_STORE, mode, fn))
+    .then(() => undefined)
+}
+
+/** 在背景图 store 上执行事务(写操作,忽略结果) */
 function run(mode: IDBTransactionMode, fn: (store: IDBObjectStore) => IDBRequest): Promise<void> {
-  return openDb().then(
-    (db) =>
-      new Promise<void>((resolve, reject) => {
-        const tx = db.transaction(STORE, mode)
-        fn(tx.objectStore(STORE))
-        tx.oncomplete = () => resolve()
-        tx.onerror = () => reject(tx.error)
-      }),
-  )
+  return openDb()
+    .then((db) => idbRun(db, STORE, mode, fn))
+    .then(() => undefined)
 }
 
 /** 默认裁切(cover 居中) */
 export const DEFAULT_BG_CROP = { zoom: 1, posX: 50, posY: 50 }
 
-/** 自定义背景完整状态:展开态 / 紧凑态各自独立的图片与裁切参数 */
+/** 自定义背景完整状态:展开态 / 紧凑态各自独立的图片、不透明度与裁切参数 */
 export interface BackgroundState {
   expandedImage: string | null
   compactImage: string | null
-  opacity: number
+  /** 不透明度(展开态 / 紧凑态各自独立,0-1;旧版单一数值自动迁移为双槽位) */
+  opacity: { expanded: number; compact: number }
   expanded: { zoom: number; posX: number; posY: number }
   compact: { zoom: number; posX: number; posY: number }
 }
@@ -63,12 +66,8 @@ export function saveBackgroundImage(dataUrl: string, slot: BackgroundSlot): Prom
 export async function loadBackgroundImage(slot: BackgroundSlot): Promise<string | null> {
   try {
     const db = await openDb()
-    return await new Promise<string | null>((resolve) => {
-      const tx = db.transaction(STORE, 'readonly')
-      const req = tx.objectStore(STORE).get(slot)
-      req.onsuccess = () => resolve(typeof req.result === 'string' ? req.result : null)
-      req.onerror = () => resolve(null)
-    })
+    const result = await idbRun(db, STORE, 'readonly', (s) => s.get(slot))
+    return typeof result === 'string' ? result : null
   } catch {
     return null
   }
@@ -77,6 +76,49 @@ export async function loadBackgroundImage(slot: BackgroundSlot): Promise<string 
 /** 清除指定槽位的背景图 */
 export function clearBackgroundImage(slot: BackgroundSlot): Promise<void> {
   return run('readwrite', (s) => s.delete(slot))
+}
+
+/** 图片库条目 */
+export interface ImageLibraryItem {
+  id: string
+  name: string
+  /** 图片 data URL(已降采样) */
+  dataUrl: string
+  createdAt: number
+}
+
+/** 生成图片库条目 id(时间戳 + 随机后缀) */
+export function genImageId(): string {
+  return `i-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+}
+
+/** 保存图片库条目(新增或按 id 覆盖,改名也走这里) */
+export function saveImageItem(item: ImageLibraryItem): Promise<void> {
+  return runLib('readwrite', (s) => s.put(item, item.id))
+}
+
+/** 读取全部图片库条目(按创建时间升序) */
+export async function loadImageItems(): Promise<ImageLibraryItem[]> {
+  try {
+    const db = await openDb()
+    const result = await idbRun(db, LIB_STORE, 'readonly', (s) => s.getAll())
+    return (result as unknown[])
+      .filter(
+        (v): v is ImageLibraryItem =>
+          typeof v === 'object' &&
+          v !== null &&
+          typeof (v as ImageLibraryItem).id === 'string' &&
+          typeof (v as ImageLibraryItem).dataUrl === 'string',
+      )
+      .sort((a, b) => a.createdAt - b.createdAt)
+  } catch {
+    return []
+  }
+}
+
+/** 删除图片库条目 */
+export function deleteImageItem(id: string): Promise<void> {
+  return runLib('readwrite', (s) => s.delete(id))
 }
 
 /**

@@ -21,6 +21,7 @@ function parseLrc(lrc) {
 }
 var lyricCache = /* @__PURE__ */ new Map();
 var LYRIC_CACHE_MS = 5 * 60 * 1e3;
+var LYRIC_CACHE_MAX = 100;
 var UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
 async function lookupLyric(title, artist) {
   const key = `${title}|${artist}`;
@@ -28,6 +29,10 @@ async function lookupLyric(title, artist) {
   if (hit && Date.now() - hit.at < LYRIC_CACHE_MS) return hit.data;
   const result = await lookupLyricRemote(title, artist);
   lyricCache.set(key, { at: Date.now(), data: result });
+  if (lyricCache.size > LYRIC_CACHE_MAX) {
+    const oldestKey = lyricCache.keys().next().value;
+    if (oldestKey !== void 0) lyricCache.delete(oldestKey);
+  }
   return result;
 }
 async function lookupLyricRemote(title, artist) {

@@ -1,4 +1,5 @@
 import {
+  memo,
   useCallback,
   useEffect,
   useImperativeHandle,
@@ -18,9 +19,60 @@ import {
   type TrackInfo,
 } from '../../data/islandStates'
 import { formatTime } from '../../utils/format'
-import { PLAY_MODES, type PlaybackMode } from '../../media/playbackModes'
-import { downscaleBackgroundImage } from '../../media/backgroundStore'
+import type { PlaybackMode } from '../../media/playbackModes'
+import { DEFAULT_BG_CROP, type ImageLibraryItem } from '../../media/backgroundStore'
+import { type FontColorMode, type FontLibraryItem } from '../../media/fontStore'
 import { ParticleTime } from './ParticleTime'
+import {
+  BackgroundView,
+  ControlView,
+  FontColorView,
+  FontLibraryView,
+  FontView,
+  HelpView,
+  ImageLibraryView,
+  ListView,
+  SettingsView,
+  ThemeView,
+} from './views'
+import {
+  BG_COMPACT_REF_H,
+  BG_COMPACT_REF_W,
+  BG_CROP_REF_H,
+  BG_CROP_REF_W,
+  COLLAPSE_HIDE_MS,
+  ELLIPSIS_SLOT_PX,
+  EXPANDED_MIN_WIDTH_PX,
+  EXPANDED_VIEWPORT_MARGIN_PX,
+  EXPANDED_WIDTH_PX,
+  FADE_IN_DELAY_MS,
+  FADE_IN_FAST_MS,
+  FADE_IN_MS,
+  FADE_OUT_MS,
+  HOVER_EXTEND_PX,
+  ISLAND_BASE_PX,
+  LONG_PRESS_MS,
+  LONG_PRESS_SLOP_PX,
+  MAX_WIDTH_PX,
+  MODE_ICON_MORPH_MS,
+  MORPH_ANIMATE_MS,
+  PROGRESS_RIGHT_MARGIN_PX,
+  PROGRESS_WIDTH_PX,
+  SEEK_STEP_SEC,
+  SUPPRESS_CLICK_MS,
+  SWIPE_THRESHOLD_PX,
+  TEXT_LEFT_PX,
+  TEXT_RISE_PX,
+  TEXT_SWAP_MS,
+  TRACK_CYCLE_MS,
+  applyTextLayout,
+  bgSizePctFor,
+  measureNaturalWidth,
+  measureTextWidth,
+  truncateText,
+  type PanelView,
+  type TextMotion,
+} from './layout'
 import './DynamicIsland.css'
 
 interface DynamicIslandProps {
@@ -89,8 +141,8 @@ interface DynamicIslandProps {
    *  渲染在岛体深色底之上,不透明度/裁切可调 */
   backgroundExpandedImage?: string | null
   backgroundCompactImage?: string | null
-  /** 背景图不透明度 0-1 */
-  backgroundOpacity?: number
+  /** 背景图不透明度(展开态 / 紧凑态各自独立,0-1) */
+  backgroundOpacity?: { expanded: number; compact: number }
   /** 背景裁切参数:展开态 / 紧凑态各自独立,互不影响
    *  (缩放 1 = 铺满 cover,位置百分比 0-100,50 = 居中) */
   backgroundCrop?: {
@@ -102,16 +154,39 @@ interface DynamicIslandProps {
   onBackgroundChange?: (bg: {
     expandedImage: string | null
     compactImage: string | null
-    opacity: number
+    opacity: { expanded: number; compact: number }
     expanded: { zoom: number; posX: number; posY: number }
     compact: { zoom: number; posX: number; posY: number }
   }) => void
-  /** 外部请求打开背景编辑器(托盘菜单):seq 变化即展开并切换到背景视图 */
-  requestBackgroundSeq?: number
+  /** 外部请求打开设置(托盘菜单):seq 变化即展开并切换到设置视图 */
+  requestSettingsSeq?: number
   /** 面板视图变化回调(宿主据此调整窗口高度:背景视图需要更高空间) */
-  onPanelViewChange?: (view: 'control' | 'list' | 'theme' | 'background') => void
-  /** 面板控制区显示"自定义背景"按钮(Web 演示入口;桌面端入口在托盘菜单) */
-  backgroundButton?: boolean
+  onPanelViewChange?: (view: PanelView) => void
+  /** 面板控制区显示"设置"按钮(Web 演示入口;桌面端入口在托盘菜单) */
+  settingsButton?: boolean
+  /** 字体库(多字体管理,设置"字体"视图);库中 id 与 dataUrl 由宿主持久化 */
+  fontLibrary?: FontLibraryItem[]
+  /** 当前应用字体的 id(null = 系统默认字体) */
+  currentFontId?: string | null
+  /** 字体颜色设置:auto = 按背景亮度自动黑白;custom = 自定义色。
+   *  传入后启用"字体"设置视图 */
+  fontColor?: { mode: FontColorMode; value: string | null }
+  /** 上传字体加入库(宿主负责持久化并设为当前应用) */
+  onFontAdd?: (item: FontLibraryItem) => void
+  /** 字体库变化(删除 / 编辑名称后的完整列表) */
+  onFontLibraryChange?: (items: FontLibraryItem[]) => void
+  /** 应用库中字体(id = null 恢复系统默认) */
+  onFontSelect?: (id: string | null) => void
+  /** 字体颜色变化(自动黑白 / 自定义色) */
+  onFontColorChange?: (mode: FontColorMode, value: string | null) => void
+  /** 字体粗细(400 常规 / 600 中等 / 800 粗体,单字重字体由浏览器合成加粗) */
+  fontWeight?: number
+  /** 字体粗细变化 */
+  onFontWeightChange?: (weight: number) => void
+  /** 图片库(多图管理,背景视图"图片库"入口);宿主持久化 */
+  imageLibrary?: ImageLibraryItem[]
+  /** 图片库变化(删除 / 编辑名称后的完整列表) */
+  onImageLibraryChange?: (items: ImageLibraryItem[]) => void
   /** 对外 API(ref) */
   ref?: Ref<DynamicIslandHandle>
 }
@@ -151,163 +226,23 @@ export interface DynamicIslandHandle {
   subscribe(listener: (snap: IslandSnapshot) => void): () => void
 }
 
-// 动画时序(与 CSS 中宽度过渡 0.5s 保持同步)
-/** 主题色预设(与播放模式/状态色同一色系,供主题色视图) */
-const THEME_PRESETS = ['#4ade80', '#60a5fa', '#a78bfa', '#f87171', '#fbbf24', '#22d3ee', '#f472b6']
+/** 设置类视图:从托盘"设置"或演示"设置"按钮进入,一律屏蔽
+ *  单击岛体 / 长按 / Esc / 点击面板外等一切缩回操作,只能通过返回键退出 */
+const SETTINGS_VIEWS: readonly PanelView[] = [
+  'settings',
+  'background',
+  'theme',
+  'help',
+  'font',
+  'font-color',
+  'font-library',
+  'image-library',
+]
+const isSettingsView = (view: string) => SETTINGS_VIEWS.includes(view as PanelView)
 
-/** HEX → RGB(自定义取色输入用) */
-function hexToRgb(hex: string): { r: number; g: number; b: number } {
-  const m = /^#?([0-9a-f]{6})$/i.exec(hex.trim())
-  if (!m) return { r: 74, g: 222, b: 128 }
-  const n = parseInt(m[1], 16)
-  return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 }
-}
 
-/** RGB → HEX */
-function rgbToHex(r: number, g: number, b: number): string {
-  const h = (v: number) =>
-    Math.max(0, Math.min(255, Math.round(v)))
-      .toString(16)
-      .padStart(2, '0')
-  return `#${h(r)}${h(g)}${h(b)}`
-}
-
-const FADE_OUT_MS = 130 // 文字上移淡出时长
-const TEXT_SWAP_MS = 140 // 淡出完成后换新文字
-const FADE_IN_MS = 240 // 新文字上移淡入时长
-const FADE_IN_DELAY_MS = 450 // 宽度回弹基本结束后再淡入,避免缩小回弹时文字被裁剪
-const FADE_IN_FAST_MS = 40 // 宽度无需变化时快速淡入
-const TEXT_RISE_PX = 6 // 文字滑动距离
-const MAX_WIDTH_PX = 500 // 与 CSS max-width 保持一致
-// 岛体固定内容宽度(不含文字):边框 2 + 内边距 56 + 图标 28 + 单段 gap 14(进度条已绝对定位)
-const ISLAND_BASE_PX = 100
-// 文字元素左偏移:边框 1 + 内边距 28 + 图标 28 + gap 14(相对岛 border-box 左缘)
-const TEXT_LEFT_PX = 71
-// 进度条:宽度 130 + 距岛右缘 30(内边距 28 + 边框 2)
-const PROGRESS_WIDTH_PX = 130
-const PROGRESS_RIGHT_MARGIN_PX = 30
-// 进度条左缘与文字尾部之间的间距(悬停时防止进度条贴字;
-// 渐隐时保证渐隐终点到进度条左缘之间有纯黑间隔,不与半透明文字叠加)
-const BAR_TAIL_GAP_PX = 14
-// 悬停展开增量:让进度条排在文字尾部之后(文字左偏移 + 进度条总占位 + 间距 - 岛基础宽)
-const HOVER_EXTEND_PX = TEXT_LEFT_PX + PROGRESS_WIDTH_PX + PROGRESS_RIGHT_MARGIN_PX + BAR_TAIL_GAP_PX - ISLAND_BASE_PX
-// 省略号占位宽度(font-size 0.95rem ≈ 15px) + 余量
-const ELLIPSIS_SLOT_PX = 18
-// 无需让位时的遮罩宽度:把渐变末 12% 的渐隐区整体推出文字右缘之外,文字完全不透明
-const MASK_NO_FADE = 'calc(100% + 20%)'
-// 进度条键盘方向键步进(秒)
-const SEEK_STEP_SEC = 5
-// 文字区滑动手势判定阈值(px):横向位移超过该值且明显大于纵向时触发
-const SWIPE_THRESHOLD_PX = 36
-// 文字区歌曲名/歌手名循环切换间隔(原 3s,调慢 3 倍避免频繁轮播)
-const TRACK_CYCLE_MS = 9000
-// 长按触发展开的持续时间(ms),参考 iOS 长按手感
-const LONG_PRESS_MS = 450
-// 长按判定允许的指针位移(px):移动超过该值视为滑动/拖动,取消长按
-const LONG_PRESS_SLOP_PX = 8
-// 展开后的岛宽(px):胶囊形变为更大的圆角矩形
-const EXPANDED_WIDTH_PX = 400
-// 展开岛宽距视口左右的最小边距(px)
-const EXPANDED_VIEWPORT_MARGIN_PX = 80
-// 展开最小宽度(px),小屏兜底
-const EXPANDED_MIN_WIDTH_PX = 240
-// 收起后隐藏悬停进度条的时长(ms),等岛收缩完成再淡入(1.5 倍速)
-const COLLAPSE_HIDE_MS = 320
-// suppressClick 标记的有效期(ms):长按松手后的 click 在此窗口内被吞,
-// 过期自动清除(面板按钮点击不触发岛 click,防止标记滞留吞掉后续收起点击)
-const SUPPRESS_CLICK_MS = 600
-// 形变动画期间关闭毛玻璃的时长(ms),略长于宽度/高度弹簧过渡(1.5 倍速)
-const MORPH_ANIMATE_MS = 400
-// 播放模式图标"线条重组"动画时长(ms),含涟漪清理
-const MODE_ICON_MORPH_MS = 420
-
-/**
- * 文字位移动画阶段:
- * - idle: 初始静止
- * - out:  上移淡出中(transform 0 → -rise)
- * - below: 已换内容,藏在下方等宽度回弹结束(opacity 0,transform +rise,不可见)
- * - in:   从下方上移淡入(+rise → 0)
- */
-type TextMotion = 'idle' | 'out' | 'below' | 'in'
-
-/** canvas 文本宽度测量(与 DOM 渲染同字体,结果一致) */
-let textMeasureCanvas: HTMLCanvasElement | null = null
-
-function measureTextWidth(text: string, font: string): number {
-  if (!textMeasureCanvas) textMeasureCanvas = document.createElement('canvas')
-  const ctx = textMeasureCanvas.getContext('2d')
-  if (!ctx) return text.length * 15
-  ctx.font = font
-  return ctx.measureText(text).width
-}
-
-/**
- * 将文字截断到可用宽度以内,尾部由省略号元素承接。
- * 二分查找最大可见前缀,保证截断后的宽度严格不超限。
- * 仅用于非悬停场景:悬停时若放不下则改用 mask 渐隐让位。
- */
-function truncateText(
-  text: string,
-  maxWidth: number,
-  font: string,
-): { visible: string; truncated: boolean } {
-  if (measureTextWidth(text, font) <= maxWidth) {
-    return { visible: text, truncated: false }
-  }
-  let lo = 1
-  let hi = text.length
-  while (lo < hi) {
-    const mid = Math.ceil((lo + hi) / 2)
-    if (measureTextWidth(text.slice(0, mid), font) <= maxWidth) lo = mid
-    else hi = mid - 1
-  }
-  return { visible: text.slice(0, lo), truncated: true }
-}
-
-/**
- * 播放模式图标(顺序/单曲循环/随机):
- * 所有线条 pathLength=1 归一化,配合 CSS 的 stroke-dasharray 做
- * "旧线条擦除 → 新线条画出"的重组动画
- */
-function ModeIcon({ mode, className }: { mode: PlaybackMode; className?: string }) {
-  const base = {
-    fill: 'none',
-    stroke: 'currentColor',
-    strokeWidth: 1.8,
-    strokeLinecap: 'round',
-    strokeLinejoin: 'round',
-  } as const
-  if (mode === 'repeat-one') {
-    return (
-      <svg className={className} width="16" height="16" viewBox="0 0 24 24" {...base}>
-        <path pathLength={1} d="M17 2l4 4-4 4" />
-        <path pathLength={1} d="M3 11v-1a4 4 0 0 1 4-4h14" />
-        <path pathLength={1} d="M7 22l-4-4 4-4" />
-        <path pathLength={1} d="M21 13v1a4 4 0 0 1-4 4H3" />
-        <path pathLength={1} d="M11 10h1v4" />
-      </svg>
-    )
-  }
-  if (mode === 'shuffle') {
-    return (
-      <svg className={className} width="16" height="16" viewBox="0 0 24 24" {...base}>
-        <polyline pathLength={1} points="16 3 21 3 21 8" />
-        <line pathLength={1} x1="4" y1="20" x2="21" y2="3" />
-        <polyline pathLength={1} points="21 16 21 21 16 21" />
-        <line pathLength={1} x1="15" y1="15" x2="21" y2="21" />
-        <line pathLength={1} x1="4" y1="4" x2="9" y2="9" />
-      </svg>
-    )
-  }
-  return (
-    <svg className={className} width="16" height="16" viewBox="0 0 24 24" {...base}>
-      <polyline pathLength={1} points="17 1 21 5 17 9" />
-      <path pathLength={1} d="M3 11V9a4 4 0 0 1 4-4h14" />
-      <polyline pathLength={1} points="7 23 3 19 7 15" />
-      <path pathLength={1} d="M21 13v2a4 4 0 0 1-4 4H3" />
-    </svg>
-  )
-}
+/** 注入 @font-face 时使用的字体族名(与岛体 font-family 应用一致) */
+const CUSTOM_FONT_FAMILY = 'island-font-custom'
 
 /**
  * 右侧文字:绑定歌曲后播放/暂停在"歌名/歌手"间循环(媒体模式),
@@ -323,65 +258,6 @@ function mediaTextFor(
     return `${state === 'playing' ? '正在播放' : '已暂停'}: ${track.title}`
   }
   return ISLAND_STATES[state].text
-}
-
-/**
- * 应用文字尾部渐隐遮罩与进度条位置。
- * 渐隐只在悬停且"完整文字 + 进度条放不下"(目前仅播放中长文字)时启用:
- * - 非悬停或放得下:文字完全不渐隐,进度条从文字尾部后 BAR_TAIL_GAP_PX 处滑出
- * - 悬停且放不下:文字尾部渐隐让位,渐隐终点(文字完全透明点)提前到进度条
- *   左缘之前(BAR_TAIL_GAP_PX),进度条下方为纯黑背景,不与半透明文字叠加
- */
-function applyTextLayout(
-  island: HTMLElement,
-  textEl: HTMLElement,
-  fullTextWidth: number,
-  targetWidth: number,
-  hovered: boolean,
-) {
-  const textWidth = textEl.scrollWidth // 可见文字布局宽度(含省略号,不受 mask 影响)
-  const textRight = TEXT_LEFT_PX + textWidth
-  // 完整文字 + 进度条是否超出岛宽上限(统一用 MAX_WIDTH_PX 判断,避免
-  // 与 targetWidth 的取整/浮点差异导致误判,如 91.2+231 vs 322)
-  const conflicts =
-    fullTextWidth + PROGRESS_WIDTH_PX + PROGRESS_RIGHT_MARGIN_PX + TEXT_LEFT_PX >
-    MAX_WIDTH_PX
-  const fadeEnd =
-    hovered && conflicts
-      ? targetWidth - PROGRESS_WIDTH_PX - PROGRESS_RIGHT_MARGIN_PX - BAR_TAIL_GAP_PX
-      : hovered
-        ? textRight + BAR_TAIL_GAP_PX
-        : textRight
-  if (fadeEnd >= textRight) {
-    // 非悬停或放得下:不需要让位,渐隐区推出文字右缘之外,文字完全不透明
-    textEl.style.setProperty('--mask-width', MASK_NO_FADE)
-  } else {
-    textEl.style.setProperty('--mask-width', `${fadeEnd - TEXT_LEFT_PX}px`)
-  }
-  // absolute left 相对岛的 padding box(比 border-box 少 1px 边框)。
-  // 进度条是文字元素的兄弟节点,变量需设在岛元素上才能被它继承
-  island.style.setProperty('--extra-left', `${fadeEnd - 1}px`)
-}
-
-/**
- * 测量灵动岛当前内容的自然宽度。
- *
- * 测量期间临时关闭过渡:若带着过渡恢复"旧宽度",浏览器会把这一步注册成
- * 一次"自然宽度→旧宽度"的过渡,之后设置新宽度时过渡被重定向,起点≈终点,
- * 宽度动画会坍缩成不可见的瞬移。关闭过渡可保证后续"旧宽度→自然宽度"
- * 是一次干净的回弹过渡(px→px 可插值,auto 不可插值)。
- */
-function measureNaturalWidth(island: HTMLElement): number {
-  const prevWidth = island.style.width
-  const prevTransition = island.style.transition
-  island.style.transition = 'none'
-  island.style.width = 'auto'
-  void island.offsetWidth
-  const width = Math.min(island.offsetWidth, MAX_WIDTH_PX)
-  island.style.width = prevWidth
-  void island.offsetWidth
-  island.style.transition = prevTransition
-  return width
 }
 
 /**
@@ -405,7 +281,12 @@ function measureNaturalWidth(island: HTMLElement): number {
  * - 通过 ref 暴露 DynamicIslandHandle API:isPlaying/getTrack/getPosition/
  *   getDuration/seekTo/snapshot/subscribe
  */
-export function DynamicIsland({
+/**
+ * memo 包裹:父组件(挂件/演示页)高频重渲染时,props 未变的渲染直接跳过
+ * (播放中 position 变化仍正常重渲;暂停/空闲时父组件的轮询/计时渲染
+ * 不再连带整棵岛体树)。宿主侧需保证回调/对象型 props 引用稳定
+ */
+export const DynamicIsland = memo(function DynamicIsland({
   state,
   track,
   position = 0,
@@ -439,9 +320,20 @@ export function DynamicIsland({
   backgroundOpacity,
   backgroundCrop,
   onBackgroundChange,
-  requestBackgroundSeq,
+  requestSettingsSeq,
   onPanelViewChange,
-  backgroundButton,
+  settingsButton,
+  fontLibrary,
+  currentFontId,
+  fontColor,
+  onFontAdd,
+  onFontLibraryChange,
+  onFontSelect,
+  onFontColorChange,
+  fontWeight,
+  onFontWeightChange,
+  imageLibrary,
+  onImageLibraryChange,
   ref,
 }: DynamicIslandProps) {
   const islandRef = useRef<HTMLDivElement>(null)
@@ -503,8 +395,9 @@ export function DynamicIsland({
   const [prevMode, setPrevMode] = useState<PlaybackMode | null>(null)
   const prevModeRef = useRef<PlaybackMode | null>(null)
   // (主题色涟漪已移除:扩散圆会染到岛角,颜色变化由各元素 transition 平滑过渡)
-  // 展开面板视图:媒体控制 / 播放列表 / 主题色 / 自定义背景
-  const [panelView, setPanelView] = useState<'control' | 'list' | 'theme' | 'background'>('control')
+  // 展开面板视图:媒体控制 / 播放列表 / 主题色 / 自定义背景 / 帮助手册 / 字体 / 设置
+  // (各视图为独立组件,见 ./views)
+  const [panelView, setPanelView] = useState<PanelView>('control')
   // 主题色切换的"跑马灯流体"动画:记录颜色与触发位置,动画结束自动清除
   const [ripple, setRipple] = useState<{ id: number; color: string; x: number; y: number } | null>(null)
   const rippleIdRef = useRef(0)
@@ -520,29 +413,9 @@ export function DynamicIsland({
     window.clearTimeout(rippleTimerRef.current)
     rippleTimerRef.current = window.setTimeout(() => setRipple(null), 1000)
   }, [])
-  // 自定义 RGB 输入(右侧常驻取色):输入防抖后触发流体动画
-  const [rgb, setRgb] = useState(() => hexToRgb(customTheme ?? THEME_PRESETS[0]))
-  const rgbDebounceRef = useRef(0)
-  useEffect(() => {
-    setRgb(hexToRgb(customTheme ?? THEME_PRESETS[0]))
-  }, [customTheme])
-  const handleRgbChange = (channel: 'r' | 'g' | 'b', value: number) => {
-    const next = { ...rgb, [channel]: value }
-    setRgb(next)
-    const hex = rgbToHex(next.r, next.g, next.b)
-    onThemeChange?.(hex)
-    // 连续输入只触发最后一次流体动画
-    window.clearTimeout(rgbDebounceRef.current)
-    rgbDebounceRef.current = window.setTimeout(() => {
-      const rect = islandRef.current?.getBoundingClientRect()
-      triggerRipple(hex, rect ? rect.width / 2 : 200, rect ? 44 : 100)
-    }, 300)
-  }
   // 首页歌词显示开关(点击音乐图标切换)
   const [lyricShown, setLyricShown] = useState(true)
   const fileInputRef = useRef<HTMLInputElement>(null)
-  // 背景图片上传输入(自定义背景视图)
-  const bgFileInputRef = useRef<HTMLInputElement>(null)
   // 主题色涟漪:模式切换时颜色从按钮位置扩散到整个岛
   expandedRef.current = expanded
 
@@ -680,23 +553,17 @@ export function DynamicIsland({
   // (查询中保持展开,避免"展开→折叠→展开"闪动)
   const lyricFold =
     !lyricShown || (lyrics !== undefined && !lyrics.loading && lyrics.lines.length === 0)
-  // 裁切参考尺寸:展开态 400×244、紧凑态 280×56(挂件典型宽度);
-  // 两种 UI 形态各自独立的裁切参数,互不影响
-  const BG_CROP_REF_W = 400
-  const BG_CROP_REF_H = 244
-  const BG_COMPACT_REF_W = 280
-  const BG_COMPACT_REF_H = 56
-  const DEFAULT_CROP = { zoom: 1, posX: 50, posY: 50 }
-  const crop = backgroundCrop ?? { expanded: DEFAULT_CROP, compact: DEFAULT_CROP }
+  // 裁切参数与当前编辑目标:展开态 / 紧凑态各自独立(互不影响)。
+  // 背景的裁切交互 / 视口 / 上传逻辑自包含在 BackgroundView,
+  // 这里仅保留根元素 class 需要的 bgTarget 与传给视图的裁切参数
+  const crop = backgroundCrop ?? { expanded: DEFAULT_BG_CROP, compact: DEFAULT_BG_CROP }
   const expandedCrop = crop.expanded
   const compactCrop = crop.compact
-  // 当前编辑目标(展开态 / 紧凑态):视口蒙版与滑杆作用于该形态
   const [bgTarget, setBgTarget] = useState<'expanded' | 'compact'>('expanded')
   const expandedImage = backgroundExpandedImage ?? null
   const compactImage = backgroundCompactImage ?? null
-  const activeImage = bgTarget === 'expanded' ? expandedImage : compactImage
-  const activeCrop = bgTarget === 'expanded' ? expandedCrop : compactCrop
-  // 各形态背景图的自然尺寸(计算 cover 基准与可平移余量)
+  // 岛体根部背景图 CSS 变量需要各形态背景的百分比尺寸(cover 基准 + 缩放):
+  // 图片自然尺寸异步加载后计算(BackgroundView 内的视口裁切各自独立计算)
   const [bgNaturalE, setBgNaturalE] = useState<{ w: number; h: number } | null>(null)
   useEffect(() => {
     if (!expandedImage) {
@@ -717,9 +584,6 @@ export function DynamicIsland({
     img.onload = () => setBgNaturalC({ w: img.naturalWidth, h: img.naturalHeight })
     img.src = compactImage
   }, [compactImage])
-  // 背景尺寸 %(相对元素宽度):1x = cover;null = 图片尺寸未知(加载中)
-  const bgSizePctFor = (refW: number, refH: number, zoom: number, w: number, h: number): number =>
-    Math.max(100, (refH / refW) * (w / h) * 100) * zoom
   const bgSizeExpanded = bgNaturalE
     ? bgSizePctFor(BG_CROP_REF_W, BG_CROP_REF_H, expandedCrop.zoom, bgNaturalE.w, bgNaturalE.h)
     : null
@@ -732,87 +596,6 @@ export function DynamicIsland({
         bgNaturalC.h,
       )
     : null
-  const bgStyleFor = (
-    image: string,
-    sizePct: number | null,
-    posX: number,
-    posY: number,
-  ): CSSProperties => ({
-    backgroundImage: `url("${image}")`,
-    backgroundSize: sizePct ? `${sizePct}%` : 'cover',
-    backgroundPosition: sizePct ? `${posX}% ${posY}%` : '50% 50%',
-  })
-  // 更新当前编辑目标的裁切参数(另一形态的图片与裁切均不受影响)
-  const patchActiveCrop = (patch: Partial<{ zoom: number; posX: number; posY: number }>) => {
-    if (!onBackgroundChange) return
-    const next = { ...activeCrop, ...patch }
-    onBackgroundChange({
-      expandedImage,
-      compactImage,
-      opacity: backgroundOpacity ?? 0.4,
-      expanded: bgTarget === 'expanded' ? next : expandedCrop,
-      compact: bgTarget === 'compact' ? next : compactCrop,
-    })
-  }
-  // 裁切视口拖拽平移:拖动图片选择可见区域(位置 % 相对"图片超出视口"的余量)
-  const bgPanRef = useRef<{
-    pointerId: number
-    startX: number
-    startY: number
-    startPosX: number
-    startPosY: number
-  } | null>(null)
-  const handleBgPanDown = (event: React.PointerEvent<HTMLDivElement>) => {
-    if (event.button !== 0 || !onBackgroundChange) return
-    event.currentTarget.setPointerCapture(event.pointerId)
-    bgPanRef.current = {
-      pointerId: event.pointerId,
-      startX: event.clientX,
-      startY: event.clientY,
-      startPosX: activeCrop.posX,
-      startPosY: activeCrop.posY,
-    }
-  }
-  const handleBgPanMove = (event: React.PointerEvent<HTMLDivElement>) => {
-    const pan = bgPanRef.current
-    if (!pan || event.pointerId !== pan.pointerId || !onBackgroundChange) return
-    const natural = bgTarget === 'expanded' ? bgNaturalE : bgNaturalC
-    if (!natural) return
-    const sizePct = bgTarget === 'expanded' ? bgSizeExpanded : bgSizeCompact
-    if (sizePct === null) return
-    const el = event.currentTarget
-    const vw = el.clientWidth
-    const vh = el.clientHeight
-    const overflowW = (sizePct / 100 - 1) * vw
-    const overflowH = (sizePct / 100) * vw * (natural.h / natural.w) - vh
-    const dx = event.clientX - pan.startX
-    const dy = event.clientY - pan.startY
-    const clamp01 = (v: number) => Math.max(0, Math.min(100, v))
-    const nextX = overflowW > 0 ? clamp01(pan.startPosX - (dx / overflowW) * 100) : 50
-    const nextY = overflowH > 0 ? clamp01(pan.startPosY - (dy / overflowH) * 100) : 50
-    if (nextX !== activeCrop.posX || nextY !== activeCrop.posY) {
-      patchActiveCrop({ posX: nextX, posY: nextY })
-    }
-  }
-  const handleBgPanEnd = (event: React.PointerEvent<HTMLDivElement>) => {
-    const pan = bgPanRef.current
-    if (pan && pan.pointerId === event.pointerId) bgPanRef.current = null
-  }
-  // 滚轮缩放(以视口中心为锚:位置 % 不变,中心内容保持)
-  const handleBgWheel = (event: React.WheelEvent<HTMLDivElement>) => {
-    if (!onBackgroundChange) return
-    event.preventDefault()
-    const factor = event.deltaY < 0 ? 1.1 : 1 / 1.1
-    const next = Math.max(1, Math.min(4, activeCrop.zoom * factor))
-    if (next === activeCrop.zoom) return
-    patchActiveCrop({ zoom: next })
-  }
-  // 双击复位当前形态的裁切(cover 居中)
-  const handleBgDoubleClick = () => {
-    if (!onBackgroundChange) return
-    if (activeCrop.zoom === 1 && activeCrop.posX === 50 && activeCrop.posY === 50) return
-    patchActiveCrop({ zoom: 1, posX: 50, posY: 50 })
-  }
 
   const ratioFromPointer = (event: PointerEvent<HTMLDivElement>, bar: HTMLDivElement): number => {
     const rect = bar.getBoundingClientRect()
@@ -1003,29 +786,14 @@ export function DynamicIsland({
     if (files.length > 0) onUploadTracks?.(files)
   }
 
-  /** 上传背景图:读取为 data URL 后一键应用(cover 居中),之后可裁切微调 */
-  const handleBackgroundFileChange = (event: ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0]
-    event.target.value = ''
-    if (!file || !onBackgroundChange) return
-    const reader = new FileReader()
-    reader.onload = () => {
-      if (typeof reader.result === 'string') {
-        // 先降采样(形变逐帧重栅格化大图是卡顿主因),再一键应用到当前形态
-        // (该形态 cover 居中,另一形态的图片与裁切不受影响)
-        void downscaleBackgroundImage(reader.result).then((small) => {
-          onBackgroundChange({
-            expandedImage: bgTarget === 'expanded' ? small : expandedImage,
-            compactImage: bgTarget === 'compact' ? small : compactImage,
-            opacity: backgroundOpacity ?? 0.4,
-            expanded: bgTarget === 'expanded' ? DEFAULT_CROP : expandedCrop,
-            compact: bgTarget === 'compact' ? DEFAULT_CROP : compactCrop,
-          })
-        })
-      }
-    }
-    reader.readAsDataURL(file)
-  }
+  // 字体上传错误提示(在字体视图预览行状态位短暂显示,3s 自动清除)
+  const [fontError, setFontError] = useState<string | null>(null)
+  const fontErrorTimerRef = useRef(0)
+  const showFontError = useCallback((msg: string) => {
+    setFontError(msg)
+    window.clearTimeout(fontErrorTimerRef.current)
+    fontErrorTimerRef.current = window.setTimeout(() => setFontError(null), 3000)
+  }, [])
 
   // 长按:紧凑态长按展开,展开态长按收起——按到 450ms 直接形变,不等待松手。
   // 压感全程渐进(无静止停顿);触发收起时保持最深压感并行收缩(一边 3D 压感
@@ -1033,9 +801,9 @@ export function DynamicIsland({
   const handleIslandPointerDown = (event: PointerEvent<HTMLDivElement>) => {
     // 仅响应左键:右键不触发按压/长按(右键拖拽已移除,右键按下不做任何事)
     if (event.button !== 0) return
-    // 背景编辑器视图:禁用按压/长按收起(裁切视口/控件的点按会冒泡到这里,
-    // 只能通过返回键收起),避免编辑中被误缩回
-    if (panelView === 'background') return
+    // 设置类视图:禁用按压/长按收起(控件的点按会冒泡到这里,
+    // 只能通过返回键收起),避免设置/编辑中被误缩回
+    if (isSettingsView(panelView)) return
     const prev = pressRef.current
     if (prev) window.clearTimeout(prev.timer)
     const startX = event.clientX
@@ -1108,9 +876,9 @@ export function DynamicIsland({
       suppressClickRef.current = false
       return
     }
-    // 展开状态:点按岛体收起(背景编辑器视图除外——只能通过返回键)
+    // 展开状态:点按岛体收起(设置类视图除外——只能通过返回键)
     if (expandedRef.current) {
-      if (panelView !== 'background') changeExpanded(false)
+      if (!isSettingsView(panelView)) changeExpanded(false)
       return
     }
     if (!onChange) return
@@ -1159,8 +927,8 @@ export function DynamicIsland({
 
   const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     if (event.key === 'Escape' && expandedRef.current) {
-      // 背景编辑器视图:Esc 不收起(只能通过返回键)
-      if (panelView !== 'background') {
+      // 设置类视图(设置/背景/帮助/主题色):Esc 不收起(只能通过返回键)
+      if (!isSettingsView(panelView)) {
         event.preventDefault()
         changeExpanded(false)
       }
@@ -1172,18 +940,18 @@ export function DynamicIsland({
     }
   }
 
-  // 展开期间:点按岛外任意位置或按 Esc 收起(背景编辑器视图除外——
-  // 只能通过返回键收起,避免编辑中被误缩回)
+  // 展开期间:点按岛外任意位置或按 Esc 收起(设置类视图除外——
+  // 只能通过返回键收起,避免设置/编辑中被误缩回)
   useEffect(() => {
     if (!expanded) return
     const onDocPointerDown = (event: globalThis.PointerEvent) => {
       const island = islandRef.current
-      if (island && !island.contains(event.target as Node) && panelView !== 'background') {
+      if (island && !island.contains(event.target as Node) && !isSettingsView(panelView)) {
         changeExpanded(false)
       }
     }
     const onDocKeyDown = (event: globalThis.KeyboardEvent) => {
-      if (event.key === 'Escape' && panelView !== 'background') changeExpanded(false)
+      if (event.key === 'Escape' && !isSettingsView(panelView)) changeExpanded(false)
     }
     document.addEventListener('pointerdown', onDocPointerDown)
     document.addEventListener('keydown', onDocKeyDown)
@@ -1193,10 +961,11 @@ export function DynamicIsland({
     }
   }, [expanded, changeExpanded, panelView])
 
-  // 外部请求(托盘菜单"自定义背景")打开面板视图:seq 变化即展开并切换
+  // 外部请求(托盘菜单"设置")打开设置视图:seq 变化即展开并切换。
+  // 背景 / 帮助 / 主题色 / 字体从设置视图内部进入,不再有独立外部入口
   useEffect(() => {
-    if (!requestBackgroundSeq) return
-    setPanelView('background')
+    if (!requestSettingsSeq) return
+    setPanelView('settings')
     setExpandedWidth(
       Math.max(
         EXPANDED_MIN_WIDTH_PX,
@@ -1204,14 +973,78 @@ export function DynamicIsland({
       ),
     )
     changeExpanded(true)
-  }, [requestBackgroundSeq, changeExpanded])
+  }, [requestSettingsSeq, changeExpanded])
+
+  // 当前应用字体:库中按 id 取(dataUrl 注入 @font-face,名称用于预览/搜索)
+  const currentFont = fontLibrary?.find((f) => f.id === currentFontId) ?? null
+  const fontDataUrl = currentFont?.dataUrl ?? null
+  const fontFamilyName = currentFont?.name ?? null
+
+  // 自定义字体:注入 @font-face(data URL 直接作 src,跨端一致),
+  // 字体变更时重建,移除/卸载时清理注入的样式
+  useEffect(() => {
+    if (!fontDataUrl) return
+    const style = document.createElement('style')
+    style.id = 'island-font-face'
+    style.textContent = `@font-face { font-family: '${CUSTOM_FONT_FAMILY}'; src: url("${fontDataUrl}"); }`
+    document.head.appendChild(style)
+    return () => style.remove()
+  }, [fontDataUrl])
+
+  // 自动字体颜色(auto 模式):从**当前形态**的背景图(展开态用展开图,
+  // 紧凑态用紧凑图,缺图时退另一形态)采样**原图**平均亮度。
+  // 用原图而非合成亮度(opacity 叠加后纯白图也只有 ~108 亮度,永远判暗
+  // → 白字不可读);白底图原图亮度高 → 黑字,暗色图 → 白字,
+  // 阈值 130 兼顾"大部分白底"与纯深色图;无背景图时按深色底(白字)
+  const [autoDarkText, setAutoDarkText] = useState(false)
+  useEffect(() => {
+    if (fontColor?.mode !== 'auto') return
+    const bg = expanded
+      ? backgroundExpandedImage ?? backgroundCompactImage
+      : backgroundCompactImage ?? backgroundExpandedImage
+    if (!bg) {
+      setAutoDarkText(false)
+      return
+    }
+    const img = new Image()
+    img.onload = () => {
+      try {
+        // 32×32 采样缩放后取原图平均亮度(忽略透明像素)
+        const canvas = document.createElement('canvas')
+        canvas.width = 32
+        canvas.height = 32
+        const ctx = canvas.getContext('2d', { willReadFrequently: true })
+        if (!ctx) {
+          setAutoDarkText(false)
+          return
+        }
+        ctx.drawImage(img, 0, 0, 32, 32)
+        const { data } = ctx.getImageData(0, 0, 32, 32)
+        let sum = 0
+        let count = 0
+        for (let i = 0; i < data.length; i += 4) {
+          if (data[i + 3] > 125) {
+            sum += 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]
+            count++
+          }
+        }
+        setAutoDarkText(count > 0 && sum / count > 130)
+      } catch {
+        setAutoDarkText(false)
+      }
+    }
+    img.onerror = () => setAutoDarkText(false)
+    img.src = bg
+  }, [backgroundExpandedImage, backgroundCompactImage, expanded, fontColor?.mode])
 
   // 面板视图变化通知宿主(背景视图需要更高的岛体与窗口)
   useEffect(() => {
     onPanelViewChange?.(panelView)
   }, [panelView, onPanelViewChange])
 
-  // 卸载时清理长按计时器 / 按压渐进循环 / 收起与动画延迟
+  // 卸载时清理全部计时器 / 按压渐进循环 / 收起与动画延迟
+  // (含防抖与临时状态计时器,Web 演示版反复切换组件时防残留;
+  // 视图内部自身的计时器已由各视图组件清理)
   useEffect(
     () => () => {
       const press = pressRef.current
@@ -1220,6 +1053,8 @@ export function DynamicIsland({
       window.clearTimeout(collapseTimerRef.current)
       window.clearTimeout(animatingTimerRef.current)
       window.clearTimeout(suppressTimerRef.current)
+      window.clearTimeout(rippleTimerRef.current)
+      window.clearTimeout(fontErrorTimerRef.current)
     },
     [],
   )
@@ -1235,6 +1070,28 @@ export function DynamicIsland({
   }, [mode])
 
   // (粒子时间在展开面板中作为 flex 子元素与歌名同行内嵌,无需测量定位)
+
+  // 字体颜色解析:custom = 自定义色;auto = 背景亮度判定的黑白;默认不覆盖
+  // (CSS fallback 白色系)。--text-dim 为次级文字色(主色 55% 透明度)
+  const resolvedTextColor =
+    fontColor?.mode === 'custom' && fontColor.value
+      ? fontColor.value
+      : fontColor?.mode === 'auto'
+        ? autoDarkText
+          ? '#0b0b0f'
+          : '#ffffff'
+        : null
+  const textDimColor = resolvedTextColor
+    ? `color-mix(in srgb, ${resolvedTextColor} 55%, transparent)`
+    : undefined
+  // 自定义字体应用:覆盖岛体及后代文字(按钮/输入 font-family: inherit 跟随),
+  // fallback 取运行时 body 字体栈,保证无字体时的观感一致;
+  // 粗细随设置(400/600/800,单字重字体由浏览器合成加粗)
+  const islandFontFamily = fontDataUrl
+    ? `'${CUSTOM_FONT_FAMILY}', ${getComputedStyle(document.body).fontFamily}`
+    : undefined
+  const islandFontWeight =
+    fontWeight && [400, 600, 800].includes(fontWeight) ? fontWeight : undefined
 
   const stateClass = state === 'playing' || state === 'idle' ? '' : state
 
@@ -1303,7 +1160,7 @@ export function DynamicIsland({
   return (
     <div
       ref={islandRef}
-      className={`island-demo${stateClass ? ` ${stateClass}` : ''}${modeClass ? ` ${modeClass}` : ''}${expanded ? ' expanded' : ''}${press ? ' is-pressed' : ''}${collapsing ? ' island-collapsing' : ''}${animating ? ' is-animating' : ''}${lyricFold ? ' island-lyric-off' : ''}${panelView === 'background' ? ' island-bg-view' : ''}`}
+      className={`island-demo${stateClass ? ` ${stateClass}` : ''}${modeClass ? ` ${modeClass}` : ''}${expanded ? ' expanded' : ''}${press ? ' is-pressed' : ''}${collapsing ? ' island-collapsing' : ''}${animating ? ' is-animating' : ''}${lyricFold ? ' island-lyric-off' : ''}${panelView === 'background' ? ` island-bg-view${bgTarget === 'compact' ? ' island-bg-view--compact' : ''}` : ''}${panelView === 'font-library' || panelView === 'image-library' ? ' island-lib-view' : ''}${panelView === 'font' ? ' island-font-view' : ''}${panelView === 'font-color' ? ' island-font-color-view' : ''}${panelView === 'theme' ? ' island-theme-view' : ''}`}
       role="button"
       tabIndex={0}
       aria-label={`灵动岛,当前状态:${ISLAND_STATES[state].label},点击切换,长按展开`}
@@ -1312,8 +1169,15 @@ export function DynamicIsland({
         {
           width: expanded ? `${expandedWidth}px` : islandWidth,
           '--state-color': theme,
+          // 字体颜色(主文字/次级文字),null 时 CSS fallback 白色系
+          '--text-color': resolvedTextColor ?? undefined,
+          '--text-dim': textDimColor,
           transform: pressTransform,
           transformOrigin: pressOrigin,
+          // 自定义字体:岛体 font-family 覆盖,后代继承
+          fontFamily: islandFontFamily,
+          // 字体粗细(全部文字生效)
+          fontWeight: islandFontWeight,
         } as CSSProperties
       }
       onClick={handleClick}
@@ -1332,7 +1196,9 @@ export function DynamicIsland({
             className="island-bg-image"
             style={
               {
-                opacity: backgroundOpacity ?? 1,
+                // 不透明度按形态取(展开态 / 紧凑态各自独立)
+                opacity:
+                  (expanded ? backgroundOpacity?.expanded : backgroundOpacity?.compact) ?? 1,
                 // 展开态 / 紧凑态各自独立的图片与裁切参数(CSS 按形态切换)
                 '--bg-img-e': expandedImage ? `url("${expandedImage}")` : 'none',
                 '--bg-size-e': bgSizeExpanded ? `${bgSizeExpanded}%` : undefined,
@@ -1345,6 +1211,12 @@ export function DynamicIsland({
           />
         )}
       </div>
+      {/* 设置类视图持久蒙版:独立一层,不参与面板淡入动画。
+          视图切换瞬间蒙版始终不透明,背景图不会闪烁透出
+          (面板自身不再带蒙版背景,由本层统一提供) */}
+      {expanded && panelView !== 'control' && (
+        <div className="island-panel-mask" aria-hidden="true" />
+      )}
       <div className="island-content">
         <div className="island-icon">
           <div className="icon-floater">{ISLAND_STATES[state].icon(state)}</div>
@@ -1382,913 +1254,160 @@ export function DynamicIsland({
           双视图:媒体控制(默认) / 播放列表(可上传音乐) */}
       {expanded && (
         <div className="island-panel">
-          {panelView === 'control' && showUploadPrompt ? (
-            /* 空播放列表:整个面板居中显示上传引导(提示下方是上传按钮) */
-            <div className="island-panel-empty">
-              <p className="island-panel-empty-text">本地暂无音乐,上传后即可播放</p>
-              <button
-                type="button"
-                className="island-ctl island-ctl--upload"
-                onClick={(event) => {
-                  event.stopPropagation()
-                  fileInputRef.current?.click()
-                }}
-              >
-                <svg
-                  className="island-ctl-svg"
-                  width="15"
-                  height="15"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth={2}
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                >
-                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                  <polyline points="17 8 12 3 7 8" />
-                  <line x1="12" y1="3" x2="12" y2="15" />
-                </svg>
-                <span>上传音乐</span>
-              </button>
-            </div>
-          ) : panelView === 'control' ? (
-            <>
-          <div className="island-panel-head">
-            {/* 图标列:音乐图标(点击切换本地播放器/系统监听数据源)+ 图标下方当前数据源标签 */}
-            <div className="island-panel-icon-col">
-              <button
-                type="button"
-                className="island-icon island-panel-icon island-panel-icon-btn"
-                aria-label="切换本地播放/系统监听"
-                title="切换本地播放/系统监听"
-                onClick={(event) => {
-                  event.stopPropagation()
-                  onToggleSource?.()
-                }}
-              >
-                {ISLAND_STATES[state].icon(`panel-${state}`)}
-              </button>
-              <span className="island-panel-icon-tag">
-                {systemActive && systemPlatform
-                  ? systemPlatform.label
-                  : ISLAND_STATES[state].label}
-              </span>
-            </div>
-            <div className="island-panel-meta">
-              {/* 主行:歌名(可省略)+ 粒子时间(与歌名同行,flex 内嵌不重叠) */}
-              <div className="island-panel-main-row">
-                <span className="island-panel-title">
-                  {track
-                    ? track.title
-                    : showUploadPrompt
-                      ? '本地暂无音乐'
-                      : ISLAND_STATES[state].text}
-                </span>
-                <ParticleTime
-                  seconds={scrubbing && scrubRatio !== null ? scrubRatio * duration : position}
-                  centerX={0}
-                  color={theme}
-                  inline
-                />
-              </div>
-              {/* 歌手行始终占位(空内容也保留行高),避免进度条位置随曲目信息位移 */}
-              <span className="island-panel-artist">{track?.artist ?? ''}</span>
-            </div>
-          </div>
-          {/* 双行歌词:面板级绝对定位(水平居中、固定在歌手行下方),
-              脱离文档流——歌词显隐不影响进度条/控制键位置 */}
-          <div
-            className={`island-panel-lyric-inline${lyricFold ? ' lyric-hidden' : ''}`}
-            key={lyrics?.currentIndex ?? -1}
-          >
-            <p
-              className={`island-lyric-line${lyricShown && lyrics && lyrics.lines.length > 0 ? ' active' : ''}`}
-            >
-              {lyricShown && lyrics && lyrics.lines.length > 0
-                ? lyrics.lines[lyrics.currentIndex >= 0 ? lyrics.currentIndex : 0]?.text ?? ''
-                : ''}
-            </p>
-            <p className="island-lyric-line">
-              {lyricShown && lyrics && lyrics.lines.length > 0
-                ? lyrics.lines[lyrics.currentIndex + 1]?.text ?? ''
-                : ''}
-            </p>
-          </div>
-
-          {showBar && duration > 0 && (
-            <div className="island-panel-progress-row">
-              <span className="island-panel-time">0:00</span>
-              <div
-                ref={panelBarRef}
-                className="island-panel-progress"
-                role="slider"
-                tabIndex={0}
-                aria-label="播放进度"
-                aria-valuemin={0}
-                aria-valuemax={duration}
-                aria-valuenow={scrubbing && scrubRatio !== null ? scrubRatio * duration : position}
-                aria-valuetext={`${formatTime(position)} / ${formatTime(duration)}`}
-                style={{ '--progress-ratio': displayRatio } as CSSProperties}
-                onClick={(event) => event.stopPropagation()}
-                onKeyDown={(event) => {
-                  event.stopPropagation()
-                  handleBarKeyDown(event)
-                }}
-                onPointerDown={(event) =>
-                  panelBarRef.current && handleBarPointerDown(event, panelBarRef.current)
-                }
-                onPointerMove={(event) =>
-                  panelBarRef.current && handleBarPointerMove(event, panelBarRef.current)
-                }
-                onPointerUp={(event) =>
-                  panelBarRef.current && handleBarPointerUp(event, panelBarRef.current)
-                }
-                onPointerCancel={(event) =>
-                  panelBarRef.current && handleBarPointerUp(event, panelBarRef.current)
-                }
-              >
-                <div className="island-panel-progress-fill" />
-              </div>
-              <span className="island-panel-time">{formatTime(duration)}</span>
-            </div>
-          )}
-          {showBar && duration <= 0 && (
-            <div className="island-panel-progress-row">
-              <div className="island-panel-progress" aria-hidden="true">
-                <div className="island-panel-progress-fill" />
-              </div>
-            </div>
-          )}
-
-          {/* 媒体状态:播放控制;通知状态:收起按钮 */}
-          {panelHasControls ? (
-            <div className="island-panel-controls">
-              {/* 歌词开关:左下角(与播放列表并排) */}
-              {lyrics && (
-                <button
-                  type="button"
-                  className={`island-ctl island-ctl--lyric${lyricShown ? ' on' : ''}`}
-                  aria-label={lyricShown ? '隐藏歌词' : '显示歌词'}
-                  aria-pressed={lyricShown}
-                  title={lyricShown ? '隐藏歌词' : '显示歌词'}
-                  onClick={(event) => {
-                    event.stopPropagation()
-                    setLyricShown((v) => !v)
-                  }}
-                >
-                  <svg
-                    className="island-ctl-svg"
-                    width="15"
-                    height="15"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth={2}
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  >
-                    <path d="M9 18V5l12-2v13" />
-                    <circle cx="6" cy="18" r="3" />
-                    <circle cx="18" cy="16" r="3" />
-                  </svg>
-                </button>
-              )}
-              {/* 播放列表入口:切换到列表视图(上传音乐/查看曲目);外部平台时隐藏 */}
-              {!systemActive && playlist && onPlayTrack && (
-                <button
-                  type="button"
-                  className="island-ctl island-ctl--list"
-                  aria-label="播放列表"
-                  title="播放列表"
-                  onClick={(event) => {
-                    event.stopPropagation()
-                    setPanelView('list')
-                  }}
-                >
-                  <svg
-                    className="island-ctl-svg"
-                    width="17"
-                    height="17"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth={2}
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  >
-                    <line x1="8" y1="6" x2="21" y2="6" />
-                    <line x1="8" y1="12" x2="21" y2="12" />
-                    <line x1="8" y1="18" x2="21" y2="18" />
-                    <line x1="3" y1="6" x2="3.01" y2="6" />
-                    <line x1="3" y1="12" x2="3.01" y2="12" />
-                    <line x1="3" y1="18" x2="3.01" y2="18" />
-                  </svg>
-                </button>
-              )}
-              {/* 主题色:右下角(模式按钮左侧),切换到主题色视图 */}
-              {/* 自定义背景入口(仅 Web 演示显示;桌面端入口在托盘菜单):
-                  切换到背景编辑器视图 */}
-              {onBackgroundChange && backgroundButton && (
-                <button
-                  type="button"
-                  className="island-ctl island-ctl--bg"
-                  aria-label="自定义背景"
-                  title="自定义背景"
-                  onClick={(event) => {
-                    event.stopPropagation()
-                    setPanelView('background')
-                  }}
-                >
-                  <svg
-                    className="island-ctl-svg"
-                    width="16"
-                    height="16"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth={2}
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  >
-                    <rect x="3" y="3" width="18" height="18" rx="2" />
-                    <circle cx="8.5" cy="8.5" r="1.5" />
-                    <path d="M21 15l-5-5L5 21" />
-                  </svg>
-                </button>
-              )}
-              {onThemeChange && (
-                <button
-                  type="button"
-                  className="island-ctl island-ctl--theme"
-                  aria-label="主题色"
-                  title="主题色"
-                  onClick={(event) => {
-                    event.stopPropagation()
-                    setPanelView('theme')
-                  }}
-                >
-                  <svg
-                    className="island-ctl-svg"
-                    width="15"
-                    height="15"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth={2}
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  >
-                    <path d="M12 22a10 10 0 1 1 10-10c0 1.4-.9 2.6-2.2 2.6H16a2.6 2.6 0 0 0 0 5.2H14a3.6 3.6 0 0 0-2 2.2" />
-                    <circle cx="7.5" cy="10.5" r="1.3" />
-                    <circle cx="11" cy="7" r="1.3" />
-                    <circle cx="15.5" cy="9" r="1.3" />
-                  </svg>
-                </button>
-              )}
-              {mode && onCycleMode && (
-                <button
-                  type="button"
-                  className="island-ctl island-ctl--mode"
-                  aria-label={`播放模式:${PLAY_MODES[mode].label}`}
-                  title={
-                    systemActive && !modeSupported
-                      ? '当前平台不支持播放模式控制'
-                      : PLAY_MODES[mode].label
-                  }
-                  disabled={systemActive && !modeSupported}
-                  onClick={(event) => {
-                    event.stopPropagation()
-                    onCycleMode()
-                  }}
-                >
-                  {/* 图标切换动画:旧图标线条擦除 + 新图标线条画出的"重组" */}
-                  <span className="island-mode-icons" aria-hidden="true">
-                    {prevMode && prevMode !== mode && (
-                      <ModeIcon
-                        key={`leave-${prevMode}`}
-                        mode={prevMode}
-                        className="island-mode-svg island-mode-svg--leave"
-                      />
-                    )}
-                    <ModeIcon
-                      key={`enter-${mode}`}
-                      mode={mode}
-                      className="island-mode-svg island-mode-svg--enter"
-                    />
-                  </span>
-                </button>
-              )}
-              <button
-                type="button"
-                className="island-ctl island-ctl--prev"
-                aria-label="上一首"
-                onClick={(event) => {
-                  event.stopPropagation()
-                  onSwipeLeft?.()
-                }}
-              >
-                <svg
-                  className="island-ctl-svg"
-                  width="18"
-                  height="18"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth={2}
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                >
-                  <polygon points="19 20 9 12 19 4" />
-                  <line x1="5" y1="19" x2="5" y2="5" />
-                </svg>
-              </button>
-              <button
-                type="button"
-                className="island-ctl island-ctl--primary"
-                aria-label={state === 'playing' ? '暂停' : '播放'}
-                onClick={(event) => {
-                  event.stopPropagation()
-                  onTextDoubleClick?.()
-                }}
-              >
-                {state === 'playing' ? (
-                  /* 暂停:两条短粗圆角竖条(宽度 3.6、高 14、圆头),舒展不紧凑 */
-                  <svg
-                    className="island-ctl-svg"
-                    width="20"
-                    height="20"
-                    viewBox="0 0 24 24"
-                    fill="currentColor"
-                  >
-                    <rect x="6.8" y="5" width="3.6" height="14" rx="1.8" />
-                    <rect x="13.6" y="5" width="3.6" height="14" rx="1.8" />
-                  </svg>
-                ) : (
-                  /* 播放:饱满圆角三角形(粗描边圆角连接) */
-                  <svg
-                    className="island-ctl-svg"
-                    width="20"
-                    height="20"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth={2.6}
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  >
-                    <path d="M7.5 4.8v14.4L19.5 12z" />
-                  </svg>
-                )}
-              </button>
-              <button
-                type="button"
-                className="island-ctl island-ctl--next"
-                aria-label="下一首"
-                onClick={(event) => {
-                  event.stopPropagation()
-                  onSwipeRight?.()
-                }}
-              >
-                <svg
-                  className="island-ctl-svg"
-                  width="18"
-                  height="18"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth={2}
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                >
-                  <polygon points="5 4 15 12 5 20" />
-                  <line x1="19" y1="5" x2="19" y2="19" />
-                </svg>
-              </button>
-              {/* 操作提示:播放键正下方(纯文本,与面板次级文字同款,无气泡;
-                  面板控制区始终贴底,提示固定落在按钮下方 16px 内边距区) */}
-              {hint && (
-                <div className="island-hint-play" role="status">
-                  {hint}
-                </div>
-              )}
-            </div>
-          ) : (
-            <div className="island-panel-dismiss">
-              <button
-                type="button"
-                className="island-ctl"
-                aria-label="收起"
-                onClick={(event) => {
-                  event.stopPropagation()
-                  changeExpanded(false)
-                }}
-              >
-                <svg
-                  className="island-ctl-svg"
-                  width="18"
-                  height="18"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth={2}
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                >
-                  <polyline points="6 9 12 15 18 9" />
-                </svg>
-              </button>
-            </div>
-          )}
-            </>
+          {panelView === 'control' ? (
+            <ControlView
+              state={state}
+              track={track}
+              showUploadPrompt={showUploadPrompt}
+              panelHasControls={panelHasControls}
+              showBar={showBar}
+              position={position}
+              duration={duration}
+              displayRatio={displayRatio}
+              scrubbing={scrubbing}
+              scrubRatio={scrubRatio}
+              hint={hint}
+              theme={theme}
+              playlist={playlist}
+              systemActive={systemActive}
+              systemPlatform={systemPlatform}
+              mode={mode}
+              prevMode={prevMode}
+              modeSupported={modeSupported}
+              lyrics={lyrics}
+              lyricShown={lyricShown}
+              lyricFold={lyricFold}
+              onToggleLyric={() => setLyricShown((v) => !v)}
+              onToggleSource={onToggleSource}
+              onPlayTrack={onPlayTrack}
+              onCycleMode={onCycleMode}
+              onPrev={onSwipeLeft}
+              onNext={onSwipeRight}
+              onPlayPause={onTextDoubleClick}
+              onChangeView={setPanelView}
+              onCollapse={() => changeExpanded(false)}
+              settingsButton={settingsButton}
+              fileInputRef={fileInputRef}
+              panelBarRef={panelBarRef}
+              onBarPointerDown={handleBarPointerDown}
+              onBarPointerMove={handleBarPointerMove}
+              onBarPointerUp={handleBarPointerUp}
+              onBarKeyDown={handleBarKeyDown}
+            />
           ) : panelView === 'list' ? (
-            /* ===== 播放列表视图:曲目列表 + 上传音乐 ===== */
-            <div className="island-panel-list">
-              <div className="island-panel-list-head">
-                <span className="island-panel-state">
-                  <span className="island-panel-state-dot" aria-hidden="true" />
-                  播放列表
-                </span>
-                <span className="island-panel-list-count">
-                  {playlist?.length ?? 0} 首
-                </span>
-              </div>
-              <ul className="island-panel-tracks">
-                {(playlist ?? []).map((t, i) => (
-                  <li
-                    key={`${t.url ?? t.title}-${i}`}
-                    className={`island-track${i === playlistIndex ? ' active' : ''}`}
-                  >
-                    <button
-                      type="button"
-                      className="island-track-main"
-                      aria-label={`${i === playlistIndex ? '暂停/继续' : '播放'} ${t.title}`}
-                      onClick={(event) => {
-                        event.stopPropagation()
-                        // 单击当前曲目:播放/暂停切换;其他曲目:直接播放
-                        if (i === playlistIndex) onTogglePlay?.()
-                        else onPlayTrack?.(i)
-                      }}
-                    >
-                      <span className="island-track-index" aria-hidden="true">
-                        {i === playlistIndex ? '▶' : String(i + 1).padStart(2, '0')}
-                      </span>
-                      <span className="island-track-meta">
-                        <span className="island-track-title">{t.title}</span>
-                        <span className="island-track-artist">{t.artist}</span>
-                      </span>
-                      <span className="island-track-duration">
-                        {t.duration > 0 ? formatTime(t.duration) : ''}
-                      </span>
-                    </button>
-                    {t.source === 'uploaded' && onRemoveTrack && (
-                      <button
-                        type="button"
-                        className="island-track-remove"
-                        aria-label={`删除 ${t.title}`}
-                        title="删除"
-                        onClick={(event) => {
-                          event.stopPropagation()
-                          onRemoveTrack(i)
-                        }}
-                      >
-                        <svg
-                          className="island-ctl-svg"
-                          width="13"
-                          height="13"
-                          viewBox="0 0 24 24"
-                          fill="none"
-                          stroke="currentColor"
-                          strokeWidth={2.2}
-                          strokeLinecap="round"
-                        >
-                          <line x1="18" y1="6" x2="6" y2="18" />
-                          <line x1="6" y1="6" x2="18" y2="18" />
-                        </svg>
-                      </button>
-                    )}
-                  </li>
-                ))}
-                {(playlist ?? []).length === 0 && (
-                  <li className="island-track-empty">暂无曲目,点击下方上传音乐</li>
-                )}
-              </ul>
-              <div className="island-panel-list-foot">
-                <button
-                  type="button"
-                  className="island-ctl island-ctl--upload"
-                  onClick={(event) => {
-                    event.stopPropagation()
-                    fileInputRef.current?.click()
-                  }}
-                >
-                  <svg
-                    className="island-ctl-svg"
-                    width="15"
-                    height="15"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth={2}
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  >
-                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                    <polyline points="17 8 12 3 7 8" />
-                    <line x1="12" y1="3" x2="12" y2="15" />
-                  </svg>
-                  <span>上传音乐</span>
-                </button>
-                <button
-                  type="button"
-                  className="island-ctl island-ctl--back"
-                  onClick={(event) => {
-                    event.stopPropagation()
-                    setPanelView('control')
-                  }}
-                >
-                  <svg
-                    className="island-ctl-svg"
-                    width="15"
-                    height="15"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth={2}
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  >
-                    <polyline points="15 18 9 12 15 6" />
-                  </svg>
-                  <span>返回</span>
-                </button>
-              </div>
-            </div>
+            <ListView
+              playlist={playlist}
+              playlistIndex={playlistIndex}
+              onPlayTrack={onPlayTrack}
+              onTogglePlay={onTogglePlay}
+              onRemoveTrack={onRemoveTrack}
+              fileInputRef={fileInputRef}
+              onBack={() => setPanelView('control')}
+            />
           ) : null}
-          {/* 主题色视图:左侧预设色板 + 右侧常驻 RGB 自定义取色 */}
+          {/* 主题色视图:预设色板(跟随播放模式 + 常用色)+
+              复用字体取色器(SV 面 + 色相条)+ hex 输入 */}
           {panelView === 'theme' && onThemeChange ? (
-            <div className="island-panel-theme">
-              <div className="island-panel-list-head">
-                <span className="island-panel-list-count">主题色</span>
-              </div>
-              <div className="island-theme-layout">
-                {/* 左:预设色板(跟随播放模式 + 常用色) */}
-                <div className="island-theme-presets">
-                  <button
-                    type="button"
-                    className={`island-theme-swatch island-theme-swatch--follow${customTheme == null ? ' active' : ''}`}
-                    title="跟随播放模式/状态色"
-                    onClick={(event) => {
-                      event.stopPropagation()
-                      const rect = islandRef.current?.getBoundingClientRect()
-                      triggerRipple(
-                        theme,
-                        event.clientX - (rect?.left ?? 0),
-                        event.clientY - (rect?.top ?? 0),
-                      )
-                      onThemeChange(null)
-                    }}
-                  />
-                  {THEME_PRESETS.map((c) => (
-                    <button
-                      key={c}
-                      type="button"
-                      className={`island-theme-swatch${customTheme === c ? ' active' : ''}`}
-                      style={{ background: c, '--swatch-color': c } as CSSProperties}
-                      title={c}
-                      onClick={(event) => {
-                        event.stopPropagation()
-                        const rect = islandRef.current?.getBoundingClientRect()
-                        triggerRipple(
-                          c,
-                          event.clientX - (rect?.left ?? 0),
-                          event.clientY - (rect?.top ?? 0),
-                        )
-                        onThemeChange(c)
-                      }}
-                    />
-                  ))}
-                </div>
-                {/* 右:常驻 RGB 自定义取色(输入即生效,无弹出层) */}
-                <div className="island-theme-custom">
-                  <div className="island-theme-custom-head">
-                    <span
-                      className="island-theme-custom-preview"
-                      style={{ background: theme }}
-                      aria-hidden="true"
-                    />
-                    <span>自定义 RGB</span>
-                  </div>
-                  {(
-                    [
-                      ['R', rgb.r],
-                      ['G', rgb.g],
-                      ['B', rgb.b],
-                    ] as const
-                  ).map(([ch, v]) => (
-                    <label key={ch} className="island-theme-rgb-row">
-                      <span className="island-theme-rgb-key">{ch}</span>
-                      <input
-                        type="number"
-                        min={0}
-                        max={255}
-                        value={v}
-                        onChange={(event) => {
-                          event.stopPropagation()
-                          handleRgbChange(ch.toLowerCase() as 'r' | 'g' | 'b', Number(event.target.value))
-                        }}
-                      />
-                    </label>
-                  ))}
-                </div>
-              </div>
-              <div className="island-panel-list-foot">
-                <button
-                  type="button"
-                  className="island-ctl island-ctl--back"
-                  onClick={(event) => {
-                    event.stopPropagation()
-                    setPanelView('control')
-                  }}
-                >
-                  <svg
-                    className="island-ctl-svg"
-                    width="15"
-                    height="15"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth={2}
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  >
-                    <polyline points="15 18 9 12 15 6" />
-                  </svg>
-                  <span>返回</span>
-                </button>
-              </div>
-            </div>
+            <ThemeView
+              customTheme={customTheme}
+              theme={theme}
+              onRipple={triggerRipple}
+              islandRef={islandRef}
+              onThemeChange={onThemeChange}
+              onBack={() => setPanelView('settings')}
+            />
           ) : null}
           {/* 自定义背景视图(托盘菜单入口,岛内打开):
-              一键上传即应用(cover 居中),之后可用双形态蒙版裁切
-              (展开态视口拖拽平移 + 紧凑态胶囊预览,岛体本身即实时预览);
-              无预览区——上传后默认就已更换 */}
+              一键上传即应用(cover 居中),之后可用双形态蒙版裁切;
+              裁切/视口/上传逻辑自包含在 BackgroundView */}
           {panelView === 'background' && onBackgroundChange ? (
-            <div className="island-panel-bg">
-              <div className="island-panel-list-head">
-                <span className="island-panel-list-count">自定义背景</span>
-              </div>
-              {/* 分段切换始终可见:即使当前形态没有图片(刚被移除),也能切到
-                  另一形态继续管理其图片与裁切 */}
-              <div
-                className={`island-bg-seg${bgTarget === 'compact' ? ' island-bg-seg--compact' : ''}`}
-                role="tablist"
-                aria-label="裁切目标"
-              >
-                {/* 滑动指示条:随目标切换回弹平移 */}
-                <span className="island-bg-seg-thumb" aria-hidden="true" />
-                <button
-                  type="button"
-                  className={bgTarget === 'expanded' ? 'on' : ''}
-                  onClick={(event) => {
-                    event.stopPropagation()
-                    setBgTarget('expanded')
-                  }}
-                >
-                  展开态
-                </button>
-                <button
-                  type="button"
-                  className={bgTarget === 'compact' ? 'on' : ''}
-                  onClick={(event) => {
-                    event.stopPropagation()
-                    setBgTarget('compact')
-                  }}
-                >
-                  紧凑态
-                </button>
-              </div>
-              {activeImage ? (
-                <>
-                  {/* 裁切区:当前形态的蒙版视口(拖拽平移/滚轮缩放/双击复位) */}
-                  <div className="island-bg-crop">
-                    <div
-                      className={`island-bg-viewport${bgTarget === 'compact' ? ' island-bg-viewport--compact' : ''}`}
-                      onPointerDown={handleBgPanDown}
-                      onPointerMove={handleBgPanMove}
-                      onPointerUp={handleBgPanEnd}
-                      onPointerCancel={handleBgPanEnd}
-                      onWheel={handleBgWheel}
-                      onDoubleClick={handleBgDoubleClick}
-                      style={bgStyleFor(
-                        activeImage ?? '',
-                        bgTarget === 'expanded' ? bgSizeExpanded : bgSizeCompact,
-                        activeCrop.posX,
-                        activeCrop.posY,
-                      )}
-                    >
-                      <span className="island-bg-mask-tag">
-                        {bgTarget === 'expanded' ? '展开态' : '紧凑态'}
-                      </span>
-                      <span className="island-bg-hint">拖拽平移 · 滚轮缩放 · 双击复位</span>
-                    </div>
-                  </div>
-                  <div className="island-bg-controls">
-                    <div className="island-bg-sliders">
-                      <label className="island-bg-slider">
-                        <span className="island-bg-opacity-row">
-                          <span>缩放</span>
-                          <span>{activeCrop.zoom.toFixed(1)}x</span>
-                        </span>
-                        <input
-                          type="range"
-                          min={100}
-                          max={400}
-                          value={Math.round(activeCrop.zoom * 100)}
-                          onChange={(event) => {
-                            event.stopPropagation()
-                            patchActiveCrop({ zoom: Number(event.target.value) / 100 })
-                          }}
-                        />
-                      </label>
-                      <label className="island-bg-slider">
-                        <span className="island-bg-opacity-row">
-                          <span>不透明度</span>
-                          <span>{Math.round((backgroundOpacity ?? 0.4) * 100)}%</span>
-                        </span>
-                        <input
-                          type="range"
-                          min={0}
-                          max={100}
-                          value={Math.round((backgroundOpacity ?? 0.4) * 100)}
-                          onChange={(event) => {
-                            event.stopPropagation()
-                            onBackgroundChange({
-                              expandedImage,
-                              compactImage,
-                              opacity: Number(event.target.value) / 100,
-                              expanded: expandedCrop,
-                              compact: compactCrop,
-                            })
-                          }}
-                        />
-                      </label>
-                    </div>
-                    <div className="island-bg-actions">
-                      <button
-                        type="button"
-                        className="island-ctl island-ctl--upload"
-                        onClick={(event) => {
-                          event.stopPropagation()
-                          bgFileInputRef.current?.click()
-                        }}
-                      >
-                        <svg
-                          className="island-ctl-svg"
-                          width="15"
-                          height="15"
-                          viewBox="0 0 24 24"
-                          fill="none"
-                          stroke="currentColor"
-                          strokeWidth={2}
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                        >
-                          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                          <polyline points="17 8 12 3 7 8" />
-                          <line x1="12" y1="3" x2="12" y2="15" />
-                        </svg>
-                        <span>更换图片</span>
-                      </button>
-                      {(activeCrop.zoom !== 1 || activeCrop.posX !== 50 || activeCrop.posY !== 50) && (
-                        <button
-                          type="button"
-                          className="island-ctl island-ctl--clear"
-                          onClick={(event) => {
-                            event.stopPropagation()
-                            patchActiveCrop({ zoom: 1, posX: 50, posY: 50 })
-                          }}
-                        >
-                          <svg
-                            className="island-ctl-svg"
-                            width="14"
-                            height="14"
-                            viewBox="0 0 24 24"
-                            fill="none"
-                            stroke="currentColor"
-                            strokeWidth={2.2}
-                            strokeLinecap="round"
-                          >
-                            <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
-                            <path d="M3 3v5h5" />
-                          </svg>
-                          <span>重置裁切</span>
-                        </button>
-                      )}
-                      <button
-                        type="button"
-                        className="island-ctl island-ctl--clear"
-                        onClick={(event) => {
-                          event.stopPropagation()
-                          // 移除当前形态的背景(另一形态不受影响)
-                          onBackgroundChange({
-                            expandedImage: bgTarget === 'expanded' ? null : expandedImage,
-                            compactImage: bgTarget === 'compact' ? null : compactImage,
-                            opacity: backgroundOpacity ?? 0.4,
-                            expanded: bgTarget === 'expanded' ? DEFAULT_CROP : expandedCrop,
-                            compact: bgTarget === 'compact' ? DEFAULT_CROP : compactCrop,
-                          })
-                        }}
-                      >
-                        <svg
-                          className="island-ctl-svg"
-                          width="14"
-                          height="14"
-                          viewBox="0 0 24 24"
-                          fill="none"
-                          stroke="currentColor"
-                          strokeWidth={2.2}
-                          strokeLinecap="round"
-                        >
-                          <line x1="18" y1="6" x2="6" y2="18" />
-                          <line x1="6" y1="6" x2="18" y2="18" />
-                        </svg>
-                        <span>移除背景</span>
-                      </button>
-                    </div>
-                  </div>
-                </>
-              ) : (
-                <div className="island-bg-empty">
-                  <p className="island-bg-empty-text">
-                    上传一张图片作为{bgTarget === 'expanded' ? '展开态' : '紧凑态'}背景,
-                    岛体将实时预览
-                  </p>
-                  <button
-                    type="button"
-                    className="island-ctl island-ctl--upload"
-                    onClick={(event) => {
-                      event.stopPropagation()
-                      bgFileInputRef.current?.click()
-                    }}
-                  >
-                    <svg
-                      className="island-ctl-svg"
-                      width="15"
-                      height="15"
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth={2}
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    >
-                      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                      <polyline points="17 8 12 3 7 8" />
-                      <line x1="12" y1="3" x2="12" y2="15" />
-                    </svg>
-                    <span>上传图片</span>
-                  </button>
-                </div>
-              )}
-              {/* 扁平返回键:独占一行,纯文本式(无按钮底/边框),背景编辑器的唯一收起方式 */}
-              <div className="island-panel-list-foot island-bg-foot">
-                <button
-                  type="button"
-                  className="island-bg-back"
-                  onClick={(event) => {
-                    event.stopPropagation()
-                    changeExpanded(false)
-                  }}
-                >
-                  <svg
-                    className="island-ctl-svg"
-                    width="15"
-                    height="15"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth={2}
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  >
-                    <polyline points="15 18 9 12 15 6" />
-                  </svg>
-                  <span>返回</span>
-                </button>
-              </div>
-            </div>
+            <BackgroundView
+              bgTarget={bgTarget}
+              expandedImage={expandedImage}
+              compactImage={compactImage}
+              backgroundOpacity={backgroundOpacity}
+              backgroundCrop={crop}
+              onBackgroundChange={onBackgroundChange}
+              onTargetChange={setBgTarget}
+              imageLibraryAvailable={Boolean(onImageLibraryChange)}
+              onOpenImageLibrary={() => setPanelView('image-library')}
+              onBack={() => setPanelView('settings')}
+            />
           ) : null}
-          {/* 背景图片上传(隐藏输入,由"上传图片"按钮触发) */}
-          <input
-            ref={bgFileInputRef}
-            type="file"
-            accept="image/*"
-            hidden
-            onClick={(event) => event.stopPropagation()}
-            onChange={handleBackgroundFileChange}
-          />
-          {/* 上传音乐文件选择(隐藏输入,由"上传音乐"按钮触发) */}
+          {/* 帮助手册视图(托盘菜单入口,岛内打开):操作引导列表 */}
+          {panelView === 'help' ? <HelpView onBack={() => setPanelView('settings')} /> : null}
+          {/* 设置视图(托盘菜单入口,岛内打开):设置类功能的总入口,
+              自定义背景 / 帮助手册 / 主题色按宿主能力显隐 */}
+          {panelView === 'settings' ? (
+            <SettingsView
+              onOpenBackground={onBackgroundChange ? () => setPanelView('background') : undefined}
+              onOpenHelp={() => setPanelView('help')}
+              onOpenTheme={onThemeChange ? () => setPanelView('theme') : undefined}
+              onOpenFont={onFontAdd || onFontLibraryChange ? () => setPanelView('font') : undefined}
+              onBack={() => changeExpanded(false)}
+            />
+          ) : null}
+          {/* 字体设置视图(设置视图"字体"入口,岛内打开):
+              上传自定义字体(注入 @font-face 应用到岛体全部文字)、
+              字体颜色:自动(按背景亮度选黑/白保证可读)或自定义色 */}
+          {panelView === 'font' && (onFontAdd || onFontLibraryChange) ? (
+            <FontView
+              fontLibrary={fontLibrary}
+              fontDataUrl={fontDataUrl}
+              fontFamilyName={fontFamilyName}
+              fontError={fontError}
+              fontWeight={fontWeight}
+              fontColor={fontColor}
+              onFontWeightChange={onFontWeightChange}
+              onFontSelect={onFontSelect}
+              onFontAdd={onFontAdd}
+              onFontColorChange={onFontColorChange}
+              onError={showFontError}
+              onOpenLibrary={() => setPanelView('font-library')}
+              onOpenColorView={() => setPanelView('font-color')}
+              onBack={() => setPanelView('settings')}
+            />
+          ) : null}
+          {/* 自定义颜色页(字体视图"自定义"入口,岛内打开):
+              预设色板 + 岛内自绘取色器(SV 面 + 色相条)+ hex 输入 */}
+          {panelView === 'font-color' && onFontColorChange ? (
+            <FontColorView
+              fontColor={fontColor}
+              onFontColorChange={onFontColorChange}
+              onBack={() => setPanelView('font')}
+            />
+          ) : null}
+          {/* 字体库页面(字体视图"字体库"入口,岛内打开,大面板):
+              搜索 / 列表(点击应用、行内编辑名称、删除)/ 上传入库 */}
+          {panelView === 'font-library' && onFontLibraryChange ? (
+            <FontLibraryView
+              fontLibrary={fontLibrary}
+              currentFontId={currentFontId}
+              onFontSelect={onFontSelect}
+              onFontLibraryChange={onFontLibraryChange}
+              onFontAdd={onFontAdd}
+              onError={showFontError}
+              onBack={() => setPanelView('font')}
+            />
+          ) : null}
+          {/* 图片库页面(背景视图"图片库"入口,岛内打开,大面板):
+              搜索 / 网格(点击应用当前形态、行内编辑名称、删除)/ 上传入库 */}
+          {panelView === 'image-library' && onImageLibraryChange ? (
+            <ImageLibraryView
+              imageLibrary={imageLibrary}
+              onImageLibraryChange={onImageLibraryChange}
+              onBackgroundChange={onBackgroundChange}
+              backgroundOpacity={backgroundOpacity}
+              expandedImage={expandedImage}
+              compactImage={compactImage}
+              bgTarget={bgTarget}
+              expandedCrop={expandedCrop}
+              compactCrop={compactCrop}
+              onBack={() => setPanelView('background')}
+            />
+          ) : null}
+          {/* 上传音乐文件选择(隐藏输入,由"上传音乐"按钮触发;
+              字体/背景上传输入已下沉到各自视图) */}
           <input
             ref={fileInputRef}
             type="file"
@@ -2350,4 +1469,4 @@ export function DynamicIsland({
       )}
     </div>
   )
-}
+})

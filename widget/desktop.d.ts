@@ -11,8 +11,8 @@ interface DesktopApi {
   quit(): void
   /** 置顶开关 */
   setAlwaysOnTop(on: boolean): void
-  /** 托盘菜单"自定义背景":订阅回调(渲染端在岛内打开背景编辑器) */
-  onOpenBackgroundEditor(callback: () => void): void
+  /** 托盘菜单"设置":订阅回调(渲染端在岛内展开设置视图) */
+  onOpenSettings(callback: () => void): void
   /** 调整窗口高度(背景编辑器视图需要更高空间) */
   setWindowHeight(height: number): void
   /** 右键长按拖拽移动挂件:开始(记录基准位置) */

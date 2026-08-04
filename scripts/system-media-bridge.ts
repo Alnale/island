@@ -57,6 +57,8 @@ function parseLrc(lrc: string): LyricLine[] {
 /** 歌词缓存:key = title|artist,5 分钟过期 */
 const lyricCache = new Map<string, { at: number; data: LyricResult | null }>()
 const LYRIC_CACHE_MS = 5 * 60 * 1000
+/** 歌词缓存容量上限:超出时淘汰最早存入的条目(常驻进程长期运行防无界增长) */
+const LYRIC_CACHE_MAX = 100
 
 interface LyricResult {
   title: string
@@ -73,6 +75,11 @@ async function lookupLyric(title: string, artist: string): Promise<LyricResult |
   if (hit && Date.now() - hit.at < LYRIC_CACHE_MS) return hit.data
   const result = await lookupLyricRemote(title, artist)
   lyricCache.set(key, { at: Date.now(), data: result })
+  if (lyricCache.size > LYRIC_CACHE_MAX) {
+    // Map 保持插入顺序,淘汰最早存入的条目(重复命中的条目位置不变)
+    const oldestKey = lyricCache.keys().next().value
+    if (oldestKey !== undefined) lyricCache.delete(oldestKey)
+  }
   return result
 }
 
