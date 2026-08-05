@@ -10,6 +10,7 @@ import {
 import { ISLAND_STATES, type IslandState, type TrackInfo } from '../../../data/islandStates'
 import type { LyricsState } from '../../../hooks/useLyrics'
 import { PLAY_MODES, type PlaybackMode } from '../../../media/playbackModes'
+import { loadLyricProvider } from '../../../media/lyricProviders'
 import { formatTime } from '../../../utils/format'
 import { ModeIcon } from '../ModeIcon'
 import { ParticleTime } from '../ParticleTime'
@@ -107,8 +108,9 @@ export function ControlView(props: ControlViewProps) {
     onBarKeyDown,
   } = props
 
-  // 歌词开关"打开"提示:播放键下方短暂显示歌词来源(网易云 API),
-  // 样式与宿主 hint("不支持进度跳转"等)同一通道,2.6s 自动消失
+  // 歌词开关"打开"提示:播放键下方短暂显示当前歌词 API 厂商名
+  // (网易云音乐/QQ音乐/自定义,设置里可切换),样式与宿主 hint
+  // ("不支持进度跳转"等)同一通道,2.6s 自动消失
   const [lyricHint, setLyricHint] = useState<string | null>(null)
   const lyricHintTimerRef = useRef(0)
   useEffect(() => () => window.clearTimeout(lyricHintTimerRef.current), [])
@@ -116,7 +118,7 @@ export function ControlView(props: ControlViewProps) {
     const next = !lyricShown
     onToggleLyric()
     if (next) {
-      setLyricHint('接入网易云歌词API')
+      setLyricHint(`接入${loadLyricProvider().name}歌词API`)
       window.clearTimeout(lyricHintTimerRef.current)
       lyricHintTimerRef.current = window.setTimeout(() => setLyricHint(null), 2600)
     }

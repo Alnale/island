@@ -15,7 +15,7 @@ Module._load = function (request, parent, isMain) {
         constructor() {}
         show() {}
       },
-      shell: { openPath: async () => {} },
+      shell: { openPath: async () => {}, openExternal: async () => {} },
     }
   }
   return origLoad.apply(this, arguments)

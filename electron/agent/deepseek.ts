@@ -3,7 +3,8 @@
  *
  * 裸 fetch + SSE 解析(不依赖 AI SDK,引擎零第三方依赖):
  *   POST {baseURL}/responses(base_url = https://api.deepseek.com,
- *   官方指南:https://api-docs.deepseek.com/zh-cn/guides/responses_api)
+ *   官方指南:https://api-docs.deepseek.com/zh-cn/guides/responses_api,
+ *   API 参考:https://api-docs.deepseek.com/zh-cn/api/create-response)
  *
  * 兼容性要点(严格按官方"兼容性明细"表):
  * - 顶层参数:model / input / instructions / stream / temperature /
@@ -139,9 +140,16 @@ async function* parseSse(body: ReadableStream<Uint8Array>, signal: AbortSignal):
 }
 
 /**
- * 发起一次流式请求(DeepSeek Responses API)。
+ * 发起一次流式请求(DeepSeek Responses API,官方指南 + API 参考:
+ * https://api-docs.deepseek.com/zh-cn/guides/responses_api
+ * https://api-docs.deepseek.com/zh-cn/api/create-response)。
  * 事件经 onEvent 实时转发(text-delta / reasoning-delta /
  * tool-partial-call / tool-call),完成后返回统一 ProviderOutcome。
+ * - jsonMode:text.format {type:'json_object'}(API 参考:text.format
+ *   支持 text / json_object / json_schema;prompt 需含 "json" 字样);
+ * - noThinking:reasoning.effort 'none'(API 参考:effort 值域
+ *   none/minimal/low/medium/high/xhigh/max,none = 关闭思考模式;
+ *   短输出任务如总结标题用它,避免思维链挤占输出预算)。
  * 失败抛 Error(调用方转成 error 事件);中止抛 AbortError。
  */
 export async function streamResponse(params: {
@@ -151,8 +159,10 @@ export async function streamResponse(params: {
   tools: AgentTool[]
   signal: AbortSignal
   onEvent: (event: AgentEvent) => void
+  jsonMode?: boolean
+  noThinking?: boolean
 }): Promise<ProviderOutcome> {
-  const { config, system, history, tools, signal, onEvent } = params
+  const { config, system, history, tools, signal, onEvent, jsonMode, noThinking } = params
   const base = config.baseURL.trim().replace(/\/+$/, '')
   const url = `${base}/responses`
 
@@ -173,10 +183,14 @@ export async function streamResponse(params: {
           tool_choice: 'auto',
         }
       : {}),
-    // 官方文档:reasoning.effort 支持(deepseek-v4-flash 思考模型;
-    // 可配置 low/medium/high)
-    reasoning: { effort: config.reasoningEffort || 'high' },
-    // 输出上限:单轮回复防失控(输出 384K 上限,不设会烧输出 token)
+    // 官方 API 参考:reasoning.effort 值域 none/minimal/low/medium/high/
+    // xhigh/max;none = 关闭思考模式;配置值直通(设置页可选"关")
+    reasoning: { effort: noThinking ? 'none' : config.reasoningEffort || 'high' },
+    // JSON 输出(API 参考 text.format):json_object 模式;
+    // 官方 json_mode 指南:prompt 必须含 "json" 字样(调用方保证)
+    ...(jsonMode ? { text: { format: { type: 'json_object' } } } : {}),
+    // 输出上限:单轮回复防失控(含思维链 token,官方:384K 上限,
+    // 不设会烧输出 token)
     max_output_tokens: 4096,
     stream: true,
   }

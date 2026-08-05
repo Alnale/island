@@ -103,6 +103,8 @@ export interface AgentController {
   loadSession(id: string): void
   deleteSession(id: string): void
   saveConfig(patch: Partial<AgentConfig>): Promise<void>
+  /** 重新拉取配置(LLM 自我配置后设置界面需刷新) */
+  refreshConfig(): void
 }
 
 export function useAgent(): AgentController {
@@ -223,6 +225,16 @@ export function useAgent(): AgentController {
           setLastError(event.message)
           setStatus('idle')
           break
+        case 'background-done': {
+          // 后台长任务完成(如 bili 下载):自动触发一轮对话——LLM 基于
+          // 系统提示的状态块主动告知用户结果,无需用户主动提问
+          // (实测:下载完成后用户不提问就不知道结果)。
+          // 复用 send:busy 时忽略(对话中的状态块已覆盖),idle 时发送;
+          // send 引用稳定(useCallback []),事件订阅闭包安全
+          const text = `【系统通知】${event.title}:${event.message}。请根据当前任务状态,用一两句话主动告知用户结果。`
+          send(text)
+          break
+        }
         default:
           break
       }
@@ -360,6 +372,26 @@ export function useAgent(): AgentController {
     const trimmed = text.trim()
     if (!trimmed) return
     if (statusRef.current === 'thinking' || statusRef.current === 'running') return
+    const prev = messagesRef.current
+    const last = prev[prev.length - 1]
+    // 上一轮被中止/失败(未落定助手消息,历史以 user 消息结尾):把新输入
+    // 合并进该消息——避免连续两条 user 消息(LLM 会把上一轮未答复的
+    // 请求当"仍待执行"重复执行 = 上下文污染,实测:switch_to_music
+    // 被重复调用,导致"打开B站"时又被自动切回音乐模式;此处合并后
+    // 两段请求同一轮内一并答复)
+    if (last && last.role === 'user') {
+      const merged: AgentMessage = {
+        ...last,
+        parts: [...last.parts, { type: 'text', text: trimmed }],
+      }
+      const next = [...prev.slice(0, -1), merged]
+      messagesRef.current = next
+      setMessages(next)
+      setLastError(null)
+      // 引擎无状态:回传完整历史(末尾即当前轮的用户消息,引擎不再追加)
+      window.desktop?.agentSend?.(trimmed, next)
+      return
+    }
     // 注意:不递增会话版本(连续对话时总结基于最新消息,旧结果主题一致
     // 仍有效;递增会把每轮总结都作废,标题永远等不到)
     const userMessage: AgentMessage = {
@@ -367,7 +399,7 @@ export function useAgent(): AgentController {
       role: 'user',
       parts: [{ type: 'text', text: trimmed }],
     }
-    const next = [...messagesRef.current, userMessage]
+    const next = [...prev, userMessage]
     // 同步更新引用:连续 send 之间(React 尚未渲染)也能拿到最新历史,
     // 避免第二次 send 基于旧消息覆盖第一次(最新一轮用户消息消失)
     messagesRef.current = next
@@ -427,6 +459,22 @@ export function useAgent(): AgentController {
     if (next) setConfig(next as AgentConfig)
   }, [])
 
+  /**
+   * 重新拉取配置与工具清单(主进程)。
+   * 场景:LLM 对话中 mcp_config/skills_config 工具改了配置(写 settings.json)
+   * 或创建了技能(写技能目录)——而 config/tools 都只在挂载时读一次 →
+   * 设置界面显示旧快照(实测 bug:对话里添加的 MCP 服务设置里为空;
+   * LLM 创建的技能不出现在设置技能列表)。打开 Agent 设置视图时调用;
+   * tools 刷新 = agentGetTools(listAllTools 实时扫描,新技能立即可见)
+   */
+  const refreshConfig = useCallback(() => {
+    window.desktop?.agentGetConfig?.().then(setConfig).catch(() => {})
+    window.desktop
+      ?.agentGetTools?.()
+      .then((list) => setTools(list as AgentToolInfo[]))
+      .catch(() => {})
+  }, [])
+
   return {
     status,
     messages,
@@ -442,6 +490,7 @@ export function useAgent(): AgentController {
     loadSession,
     deleteSession,
     saveConfig,
+    refreshConfig,
   }
 }
 

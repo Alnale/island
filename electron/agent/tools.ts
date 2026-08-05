@@ -22,8 +22,31 @@ import type { AgentTool, ToolParams } from './types'
 const XXT_SCRIPT = 'C:/Users/asus/Desktop/MS Agent/main-sub-agent-system/tools/xxt/auto_answer.py'
 /** bili-tool 二进制绝对路径(B站数据查询,纯 Rust 单二进制;查询命令 --json 输出到 stdout) */
 const BILI_BIN = 'C:/Users/asus/Desktop/bilibili/bili-rs/target/release/bili-tool.exe'
+/**
+ * bili-tool 工作目录(**必须显式固定**):config 的 outdir=downloads 是相对
+ * 路径,不指定 cwd 时下载会落在 Electron 的启动目录(打包版可能是
+ * System32/exe 目录,用户和 LLM 都找不到);固定到 bili-rs 项目目录,
+ * 下载落在 `C:/Users/asus/Desktop/bilibili/bili-rs/downloads/`,
+ * 与用户手动使用 bili-tool 的现有下载一致
+ */
+const BILI_CWD = 'C:/Users/asus/Desktop/bilibili/bili-rs'
 /** DocFlow 服务地址(本地 Flask) */
 const DOCFLOW_BASE = 'http://127.0.0.1:5000'
+
+/** 解析任务的输出目录(--outdir 参数,相对 BILI_CWD 解析;缺省默认目录);
+ * 返回绝对路径,供通知/状态注入/LLM 报告真实落点 */
+function biliOutdir(args: string[]): string {
+  const i = args.indexOf('--outdir')
+  const dir = i >= 0 && args[i + 1] ? args[i + 1] : 'downloads'
+  return path.isAbsolute(dir) ? path.normalize(dir) : path.join(BILI_CWD, dir)
+}
+
+/** saved 记录里的相对路径 → 绝对路径(相对 BILI_CWD;已是绝对路径则原样) */
+function absolutizeBiliPath(rel: string): string {
+  const p = rel.trim()
+  if (!p || path.isAbsolute(p)) return p
+  return path.join(BILI_CWD, p)
+}
 
 /** 运行 Python 脚本(收集 stdout,超时杀进程) */
 function runPython(args: string[], timeoutMs: number): Promise<string> {
@@ -48,35 +71,147 @@ function runPython(args: string[], timeoutMs: number): Promise<string> {
   })
 }
 
-/** 进行中的后台下载任务(完成/失败时发系统通知,用户无需轮询等待) */
-const biliDownloads = new Map<number, { startedAt: number; args: string[] }>()
+/** 后台 bili-tool 长任务记录(进行中 + 已结束;结束记录保留供状态注入,
+ * 让 LLM 对下载完成与否有真实感知——否则完成信息只经系统通知一次性
+ * 播报,后续对话中 LLM 仍会惯性回复"还在下载/完成后会通知",实测 bug) */
+interface BiliJob {
+  pid: number
+  startedAt: number
+  args: string[]
+  /** 是否已结束(close 事件落定;未落定视为进行中) */
+  finished: boolean
+  exitCode: number | null
+  finishedAt: number
+  /** 成功后的输出文件绝对路径(close 后查 saved 记录解析;空 = 未查/查不到) */
+  outputPaths: string[]
+}
+
+/** 后台 bili 任务(完成/失败时发系统通知,用户无需轮询等待) */
+const biliJobs = new Map<number, BiliJob>()
+/** 已结束记录保留时长(超过后从状态注入清除;进程存续期内存占用可忽略) */
+const BILI_JOB_TTL_MS = 24 * 60 * 60 * 1000
+/** 进行中任务失联阈值:超过仍无 close,进程可能已被外部终结 */
+const BILI_STALE_MS = 6 * 60 * 60 * 1000
+
+/** 清理已结束且超 TTL 的旧记录 */
+function pruneBiliJobs(now: number) {
+  for (const [pid, job] of biliJobs) {
+    if (job.finished && now - job.finishedAt > BILI_JOB_TTL_MS) biliJobs.delete(pid)
+  }
+}
+
+/** 任务的人话标签与目标(args[0]:get = 单视频、download = UP 批量) */
+function biliJobLabel(args: string[]): string {
+  const target = args[1] ?? ''
+  return args[0] === 'download' ? `UP 主批量下载(${target})` : `视频下载(${target})`
+}
+
+/** 全部任务的确定性状态快照(按启动时间排序;文案稳定,不随流逝时间
+ * 逐字变化——状态块是系统提示末尾的唯一动态段,状态不变时不产生
+ * 序列化抖动,不破坏 DeepSeek 前缀缓存) */
+function getBiliJobLines(): string[] {
+  const now = Date.now()
+  pruneBiliJobs(now)
+  const jobs = [...biliJobs.values()].sort((a, b) => a.startedAt - b.startedAt)
+  return jobs.map((j) => {
+    const label = biliJobLabel(j.args)
+    if (!j.finished) {
+      // 进行中也带上输出目录:LLM 回答"下载到哪"时能给真实绝对路径
+      const outdir = biliOutdir(j.args)
+      return now - j.startedAt > BILI_STALE_MS
+        ? `- 进行中(进程 ${j.pid},已启动超过 6 小时,进程可能已丢失,可用 bili saved 确认):${label},输出目录 ${outdir}`
+        : `- 进行中(进程 ${j.pid}):${label},输出目录 ${outdir}`
+    }
+    const t = new Date(j.finishedAt)
+    const hm = `${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}`
+    if (j.exitCode !== 0) {
+      return `- 已失败(${hm},退出码 ${j.exitCode},进程 ${j.pid}):${label}`
+    }
+    // 已完成:列出输出文件绝对路径(LLM 据此告知用户视频在哪,
+    // 不再"可在下载目录查看"这种含糊说法)
+    const files = j.outputPaths ?? []
+    return (
+      `- 已完成(${hm},进程 ${j.pid}):${label}` +
+      (files.length > 0 ? `,文件:\n      ${files.join('\n      ')}` : `,输出目录 ${biliOutdir(j.args)}`)
+    )
+  })
+}
+
+/** 后台 bili 任务状态注入块(引擎追加到系统提示末尾;无任务返回空串)。
+ * 让 LLM 回答下载相关问题时依据真实状态,而不是"长任务默认还没好" */
+export function getBiliBackgroundStatus(): string {
+  const lines = getBiliJobLines()
+  if (lines.length === 0) return ''
+  return (
+    '【后台下载任务状态(最新,以此为准)】\n' +
+    lines.join('\n') +
+    '\n对话中提及这些下载时按状态如实回答:已完成/已失败就直接说明,不要再"还在下载"或"完成后会通知";进行中才说还在下载。'
+  )
+}
+
+/**
+ * 完成时查询 saved 记录,提取本次输出的文件绝对路径。
+ * 记录路径是相对 BILI_CWD 的,必须转绝对路径,否则 LLM/通知
+ * 说不清视频落在哪个文件夹(用户实测反馈)。
+ * 取最新 limit 条里落在本任务输出目录下的记录(刚完成的文件在最前;
+ * 并发任务/手动下载混入时会多报几条,比漏报好)
+ */
+async function resolveBiliOutputs(job: BiliJob): Promise<string[]> {
+  try {
+    const out = await runBili(['saved', '--limit', '10'], 15000)
+    const outdir = biliOutdir(job.args).toLowerCase()
+    const files: string[] = []
+    for (const line of out.split('\n')) {
+      const i = line.lastIndexOf(' | ')
+      if (i === -1) continue
+      const abs = absolutizeBiliPath(line.slice(i + 3))
+      if (abs.toLowerCase().startsWith(outdir)) files.push(abs)
+    }
+    return files
+  } catch {
+    return []
+  }
+}
 
 /** 后台启动 bili-tool 长任务(视频下载):detached 独立进程,立即返回,
  * 不阻塞对话;完成/失败时发系统通知(下载中查询 saved 没有记录是正常的);
  * 返回文本明确"无需等待",防止 Agent 自行反复轮询造成等待感 */
 function runBiliBackground(args: string[]): string {
   try {
-    const child = spawn(BILI_BIN, args, { windowsHide: true, stdio: 'ignore', detached: true })
+    const child = spawn(BILI_BIN, args, { windowsHide: true, stdio: 'ignore', detached: true, cwd: BILI_CWD })
     child.unref()
     const pid = child.pid ?? -1
-    biliDownloads.set(pid, { startedAt: Date.now(), args })
+    biliJobs.set(pid, { pid, startedAt: Date.now(), args, finished: false, exitCode: null, finishedAt: 0, outputPaths: [] })
     child.on('close', (code) => {
-      const job = biliDownloads.get(pid)
-      biliDownloads.delete(pid)
+      const job = biliJobs.get(pid)
       if (!job) return
-      // 下载完成/失败:系统通知(长任务自动收尾,无需 Agent 轮询)
-      const isUp = job.args[0] === 'download'
-      const label = isUp ? 'UP 主视频批量下载' : '视频下载'
-      new Notification({
-        title: 'B站下载' + (code === 0 ? '完成' : '结束'),
-        body:
-          code === 0
-            ? `${label}已完成,可在 bili-tool 下载目录查看`
-            : `${label}异常退出(退出码 ${code}),请用 bili saved 查看记录或重试`,
-      }).show()
+      // 状态推进:进行中 → 结束(记录保留供后续状态注入;通知用户收尾)
+      job.finished = true
+      job.exitCode = code
+      job.finishedAt = Date.now()
+      const label = biliJobLabel(job.args)
+      if (code !== 0) {
+        new Notification({
+          title: 'B站下载结束',
+          body: `${label}异常退出(退出码 ${code}),请用 bili saved 查看记录或重试`,
+        }).show()
+        return
+      }
+      // 成功:后台查 saved 记录解析输出文件绝对路径 → 状态注入 + 通知
+      void resolveBiliOutputs(job).then((files) => {
+        job.outputPaths = files
+        const outdir = biliOutdir(job.args)
+        const message =
+          files.length > 0 ? `${label}已完成:\n${files.join('\n')}` : `${label}已完成,输出目录:${outdir}`
+        new Notification({ title: 'B站下载完成', body: message }).show()
+        // 后台任务完成回调:引擎转发 background-done → 渲染端自动触发
+        // 一轮对话,LLM 主动告知用户下载结果(无需用户主动提问)
+        deps.onBackgroundDone?.({ title: 'B站下载完成', message })
+      })
     })
     return (
       `已后台启动 bili-tool 下载:${args.join(' ')}(进程 ${pid})。` +
+      `输出目录:${biliOutdir(args)}。` +
       '**这是长任务,通常 1-10 分钟,不要等待**:请立即告知用户"下载已开始,完成后会有系统通知";' +
       '完成/失败都会自动发系统通知,不需要反复查询。' +
       '仅当用户主动询问下载进度时,才调用 bili saved 查询下载记录(下载进行中查不到记录是正常的)。'
@@ -86,10 +221,11 @@ function runBiliBackground(args: string[]): string {
   }
 }
 
-/** 运行 bili-tool(查询类命令,stdout 为 JSON;超时杀进程) */
+/** 运行 bili-tool(查询类命令,stdout 为 JSON;超时杀进程;
+ * cwd 固定 BILI_CWD,saved 记录等相对路径才能按同一基准解析) */
 function runBili(args: string[], timeoutMs: number): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = spawn(BILI_BIN, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
+    const child = spawn(BILI_BIN, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], cwd: BILI_CWD })
     let out = ''
     let err = ''
     child.stdout.on('data', (d: Buffer) => (out += d.toString()))
@@ -183,13 +319,55 @@ async function biliQuery(params: ToolParams): Promise<string> {
       return runBili(['subtitle', query], 60000)
     }
     case 'saved': {
-      // 已下载记录(查询后台下载任务是否完成)
+      // 已下载记录(查询后台下载任务是否完成)。
+      // 记录里的路径是相对 BILI_CWD 的,逐行转绝对路径——
+      // 否则 LLM 看到 downloads\xxx.mp4 不知道真实落点(用户实测反馈)
       const limit = Math.min(Math.max(Number(params.limit) || 20, 1), 200)
-      return runBili(['saved', '--limit', String(limit)], 30000)
+      const out = await runBili(['saved', '--limit', String(limit)], 30000)
+      return out
+        .split('\n')
+        .map((line) => {
+          const i = line.lastIndexOf(' | ')
+          if (i === -1) return line
+          return line.slice(0, i + 3) + absolutizeBiliPath(line.slice(i + 3))
+        })
+        .join('\n')
+    }
+    case 'open': {
+      // 搜索并直接打开第一个结果(一次调用完成"搜索+打开",
+      // 免去 LLM 解析 JSON 再拼接 BV 链接的中间步骤)。
+      // 默认视频 → bvid 拼视频页;type=user → mid 拼 UP 空间页
+      if (!query) throw new Error('open 需要搜索关键词')
+      const type = String(params.type ?? 'video')
+      if (!['video', 'user', 'bangumi'].includes(type)) {
+        throw new Error('type 仅支持 video/user/bangumi')
+      }
+      const json = await runBili(['search', query, '--type', type, '--json'], 30000)
+      let items: unknown = null
+      try {
+        items = JSON.parse(json)
+      } catch {
+        // 解析失败走下方无结果分支
+      }
+      const first = Array.isArray(items) && items.length > 0 ? items[0] : null
+      const rec = first && typeof first === 'object' ? (first as Record<string, unknown>) : null
+      const url =
+        type === 'user' && typeof rec?.mid === 'number'
+          ? `https://space.bilibili.com/${rec.mid}`
+          : typeof rec?.bvid === 'string' && rec.bvid
+            ? `https://www.bilibili.com/video/${rec.bvid}`
+            : ''
+      if (!url) throw new Error(`搜索"${query}"无结果或格式异常,请改用 search 查看`)
+      const title =
+        typeof rec?.title === 'string' ? rec.title : typeof rec?.name === 'string' ? rec.name : ''
+      // 标题自带《》时不重复包裹(如 B站 标题常含书名号)
+      const shown = title ? (title.includes('《') ? title : `《${title}》`) : ''
+      await shell.openExternal(url)
+      return `已打开第一个搜索结果:${shown}\n${url}`
     }
     default:
       throw new Error(
-        `未知 action:${action}(支持 up_info/up_videos/search/trending/comments/download/download_up/danmaku/subtitle/saved)`,
+        `未知 action:${action}(支持 up_info/up_videos/search/open/trending/comments/download/download_up/danmaku/subtitle/saved)`,
       )
   }
   return runBili(args, 30000)
@@ -369,7 +547,15 @@ async function webSearch(query: string, count: number): Promise<string> {
 }
 
 /** 模块化工具清单(每次注册都是独立对象,便于后续按需增删) */
-export function createTools(deps: { onSwitchToMusic(): void }): AgentTool[] {
+export function createTools(deps: {
+  onSwitchToMusic(): void
+  /**
+   * 后台长任务完成回调(如 bili 下载完成):引擎转发为 background-done
+   * 事件 → 渲染端自动触发一轮对话,LLM 主动告知用户结果(用户无需
+   * 主动提问——实测下载完成后不提问就不知道结果)
+   */
+  onBackgroundDone?(info: { title: string; message: string }): void
+}): AgentTool[] {
   return [
     {
       name: 'exec_command',
@@ -628,7 +814,7 @@ export function createTools(deps: { onSwitchToMusic(): void }): AgentTool[] {
       description:
         'B站数据查询与视频下载(调用本机 bili-tool,Rust 单二进制,免 Python)。' +
         '查询:up_info 查 UP 主信息(粉丝/关注/投稿/获赞) / up_videos 查 UP 主视频列表 / ' +
-        'search 搜索视频/用户/番剧 / trending 查热门榜(分区 rid:0全站 1动画 3音乐 4游戏 5娱乐 36科技 ' +
+        'search 搜索视频/用户/番剧 / open 搜索并直接打开第一个结果(用户说"搜索XX打开第一个"时用它,一次完成;type=user 打开 UP 空间页) / trending 查热门榜(分区 rid:0全站 1动画 3音乐 4游戏 5娱乐 36科技 ' +
         '119鬼畜 129舞蹈 155生活 160时尚 167知识 181影视) / comments 查视频评论区。' +
         '下载:download 下载单个视频 / download_up 批量下载 UP 主视频(可限最近 N 个/正则过滤,支持 --dry-run 先预览) / ' +
         'danmaku 下载弹幕(XML/ASS/TXT/JSON) / subtitle 下载 CC 字幕 / saved 查已下载记录。' +
@@ -651,6 +837,7 @@ export function createTools(deps: { onSwitchToMusic(): void }): AgentTool[] {
               'up_info',
               'up_videos',
               'search',
+              'open',
               'trending',
               'comments',
               'download',
@@ -660,7 +847,7 @@ export function createTools(deps: { onSwitchToMusic(): void }): AgentTool[] {
               'saved',
             ],
             description:
-              '操作:up_info/up_videos/search/trending/comments(查询)/download(单视频下载)/download_up(UP批量下载)/danmaku(弹幕)/subtitle(字幕)/saved(下载记录)',
+              '操作:up_info/up_videos/search/open/trending/comments(查询)/download(单视频下载)/download_up(UP批量下载)/danmaku(弹幕)/subtitle(字幕)/saved(下载记录)',
           },
           query: {
             type: 'string',

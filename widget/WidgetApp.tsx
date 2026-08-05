@@ -58,6 +58,9 @@ const WINDOW_W = 520
 const WINDOW_H = 280
 /** 背景编辑器视图的窗口高度(岛体加高到 440 + 余量) */
 const BG_VIEW_WINDOW_H = 480
+/** 帮助手册视图窗口尺寸:岛体 800×640(缩放 200% 的大小)+ 余量 */
+const HELP_WIN_W = 820
+const HELP_VIEW_WINDOW_H = 680
 /**
  * 视图 → 窗口高度映射(岛体高度 + 顶部 8px 定位余量 + 缓冲):
  * 背景编辑器 / 库页面用大面板(480);自定义颜色页 352px 岛体
@@ -69,6 +72,7 @@ const VIEW_WINDOW_H: Record<string, number> = {
   'image-library': BG_VIEW_WINDOW_H,
   'font-color': 364,
   theme: 364,
+  help: HELP_VIEW_WINDOW_H,
   // Agent 聊天面板:高度内容自适应(下限 240),窗口由 onAgentPanelHeight
   // 动态跟随(岛体 + 40 余量);VIEW_WINDOW_H 无需登记(回落 WINDOW_H)
   // Agent 设置表单(API Key / 模型 / 系统提示词)
@@ -104,11 +108,19 @@ export default function WidgetApp() {
     }
   })
   // 待应用模式(托盘切换请求):先收起岛体动画完成,再真正切换数据源,
-  // 避免"Agent 面板瞬间消失 + 尺寸突变"造成的 UI 变形错乱
-  const [pendingMode, setPendingMode] = useState<'music' | 'agent' | null>(null)
+  // 避免"Agent 面板瞬间消失 + 尺寸突变"造成的 UI 变形错乱。
+  // source:切换来源('tool' = Agent 工具 switch_to_music)——工具触发的
+  // 切换属于对话流程,应用模式后**不中止**正在运行的本轮(见下方 effect)
+  const [pendingMode, setPendingMode] = useState<{
+    mode: 'music' | 'agent'
+    source: 'user' | 'tool'
+  } | null>(null)
+  // 最近一次应用的模式切换来源(供"切回音乐是否中止 Agent 轮次"判定;
+  // 默认 'user':启动/手势/托盘均为用户主动)
+  const lastModeSourceRef = useRef<'user' | 'tool'>('user')
   // 订阅托盘切换(进入待应用队列)+ 启动时向主进程确认持久化模式(直接应用)
   useEffect(() => {
-    window.desktop?.onSetMode?.((next) => setPendingMode(next))
+    window.desktop?.onSetMode?.((payload) => setPendingMode(payload))
     window.desktop?.getMode?.().then((persisted) => {
       setMode(persisted)
       try {
@@ -121,13 +133,14 @@ export default function WidgetApp() {
   // 模式切换:收起岛体(当前模式数据保留到动画完成)→ 切换数据源 + 重置窗口
   const [collapseSeq, setCollapseSeq] = useState(0)
   useEffect(() => {
-    if (!pendingMode || pendingMode === mode) return
+    if (!pendingMode || pendingMode.mode === mode) return
     setCollapseSeq((s) => s + 1)
     const timer = window.setTimeout(() => {
-      setMode(pendingMode)
+      lastModeSourceRef.current = pendingMode.source
+      setMode(pendingMode.mode)
       setPendingMode(null)
       try {
-        localStorage.setItem(MODE_STORAGE_KEY, pendingMode)
+        localStorage.setItem(MODE_STORAGE_KEY, pendingMode.mode)
       } catch {
         // 忽略存储失败
       }
@@ -135,7 +148,7 @@ export default function WidgetApp() {
       // 避免切到 Agent 模式后声音继续;切回音乐时不自动恢复,
       // 由用户手动继续(与数据源切换的"双向暂停"约定一致)。
       // externalActive 为切换前(音乐模式)的值,闭包捕获正确
-      if (pendingMode === 'agent') {
+      if (pendingMode.mode === 'agent') {
         if (externalActive) void system.control('pause')
         else player.pause()
       }
@@ -144,9 +157,18 @@ export default function WidgetApp() {
     return () => window.clearTimeout(timer)
     // eslint-disable-next-line react-hooks/exhaustive-deps -- externalActive/system/player 取切换前状态即可
   }, [pendingMode, mode])
-  // 切回音乐模式时中止正在运行的 Agent 轮次
+  // 切回音乐模式时中止正在运行的 Agent 轮次——但 **工具触发**的切换除外
+  // (switch_to_music 属于对话流程:中止会把最终回复一并丢弃,历史停在
+  // 未答复的用户消息;下一轮 LLM 把旧请求当"仍待执行"重复执行,造成
+  // 上下文污染,实测"打开B站"时又被自动切回音乐模式)。工具触发的
+  // 切换让引擎完成本轮,回复正常落定,回到 Agent 模式气泡还在。
+  // 用户主动切换(托盘/手势,source='user')保持中止语义不变
   useEffect(() => {
-    if (mode === 'music' && (agent.status === 'thinking' || agent.status === 'running')) {
+    if (
+      mode === 'music' &&
+      lastModeSourceRef.current !== 'tool' &&
+      (agent.status === 'thinking' || agent.status === 'running')
+    ) {
       agent.abort()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -282,6 +304,11 @@ export default function WidgetApp() {
   useEffect(() => {
     window.desktop?.onOpenSettings?.(() => setSettingsSeq((s) => s + 1))
   }, [])
+  // 初次安装引导:主进程检测到首启 → 自动展开并进入帮助手册
+  const [helpSeq, setHelpSeq] = useState(0)
+  useEffect(() => {
+    window.desktop?.onOpenHelp?.(() => setHelpSeq((s) => s + 1))
+  }, [])
   useEffect(() => {
     // 旧版单图迁移后,恢复两个槽位的背景图(IndexedDB);
     // 旧版本可能存了未降采样的大图,降采样后再用并回存
@@ -335,7 +362,11 @@ export default function WidgetApp() {
   // 高空间视图(背景编辑器 / 库页面 / 自定义颜色页)按映射同步调整
   // 窗口高度,离开回落常规高度与宽度(520)
   const handlePanelViewChange = useCallback((view: string) => {
-    window.desktop?.setWindowSize?.(WINDOW_W, VIEW_WINDOW_H[view] ?? WINDOW_H)
+    // 帮助手册:大尺寸窗口(820×680,岛体 800×640 承载教学内容)
+    window.desktop?.setWindowSize?.(
+      view === 'help' ? HELP_WIN_W : WINDOW_W,
+      VIEW_WINDOW_H[view] ?? WINDOW_H,
+    )
   }, [])
   // Agent 面板视觉尺寸(内容自适应 × 界面缩放):窗口 = 岛体 + 余量。
   // <4px 的变化不 resize(流式回复时逐行长高,避免窗口高频抖动)
@@ -460,12 +491,17 @@ export default function WidgetApp() {
 
   // 系统媒体监听激活(外部平台正在播放):数据与控制优先走系统,本地播放器让位
   const externalActive = system.active && system.track != null && useExternalSource
-  // 歌词字幕:按当前曲目(外部平台或本地)自动查询,播放位置驱动高亮
+  // 歌词字幕:按当前曲目(外部平台或本地)自动查询,播放位置驱动高亮。
+  // platformId:自动切换歌词 API 到监听平台对应的厂商(QQ音乐/网易云/酷狗/
+  // 酷我;浏览器等无对应平台回退手动配置)
   const lyricsData = useLyrics(
     externalActive ? system.track?.title ?? null : player.track?.title ?? null,
     externalActive ? system.track?.artist ?? null : player.track?.artist ?? null,
-    externalActive ? system.position : player.position,
+    // 歌词用 lyricPosition(跟随平台上报,与歌词对齐);进度条仍用
+    // position(锚定 + 本地时钟,平滑)
+    externalActive ? system.lyricPosition : player.position,
     true,
+    externalActive ? system.platform?.id ?? null : null,
   )
 
   // memo 化外部曲目对象:曲目未变时保持引用稳定(DynamicIsland 已包 memo)
@@ -761,6 +797,8 @@ export default function WidgetApp() {
           agentConfig={{
             config: agent.config,
             onSave: agent.saveConfig,
+            onRefresh: agent.refreshConfig,
+            tools: agent.tools,
           }}
           position={islandPosition}
           duration={islandDuration}
@@ -793,6 +831,7 @@ export default function WidgetApp() {
           backgroundCrop={backgroundCropProp}
           onBackgroundChange={handleBackgroundChange}
           requestSettingsSeq={settingsSeq}
+          requestHelpSeq={helpSeq}
           onPanelViewChange={handlePanelViewChange}
           onAgentPanelSize={handleAgentPanelSize}
           onAgentPanelWidth={handleAgentPanelWidth}

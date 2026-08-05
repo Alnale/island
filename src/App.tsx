@@ -347,11 +347,12 @@ export default function App() {
       return real === current ? current : real
     })
   }, [system.mode, externalActive])
-  // 歌词字幕:按当前曲目(外部平台或本地)自动查询,播放位置驱动高亮
+  // 歌词字幕:按当前曲目(外部平台或本地)自动查询,播放位置驱动高亮。
+  // 歌词用 lyricPosition(跟随平台上报,与歌词对齐);进度条仍用 position
   const lyricsData = useLyrics(
     externalActive ? system.track?.title ?? null : player.track?.title ?? null,
     externalActive ? system.track?.artist ?? null : player.track?.artist ?? null,
-    externalActive ? system.position : player.position,
+    externalActive ? system.lyricPosition : player.position,
     true,
   )
 

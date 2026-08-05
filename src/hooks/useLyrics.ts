@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { resolveLyricProvider } from '../media/lyricProviders'
 
 /** 本地桥接歌词代理地址(scripts/system-media-bridge.ts 提供) */
 const LYRIC_BASE = 'http://127.0.0.1:8765/system-media/lyric'
@@ -29,6 +30,8 @@ export function useLyrics(
   artist: string | null,
   position: number,
   active: boolean,
+  /** 当前监听平台 id(如 qqmusic/netease):自动切换对应厂商的歌词 API */
+  platformId?: string | null,
 ): LyricsState {
   const [loading, setLoading] = useState(false)
   const [lyricTitle, setLyricTitle] = useState<string | null>(null)
@@ -36,7 +39,9 @@ export function useLyrics(
   const [currentIndex, setCurrentIndex] = useState(-1)
   const lastKeyRef = useRef('')
 
-  // 曲目变化 → 查询歌词(缓存由桥接承担)
+  // 曲目变化(或厂商切换)→ 查询歌词(缓存由桥接承担)。
+  // key 含 provider:切换歌词 API 后**即时重新查询**当前歌曲——
+  // 原实现 key 只有 title|artist,切厂商不触发查询,需重播才有新歌词
   useEffect(() => {
     if (!active || !title) {
       setLines([])
@@ -44,12 +49,16 @@ export function useLyrics(
       lastKeyRef.current = ''
       return
     }
-    const key = `${title}|${artist ?? ''}`
+    // 监听平台有对应厂商(QQ/网易云/酷狗/酷我)→ 自动切换;否则手动配置
+    const provider = resolveLyricProvider(platformId)
+    const key = `${provider.id}|${title}|${artist ?? ''}`
     if (key === lastKeyRef.current) return
     lastKeyRef.current = key
     setLoading(true)
     setLines([])
-    const params = new URLSearchParams({ title, artist: artist ?? '' })
+    // 请求带 provider,桥接按厂商实现搜索+歌词;自定义带 URL 模板
+    const params = new URLSearchParams({ title, artist: artist ?? '', provider: provider.id })
+    if (provider.type === 'custom' && provider.url) params.set('url', provider.url)
     fetch(`${LYRIC_BASE}?${params.toString()}`, {
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     })
@@ -77,7 +86,7 @@ export function useLyrics(
       .finally(() => {
         if (key === lastKeyRef.current) setLoading(false)
       })
-  }, [active, title, artist])
+  }, [active, title, artist, platformId])
 
   // 播放位置 → 当前歌词行
   useEffect(() => {

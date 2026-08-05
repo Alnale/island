@@ -54,6 +54,11 @@ export type AgentEvent =
       usage?: { input: number; output: number; cached?: number }
     }
   | { type: 'error'; message: string }
+  /** 记忆自我进化后台任务进度(渲染端忽略,状态机不受影响) */
+  | { type: 'evolution-progress'; phase: string }
+  | { type: 'evolution-done' }
+  /** 后台长任务完成(如 bili 下载):自动触发一轮对话,LLM 主动回复 */
+  | { type: 'background-done'; title: string; message: string }
 
 /** 流式中的工具调用状态(参数收齐后解析为对象) */
 export interface AgentToolCallState {
@@ -86,6 +91,8 @@ export interface AgentToolInfo {
     properties: Record<string, unknown>
     required?: string[]
   }
+  /** 技能来源分区:created = 灵动岛创建 / imported = 手动导入 / scanned = 扫描到的 */
+  sourceKind?: 'created' | 'imported' | 'scanned'
 }
 
 /** 面板 props:DynamicIsland 的 agent prop 与 AgentView 共用 */
@@ -109,6 +116,40 @@ export interface AgentPanelProps {
   onAbort(): void
   /** 新对话:当前对话存档到历史后清空 */
   onClear(): void
+  /** 打开 Agent 设置视图(⋯ 菜单"设置"入口) */
+  onOpenSettings?(): void
+}
+
+/**
+ * MCP 服务端配置(settings.json 的 agent.mcpServers 段)。
+ * type = stdio(默认):本地进程,command/args/env;type = sse:远程端点,url + headers
+ */
+export interface McpServerConfig {
+  /** 服务名(工具名前缀 mcp_<name>_;仅展示用,可中文) */
+  name: string
+  /** 传输类型:stdio(本地进程,默认)/ sse(远程端点) */
+  type?: 'stdio' | 'sse'
+  /** stdio:启动命令(npx / node / 绝对路径可执行文件等) */
+  command: string
+  /** stdio:启动参数(数组) */
+  args?: string[]
+  /** stdio:注入子进程的环境变量(KEY=值;如服务器需要的 API Key) */
+  env?: Record<string, string>
+  /** sse:服务端端点 URL */
+  url?: string
+  /** sse:请求头(如 Authorization) */
+  headers?: Record<string, string>
+}
+
+/** 记忆条目(记忆系统;类型 = 偏好/事实/工作流/教训) */
+export interface MemoryEntry {
+  id: string
+  type: 'preference' | 'fact' | 'workflow' | 'lesson'
+  content: string
+  tags?: string[]
+  source?: 'manual' | 'agent' | 'evolution'
+  createdAt: number
+  updatedAt: number
 }
 
 /** Agent 配置(settings.json 的 agent 段镜像) */
@@ -119,4 +160,10 @@ export interface AgentConfig {
   systemPrompt: string
   /** 思考强度(low/medium/high,默认 high) */
   reasoningEffort: string
+  /** MCP 服务端列表(每个服务暴露 mcp_<服务>_<工具> 工具) */
+  mcpServers: McpServerConfig[]
+  /** 技能目录列表(扫描 SKILL.md,每个技能暴露 skill_<名字> 工具) */
+  skillsDirs: string[]
+  /** 已排除技能(扫描跳过;LLM 对话 / 设置界面移除) */
+  excludedSkills: string[]
 }

@@ -35,9 +35,10 @@ import {
   ImageLibraryView,
   ListView,
   SettingsView,
+  LyricApiView,
   ThemeView,
 } from './views'
-import type { AgentConfig, AgentPanelProps, AgentPart } from '../../agent/types'
+import type { AgentConfig, AgentPanelProps, AgentPart, AgentToolInfo } from '../../agent/types'
 import {
   AGENT_PANEL_MIN_H,
   BG_COMPACT_REF_H,
@@ -168,6 +169,8 @@ interface DynamicIslandProps {
   }) => void
   /** 外部请求打开设置(托盘菜单):seq 变化即展开并切换到设置视图 */
   requestSettingsSeq?: number
+  /** 外部请求打开帮助手册(初次安装引导):seq 变化即展开并切换到帮助视图 */
+  requestHelpSeq?: number
   /** 面板视图变化回调(宿主据此调整窗口高度:背景视图需要更高空间) */
   onPanelViewChange?: (view: PanelView) => void
   /** 面板控制区显示"设置"按钮(Web 演示入口;桌面端入口在托盘菜单) */
@@ -205,6 +208,10 @@ interface DynamicIslandProps {
   agentConfig?: {
     config: AgentConfig | null
     onSave: (patch: Partial<AgentConfig>) => void
+    /** 重新拉取配置(Agent 设置视图打开时调用——LLM 自我配置后刷新) */
+    onRefresh?: () => void
+    /** 工具清单(已注册技能/MCP 的预览展示;agent:tools 异步加载) */
+    tools?: AgentToolInfo[]
   }
   /**
    * Agent 面板视觉尺寸变化(px,内容自适应 × 界面缩放;仅 agent 视图生效)。
@@ -275,6 +282,7 @@ const SETTINGS_VIEWS: readonly PanelView[] = [
   'font-library',
   'image-library',
   'agent-settings',
+  'lyric-api',
 ]
 const isSettingsView = (view: string) => SETTINGS_VIEWS.includes(view as PanelView)
 
@@ -338,7 +346,10 @@ const CUSTOM_FONT_FAMILY = 'island-font-custom'
 
 /**
  * 右侧文字:绑定歌曲后播放/暂停在"歌名/歌手"间循环(媒体模式),
- * 其余状态用固定文案
+ * 其余状态用固定文案。
+ * 歌手位占位:浏览器(Chrome/Edge 标签页)等平台 SMTC 查询不到作者,
+ * artist 为空时文字区宽度为 0 → 悬停进度条位置计算异常,拖拽时粒子
+ * 时间与进度条 UI 重叠(用户实测)——空值显示"未知作者"占位保宽度
  */
 function mediaTextFor(
   state: IslandState,
@@ -346,8 +357,8 @@ function mediaTextFor(
   showArtist: boolean,
 ): string {
   if (track && (state === 'playing' || state === 'idle')) {
-    if (showArtist) return track.artist
-    return `${state === 'playing' ? '正在播放' : '已暂停'}: ${track.title}`
+    if (showArtist) return track.artist?.trim() || '未知作者'
+    return `${state === 'playing' ? '正在播放' : '已暂停'}: ${track.title ?? ''}`
   }
   return ISLAND_STATES[state].text
 }
@@ -415,6 +426,7 @@ export const DynamicIsland = memo(function DynamicIsland({
   backgroundCrop,
   onBackgroundChange,
   requestSettingsSeq,
+  requestHelpSeq,
   onPanelViewChange,
   settingsButton,
   fontLibrary,
@@ -1076,6 +1088,29 @@ export const DynamicIsland = memo(function DynamicIsland({
     setIslandWidth(`${targetPx}px`)
   }
 
+  // 模式切换(音乐 ↔ Agent,如三连击快捷切换):compact 态清除悬停扩展态。
+  // 鼠标在切换瞬间未离开岛体,hoveredRef 滞留 → 切到 Agent 后右侧进度条
+  // 占位残留(实测:三连击切 Agent 右侧仍占位,重新悬浮才正常);重置为
+  // 自然宽 + 悬停布局复位
+  useEffect(() => {
+    if (expandedRef.current) return
+    hoveredRef.current = false
+    setHovered(false)
+    const island = islandRef.current
+    const textEl = textRef.current
+    if (island && textEl) {
+      const natural = measureNaturalWidth(island)
+      applyTextLayout(
+        island,
+        textEl,
+        measureTextWidth(displayText, getComputedStyle(textEl).font),
+        natural,
+        false,
+      )
+      setIslandWidth(`${natural}px`)
+    }
+  }, [agentActive])
+
   const handleMouseLeave = () => {
     if (expandedRef.current) return // 展开期间不响应悬停伸缩
     if (collapsingRef.current) return // 收起冷却期不响应悬停
@@ -1152,7 +1187,9 @@ export const DynamicIsland = memo(function DynamicIsland({
     if (panelView !== 'agent') setAgentPanelH(AGENT_PANEL_MIN_H)
   }, [panelView])
   // Agent 面板界面缩放(百分比 100-300,最低 100%):等比例缩放展开态 UI。
-  // 持久化 localStorage;视觉尺寸 = 逻辑值 × 缩放,窗口由宿主跟随
+  // 持久化 localStorage;视觉尺寸 = 逻辑值 × 缩放,窗口由宿主跟随。
+  // 默认 200%(用户要求:初次安装初次进入 Agent 模式时默认放大——小屏
+  // 挂件默认 100% 观感偏小;已有 localStorage(用户改过)保留原值)
   const AGENT_SCALE_KEY = 'widget-agent-scale'
   const [agentScale, setAgentScale] = useState(() => {
     try {
@@ -1161,7 +1198,7 @@ export const DynamicIsland = memo(function DynamicIsland({
     } catch {
       // 忽略存储失败
     }
-    return 100
+    return 200
   })
   const handleAgentScaleChange = useCallback((scale: number) => {
     const clamped = Math.min(300, Math.max(100, Math.round(scale)))
@@ -1201,6 +1238,19 @@ export const DynamicIsland = memo(function DynamicIsland({
     )
     changeExpanded(true)
   }, [requestSettingsSeq, changeExpanded])
+
+  // 外部请求打开帮助手册(初次安装引导):seq 变化即展开并直接进入帮助视图
+  useEffect(() => {
+    if (!requestHelpSeq) return
+    setPanelView('help')
+    setExpandedWidth(
+      Math.max(
+        EXPANDED_MIN_WIDTH_PX,
+        Math.min(EXPANDED_WIDTH_PX, window.innerWidth - EXPANDED_VIEWPORT_MARGIN_PX),
+      ),
+    )
+    changeExpanded(true)
+  }, [requestHelpSeq, changeExpanded])
 
   // 当前应用字体:库中按 id 取(dataUrl 注入 @font-face,名称用于预览/搜索)
   const currentFont = fontLibrary?.find((f) => f.id === currentFontId) ?? null
@@ -1265,8 +1315,16 @@ export const DynamicIsland = memo(function DynamicIsland({
   }, [backgroundExpandedImage, backgroundCompactImage, expanded, fontColor?.mode])
 
   // 面板视图变化通知宿主(背景视图需要更高的岛体与窗口)
+  // 进入 Agent 设置视图前刷新配置:LLM 对话中 mcp_config/skills_config
+  // 写的配置立即可见(useAgent 只在挂载时读一次)。刷新必须在视图渲染前
+  // 触发且只在 panelView 变化时一次——不能在 AgentSettingsView 挂载后
+  // 刷新(异步返回重置正在编辑的表单,实测丢失编辑);agentConfig 经 ref
+  // 访问(对象字面量每次渲染新引用,进依赖会无限循环刷新)
+  const agentConfigRef = useRef(agentConfig)
+  agentConfigRef.current = agentConfig
   useEffect(() => {
     onPanelViewChange?.(panelView)
+    if (panelView === 'agent-settings') agentConfigRef.current?.onRefresh?.()
   }, [panelView, onPanelViewChange])
 
   // 外部请求收起(宿主在模式切换等场景调用;seq 递增触发,仅展开态有效)
@@ -1393,19 +1451,22 @@ export const DynamicIsland = memo(function DynamicIsland({
   return (
     <div
       ref={islandRef}
-      className={`island-demo${stateClass ? ` ${stateClass}` : ''}${modeClass ? ` ${modeClass}` : ''}${expanded ? ' expanded' : ''}${press ? ' is-pressed' : ''}${collapsing ? ' island-collapsing' : ''}${animating ? ' is-animating' : ''}${lyricFold ? ' island-lyric-off' : ''}${panelView === 'background' ? ` island-bg-view${bgTarget === 'compact' ? ' island-bg-view--compact' : ''}` : ''}${panelView === 'font-library' || panelView === 'image-library' ? ' island-lib-view' : ''}${panelView === 'font' ? ' island-font-view' : ''}${panelView === 'font-color' ? ' island-font-color-view' : ''}${panelView === 'theme' ? ' island-theme-view' : ''}${panelView === 'agent' ? ' island-agent-view' : ''}${panelView === 'agent' && agent?.streaming ? ' island-agent-streaming' : ''}${panelView === 'agent-settings' ? ' island-agent-settings-view' : ''}`}
+      className={`island-demo${stateClass ? ` ${stateClass}` : ''}${modeClass ? ` ${modeClass}` : ''}${expanded ? ' expanded' : ''}${press ? ' is-pressed' : ''}${collapsing ? ' island-collapsing' : ''}${animating ? ' is-animating' : ''}${lyricFold ? ' island-lyric-off' : ''}${panelView === 'background' ? ` island-bg-view${bgTarget === 'compact' ? ' island-bg-view--compact' : ''}` : ''}${panelView === 'font-library' || panelView === 'image-library' ? ' island-lib-view' : ''}${panelView === 'font' ? ' island-font-view' : ''}${panelView === 'font-color' ? ' island-font-color-view' : ''}${panelView === 'theme' ? ' island-theme-view' : ''}${panelView === 'help' ? ' island-help-view' : ''}${panelView === 'agent' ? ' island-agent-view' : ''}${panelView === 'agent' && agent?.streaming ? ' island-agent-streaming' : ''}${panelView === 'agent-settings' ? ' island-agent-settings-view' : ''}`}
       role="button"
       tabIndex={0}
       aria-label={`灵动岛,当前状态:${agentActive ? 'Agent' : ISLAND_STATES[state].label},点击切换,长按展开`}
       aria-expanded={expanded}
       style={
         {
-          // Agent 展开态:岛体宽度 = 逻辑展开宽 × 界面缩放(高度由 CSS
-          // var(--agent-h) × var(--agent-s) 计算)
+          // 帮助手册展开态:富裕大小 = 逻辑展开宽 × 2(缩放 200% 的大小,
+          // 800px,承载教学内容);Agent 展开态 = 逻辑宽 × 界面缩放
+          // (高度由 CSS var(--agent-h) 计算);其余视图 = 逻辑展开宽
           width: expanded
-            ? agentActive
-              ? `${Math.round(expandedWidth * (agentScale / 100))}px`
-              : `${expandedWidth}px`
+            ? panelView === 'help'
+              ? `${Math.round(expandedWidth * 2)}px`
+              : agentActive
+                ? `${Math.round(expandedWidth * (agentScale / 100))}px`
+                : `${expandedWidth}px`
             : islandWidth,
           '--state-color': theme,
           // 字体颜色(主文字/次级文字),null 时 CSS fallback 白色系
@@ -1588,14 +1649,22 @@ export const DynamicIsland = memo(function DynamicIsland({
               onOpenTheme={onThemeChange ? () => setPanelView('theme') : undefined}
               onOpenFont={onFontAdd || onFontLibraryChange ? () => setPanelView('font') : undefined}
               onOpenAgent={agentConfig ? () => setPanelView('agent-settings') : undefined}
+              onOpenLyricApi={() => setPanelView('lyric-api')}
               onBack={() => changeExpanded(false)}
             />
+          ) : null}
+          {/* 歌词 API 接入点(设置视图"歌词 API"入口):预设厂家 + 自定义 */}
+          {panelView === 'lyric-api' ? (
+            <LyricApiView onBack={() => setPanelView('settings')} />
           ) : null}
           {/* Agent 聊天视图(agent 模式展开默认;只保留长按收回,
               设置类视图除外) */}
           {panelView === 'agent' && agent ? (
             <AgentView
               {...agent}
+              // ⋯ 菜单"设置"入口:切换到 Agent 设置视图(设置类视图,
+              // 只能经返回键退出)
+              onOpenSettings={() => setPanelView('agent-settings')}
               onCollapse={() => changeExpanded(false)}
               onHeightChange={setAgentPanelH}
             />
@@ -1606,6 +1675,7 @@ export const DynamicIsland = memo(function DynamicIsland({
             <AgentSettingsView
               config={agentConfig.config}
               onSave={agentConfig.onSave}
+              tools={agentConfig.tools}
               scale={agentScale}
               onScaleChange={handleAgentScaleChange}
               onBack={() => setPanelView('settings')}

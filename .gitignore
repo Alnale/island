@@ -24,3 +24,7 @@ release
 *.njsproj
 *.sln
 *.sw?
+
+# 本地验证临时目录 / 测试下载
+.tmp
+downloads

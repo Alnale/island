@@ -21,6 +21,10 @@ const POSITION_DIVERGENCE_LIMIT_SEC = 5
  *  用于区分可靠上报(原生客户端每次轮询前进 ~1s,seek 时移动数十秒)
  *  与不可靠上报(浏览器冻结期移动≈0) */
 const POSITION_ALIVE_MOVE_SEC = 2
+/** 歌词定位的"上报活着"判定(秒):比显示进度更宽松——歌词必须与平台
+ *  实际播放对齐,原生客户端每秒 +1s 即视为活着直接采信;仅浏览器等
+ *  阶梯式冻结上报(移动≈0)落入本地时钟插值兜底 */
+const LYRIC_ALIVE_MOVE_SEC = 0.5
 /** seek 验证容差(秒):seek 后系统位置与目标距离 ≤ 该值视为已生效 */
 const SEEK_VERIFY_TOLERANCE_SEC = 3
 /** seek 验证跳变判定(秒):系统位置单次轮询移动超过该值视为位置确实
@@ -30,7 +34,10 @@ const SEEK_VERIFY_JUMP_SEC = 5
 /** seek 验证时限(ms):超时未跟随视为客户端"接受"但实际未跳转
  *  (如 QQ音乐),回退显示并判定该平台不支持跳转。仅在平台首次验证时
  *  等待(结果按平台持久化,之后直接按记忆处理) */
-const SEEK_VERIFY_LIMIT_MS = 8000
+// seek 生效判定超时:原 8s(用户实测感觉太慢才判定"不支持拖拽")→ 3s。
+// 覆盖:客户端明确拒绝(accepted false)或 3s 内位置未跟随(±3s 或跳变
+// >5s)即回退并判定该平台不支持 seek
+const SEEK_VERIFY_LIMIT_MS = 3000
 /** seek 支持记忆持久化键:按 sourceAppId 记录平台是否真的跟随进度跳转 */
 const SEEK_SUPPORT_STORAGE_KEY = 'island-seek-support'
 
@@ -71,7 +78,15 @@ export interface SystemMediaState {
   platform: SystemPlatform
   track: SystemTrackInfo | null
   isPlaying: boolean
+  /** 显示进度(锚定基准 + 本地时钟流逝,平滑无回跳;进度条用) */
   position: number
+  /**
+   * 歌词定位(歌词对齐用):跟随平台上报位置——歌词必须与实际播放对齐,
+   * 原生客户端(QQ音乐等)每秒 +1s 即"活着"直接采信;上报冻结(浏览器
+   * 阶梯式过期)时用本地时钟插值兜底,暂停停在最后位置。
+   * 与 position 分离:显示进度平滑优先,歌词对齐优先
+   */
+  lyricPosition: number
   duration: number
   /** 客户端是否支持播放模式读写(PlaybackInfo 可用);
    *  QQ音乐等不暴露状态的客户端为 false,前端禁用模式按钮 */
@@ -143,6 +158,11 @@ export function useSystemMedia(): SystemMediaState {
   const sourceIdRef = useRef<string | null>(null)
   // 250ms tick 驱动重渲染(重算显示进度)
   const [, setTick] = useState(0)
+  // 歌词定位(与显示进度分离,轮询驱动;250ms tick 不推它):
+  // 跟随平台上报 = 与歌词对齐;上报冻结(浏览器)时本地时钟插值兜底
+  const [lyricPosition, setLyricPosition] = useState(0)
+  const lyricPosRef = useRef(0)
+  const lyricAnchorAtRef = useRef(0)
 
   // 记忆平台 seek 支持状态(按 sourceAppId,持久化;
   // 验证结果归属调用时的平台,防止验证期间切换平台张冠李戴)
@@ -246,6 +266,32 @@ export function useSystemMedia(): SystemMediaState {
           ) {
             baseRef.current = reported
             baseAtRef.current = now
+          }
+          // 歌词定位:歌词必须与实际平台播放对齐,与显示进度(防进度条
+          // 抽搐的锚定+本地时钟模型)分离处理——
+          //   上报"活着"(本次移动 ≥ 0.5s,原生客户端每秒 +1s)→ 直接
+          //   采信上报位置(1s 粒度对歌词行切换足够,杜绝全曲漂移——
+          //   显示进度的 5s 偏离阈值对原生客户端永达不到,歌词会一直
+          //   落后/超前,即"偶尔快偶尔慢"的根因);
+          //   上报冻结(浏览器阶梯式过期:数秒不移动)→ 本地时钟插值
+          //   (平台实际在播,只是 SMTC 未更新,插值照常推进);
+          //   暂停 → 停在最后位置;恢复后上报通常立即解冻,采信上报
+          if (smPlaying) {
+            const lyricAlive =
+              prevReportedRef.current === null ||
+              Math.abs(reported - prevReportedRef.current) >= LYRIC_ALIVE_MOVE_SEC
+            if (lyricAlive) {
+              lyricPosRef.current = reported
+              lyricAnchorAtRef.current = now
+            } else {
+              lyricPosRef.current += (now - lyricAnchorAtRef.current) / 1000
+              lyricAnchorAtRef.current = now
+            }
+            setLyricPosition(lyricPosRef.current)
+          } else {
+            // 暂停:流逝基准更新到当前时刻——恢复后若上报尚未解冻,
+            // 插值从暂停时刻继续,不把暂停时长计入
+            lyricAnchorAtRef.current = now
           }
           prevReportedRef.current = reported
           // 挂起的 seek 验证:系统位置跟随目标(或单次大幅移动——覆盖
@@ -393,6 +439,7 @@ export function useSystemMedia(): SystemMediaState {
     track,
     isPlaying: userPlaying,
     position,
+    lyricPosition,
     duration,
     modeSupported,
     mode,

@@ -70,6 +70,7 @@ export type PanelView =
   | 'settings'
   | 'agent'
   | 'agent-settings'
+  | 'lyric-api'
 
 /** 主题色预设(与播放模式/状态色同一色系,供主题色视图) */
 export const THEME_PRESETS = [

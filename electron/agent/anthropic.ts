@@ -7,7 +7,7 @@
  * "anthropic" 自动切换本 provider。
  *
  * POST {baseURL}/v1/messages,鉴权头 x-api-key + anthropic-version。
- * 与 Responses API 的格式差异(核心):
+ * 与 DeepSeek Chat Completions 的格式差异(核心):
  * - max_tokens 必填;
  * - 角色严格交替(相邻同角色消息必须合并);
  * - 工具结果不能放在助手消息里,必须打包进**下一条 user 消息**的
@@ -89,7 +89,7 @@ function anthropicTools(tools: AgentTool[]) {
 }
 
 /**
- * 流式请求(与 streamResponse 同构):
+ * 流式请求(与 streamChatCompletion 同构):
  * 事件经 onEvent 实时转发,完成后返回统一 ProviderOutcome。
  */
 export async function streamAnthropic(params: {

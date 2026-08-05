@@ -1,0 +1,282 @@
+/**
+ * 记忆系统 —— 结构化长期记忆
+ *
+ * 借鉴 penguin-harness 的"可编辑资产"语义:记忆是 LLM 可读写的资产,
+ * 对话中经 remember/forget/list_memory/update_memory 工具沉淀与修正,
+ * 系统提示词自动附加记忆块(与用户自定义提示词并列)。
+ *
+ * 存储:userData/memory.json(main.cjs 注入路径,与 settings.json 分离:
+ * 记忆高频变更,独立文件不污染配置,损坏不影响配置)。
+ * 写入串行化(工具并行执行时防竞态):写队列。
+ *
+ * 记忆上限 200 条、单条 500 字;拼装截断 6000 字符(防上下文膨胀,
+ * 记忆块是系统提示的静态段,变更才断 DeepSeek 前缀缓存)。
+ */
+
+import { randomUUID } from 'node:crypto'
+import { promises as fs } from 'node:fs'
+import type { AgentTool, MemoryEntry, ToolParams } from './types'
+
+const MAX_ENTRIES = 200
+const MAX_CONTENT_CHARS = 500
+/** 拼装进系统提示词的记忆块最大长度(截断防膨胀) */
+const BLOCK_MAX = 6000
+
+const TYPE_LABEL: Record<MemoryEntry['type'], string> = {
+  preference: '偏好',
+  fact: '事实',
+  workflow: '工作流',
+  lesson: '教训',
+}
+
+/** 记忆存储:内存态 + 串行写盘 */
+export function createMemoryStore(getPath: () => string) {
+  let entries: MemoryEntry[] = []
+  /** 写盘串行队列(并行工具调用时防竞态覆盖) */
+  let writeChain: Promise<void> = Promise.resolve()
+  let loaded = false
+  /** 加载互斥:并发 add 会同时触发 load,后完成的 catch 会把刚 push 的
+   * 条目清空(实测:10 并发 add 只剩 1 条)——所有调用共享同一加载 */
+  let loadPromise: Promise<void> | null = null
+
+  function load() {
+    if (loadPromise) return loadPromise
+    loadPromise = (async () => {
+      try {
+        const raw = await fs.readFile(getPath(), 'utf8')
+        const data = JSON.parse(raw) as { entries?: unknown }
+        if (Array.isArray(data.entries)) {
+          entries = data.entries
+            .filter(
+              (e): e is MemoryEntry =>
+                !!e && typeof e === 'object' && typeof (e as MemoryEntry).content === 'string',
+            )
+            .slice(0, MAX_ENTRIES)
+        }
+      } catch {
+        entries = []
+      }
+      loaded = true
+    })().finally(() => {
+      loadPromise = null
+    })
+    return loadPromise
+  }
+
+  /** 排队写盘(串行,后写覆盖前写) */
+  function scheduleWrite() {
+    const payload = JSON.stringify({ entries }, null, 2)
+    writeChain = writeChain.then(() => fs.writeFile(getPath(), payload, 'utf8')).catch(() => {})
+    return writeChain
+  }
+
+  async function ensureLoaded() {
+    if (loaded) return
+    await load()
+  }
+
+  return {
+    /** 全部条目(按更新时间倒序) */
+    async list(): Promise<MemoryEntry[]> {
+      await ensureLoaded()
+      return [...entries].sort((a, b) => b.updatedAt - a.updatedAt)
+    },
+    async add(input: {
+      content: string
+      type: MemoryEntry['type']
+      source?: MemoryEntry['source']
+      tags?: string[]
+    }): Promise<{ entry: MemoryEntry; created: boolean }> {
+      await ensureLoaded()
+      const content = input.content.trim().slice(0, MAX_CONTENT_CHARS)
+      if (!content) throw new Error('记忆内容不能为空')
+      // 去重:完全相同的已有条目不重复添加
+      const dup = entries.find((e) => e.content === content)
+      if (dup) return { entry: dup, created: false }
+      if (entries.length >= MAX_ENTRIES) {
+        // 超限:删最旧(按 createdAt),保持总量上限
+        const oldest = entries.find((e) => e.createdAt === Math.min(...entries.map((e) => e.createdAt)))
+        if (oldest) entries = entries.filter((e) => e.id !== oldest.id)
+      }
+      const now = Date.now()
+      const entry: MemoryEntry = {
+        id: randomUUID(),
+        type: input.type || 'fact',
+        content,
+        tags: input.tags?.slice(0, 8),
+        source: input.source ?? 'agent',
+        createdAt: now,
+        updatedAt: now,
+      }
+      entries.push(entry)
+      scheduleWrite()
+      return { entry, created: true }
+    },
+    /** 按 id 或内容片段删除;返回删除条数 */
+    async remove(key: string): Promise<number> {
+      await ensureLoaded()
+      const before = entries.length
+      entries = entries.filter((e) => e.id !== key && !e.content.includes(key))
+      const removed = before - entries.length
+      if (removed > 0) scheduleWrite()
+      return removed
+    },
+    async update(
+      id: string,
+      patch: { content?: string; type?: MemoryEntry['type']; tags?: string[] },
+    ): Promise<MemoryEntry | null> {
+      await ensureLoaded()
+      const target = entries.find((e) => e.id === id)
+      if (!target) return null
+      if (typeof patch.content === 'string') {
+        const c = patch.content.trim().slice(0, MAX_CONTENT_CHARS)
+        if (!c) throw new Error('记忆内容不能为空')
+        target.content = c
+      }
+      if (patch.type) target.type = patch.type
+      if (patch.tags) target.tags = patch.tags.slice(0, 8)
+      target.updatedAt = Date.now()
+      scheduleWrite()
+      return { ...target }
+    },
+    /** 整组替换(自我进化提交时用);返回新列表 */
+    async replaceAll(next: MemoryEntry[]): Promise<MemoryEntry[]> {
+      await ensureLoaded()
+      entries = next.slice(0, MAX_ENTRIES)
+      scheduleWrite()
+      return [...entries]
+    },
+    /** 快照备份(进化提交前写 .bak;回滚用) */
+    async snapshot(backupPath: string) {
+      await ensureLoaded()
+      await fs.writeFile(backupPath, JSON.stringify({ entries }, null, 2), 'utf8')
+    },
+  }
+}
+
+export type MemoryStore = ReturnType<typeof createMemoryStore>
+
+/** 记忆 → 系统提示词块(按类型分组;截断防膨胀) */
+export function formatMemoryBlock(entries: MemoryEntry[]): string {
+  if (entries.length === 0) return ''
+  const lines: string[] = []
+  for (const type of ['preference', 'fact', 'workflow', 'lesson'] as const) {
+    for (const e of entries.filter((x) => x.type === type)) {
+      lines.push(`- [${TYPE_LABEL[type]}] ${e.content}`)
+    }
+  }
+  let body = lines.join('\n')
+  if (body.length > BLOCK_MAX) {
+    body = body.slice(0, BLOCK_MAX) + `\n…(记忆过长,已截断)`
+  }
+  return `【长期记忆(对话中遵守,别自相矛盾;与你对话的是同一用户)】\n${body}`
+}
+
+/** 记忆工具(LLM 对话中读写记忆,自然语言沉淀) */
+export function createMemoryTools(store: MemoryStore): AgentTool[] {
+  return [
+    {
+      name: 'remember',
+      description:
+        '把用户偏好/事实/工作流/教训写入长期记忆(永久生效,后续所有对话都遵守)。' +
+        '适合:用户表达的偏好("我喜欢简洁回答")、重要事实("我的项目在 D:/xxx")、' +
+        '学到的教训。注意:可复用的规律才记,一次性信息不要记;已有相同内容不会重复添加。',
+      parameters: {
+        type: 'object',
+        properties: {
+          content: { type: 'string', description: '记忆内容,一句话为宜' },
+          type: {
+            type: 'string',
+            enum: ['preference', 'fact', 'workflow', 'lesson'],
+            description: '类型:preference 偏好 / fact 事实 / workflow 工作流 / lesson 教训,缺省 fact',
+          },
+          tags: { type: 'array', items: { type: 'string' }, description: '可选:标签' },
+        },
+        required: ['content'],
+      },
+      async execute(params: ToolParams) {
+        const type = String(params.type ?? 'fact') as MemoryEntry['type']
+        if (!['preference', 'fact', 'workflow', 'lesson'].includes(type)) {
+          throw new Error('type 仅支持 preference/fact/workflow/lesson')
+        }
+        const r = await store.add({
+          content: String(params.content ?? ''),
+          type,
+          source: 'agent',
+          tags: Array.isArray(params.tags) ? params.tags.map(String) : undefined,
+        })
+        return r.created
+          ? `已写入长期记忆([${TYPE_LABEL[type]}] ${r.entry.content})`
+          : '(记忆已存在相同内容,未重复添加)'
+      },
+    },
+    {
+      name: 'forget',
+      description: '删除长期记忆(按内容片段或条目 id;记错/过时的记忆用它修正)。',
+      parameters: {
+        type: 'object',
+        properties: {
+          key: { type: 'string', description: '记忆内容片段或条目 id' },
+        },
+        required: ['key'],
+      },
+      async execute(params: ToolParams) {
+        const n = await store.remove(String(params.key ?? '').trim())
+        if (n === 0) throw new Error('未找到匹配的记忆')
+        return `已删除 ${n} 条记忆`
+      },
+    },
+    {
+      name: 'list_memory',
+      description: '查看长期记忆(按类型过滤或关键词搜索;回答涉及用户偏好/历史约定时先查记忆)。',
+      parameters: {
+        type: 'object',
+        properties: {
+          type: {
+            type: 'string',
+            enum: ['preference', 'fact', 'workflow', 'lesson'],
+            description: '只列该类型,缺省全部',
+          },
+          keyword: { type: 'string', description: '只列含该关键词的记忆' },
+        },
+      },
+      async execute(params: ToolParams) {
+        const entries = await store.list()
+        const type = params.type ? String(params.type) : ''
+        const keyword = params.keyword ? String(params.keyword) : ''
+        const filtered = entries.filter(
+          (e) => (!type || e.type === type) && (!keyword || e.content.includes(keyword)),
+        )
+        if (filtered.length === 0) return '(无匹配的记忆)'
+        return filtered
+          .map((e) => `- [${TYPE_LABEL[e.type]}] ${e.content}(id:${e.id.slice(0, 8)}${e.source === 'manual' ? ',手动' : ''})`)
+          .join('\n')
+      },
+    },
+    {
+      name: 'update_memory',
+      description: '修改已有记忆(按 id;纠正措辞、合并重复、换类型)。',
+      parameters: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', description: '条目 id(list_memory 可查到)' },
+          content: { type: 'string', description: '新内容' },
+          type: {
+            type: 'string',
+            enum: ['preference', 'fact', 'workflow', 'lesson'],
+            description: '新类型',
+          },
+        },
+        required: ['id'],
+      },
+      async execute(params: ToolParams) {
+        const updated = await store.update(String(params.id ?? ''), {
+          content: params.content ? String(params.content) : undefined,
+          type: params.type as MemoryEntry['type'] | undefined,
+        })
+        if (!updated) throw new Error(`未找到条目 ${String(params.id ?? '')}`)
+        return `已更新:${updated.content}`
+      },
+    },
+  ]
+}

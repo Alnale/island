@@ -19,10 +19,14 @@ import {
   useRef,
   useState,
   type KeyboardEvent,
+  type MouseEvent,
   type ReactNode,
   type RefObject,
+  type WheelEvent,
 } from 'react'
-import type { AgentMessage, AgentPanelProps, AgentPart, AgentToolCallState } from '../../../agent/types'
+import type { AgentMessage, AgentPanelProps, AgentPart, AgentToolCallState, AgentToolInfo } from '../../../agent/types'
+import { useWheelSteps } from '../../../hooks/useWheelSteps'
+import { WheelSwap } from './WheelSwap'
 import {
   AGENT_PANEL_FIXED_H,
   AGENT_PANEL_MAX_H,
@@ -32,12 +36,157 @@ import {
 
 /** 面板子视图:聊天 / 对话历史 / 工具列表 */
 type AgentViewKind = 'chat' | 'history' | 'tools'
+
+/** 头部下拉菜单项 id:⋯ 弹出菜单与快捷切换按钮共用 */
+type AgentMenuItemId = 'stop' | 'clear' | 'history' | 'tools' | 'settings' | 'collapse'
+
+/** 快捷按钮图标(stroke 风格,与头部其他 ctl 按钮一致) */
+const QUICK_MENU_ICONS: Record<AgentMenuItemId, ReactNode> = {
+  stop: (
+    <svg className="island-ctl-svg" width="11" height="11" viewBox="0 0 24 24" fill="currentColor">
+      <rect x="6" y="6" width="12" height="12" rx="2" />
+    </svg>
+  ),
+  clear: (
+    <svg
+      className="island-ctl-svg"
+      width="11"
+      height="11"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+    >
+      <path d="M12 5v14M5 12h14" />
+    </svg>
+  ),
+  history: (
+    <svg
+      className="island-ctl-svg"
+      width="11"
+      height="11"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <circle cx="12" cy="12" r="9" />
+      <polyline points="12 7 12 12 15 14" />
+    </svg>
+  ),
+  tools: (
+    <svg
+      className="island-ctl-svg"
+      width="11"
+      height="11"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+    >
+      <line x1="4" y1="6" x2="20" y2="6" />
+      <circle cx="14" cy="6" r="2" />
+      <line x1="4" y1="12" x2="20" y2="12" />
+      <circle cx="8" cy="12" r="2" />
+      <line x1="4" y1="18" x2="20" y2="18" />
+      <circle cx="16" cy="18" r="2" />
+    </svg>
+  ),
+  settings: (
+    <svg
+      className="island-ctl-svg"
+      width="11"
+      height="11"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <circle cx="12" cy="12" r="3" />
+      <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 11-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 110-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 114 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 110 4h-.09a1.65 1.65 0 00-1.51 1z" />
+    </svg>
+  ),
+  collapse: (
+    <svg
+      className="island-ctl-svg"
+      width="11"
+      height="11"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <polyline points="6 9 12 15 18 9" />
+    </svg>
+  ),
+}
 /**
  * 视图切换离场副本卸载延时(ms):必须大于 CSS 离场动画时长(0.15s),
  * 留出余量保证动画播完(forwards 停在透明)才卸载——提前卸载会
  * 在动画中途突然消失,是切换闪烁的常见原因
  */
 const VIEW_LEAVE_MS = 200
+
+/**
+ * 平滑滚动到目标位置(自绘 rAF 插值,非线性):
+ * - **先加速再减速**(easeInOutQuart)——减速段斜率陡,明显"刹车";
+ * - **动态高斯模糊按速度占比二次衰减**(blur = true 时):峰值约 3.5px,
+ *   速度降到峰值 25% 以下完全清除(提前消退,减速段清晰)。模糊是给
+ *   长消息列表滚动动画的性能优化——没有历史消息的滚动(如新对话进入)
+ *   传 blur = false,避免无谓的模糊;
+ * - 时长自适应(距离越大越久,clamp 500-1200ms;进入 800ms / 发送 650ms);
+ * - 用户手动滚动(滚轮/拖拽/触摸)时立即取消动画与模糊,不打架。
+ * (曾加入过冲回弹,用户反馈不合适,已移除——纯滑行到位的缓动)
+ */
+function smoothScrollTo(el: HTMLElement, target: number, durationMs = 800, blur = true) {
+  const start = el.scrollTop
+  const dist = target - start
+  if (Math.abs(dist) < 1) return
+  const duration = Math.min(1200, Math.max(500, durationMs))
+  const startTime = performance.now()
+  let cancelled = false
+  let lastScroll = start
+  let lastTime = startTime
+  let peakVel = 0
+  const cancel = () => {
+    cancelled = true
+    if (blur) el.style.filter = ''
+  }
+  // 用户介入(滚轮/触摸/点击)即中止自绘动画,交给浏览器原生行为
+  el.addEventListener('wheel', cancel, { once: true, passive: true })
+  el.addEventListener('touchstart', cancel, { once: true, passive: true })
+  el.addEventListener('pointerdown', cancel, { once: true })
+  const easeInOutQuart = (t: number) =>
+    t < 0.5 ? 8 * t * t * t * t : 1 - Math.pow(-2 * t + 2, 4) / 2
+  const step = (now: number) => {
+    if (cancelled) return
+    const t = Math.min(1, (now - startTime) / duration)
+    const pos = start + dist * easeInOutQuart(t)
+    el.scrollTop = pos
+    if (blur) {
+      // 动态模糊:按速度占比二次衰减(速度降到峰值 25% 以下完全清除,
+      // 提前消退让减速段清晰可见)
+      const dt = Math.max(1, now - lastTime)
+      const vel = Math.abs(pos - lastScroll) / dt
+      if (vel > peakVel) peakVel = vel
+      const ratio = peakVel > 0 ? vel / peakVel : 0
+      el.style.filter = ratio > 0.25 ? `blur(${(3.5 * ratio * ratio).toFixed(2)}px)` : ''
+    }
+    lastScroll = pos
+    lastTime = now
+    if (t < 1) requestAnimationFrame(step)
+    else el.style.filter = ''
+  }
+  requestAnimationFrame(step)
+}
 
 /** 历史会话时间显示:今天 → HH:MM;昨天 → 昨天;更早 → M月D日 */
 function formatSessionTime(ts: number): string {
@@ -265,10 +414,42 @@ export function AgentView({
   onSend,
   onAbort,
   onClear,
+  onOpenSettings,
   onCollapse,
   onHeightChange,
 }: AgentViewProps) {
   const [input, setInput] = useState('')
+  // / 与 @ 手动调用的候选列表(输入前缀时列出技能/MCP 工具)
+  const [suggestions, setSuggestions] = useState<AgentToolInfo[]>([])
+  const [suggestionIndex, setSuggestionIndex] = useState(0)
+  // 收起动画中(closing = 卡片逐个折叠退场,全部退完才卸载列表)
+  const [suggestClosing, setSuggestClosing] = useState(false)
+  const suggestCloseTimerRef = useRef(0)
+  // suggestions 经 ref 访问:closeSuggestions 必须**引用稳定**(useCallback
+  // 空依赖)——输入 effect 依赖它,若随 suggestions.length 变化,收起
+  // 卸载(setSuggestions([]))后引用变化会触发 effect 重跑、候选重新展开
+  // (实测 bug:Esc 后候选又弹回来)
+  const suggestionsRef = useRef(suggestions)
+  suggestionsRef.current = suggestions
+  // 收起:卡片倒序 stagger 退场(总时长 = 容器收缩 0.24s + 卡片数 × 间隔),
+  // 完成后真正卸载;重复触发只重置计时(打字/多次 Esc 安全)。
+  // 与收起动画时长匹配(CSS 容器 0.24s / 卡片 0.2s)——提前卸载会截断动画
+  const closeSuggestions = useCallback(() => {
+    const n = suggestionsRef.current.length
+    if (n === 0) return
+    setSuggestClosing(true)
+    window.clearTimeout(suggestCloseTimerRef.current)
+    suggestCloseTimerRef.current = window.setTimeout(
+      () => {
+        setSuggestions([])
+        setSuggestClosing(false)
+      },
+      240 + n * 30,
+    )
+  }, [])
+  // 删除中的会话 id(离场动画中;播完才真正删除)
+  const [leavingSessionIds, setLeavingSessionIds] = useState<string[]>([])
+  const leavingSessionTimersRef = useRef<number[]>([])
   // 面板子视图:聊天 / 对话历史 / 工具列表
   const [view, setView] = useState<AgentViewKind>('chat')
   // 视图切换过渡:先切主实例(新视图进场动画),旧视图副本盖在上层
@@ -283,12 +464,26 @@ export function AgentView({
   }, [])
   // 右上角下拉菜单(⋯):停止生成 / 新对话 / 对话历史 / 工具列表 / 收起面板
   const [menuOpen, setMenuOpen] = useState(false)
+  // 卸载时清理候选收起计时器(动画未完成即卸载不残留)
+  useEffect(() => () => window.clearTimeout(suggestCloseTimerRef.current), [])
   // 输入框引用:LLM 回复完成后自动聚焦,直接可输入
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const atBottomRef = useRef(true)
   const busy = status === 'thinking' || status === 'running'
+  // 下拉菜单项:⋯ 弹出菜单与快捷切换按钮共用;条件项随状态
+  // (停止生成仅运行中、新对话仅非空历史)。收起面板恒为末项
+  // (快捷按钮的默认显示项)
+  const menuItems: Array<{ id: AgentMenuItemId; label: string; danger?: boolean }> = []
+  if (busy) menuItems.push({ id: 'stop', label: '停止生成', danger: true })
+  if (messages.length > 0) menuItems.push({ id: 'clear', label: '新对话' })
+  menuItems.push(
+    { id: 'history', label: '对话历史' },
+    { id: 'tools', label: '工具列表' },
+    { id: 'settings', label: '设置' },
+    { id: 'collapse', label: '收起面板' },
+  )
   // LLM 回复完成(运行中 → 空闲)自动聚焦输入框,直接可输入
   const wasBusyRef = useRef(busy)
   useEffect(() => {
@@ -321,6 +516,11 @@ export function AgentView({
   const measureHeight = useCallback(() => {
     // 骨架期不测量(消息区未挂载,保持岛体下限;内容期才测量长高)
     if (phase !== 'content') return
+    // 工具列表/对话历史视图:高度由聊天视图决定(岛体保持进入前的聊天
+    // 高度),内容在岛体剩余空间内滚动——不能按子视图内容测量,否则
+    // 工具多/会话多会把岛体撑到上限(用户要求:与工具列表相同设计,
+    // 实时响应布局,岛体小则列表小可滚动,岛体扩展列表随之扩展)
+    if (viewRef.current === 'tools' || viewRef.current === 'history') return
     const el = scrollRef.current
     if (!el) return
     let contentH = 0
@@ -374,6 +574,109 @@ export function AgentView({
   // 卸载时清理切换定时器(面板收起等)
   useEffect(() => () => window.clearTimeout(switchTimerRef.current), [])
 
+  // 删除会话:先播离场动画(高度折叠 + 淡出上移,0.24s)再真正删除——
+  // 行高在点击瞬间固定为测量值(触发折叠过渡),负 margin 抵消列表
+  // gap,行消失过程列表平滑上移,无跳变;多个行可同时离场(各自定时)
+  const handleDeleteSession = (event: MouseEvent<HTMLButtonElement>, id: string) => {
+    event.stopPropagation()
+    if (leavingSessionIds.includes(id)) return
+    const row = event.currentTarget.closest('.island-agent-history-item') as HTMLElement | null
+    row?.style.setProperty('height', `${row.offsetHeight}px`)
+    setLeavingSessionIds((prev) => [...prev, id])
+    leavingSessionTimersRef.current.push(
+      window.setTimeout(() => {
+        setLeavingSessionIds((prev) => prev.filter((x) => x !== id))
+        onDeleteSession(id)
+      }, 260),
+    )
+  }
+  // 卸载时清理离场定时器(动画未完成即卸载不残留)
+  useEffect(
+    () => () => {
+      leavingSessionTimersRef.current.forEach((t) => window.clearTimeout(t))
+    },
+    [],
+  )
+
+  // ===== 快捷切换按钮(悬浮 ⋯ 时在左侧浮现;滚轮逐格切换、单击跳转) =====
+  // 默认显示"收起面板"(末项);滚轮可切换到菜单的各个入口;单击执行当前项。
+  // 菜单项随 busy/messages 变化:索引经 ref 跨渲染同步,渲染时钳制有效范围
+  const [quickIndex, setQuickIndex] = useState(() => menuItems.length - 1)
+  const [quickTick, setQuickTick] = useState(0)
+  // 切换前的内容与方向(WheelSwap 旧内容滑出/新内容回弹滑入)
+  const [quickPrev, setQuickPrev] = useState<{ id: AgentMenuItemId; label: string } | null>(null)
+  const [quickDir, setQuickDir] = useState<1 | -1>(1)
+  const quickIndexRef = useRef(quickIndex)
+  quickIndexRef.current = quickIndex
+  const quickItem = menuItems[Math.min(quickIndex, menuItems.length - 1)]
+
+  // 执行菜单项动作(⋯ 弹出菜单与快捷按钮共用)
+  const runItem = useCallback(
+    (id: AgentMenuItemId) => {
+      setMenuOpen(false)
+      switch (id) {
+        case 'stop':
+          onAbort()
+          break
+        case 'clear':
+          onClear()
+          break
+        case 'history':
+          switchView('history')
+          break
+        case 'tools':
+          switchView('tools')
+          break
+        case 'settings':
+          onOpenSettings?.()
+          break
+        case 'collapse':
+          onCollapse()
+          break
+      }
+    },
+    [onAbort, onClear, onCollapse, onOpenSettings, switchView],
+  )
+
+  // 滚轮推进一格(dir = 1 向下滚 = 列表下移 = 下一项;-1 向上滚 = 上一项,
+  // 循环)。每格重挂载按钮重放内容交换动画(旧内容滑出/新内容回弹滑入)
+  const stepQuick = (dir: 1 | -1) => {
+    const n = menuItems.length
+    const cur = Math.min(quickIndexRef.current, n - 1)
+    setQuickPrev(menuItems[cur])
+    setQuickDir(dir)
+    quickIndexRef.current = (cur + dir + n) % n
+    setQuickIndex(quickIndexRef.current)
+    setQuickTick((t) => t + 1)
+  }
+
+  // 滚轮逐格步进(共享 useWheelSteps:每 60px 一步、步间 ≥100ms、
+  // 350ms 无滚动重置——与记忆类型按钮手感一致)
+  const wheelSteps = useWheelSteps()
+  const handleQuickWheel = (event: WheelEvent<HTMLDivElement>) => {
+    const dir = wheelSteps(event)
+    if (dir) stepQuick(dir)
+  }
+
+  // 单击快捷按钮:执行当前项并复位默认(收起面板)
+  const handleQuickClick = (event: MouseEvent<HTMLDivElement>) => {
+    event.stopPropagation()
+    runItem(quickItem.id)
+    setQuickPrev(quickItem)
+    setQuickDir(1)
+    quickIndexRef.current = menuItems.length - 1
+    setQuickIndex(quickIndexRef.current)
+    setQuickTick((t) => t + 1)
+  }
+
+  // 快捷按钮内容(图标 + 标签):WheelSwap 的旧/新两层共用
+  const quickItemNode = (item: { id: AgentMenuItemId; label: string }) => (
+    <>
+      {QUICK_MENU_ICONS[item.id]}
+      <span className="island-agent-quick-label">{item.label}</span>
+    </>
+  )
+
   // 内容变化(消息/流式/状态)时重测(rAF 延迟一帧:面板首帧挂载不阻塞
   // 展开动画布局,测量结果下一帧生效,展开更顺)
   useLayoutEffect(() => {
@@ -405,22 +708,103 @@ export function AgentView({
     atBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48
   }
 
+  // 进入对话面板(chat 视图内容挂载后)自动滚动到最近信息:
+  // 恢复历史/展开面板时用户期望看到最新消息,而不是停留在旧位置。
+  // 自绘非线性滚动(先加速再减速 + 平滑停止;距离大时动画稍长)。
+  // 高斯模糊只用于长消息列表滚动的性能优化——**新对话没有过去的
+  // 消息时不模糊**(紧凑态进入新对话的滚动动画干净无模糊)。
+  // messages 长度经 ref 读取:不入依赖(消息到达时发送路径已平滑滚动,
+  // 这里只在视图/骨架切换时滚动一次)
+  const messagesLenRef = useRef(messages.length)
+  messagesLenRef.current = messages.length
+  useEffect(() => {
+    if (view !== 'chat' || phase !== 'content') return
+    const el = scrollRef.current
+    if (el) {
+      atBottomRef.current = true
+      smoothScrollTo(el, el.scrollHeight, 800, messagesLenRef.current > 0)
+    }
+  }, [view, phase])
+
   const submit = () => {
     const text = input.trim()
     if (!text || busy) return
     onSend(text)
     setInput('')
-    // 发送后滚到底(输入框高度可能变化)
+    // 发送后自绘非线性滚动到底(输入框高度可能变化;先加速再减速,
+    // 平滑停止)。**不模糊**:对话中跳转最新消息的消息列表往往很短,
+    // 模糊只服务于长列表滚动动画的性能优化,这里不需要(实测对话中
+    // 每次发送都会触发模糊,观感不佳)
     requestAnimationFrame(() => {
       const el = scrollRef.current
       if (el) {
         atBottomRef.current = true
-        el.scrollTop = el.scrollHeight
+        smoothScrollTo(el, el.scrollHeight, 650, false)
       }
     })
   }
 
+  // 输入以 / 或 @ 开头时,计算候选(技能 / MCP 工具;按输入 token 过滤)
+  useEffect(() => {
+    const prefix = input[0]
+    if (prefix !== '/' && prefix !== '@') {
+      // 非前缀输入:收起动画(卡片逐个折叠退场)
+      closeSuggestions()
+      return
+    }
+    const token = input.slice(1).split(/\s+/)[0].toLowerCase()
+    // 外部工具前缀:技能 skill_<slug>;MCP 工具 mcp_<服务>_<工具>(双下划线)——
+    // 内置工具 mcp_config 恰好以 mcp_ 开头,用"名称里存在第二个下划线"
+    // 区分(外部 MCP 工具名必有服务段与工具段,实测 @mcp_config 混入候选)
+    const all = tools.filter((t) =>
+      prefix === '/'
+        ? t.name.startsWith('skill_')
+        : t.name.startsWith('mcp_') && t.name.indexOf('_', 4) > 0,
+    )
+    // 全量匹配(不截断上限——用户技能不可能只有 6 个,实测被 slice 截断;
+    // 超高由 max-height + overflow 滚动兜底,列表随岛体高度显示)
+    const matched = token ? all.filter((t) => t.name.toLowerCase().includes(token)) : all
+    // 重新展开:取消收起动画,列表逐卡展开
+    window.clearTimeout(suggestCloseTimerRef.current)
+    setSuggestClosing(false)
+    setSuggestions(matched)
+    setSuggestionIndex(0)
+  }, [input, tools])
+
+  // 应用候选:替换开头的 /xxx 或 @xxx,保留后续文本(收起动画)
+  const applySuggestion = (name: string) => {
+    const prefix = input[0]
+    const rest = input.replace(/^[/@]\S*/, '').trim()
+    setInput(prefix + name + (rest ? ' ' + rest : ''))
+    closeSuggestions()
+    inputRef.current?.focus()
+  }
+
   const handleInputKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    // 候选列表打开时:↑↓ 导航 / Esc 关闭 / Enter 选中(不发送)
+    if (suggestions.length > 0) {
+      if (event.key === 'ArrowDown') {
+        event.preventDefault()
+        setSuggestionIndex((i) => (i + 1) % suggestions.length)
+        return
+      }
+      if (event.key === 'ArrowUp') {
+        event.preventDefault()
+        setSuggestionIndex((i) => (i - 1 + suggestions.length) % suggestions.length)
+        return
+      }
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        closeSuggestions()
+        return
+      }
+      if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
+        event.preventDefault()
+        const name = suggestions[suggestionIndex]?.name
+        if (name) applySuggestion(name)
+        return
+      }
+    }
     // Enter 发送;Shift+Enter 换行;IME 组字中 Enter 不上屏发送
     if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
       event.preventDefault()
@@ -484,7 +868,10 @@ export function AgentView({
               <div className="island-agent-welcome">暂无历史对话,新对话会自动存档</div>
             )}
             {sessions.map((s) => (
-              <div key={s.id} className="island-agent-history-item">
+              <div
+                key={s.id}
+                className={`island-agent-history-item${leavingSessionIds.includes(s.id) ? ' leaving' : ''}`}
+              >
                 <button
                   type="button"
                   className="island-agent-history-open"
@@ -501,10 +888,7 @@ export function AgentView({
                   type="button"
                   className="island-agent-history-del"
                   title="删除会话"
-                  onClick={(event) => {
-                    event.stopPropagation()
-                    onDeleteSession(s.id)
-                  }}
+                  onClick={(event) => handleDeleteSession(event, s.id)}
                 >
                   <svg
                     className="island-ctl-svg"
@@ -598,7 +982,31 @@ export function AgentView({
             Agent
           </span>
           <span className="island-agent-status">{statusText}</span>
-          <div className="island-agent-menu" ref={menuRef}>
+          <div className={`island-agent-menu${menuOpen ? ' open' : ''}`} ref={menuRef}>
+            {/* 快捷切换按钮:悬浮 ⋯ 时在左侧浮现,默认显示"收起面板"。
+                滚轮在菜单各入口间逐格切换(顿挫 tick)、单击执行当前项。
+                透明命中区自 ⋯ 左缘向左延伸(覆盖间隙与按钮本身)——鼠标
+                从 ⋯ 横移到按钮的过程悬停不中断,按钮不会中途消失。
+                菜单打开时(.open)隐藏(弹出面板已展开,快捷按钮冗余) */}
+            <div
+              className="island-agent-quick"
+              onPointerDown={(event) => {
+                if (event.button === 0) event.stopPropagation()
+              }}
+              onClick={handleQuickClick}
+              onWheel={handleQuickWheel}
+            >
+              <button
+                key={quickTick}
+                type="button"
+                className={`island-agent-quick-btn${quickItem.danger ? ' danger' : ''}`}
+                title={quickItem.label}
+              >
+                <WheelSwap tick={quickTick} dir={quickDir} prev={quickPrev ? quickItemNode(quickPrev) : null}>
+                  {quickItemNode(quickItem)}
+                </WheelSwap>
+              </button>
+            </div>
             <button
               type="button"
               className={`island-agent-ctl${menuOpen ? ' on' : ''}`}
@@ -622,65 +1030,19 @@ export function AgentView({
             </button>
             {menuOpen && (
               <div className="island-agent-menu-pop">
-                {busy && (
+                {menuItems.map((item) => (
                   <button
+                    key={item.id}
                     type="button"
-                    className="island-agent-menu-item danger"
+                    className={`island-agent-menu-item${item.danger ? ' danger' : ''}`}
                     onClick={(event) => {
                       event.stopPropagation()
-                      setMenuOpen(false)
-                      onAbort()
+                      runItem(item.id)
                     }}
                   >
-                    停止生成
+                    {item.label}
                   </button>
-                )}
-                {messages.length > 0 && (
-                  <button
-                    type="button"
-                    className="island-agent-menu-item"
-                    onClick={(event) => {
-                      event.stopPropagation()
-                      setMenuOpen(false)
-                      onClear()
-                    }}
-                  >
-                    新对话
-                  </button>
-                )}
-                <button
-                  type="button"
-                  className="island-agent-menu-item"
-                  onClick={(event) => {
-                    event.stopPropagation()
-                    setMenuOpen(false)
-                    switchView('history')
-                  }}
-                >
-                  对话历史
-                </button>
-                <button
-                  type="button"
-                  className="island-agent-menu-item"
-                  onClick={(event) => {
-                    event.stopPropagation()
-                    setMenuOpen(false)
-                    switchView('tools')
-                  }}
-                >
-                  工具列表
-                </button>
-                <button
-                  type="button"
-                  className="island-agent-menu-item"
-                  onClick={(event) => {
-                    event.stopPropagation()
-                    setMenuOpen(false)
-                    onCollapse()
-                  }}
-                >
-                  收起面板
-                </button>
+                ))}
               </div>
             )}
           </div>
@@ -747,6 +1109,37 @@ export function AgentView({
             if (event.button === 0) event.stopPropagation()
           }}
         >
+          {suggestions.length > 0 && (
+            <div className={`island-agent-suggest${suggestClosing ? ' closing' : ''}`}>
+              {suggestions.map((t, i) => (
+                <button
+                  key={t.name}
+                  type="button"
+                  // 展开:自输入框**从下而上**逐卡滑入(靠近输入框的最后一张
+                  // 先出现,向上逐张展开——倒序 stagger);收起:同样从输入框
+                  // 处开始逐卡折叠退场(倒序 stagger)
+                  style={{ animationDelay: `${(suggestions.length - 1 - i) * 30}ms` }}
+                  className={`island-agent-suggest-item${suggestClosing ? ' out' : ''}${
+                    i === suggestionIndex && !suggestClosing ? ' on' : ''
+                  }`}
+                  // mousedown preventDefault 防 textarea 失焦;点击应用候选
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={(event) => {
+                    event.stopPropagation()
+                    applySuggestion(t.name)
+                  }}
+                >
+                  <span className="island-agent-suggest-cmd">
+                    {input[0]}
+                    {t.name}
+                  </span>
+                  <span className="island-agent-suggest-desc">
+                    {t.description.replace(/^\[MCP 服务:[^\]]+\]\s*/, '').slice(0, 28)}
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
           <textarea
             ref={inputRef}
             value={input}

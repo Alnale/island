@@ -13,6 +13,8 @@ interface DesktopApi {
   setAlwaysOnTop(on: boolean): void
   /** 托盘菜单"设置":订阅回调(渲染端在岛内展开设置视图) */
   onOpenSettings(callback: () => void): void
+  /** 初次安装引导:订阅回调(渲染端在岛内展开帮助手册) */
+  onOpenHelp(callback: () => void): void
   /** 调整窗口高度(背景编辑器视图需要更高空间) */
   setWindowHeight(height: number): void
   /** 调整窗口尺寸(Agent 面板缩放需要宽度;高度用于高空间视图) */
@@ -29,24 +31,84 @@ interface DesktopApi {
   agentAbort(): void
   /** Agent:订阅引擎事件流(状态/文本增量/工具调用/工具结果/消息落定) */
   onAgentEvent(callback: (event: unknown) => void): void
-  /** Agent:读取配置(API Key / Base URL / 模型 / 系统提示词) */
+  /** Agent:读取配置(API Key / Base URL / 模型 / 系统提示词 / MCP / 技能目录) */
   agentGetConfig(): Promise<{
     apiKey: string
     baseURL: string
     model: string
     systemPrompt: string
     reasoningEffort: string
+    mcpServers: Array<{
+      name: string
+      command: string
+      type?: 'stdio' | 'sse'
+      args?: string[]
+      env?: Record<string, string>
+      url?: string
+      headers?: Record<string, string>
+    }>
+    skillsDirs: string[]
+    excludedSkills: string[]
   }>
   /** Agent:写入配置(增量补丁) */
   agentSetConfig(
-    patch: Partial<Record<'apiKey' | 'baseURL' | 'model' | 'systemPrompt' | 'reasoningEffort', string>>,
+    patch: Partial<
+      Record<
+        'apiKey' | 'baseURL' | 'model' | 'systemPrompt' | 'reasoningEffort',
+        string
+      > & {
+        mcpServers?: Array<{
+          name: string
+          command: string
+          type?: 'stdio' | 'sse'
+          args?: string[]
+          env?: Record<string, string>
+          url?: string
+          headers?: Record<string, string>
+        }>
+        skillsDirs?: string[]
+        excludedSkills?: string[]
+      }
+    >,
   ): Promise<unknown>
-  /** Agent:工具清单(名称/描述/参数 schema,UI 展示用) */
+  /** Agent:工具清单(名称/描述/参数 schema,UI 展示用;含 MCP/技能) */
   agentGetTools(): Promise<Array<{ name: string; description: string; parameters: unknown }>>
+  /** Agent:测试 MCP 服务连通性(独立连接 → 列工具 → 销毁) */
+  agentTestMcp(server: {
+    name: string
+    command: string
+    type?: 'stdio' | 'sse'
+    args?: string[]
+    env?: Record<string, string>
+    url?: string
+    headers?: Record<string, string>
+  }): Promise<{ ok: boolean; error?: string; toolCount?: number }>
+  /** Agent:读取记忆条目列表(记忆管理器用) */
+  agentMemoryGet(): Promise<unknown[]>
+  /** Agent:写入记忆(add/remove/update/replaceAll,返回最新列表) */
+  agentMemorySet(patch: unknown): Promise<unknown>
+  /** Agent:导出记忆到文件(保存对话框;JSON 结构同 memory.json) */
+  agentMemoryExport(): Promise<{ canceled: boolean; path?: string; bytes?: number; error?: string }>
+  /** Agent:触发记忆自我进化(后台,完成发系统通知) */
+  agentEvolve(focus?: string): Promise<{ started: boolean; message: string }>
+  /** Agent:自我进化日志(version = 候选版本号) */
+  agentEvolutionLog(): Promise<Array<{ at: number; version: number; before: number; after: number; applied: boolean; summary: string; changes: number }>>
+  /** Agent:回滚到最近一次进化前快照 */
+  agentEvolutionRollback(): Promise<string>
+  /** Agent:清除全部进化版本(回到初始状态) */
+  agentEvolutionReset(): Promise<string>
+  /** Agent:导入技能(选择技能包文件夹或单个 .md 文件) */
+  agentSkillImport(): Promise<{
+    canceled: boolean
+    imported?: string[]
+    skipped?: string[]
+    error?: string
+  }>
   /** Agent:静默总结对话标题(后台,不打扰用户) */
   agentSummarize(messages: unknown[]): Promise<string>
-  /** 模式切换(托盘右键菜单):订阅回调 */
-  onSetMode(callback: (mode: 'music' | 'agent') => void): void
+  /** 模式切换(托盘右键菜单):订阅回调(payload = 目标模式 + 切换来源;
+   * source 'tool' = Agent 工具 switch_to_music 触发的切换) */
+  onSetMode(callback: (payload: { mode: 'music' | 'agent'; source: 'user' | 'tool' }) => void): void
   /** 请求切换模式(音乐 ↔ agent;Agent 文字区滑动手势退出 → 音乐) */
   setMode(mode: 'music' | 'agent'): void
   /** 启动时询问当前模式(音乐 / agent) */

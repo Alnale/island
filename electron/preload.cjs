@@ -25,6 +25,10 @@ contextBridge.exposeInMainWorld('desktop', {
   onOpenSettings(callback) {
     ipcRenderer.on('widget:open-settings', () => callback())
   },
+  /** 初次安装引导:订阅回调(渲染端在岛内展开帮助手册) */
+  onOpenHelp(callback) {
+    ipcRenderer.on('widget:open-help', () => callback())
+  },
   /** 调整窗口高度(背景编辑器视图需要更高空间) */
   setWindowHeight(height) {
     ipcRenderer.send('widget:set-height', Number(height))
@@ -61,9 +65,45 @@ contextBridge.exposeInMainWorld('desktop', {
   agentGetConfig() {
     return ipcRenderer.invoke('agent:config-get')
   },
-  /** Agent:工具清单(名称/描述/参数 schema,UI 展示用) */
+  /** Agent:工具清单(名称/描述/参数 schema,UI 展示用;含 MCP/技能) */
   agentGetTools() {
     return ipcRenderer.invoke('agent:tools')
+  },
+  /** Agent:测试 MCP 服务连通性(独立连接 → 列工具 → 销毁) */
+  agentTestMcp(server) {
+    return ipcRenderer.invoke('agent:mcp-test', server)
+  },
+  /** Agent:读取记忆条目列表(记忆管理器用) */
+  agentMemoryGet() {
+    return ipcRenderer.invoke('agent:memory-get')
+  },
+  /** Agent:导出记忆到文件(保存对话框;JSON 结构同 memory.json) */
+  agentMemoryExport() {
+    return ipcRenderer.invoke('agent:memory-export')
+  },
+  /** Agent:写入记忆(add/remove/update/replaceAll,返回最新列表) */
+  agentMemorySet(patch) {
+    return ipcRenderer.invoke('agent:memory-set', patch)
+  },
+  /** Agent:触发记忆自我进化(后台,完成发系统通知) */
+  agentEvolve(focus) {
+    return ipcRenderer.invoke('agent:evolve', typeof focus === 'string' ? focus : undefined)
+  },
+  /** Agent:自我进化日志 */
+  agentEvolutionLog() {
+    return ipcRenderer.invoke('agent:evolution-log')
+  },
+  /** Agent:回滚到最近一次进化前快照 */
+  agentEvolutionRollback() {
+    return ipcRenderer.invoke('agent:evolution-rollback')
+  },
+  /** Agent:清除全部进化版本(回到初始状态) */
+  agentEvolutionReset() {
+    return ipcRenderer.invoke('agent:evolution-reset')
+  },
+  /** Agent:导入技能(选择技能包文件夹或单个 .md 文件) */
+  agentSkillImport() {
+    return ipcRenderer.invoke('agent:skill-import')
   },
   /** Agent:静默总结对话标题(后台,不打扰用户) */
   agentSummarize(messages) {
@@ -73,9 +113,9 @@ contextBridge.exposeInMainWorld('desktop', {
   agentSetConfig(patch) {
     return ipcRenderer.invoke('agent:config-set', patch)
   },
-  /** 模式切换(托盘右键菜单):订阅回调 */
+  /** 模式切换(托盘右键菜单):订阅回调(payload = { mode, source }) */
   onSetMode(callback) {
-    ipcRenderer.on('widget:set-mode', (_event, mode) => callback(mode))
+    ipcRenderer.on('widget:set-mode', (_event, payload) => callback(payload))
   },
   /** 请求切换模式(音乐 ↔ agent;Agent 文字区滑动手势退出 → 音乐) */
   setMode(mode) {
