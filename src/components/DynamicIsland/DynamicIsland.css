@@ -3058,9 +3058,10 @@
 .island-agent-msg-user-text {
   font-size: 0.75rem;
   line-height: 1.5;
-  white-space: pre-wrap;
+  white-space: normal;
   word-break: break-word;
   user-select: text;
+  min-width: 0;
 }
 
 /* 复制按钮:气泡脚注小图标按钮,点击短暂显示 ✓ 反馈。
@@ -3146,6 +3147,297 @@
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+/* ====================== 消息气泡 Markdown 渲染 ======================
+   全部文本经 React 转义(无 HTML 注入面);配色跟随 --text-color /
+   --text-dim / --state-color(自定义主题色与字体色均生效)。
+   流式渲染:增量重解析,未闭合结构自然退化为段落,补齐即成形 */
+.island-agent-md {
+  white-space: normal;
+  min-width: 0;
+  user-select: text;
+}
+
+.island-agent-md > * + * {
+  margin-top: 6px;
+}
+
+.island-agent-md p {
+  margin: 0;
+}
+
+.island-agent-md h1,
+.island-agent-md h2,
+.island-agent-md h3,
+.island-agent-md h4,
+.island-agent-md h5,
+.island-agent-md h6 {
+  margin: 0;
+  line-height: 1.45;
+  font-weight: 650;
+  color: var(--text-color, #fff);
+}
+
+.island-agent-md h1 {
+  font-size: 1.02rem;
+}
+
+.island-agent-md h2 {
+  font-size: 0.92rem;
+}
+
+.island-agent-md h3 {
+  font-size: 0.86rem;
+}
+
+.island-agent-md h4,
+.island-agent-md h5,
+.island-agent-md h6 {
+  font-size: 0.78rem;
+}
+
+.island-agent-md ul,
+.island-agent-md ol {
+  margin: 0;
+  padding-left: 1.4em;
+}
+
+.island-agent-md li {
+  margin: 0;
+}
+
+.island-agent-md li + li {
+  margin-top: 2px;
+}
+
+/* 嵌套列表/续行子块 */
+.island-agent-md ul ul,
+.island-agent-md ul ol,
+.island-agent-md ol ul,
+.island-agent-md ol ol {
+  margin-top: 2px;
+}
+
+.island-agent-md li > p,
+.island-agent-md li > ul,
+.island-agent-md li > ol,
+.island-agent-md li > blockquote {
+  margin-top: 4px;
+}
+
+.island-agent-md blockquote {
+  margin: 0;
+  padding: 3px 10px;
+  border-left: 3px solid var(--state-color, #4d6bfe);
+  border-radius: 0 6px 6px 0;
+  background: rgba(255, 255, 255, 0.045);
+  color: var(--text-dim, rgba(255, 255, 255, 0.75));
+}
+
+.island-agent-md blockquote > * + * {
+  margin-top: 4px;
+}
+
+.island-agent-md hr {
+  margin: 2px 0;
+  border: 0;
+  border-top: 1px solid rgba(255, 255, 255, 0.14);
+}
+
+.island-agent-md code {
+  font-family: 'Cascadia Mono', 'JetBrains Mono', Consolas, monospace;
+  font-size: 0.9em;
+  padding: 0.5px 4px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.12);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+}
+
+.island-agent-md a {
+  color: var(--state-color, #4d6bfe);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+  word-break: break-all;
+}
+
+.island-agent-md a:hover {
+  opacity: 0.85;
+}
+
+/* 围栏代码块:头部(语言标签 + 复制)+ 代码(超出滚动,不撑岛体) */
+.island-agent-code {
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.32);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+
+.island-agent-code-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 3px 8px;
+  background: rgba(255, 255, 255, 0.05);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.island-agent-code-lang {
+  font-family: 'Cascadia Mono', 'JetBrains Mono', Consolas, monospace;
+  font-size: 0.6rem;
+  text-transform: lowercase;
+  color: var(--text-dim, rgba(255, 255, 255, 0.55));
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.island-agent-code-head .island-agent-copy {
+  flex: none;
+  margin: 0 -3px 0 auto;
+}
+
+.island-agent-code pre {
+  margin: 0;
+  padding: 8px 10px;
+  max-height: 240px;
+  overflow: auto;
+  white-space: pre;
+  font-family: 'Cascadia Mono', 'JetBrains Mono', Consolas, monospace;
+  font-size: 0.66rem;
+  line-height: 1.55;
+  color: var(--text-dim, rgba(255, 255, 255, 0.75));
+}
+
+.island-agent-code pre code {
+  background: none;
+  border: 0;
+  padding: 0;
+  font-size: inherit;
+  color: inherit;
+}
+
+/* GFM 表格:宽表格横向滚动;对齐来自分隔行 :---: 形态 */
+.island-agent-table-wrap {
+  max-width: 100%;
+  overflow-x: auto;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.island-agent-md table {
+  border-collapse: collapse;
+  min-width: 100%;
+  width: max-content;
+  font-size: 0.72rem;
+  line-height: 1.5;
+}
+
+.island-agent-md th,
+.island-agent-md td {
+  padding: 4px 9px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  text-align: left;
+  vertical-align: top;
+  word-break: break-word;
+}
+
+.island-agent-md th {
+  background: rgba(255, 255, 255, 0.07);
+  font-weight: 650;
+  color: var(--text-color, #fff);
+}
+
+.island-agent-md td {
+  color: var(--text-color, #fff);
+}
+
+/* Mermaid 图表:深色主题 SVG,宽图横向滚动 */
+.island-agent-mermaid {
+  background: rgba(0, 0, 0, 0.28);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  padding: 10px;
+  overflow-x: auto;
+}
+
+.island-agent-mermaid svg {
+  display: block;
+  margin: 0 auto;
+  max-width: 100%;
+  height: auto;
+}
+
+.island-agent-mermaid-loading {
+  padding: 6px 2px;
+  font-size: 0.64rem;
+  color: var(--text-dim, rgba(255, 255, 255, 0.55));
+}
+
+.island-agent-mermaid-err {
+  padding: 6px 2px;
+  font-size: 0.64rem;
+  color: #ff858f;
+}
+
+/* 用户气泡(浅色强调底):Markdown 元素换深色描边,可读性跟随 #0b0b0f */
+.island-agent-msg-user .island-agent-md a {
+  color: rgba(11, 11, 15, 0.85);
+}
+
+.island-agent-msg-user .island-agent-md code {
+  background: rgba(11, 11, 15, 0.1);
+  border-color: rgba(11, 11, 15, 0.15);
+  color: #0b0b0f;
+}
+
+.island-agent-msg-user .island-agent-md blockquote {
+  border-left-color: rgba(11, 11, 15, 0.45);
+  background: rgba(11, 11, 15, 0.06);
+  color: rgba(11, 11, 15, 0.7);
+}
+
+.island-agent-msg-user .island-agent-md hr {
+  border-top-color: rgba(11, 11, 15, 0.2);
+}
+
+.island-agent-msg-user .island-agent-code {
+  background: rgba(11, 11, 15, 0.12);
+  border-color: rgba(11, 11, 15, 0.18);
+}
+
+.island-agent-msg-user .island-agent-code-head {
+  background: rgba(11, 11, 15, 0.08);
+  border-bottom-color: rgba(11, 11, 15, 0.1);
+}
+
+.island-agent-msg-user .island-agent-code pre {
+  color: rgba(11, 11, 15, 0.8);
+}
+
+.island-agent-msg-user .island-agent-table-wrap {
+  border-color: rgba(11, 11, 15, 0.16);
+}
+
+.island-agent-msg-user .island-agent-md th,
+.island-agent-msg-user .island-agent-md td {
+  border-color: rgba(11, 11, 15, 0.16);
+  color: #0b0b0f;
+}
+
+.island-agent-msg-user .island-agent-md th {
+  background: rgba(11, 11, 15, 0.08);
+}
+
+.island-agent-msg-user .island-agent-md h1,
+.island-agent-msg-user .island-agent-md h2,
+.island-agent-msg-user .island-agent-md h3,
+.island-agent-msg-user .island-agent-md h4,
+.island-agent-msg-user .island-agent-md h5,
+.island-agent-msg-user .island-agent-md h6 {
+  color: #0b0b0f;
 }
 
 /* 流式光标 */

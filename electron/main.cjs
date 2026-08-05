@@ -23,6 +23,7 @@ const {
   utilityProcess,
   screen,
   dialog,
+  shell,
 } = require('electron')
 const path = require('node:path')
 const fs = require('node:fs')
@@ -1489,6 +1490,13 @@ ipcMain.on('widget:pointer', (_event, active) => {
 })
 
 ipcMain.on('widget:hide', () => win?.hide())
+
+// 消息气泡链接:系统浏览器打开(仅 http/https,防协议注入;
+// 渲染端 Markdown 渲染器也只把 http(s) 渲染为可点击链接)
+ipcMain.on('app:open-external', (_event, url) => {
+  if (typeof url === 'string' && /^https?:\/\//i.test(url)) void shell.openExternal(url)
+})
+
 ipcMain.on('widget:quit', () => {
   quitting = true
   app.quit()

@@ -29,6 +29,10 @@ contextBridge.exposeInMainWorld('desktop', {
   onOpenHelp(callback) {
     ipcRenderer.on('widget:open-help', () => callback())
   },
+  /** 消息气泡链接:用系统浏览器打开(不新建 Electron 窗口) */
+  openExternal(url) {
+    ipcRenderer.send('app:open-external', String(url))
+  },
   /** 调整窗口高度(背景编辑器视图需要更高空间) */
   setWindowHeight(height) {
     ipcRenderer.send('widget:set-height', Number(height))

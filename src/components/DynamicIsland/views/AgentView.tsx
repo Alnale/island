@@ -27,6 +27,7 @@ import {
 import type { AgentMessage, AgentPanelProps, AgentPart, AgentToolCallState, AgentToolInfo } from '../../../agent/types'
 import { useWheelSteps } from '../../../hooks/useWheelSteps'
 import { WheelSwap } from './WheelSwap'
+import { CopyButton, Markdown } from './Markdown'
 import {
   AGENT_PANEL_FIXED_H,
   AGENT_PANEL_MAX_H,
@@ -211,73 +212,8 @@ export interface AgentViewProps extends AgentPanelProps {
   onHeightChange?: (height: number) => void
 }
 
-/** 写入剪贴板:Clipboard API 优先,失败(非安全上下文等)回退 execCommand */
-async function copyToClipboard(text: string): Promise<boolean> {
-  try {
-    await navigator.clipboard.writeText(text)
-    return true
-  } catch {
-    try {
-      const ta = document.createElement('textarea')
-      ta.value = text
-      ta.style.position = 'fixed'
-      ta.style.opacity = '0'
-      document.body.appendChild(ta)
-      ta.select()
-      const ok = document.execCommand('copy')
-      document.body.removeChild(ta)
-      return ok
-    } catch {
-      return false
-    }
-  }
-}
-
-/** 复制按钮:点击把文本写入剪贴板,短暂显示 ✓ 反馈。
- * 拦截左键 pointerdown —— 消息区内交互元素,长按不触发岛体收回 */
-function CopyButton({ text }: { text: string }) {
-  const [copied, setCopied] = useState(false)
-  return (
-    <button
-      type="button"
-      className={`island-agent-copy${copied ? ' copied' : ''}`}
-      title="复制"
-      aria-label="复制"
-      onPointerDown={(event) => {
-        if (event.button === 0) event.stopPropagation()
-      }}
-      onClick={(event) => {
-        event.stopPropagation()
-        void copyToClipboard(text).then((ok) => {
-          if (!ok) return
-          setCopied(true)
-          window.setTimeout(() => setCopied(false), 900)
-        })
-      }}
-    >
-      {copied ? (
-        '✓'
-      ) : (
-        <svg
-          className="island-ctl-svg"
-          width="11"
-          height="11"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth={2}
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        >
-          <rect x="9" y="9" width="13" height="13" rx="2" />
-          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-        </svg>
-      )}
-    </button>
-  )
-}
-
-/** 用户消息气泡:右侧强调色,文本 + 复制按钮 */
+/** 用户消息气泡:右侧强调色,Markdown 文本(plainMermaid:用户贴的
+ * mermaid 源码按普通代码块显示,图表深色主题进浅色气泡不可读) + 复制按钮 */
 function UserBubble({ m }: { m: AgentMessage }) {
   const text = m.parts
     .filter((p): p is Extract<AgentPart, { type: 'text' }> => p.type === 'text')
@@ -285,7 +221,9 @@ function UserBubble({ m }: { m: AgentMessage }) {
     .join('\n')
   return (
     <div className="island-agent-msg-user">
-      <div className="island-agent-msg-user-text">{text}</div>
+      <div className="island-agent-msg-user-text">
+        <Markdown text={text} plainMermaid />
+      </div>
       <CopyButton text={text} />
     </div>
   )
@@ -342,7 +280,7 @@ function AssistantBlock({
         if (part.type === 'text') {
           return (
             <div key={i} className="island-agent-text">
-              {part.text}
+              <Markdown text={part.text} />
             </div>
           )
         }
@@ -1218,8 +1156,7 @@ export function AgentView({
               <div className="island-agent-msg-assistant">
                 {streaming.text && (
                   <div className="island-agent-text">
-                    {streaming.text}
-                    <span className="island-agent-caret" aria-hidden="true" />
+                    <Markdown text={streaming.text} caret />
                   </div>
                 )}
                 {streaming.tools.map((tool) => (

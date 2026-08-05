@@ -8,6 +8,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
+    "test:markdown": "node scripts/test-markdown.mjs",
     "preview": "vite preview",
     "bridge": "node scripts/system-media-bridge.ts",
     "build:widget": "vite build --mode widget --config vite.widget.config.ts",
@@ -17,6 +18,7 @@
     "dist:win": "pnpm build:widget && pnpm build:electron && electron-builder --win"
   },
   "dependencies": {
+    "mermaid": "^11.16.1",
     "react": "^19.2.8",
     "react-dom": "^19.2.8"
   },
