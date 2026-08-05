@@ -13,7 +13,7 @@
     "build:widget": "vite build --mode widget --config vite.widget.config.ts",
     "build:electron": "node scripts/build-electron.mjs",
     "make:icon": "electron scripts/make-icon.cjs",
-    "dev:widget": "vite build --config vite.widget.config.ts && electron .",
+    "dev:widget": "vite build --mode widget --config vite.widget.config.ts && electron .",
     "dist:win": "pnpm build:widget && pnpm build:electron && electron-builder --win"
   },
   "dependencies": {

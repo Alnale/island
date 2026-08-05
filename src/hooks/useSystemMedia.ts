@@ -234,6 +234,11 @@ export function useSystemMedia(): SystemMediaState {
             // 外部暂停:冻结在本地时钟当前显示位置
             baseRef.current = displayed
             baseAtRef.current = now
+          } else if (playChanged && smPlaying) {
+            // 外部恢复播放:流逝基准更新为当前时刻——暂停时长不计入
+            // (否则 position = base + (now - baseAt)/1000 会把暂停时段
+            // 算进去,恢复瞬间时间突跳,显示比进度条长)
+            baseAtRef.current = now
           } else if (
             Math.abs(reported - displayed) > POSITION_DIVERGENCE_LIMIT_SEC &&
             (prevReportedRef.current === null ||
@@ -299,14 +304,24 @@ export function useSystemMedia(): SystemMediaState {
     async (action: SystemControlAction, seekPosition?: number): Promise<boolean | undefined> => {
       // 记录用户意图:播放/暂停按钮按意图显示与发指令;
       // 切歌后客户端通常自动播放,乐观更新为播放态(轮询会校准)
-      if (action === 'play') setUserPlaying(true)
-      else if (action === 'pause') {
+      if (action === 'play') {
+        setUserPlaying(true)
+        // 恢复播放:流逝基准更新为当前时刻,从冻结位置继续推进
+        // (暂停时长不计入,否则 position 会突跳多出暂停秒数)
+        baseAtRef.current = performance.now()
+      } else if (action === 'pause') {
         setUserPlaying(false)
         // 暂停:立即把显示位置冻结在点击瞬间(本地时钟当前值),避免
         // 显示停在旧基准上;恢复时从冻结位置继续推进
         baseRef.current = baseRef.current + (performance.now() - baseAtRef.current) / 1000
         baseAtRef.current = performance.now()
-      } else if (action === 'next' || action === 'previous') setUserPlaying(true)
+      } else if (action === 'next' || action === 'previous') {
+        setUserPlaying(true)
+        // 乐观切歌:新曲从 0 开始(轮询会校准真实位置),避免旧曲
+        // 基准残留导致切歌瞬间位置乱跳
+        baseRef.current = 0
+        baseAtRef.current = performance.now()
+      }
       // 用户主动 seek:立即把显示位置锚定到目标(拖拽即时响应)。
       // 是否生效由"挂起验证"判定(对照系统真实位置,见轮询):
       //   已记忆为不支持的平台直接拒绝(零等待);

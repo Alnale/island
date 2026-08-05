@@ -25,6 +25,10 @@ const {
 const path = require('node:path')
 const fs = require('node:fs')
 
+// Agent 引擎(由 scripts/build-electron.mjs 打包):DeepSeek Responses API
+// provider + 工具系统,主进程内运行(纯异步网络/文件 IO,无阻塞点)
+const agentEngineModule = require('./agent.cjs')
+
 // 透明窗口在 Windows GPU 合成下,叠在其他应用上方时半透明区域
 // (岛体背景)的 alpha 偶发突变(闪全黑/全透明)。
 // 禁用硬件加速走软件渲染:小窗口 60fps 无压力,合成稳定
@@ -72,6 +76,65 @@ function saveSettings(patch) {
   } catch (err) {
     console.error('[widget] save settings failed:', err)
   }
+}
+
+// ---------------------------------------------------------------------------
+// 模式(音乐播放器 ↔ Agent)
+// ---------------------------------------------------------------------------
+
+function currentMode() {
+  return loadSettings().mode === 'agent' ? 'agent' : 'music'
+}
+
+function setWidgetMode(mode) {
+  const next = mode === 'agent' ? 'agent' : 'music'
+  saveSettings({ mode: next })
+  win?.webContents.send('widget:set-mode', next)
+  // 托盘 radio 选中态同步:菜单 checked 是构建时一次性设置的,
+  // 代码路径切换(Agent 工具 switch_to_music)不会自动更新——
+  // 必须重建菜单(rebuildTrayMenu 同时更新 tooltip),否则托盘
+  // 仍显示旧的模式选中
+  rebuildTrayMenu()
+}
+
+// ---------------------------------------------------------------------------
+// Agent 引擎(懒加载单例;配置与持久化走 settings.json 的 agent 段)
+// ---------------------------------------------------------------------------
+
+const AGENT_CONFIG_DEFAULTS = {
+  apiKey: '',
+  baseURL: 'https://api.deepseek.com',
+  model: 'deepseek-v4-flash',
+  systemPrompt:
+    '你是运行在桌面灵动岛挂件里的个人助手,名叫「岛灵」。' +
+    '你可以调用本机工具(执行命令、读写文件、联网搜索、发通知等),' +
+    '根据用户自然语言直接完成操作,无需沙箱限制。' +
+    '回答简洁自然,使用与用户相同的语言;执行工具时先说明意图。',
+  reasoningEffort: 'high',
+}
+
+let agentEngine = null
+
+function getAgentEngine() {
+  if (agentEngine) return agentEngine
+  agentEngine = agentEngineModule.createAgentEngine({
+    getConfig: () => ({ ...AGENT_CONFIG_DEFAULTS, ...(loadSettings().agent ?? {}) }),
+    onEvent: (event) => win?.webContents.send('agent:event', event),
+    onSwitchToMusic: () => setWidgetMode('music'),
+  })
+  return agentEngine
+}
+
+// 独立的总结后台 Sub Agent(懒加载单例):与主对话引擎零共享——
+// 对话的发送/中止/清空都不会打断总结,总结失败也不外溢到对话
+let summaryAgent = null
+
+function getSummaryAgent() {
+  if (summaryAgent) return summaryAgent
+  summaryAgent = agentEngineModule.createSummaryAgent({
+    getConfig: () => ({ ...AGENT_CONFIG_DEFAULTS, ...(loadSettings().agent ?? {}) }),
+  })
+  return summaryAgent
 }
 
 // ---------------------------------------------------------------------------
@@ -189,6 +252,10 @@ function createWindow() {
   }
 
   win.once('ready-to-show', () => win.show())
+  // 加载完成后广播当前模式(渲染端启动时也走 getMode 兜底)
+  win.webContents.once('did-finish-load', () => {
+    win?.webContents.send('widget:set-mode', currentMode())
+  })
 
   // 关闭 = 隐藏(挂件常驻托盘),托盘"退出"才真正结束
   win.on('close', (event) => {
@@ -489,6 +556,18 @@ ipcMain.on('widget:set-height', (_event, height) => {
   win.setSize(WINDOW_W, clamped)
 })
 
+// 调整窗口尺寸(Agent 面板缩放:宽高按岛体视觉尺寸 + 余量;
+// 其余视图由 set-height 保持 520 宽)。合理范围钳制,防脏数据
+ipcMain.on('widget:set-size', (_event, width, height) => {
+  if (!win) return
+  const w = Number(width)
+  const h = Number(height)
+  if (!Number.isFinite(w) || !Number.isFinite(h)) return
+  const cw = Math.max(400, Math.min(1600, Math.round(w)))
+  const ch = Math.max(200, Math.min(2000, Math.round(h)))
+  win.setSize(cw, ch)
+})
+
 // 右键长按拖拽移动挂件。
 // 用"绝对定位"而非"相对位移":窗口位置 = 鼠标当前位置 - 按下时鼠标相对
 // 窗口的偏移。窗口移动后 Chromium 会合成新的指针事件(指针相对窗口位置
@@ -573,6 +652,58 @@ ipcMain.on('widget:drag-end', () => {
 })
 
 // ---------------------------------------------------------------------------
+// IPC:Agent 模式(渲染端 → 引擎)
+// ---------------------------------------------------------------------------
+
+// 发送一轮对话:引擎无状态,history 为渲染端回传的完整历史
+ipcMain.on('agent:send', (_event, text, history) => {
+  if (typeof text !== 'string') return
+  getAgentEngine().send(text, Array.isArray(history) ? history : [])
+})
+
+ipcMain.on('agent:abort', () => {
+  getAgentEngine().abort()
+})
+
+// 配置读取/写入(API Key / Base URL / 模型 / 系统提示词,存 settings.json)
+ipcMain.handle('agent:config-get', () => ({
+  ...AGENT_CONFIG_DEFAULTS,
+  ...(loadSettings().agent ?? {}),
+}))
+
+ipcMain.handle('agent:config-set', (_event, patch) => {
+  const current = loadSettings().agent ?? {}
+  const next = { ...current }
+  for (const key of ['apiKey', 'baseURL', 'model', 'systemPrompt', 'reasoningEffort']) {
+    const value = patch?.[key]
+    if (typeof value === 'string') {
+      // 长度上限兜底,避免超大字符串污染配置文件
+      next[key] = value.slice(0, 20000)
+    }
+  }
+  saveSettings({ agent: next })
+  return next
+})
+
+// 渲染端启动时询问当前模式(与 tray 切换保持一致)
+ipcMain.handle('widget:get-mode', () => currentMode())
+
+// 渲染端请求切换模式(Agent 文字区滑动手势退出 → 音乐;复用托盘同款
+// setWidgetMode:持久化 + 通知渲染端 + 重建托盘菜单)
+ipcMain.on('widget:set-mode', (_event, mode) => {
+  if (mode === 'agent' || mode === 'music') setWidgetMode(mode)
+})
+
+// Agent 工具清单(名称/描述/参数 schema,供 UI 工具列表视图展示)
+ipcMain.handle('agent:tools', () => getAgentEngine().listTools())
+
+// 静默总结对话标题(新对话入历史时后台生成,不打扰用户);
+// 走独立的总结 Sub Agent(与主对话引擎隔离)
+ipcMain.handle('agent:summarize', (_event, messages) =>
+  getSummaryAgent().summarize(Array.isArray(messages) ? messages : []),
+)
+
+// ---------------------------------------------------------------------------
 // 托盘
 // ---------------------------------------------------------------------------
 
@@ -592,6 +723,8 @@ function setLoginAtStartup(on) {
 function rebuildTrayMenu() {
   if (!tray) return
   const settings = loadSettings()
+  const mode = settings.mode === 'agent' ? 'agent' : 'music'
+  tray.setToolTip(`灵动岛挂件${mode === 'agent' ? '(Agent)' : ''}`)
   tray.setContextMenu(
     Menu.buildFromTemplate([
       {
@@ -603,10 +736,28 @@ function rebuildTrayMenu() {
         label: '设置…',
         click: () => {
           // 入口在托盘,设置面板在灵动岛内打开(渲染端展开并切换到设置视图,
-          // 内含自定义图片背景 / 帮助手册 / 主题色三个入口)
+          // 内含自定义图片背景 / 帮助手册 / 主题色 / Agent 设置入口)
           showWindow()
           win?.webContents.send('widget:open-settings')
         },
+      },
+      {
+        // 模式切换:音乐播放器 ↔ Agent(对话 + 本机工具执行)
+        label: '模式',
+        submenu: [
+          {
+            label: '音乐模式',
+            type: 'radio',
+            checked: mode === 'music',
+            click: () => setWidgetMode('music'),
+          },
+          {
+            label: 'Agent 模式',
+            type: 'radio',
+            checked: mode === 'agent',
+            click: () => setWidgetMode('agent'),
+          },
+        ],
       },
       { type: 'separator' },
       {

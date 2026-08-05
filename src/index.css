@@ -13,7 +13,7 @@
   --panel: rgba(255, 255, 255, 0.03);
   --font-display: 'Noto Serif SC', 'Songti SC', 'SimSun', serif;
   --font-mono: 'IBM Plex Mono', 'Cascadia Mono', Consolas, monospace;
-  --font-body: 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  --font-body: 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', 'Segoe UI Emoji', sans-serif;
 }
 
 html {

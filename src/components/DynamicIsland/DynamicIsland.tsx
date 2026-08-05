@@ -24,6 +24,8 @@ import { DEFAULT_BG_CROP, type ImageLibraryItem } from '../../media/backgroundSt
 import { type FontColorMode, type FontLibraryItem } from '../../media/fontStore'
 import { ParticleTime } from './ParticleTime'
 import {
+  AgentSettingsView,
+  AgentView,
   BackgroundView,
   ControlView,
   FontColorView,
@@ -35,7 +37,9 @@ import {
   SettingsView,
   ThemeView,
 } from './views'
+import type { AgentConfig, AgentPanelProps, AgentPart } from '../../agent/types'
 import {
+  AGENT_PANEL_MIN_H,
   BG_COMPACT_REF_H,
   BG_COMPACT_REF_W,
   BG_CROP_REF_H,
@@ -94,6 +98,10 @@ interface DynamicIslandProps {
   onSwipeLeft?: () => void
   /** 文字区手势:右滑回调(通常切换下一首) */
   onSwipeRight?: () => void
+  /** Agent 模式:文字区左滑/右滑手势回调(通常退出 Agent 切回音乐) */
+  onAgentSwipeToMusic?: () => void
+  /** 音乐模式:文字区三连击回调(通常切入 Agent 模式) */
+  onAgentTripleClick?: () => void
   /** 文字区双击回调(通常暂停/继续播放) */
   onTextDoubleClick?: () => void
   /** 长按展开状态变化回调(供外部暂停/恢复自动演示) */
@@ -187,6 +195,32 @@ interface DynamicIslandProps {
   imageLibrary?: ImageLibraryItem[]
   /** 图片库变化(删除 / 编辑名称后的完整列表) */
   onImageLibraryChange?: (items: ImageLibraryItem[]) => void
+  /**
+   * Agent 模式(存在即激活,桌面端由托盘菜单切换):
+   * 紧凑态显示 Agent 状态/回复预览,展开面板切换为聊天视图。
+   * 传入后媒体数据(track/playlist 等)与手势(双击/滑动)自动让位
+   */
+  agent?: AgentPanelProps
+  /** Agent 配置(设置视图"Agent 设置"入口;提供后设置视图显示该入口) */
+  agentConfig?: {
+    config: AgentConfig | null
+    onSave: (patch: Partial<AgentConfig>) => void
+  }
+  /**
+   * Agent 面板视觉尺寸变化(px,内容自适应 × 界面缩放;仅 agent 视图生效)。
+   * 宿主据此同步窗口尺寸(岛体 + 余量),长高/缩放窗口跟随
+   */
+  onAgentPanelSize?: (width: number, height: number) => void
+  /**
+   * 外部请求收起岛体(宿主在模式切换等场景调用):seq 递增即收起。
+   * 消除"Agent 缩放/展开状态残留进另一模式"的观感错乱
+   */
+  collapseSeq?: number
+  /**
+   * Agent 面板视觉宽度变化(px,缩放即时反馈;仅 agent 模式展开时生效)。
+   * 缩放在设置视图切换时窗口宽度也要立即跟随(高度由面板视图回调管理)
+   */
+  onAgentPanelWidth?: (width: number) => void
   /** 对外 API(ref) */
   ref?: Ref<DynamicIslandHandle>
 }
@@ -228,6 +262,9 @@ export interface DynamicIslandHandle {
 
 /** 设置类视图:从托盘"设置"或演示"设置"按钮进入,一律屏蔽
  *  单击岛体 / 长按 / Esc / 点击面板外等一切缩回操作,只能通过返回键退出 */
+/** 文字区三连击判定窗口(ms):三次点击两两间隔都在窗口内才触发 */
+const TRIPLE_CLICK_WINDOW_MS = 400
+
 const SETTINGS_VIEWS: readonly PanelView[] = [
   'settings',
   'background',
@@ -237,8 +274,63 @@ const SETTINGS_VIEWS: readonly PanelView[] = [
   'font-color',
   'font-library',
   'image-library',
+  'agent-settings',
 ]
 const isSettingsView = (view: string) => SETTINGS_VIEWS.includes(view as PanelView)
+
+/**
+ * Agent 模式紧凑态文案:监听 LLM 回复的完整流程。
+ * - 深度思考中:thinking + 仅有 reasoning 流(无文本输出);
+ * - 正在回复:thinking + 文本流已开始(流式增量实时可见);
+ * - 正在执行:工具循环阶段(带当前工具名);
+ * - 回复已完成:最近一条助手文本预览(岛内自动截断省略);
+ * - 出错 → 提示展开查看;无回复 → 待命
+ */
+function agentCompactLabel(agent: AgentPanelProps): string {
+  if (agent.lastError) return 'Agent 出错,展开查看'
+  if (agent.status === 'thinking') {
+    if (agent.streaming?.text) return '正在回复…'
+    if (agent.streaming?.reasoning) return '深度思考中…'
+    return '思考中…'
+  }
+  if (agent.status === 'running') {
+    const tools = agent.streaming?.tools
+    const last = tools && tools.length > 0 ? tools[tools.length - 1] : null
+    return last ? `正在执行:${last.name}` : 'Agent 正在执行…'
+  }
+  // 回复已完成:优先显示当前对话的实时总结标题(每轮回复后静默更新),
+  // 无总结时回退最近一条助手文本预览
+  if (agent.currentTitle) return agent.currentTitle
+  for (let i = agent.messages.length - 1; i >= 0; i--) {
+    const m = agent.messages[i]
+    if (m.role !== 'assistant') continue
+    const texts = m.parts
+      .filter((p): p is Extract<AgentPart, { type: 'text' }> => p.type === 'text')
+      .map((p) => p.text)
+    if (texts.length > 0) return texts.join(' ')
+  }
+  return 'Agent 待命'
+}
+
+/** Agent 模式左侧图标:四角星(sparkles,与灵动岛线稿风格一致) */
+function AgentIcon() {
+  return (
+    <svg
+      className="island-svg"
+      width="20"
+      height="20"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M12 3l1.9 5.8a2 2 0 0 0 1.3 1.3L21 12l-5.8 1.9a2 2 0 0 0-1.3 1.3L12 21l-1.9-5.8a2 2 0 0 0-1.3-1.3L3 12l5.8-1.9a2 2 0 0 0 1.3-1.3z" />
+      <path d="M19 3v3M20.5 4.5h-3" />
+    </svg>
+  )
+}
 
 
 /** 注入 @font-face 时使用的字体族名(与岛体 font-family 应用一致) */
@@ -296,6 +388,8 @@ export const DynamicIsland = memo(function DynamicIsland({
   onHoverChange,
   onSwipeLeft,
   onSwipeRight,
+  onAgentSwipeToMusic,
+  onAgentTripleClick,
   onTextDoubleClick,
   onExpandChange,
   mode,
@@ -334,8 +428,17 @@ export const DynamicIsland = memo(function DynamicIsland({
   onFontWeightChange,
   imageLibrary,
   onImageLibraryChange,
+  agent,
+  agentConfig,
+  onAgentPanelSize,
+  collapseSeq,
+  onAgentPanelWidth,
   ref,
 }: DynamicIslandProps) {
+  // Agent 模式激活(存在即激活):媒体数据与手势让位
+  const agentActive = agent != null
+  const agentActiveRef = useRef(false)
+  agentActiveRef.current = agentActive
   const islandRef = useRef<HTMLDivElement>(null)
   const textRef = useRef<HTMLSpanElement>(null)
   const barRef = useRef<HTMLDivElement>(null)
@@ -360,6 +463,8 @@ export const DynamicIsland = memo(function DynamicIsland({
   const onExpandChangeRef = useRef(onExpandChange)
   // 文字区滑动手势:按下起点 + 是否已触发(触发后不再重复)
   const swipeRef = useRef<{ startX: number; startY: number; pointerId: number; done: boolean } | null>(null)
+  // 文字区点击时间序列(三连击检测:三次点击间隔都在窗口内即触发)
+  const tripleClickRef = useRef<number[]>([])
   onSeekRef.current = onSeek
   onExpandChangeRef.current = onExpandChange
   onHoverChangeRef.current = onHoverChange
@@ -450,13 +555,16 @@ export const DynamicIsland = memo(function DynamicIsland({
   // 上传入口在展开面板主体);playlist 已传说明是本地模式
   const showUploadPrompt = track == null && playlist != null && playlist.length === 0
   // 操作提示优先:紧凑态直接把提示文本放进左侧文字区(与歌名同款字体、
-  // 同套切换动画,不额外加气泡),展开态由面板在播放键下方渲染
+  // 同套切换动画,不额外加气泡),展开态由面板在播放键下方渲染;
+  // Agent 模式:状态/回复预览文案走 agentCompactLabel
   const text =
-    hint && !expanded
-      ? hint
-      : showUploadPrompt
-        ? '本地暂无音乐,长按上传'
-        : mediaTextFor(state, track, showArtist)
+    agentActive
+      ? agentCompactLabel(agent)
+      : hint && !expanded
+        ? hint
+        : showUploadPrompt
+          ? '本地暂无音乐,长按上传'
+          : mediaTextFor(state, track, showArtist)
 
   // 媒体模式下文字区循环显示歌名/歌手名;悬浮、拖动进度条或展开期间暂停循环,
   // 避免触发文字切换动画导致岛宽/进度条位置变化
@@ -537,7 +645,8 @@ export const DynamicIsland = memo(function DynamicIsland({
   }, [displayText, visibleText])
 
   const progressMode = ISLAND_STATES[state].progress
-  const showBar = progressMode !== 'none'
+  // Agent 模式:不渲染紧凑进度条(媒体让位)
+  const showBar = !agentActive && progressMode !== 'none'
   // 确定进度:拖动中显示临时比例,否则按 position/duration;无 duration 时退回扫光
   const fillRatio = duration > 0 ? Math.min(position / duration, 1) : 0
   const displayRatio = scrubbing && scrubRatio !== null ? scrubRatio : fillRatio
@@ -653,9 +762,25 @@ export const DynamicIsland = memo(function DynamicIsland({
   }
 
   // 文字区鼠标手势:横向滑动超阈值即触发(左滑 onSwipeLeft/右滑 onSwipeRight),
-  // 纵向位移过大视为误触;仅绑定了手势回调时启用
-  const hasTextGestures = Boolean(onSwipeLeft || onSwipeRight)
+  // 纵向位移过大视为误触;仅绑定了手势回调时启用;Agent 模式下媒体手势让位,
+  // 改接 onAgentSwipeToMusic(左滑/右滑都触发,通常退出 Agent 切回音乐)
+  const hasTextGestures = agentActive
+    ? Boolean(onAgentSwipeToMusic)
+    : Boolean(onSwipeLeft || onSwipeRight)
   const handleTextPointerDown = (event: PointerEvent<HTMLSpanElement>) => {
+    // 音乐模式文字区三连击:切换到 Agent 模式。与双击(播放/暂停)并存
+    // —— 第三击按下时前两次已产生 dblclick,播放状态切换的副作用保留
+    if (!agentActive && onAgentTripleClick && event.button === 0) {
+      const now = Date.now()
+      const times = tripleClickRef.current
+      times.push(now)
+      // 只保留窗口内的点击(间隔过久的旧点击滑出)
+      while (times.length > 0 && now - times[0] > TRIPLE_CLICK_WINDOW_MS) times.shift()
+      if (times.length >= 3) {
+        times.length = 0
+        onAgentTripleClick()
+      }
+    }
     if (!hasTextGestures) return
     // 仅左键:右键留给挂件层的"长按拖拽移动挂件"
     if (event.button !== 0) return
@@ -674,6 +799,11 @@ export const DynamicIsland = memo(function DynamicIsland({
     const dy = event.clientY - gesture.startY
     if (Math.abs(dx) < SWIPE_THRESHOLD_PX || Math.abs(dy) > Math.abs(dx) * 1.2) return
     gesture.done = true
+    // Agent 模式:左滑/右滑无方向语义,都是退出 Agent 切回音乐
+    if (agentActive) {
+      onAgentSwipeToMusic?.()
+      return
+    }
     if (dx > 0) onSwipeRight?.()
     else onSwipeLeft?.()
   }
@@ -683,73 +813,100 @@ export const DynamicIsland = memo(function DynamicIsland({
   }
 
   /** 切换展开状态并通知外部(供暂停/恢复自动演示) */
-  const changeExpanded = useCallback((value: boolean) => {
-    if (value === expandedRef.current) return
-    setExpanded(value)
-    onExpandChangeRef.current?.(value)
+  /**
+   * 真正执行收起:宽度回缩 + 压感回弹 + 面板视图重置(音乐模式直接走这里;
+   * Agent 模式先经两阶段——阶段 1 只收缩高度,阶段 2 才到本函数,
+   * 压感在高度收缩期间保持,长条上 3D 旋转先随收缩自然收尾再回弹)
+   */
+  const doCollapse = useCallback(() => {
+    releasePress()
+    setExpanded(false)
+    onExpandChangeRef.current?.(false)
     // 形变动画期:关闭背景毛玻璃(backdrop 每帧重采样是卡顿主因)
     setAnimating(true)
     window.clearTimeout(animatingTimerRef.current)
     animatingTimerRef.current = window.setTimeout(() => setAnimating(false), MORPH_ANIMATE_MS)
-    // 收起时清掉残留的拖动状态与面板视图(拖动中收起可能不触发 bar 的 pointerup)
-    if (!value) {
-      scrubbingRef.current = false
-      setScrubbing(false)
-      setScrubRatio(null)
-      setPanelView('control')
-      // 收起目标宽度按收起后的状态重新计算(不复用展开前的悬停宽):
-      // - 悬停且当前状态有进度条 → 悬停目标宽(进度条会显示)
-      // - 非悬停或状态无进度条(success/error 等) → 自然紧凑宽,
-      //   避免"宽岛无进度条"的留白(demo 状态循环中收起时的常见问题)
+    // 收起时清掉残留的拖动状态与面板视图(拖动中收起可能不触发 bar 的 pointerup)。
+    // 统一回落 control:窗口高度随之恢复 280;Agent 模式再次展开时由下方
+    // "agent 激活" effect 把 control/list 切回 agent 视图(避免收起后窗口
+    // 停留在聊天高度 640)
+    scrubbingRef.current = false
+    setScrubbing(false)
+    setScrubRatio(null)
+    setPanelView('control')
+    // 收起目标宽度按收起后的状态重新计算(不复用展开前的悬停宽):
+    // - 悬停且当前状态有进度条 → 悬停目标宽(进度条会显示)
+    // - 非悬停或状态无进度条(success/error 等) → 自然紧凑宽,
+    //   避免"宽岛无进度条"的留白(demo 状态循环中收起时的常见问题)
+    const island = islandRef.current
+    const textEl = textRef.current
+    if (island && textEl) {
+      const font = getComputedStyle(textEl).font
+      const fullTextWidth = measureTextWidth(displayTextRef.current, font)
+      const natural = measureNaturalWidth(island)
+      const hoverNow = island.matches(':hover')
+      const hasBar = ISLAND_STATES[stateRef.current].progress !== 'none'
+      if (hoverNow && hasBar) {
+        const conflicts =
+          fullTextWidth + PROGRESS_WIDTH_PX + PROGRESS_RIGHT_MARGIN_PX + TEXT_LEFT_PX >
+          MAX_WIDTH_PX
+        const targetPx = conflicts
+          ? MAX_WIDTH_PX
+          : Math.min(natural + HOVER_EXTEND_PX, MAX_WIDTH_PX)
+        applyTextLayout(island, textEl, fullTextWidth, targetPx, true)
+        setIslandWidth(`${targetPx}px`)
+      } else {
+        applyTextLayout(island, textEl, fullTextWidth, natural, false)
+        setIslandWidth(`${natural}px`)
+      }
+      // 收起后鼠标不在岛上:解除悬停暂停(恢复自动演示循环)
+      if (!hoverNow && hoveredRef.current) {
+        hoveredRef.current = false
+        setHovered(false)
+        onHoverChangeRef.current?.(false)
+      }
+    }
+    // 收起瞬间进入 collapsing:隐藏悬停进度条并屏蔽 hover 布局,
+    // 等岛收缩完成后再恢复(紧凑内容的淡入延迟由 CSS 的 transition-delay 承担)
+    setCollapsing(true)
+    window.clearTimeout(collapseTimerRef.current)
+    collapseTimerRef.current = window.setTimeout(() => {
+      setCollapsing(false)
+      // 校准:收起触发瞬间鼠标在岛上(长按/点按),但松手移开后
+      // mouseleave 在 collapsing 期间被屏蔽——此时按实时 :hover 回落自然宽,
+      // 避免"悬停宽但无进度条"的留白
       const island = islandRef.current
       const textEl = textRef.current
-      if (island && textEl) {
+      if (island && textEl && !island.matches(':hover') && !expandedRef.current) {
         const font = getComputedStyle(textEl).font
         const fullTextWidth = measureTextWidth(displayTextRef.current, font)
         const natural = measureNaturalWidth(island)
-        const hoverNow = island.matches(':hover')
-        const hasBar = ISLAND_STATES[stateRef.current].progress !== 'none'
-        if (hoverNow && hasBar) {
-          const conflicts =
-            fullTextWidth + PROGRESS_WIDTH_PX + PROGRESS_RIGHT_MARGIN_PX + TEXT_LEFT_PX >
-            MAX_WIDTH_PX
-          const targetPx = conflicts
-            ? MAX_WIDTH_PX
-            : Math.min(natural + HOVER_EXTEND_PX, MAX_WIDTH_PX)
-          applyTextLayout(island, textEl, fullTextWidth, targetPx, true)
-          setIslandWidth(`${targetPx}px`)
-        } else {
-          applyTextLayout(island, textEl, fullTextWidth, natural, false)
-          setIslandWidth(`${natural}px`)
-        }
-        // 收起后鼠标不在岛上:解除悬停暂停(恢复自动演示循环)
-        if (!hoverNow && hoveredRef.current) {
-          hoveredRef.current = false
-          setHovered(false)
-          onHoverChangeRef.current?.(false)
-        }
+        applyTextLayout(island, textEl, fullTextWidth, natural, false)
+        setIslandWidth(`${natural}px`)
       }
-      // 收起瞬间进入 collapsing:隐藏悬停进度条并屏蔽 hover 布局,
-      // 等岛收缩完成后再恢复(紧凑内容的淡入延迟由 CSS 的 transition-delay 承担)
-      setCollapsing(true)
-      window.clearTimeout(collapseTimerRef.current)
-      collapseTimerRef.current = window.setTimeout(() => {
-        setCollapsing(false)
-        // 校准:收起触发瞬间鼠标在岛上(长按/点按),但松手移开后
-        // mouseleave 在 collapsing 期间被屏蔽——此时按实时 :hover 回落自然宽,
-        // 避免"悬停宽但无进度条"的留白
-        const island = islandRef.current
-        const textEl = textRef.current
-        if (island && textEl && !island.matches(':hover') && !expandedRef.current) {
-          const font = getComputedStyle(textEl).font
-          const fullTextWidth = measureTextWidth(displayTextRef.current, font)
-          const natural = measureNaturalWidth(island)
-          applyTextLayout(island, textEl, fullTextWidth, natural, false)
-          setIslandWidth(`${natural}px`)
-        }
-      }, COLLAPSE_HIDE_MS)
-    }
+    }, COLLAPSE_HIDE_MS)
   }, [])
+
+  /**
+   * 展开/收起切换(单动画:收起 = 宽度/高度同时收缩 + 压感回弹并行,
+   * 与音乐模式一致,无两段式割裂)
+   */
+  const changeExpanded = useCallback(
+    (value: boolean) => {
+      if (value === expandedRef.current) return
+      if (value) {
+        setExpanded(true)
+        onExpandChangeRef.current?.(true)
+        // 形变动画期:关闭背景毛玻璃(backdrop 每帧重采样是卡顿主因)
+        setAnimating(true)
+        window.clearTimeout(animatingTimerRef.current)
+        animatingTimerRef.current = window.setTimeout(() => setAnimating(false), MORPH_ANIMATE_MS)
+        return
+      }
+      doCollapse()
+    },
+    [doCollapse],
+  )
 
   // 3D 按压反馈:记录按压点象限,按压力度随按住时长渐进(0→1,与长按阈值同步,
   // 每帧节流 16ms,避免 60fps setState 重渲染),整岛以按压点为原点逐渐下沉/倾斜
@@ -808,8 +965,14 @@ export const DynamicIsland = memo(function DynamicIsland({
     if (prev) window.clearTimeout(prev.timer)
     const startX = event.clientX
     const startY = event.clientY
-    pressIslandAt(event)
+    // Agent 展开态:不做 3D 按压反馈(聊天面板交互区已拦截左键,
+    // 到达这里的左键来自消息区空白,长按/点击均无收起操作);
+    // 紧凑态保留按压反馈(长按展开手感与音乐模式一致)
+    if (!(agentActiveRef.current && expandedRef.current)) pressIslandAt(event)
     if (expandedRef.current) {
+      // Agent 模式:禁用长按收回(只能通过右上角收起面板按钮),
+      // 按压反馈仍保留(按下有 3D 压感,松手回弹)
+      if (agentActiveRef.current) return
       pressRef.current = {
         startX,
         startY,
@@ -820,9 +983,7 @@ export const DynamicIsland = memo(function DynamicIsland({
           suppressTimerRef.current = window.setTimeout(() => {
             suppressClickRef.current = false
           }, SUPPRESS_CLICK_MS)
-          // 压感回弹与收缩同步并行(同为 0.5s 弹簧,同时结束,
-          // 避免收起动画结束后才回弹造成的"动画 UI 与静态 UI 冲突"抖动)
-          releasePress()
+          // 压感回弹由 doCollapse 统一在收缩时执行(同 tick 并行)
           changeExpanded(false)
         }, LONG_PRESS_MS),
       }
@@ -845,6 +1006,12 @@ export const DynamicIsland = memo(function DynamicIsland({
             Math.min(EXPANDED_WIDTH_PX, window.innerWidth - EXPANDED_VIEWPORT_MARGIN_PX),
           ),
         )
+        // Agent 模式:展开同一帧切到聊天视图(与 setExpanded 批量提交),
+        // 高度目标直接是 --agent-h,避免"先朝 244 形变再改目标"的二次
+        // 重定向抖动(视图切换 effect 兜底运行中/设置类视图保留)
+        if (agentActive) {
+          setPanelView((view) => (view === 'control' || view === 'list' ? 'agent' : view))
+        }
         changeExpanded(true)
       }, LONG_PRESS_MS),
     }
@@ -876,9 +1043,10 @@ export const DynamicIsland = memo(function DynamicIsland({
       suppressClickRef.current = false
       return
     }
-    // 展开状态:点按岛体收起(设置类视图除外——只能通过返回键)
+    // 展开状态:点按岛体收起(设置类视图除外——只能通过返回键;
+    // Agent 模式屏蔽单击缩回,只保留长按收回)
     if (expandedRef.current) {
-      if (!isSettingsView(panelView)) changeExpanded(false)
+      if (!agentActive && !isSettingsView(panelView)) changeExpanded(false)
       return
     }
     if (!onChange) return
@@ -927,8 +1095,9 @@ export const DynamicIsland = memo(function DynamicIsland({
 
   const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     if (event.key === 'Escape' && expandedRef.current) {
-      // 设置类视图(设置/背景/帮助/主题色):Esc 不收起(只能通过返回键)
-      if (!isSettingsView(panelView)) {
+      // 设置类视图 / Agent 模式:Esc 不收起(设置类只能通过返回键,
+      // Agent 模式只保留长按收回)
+      if (!isSettingsView(panelView) && !agentActive) {
         event.preventDefault()
         changeExpanded(false)
       }
@@ -941,17 +1110,25 @@ export const DynamicIsland = memo(function DynamicIsland({
   }
 
   // 展开期间:点按岛外任意位置或按 Esc 收起(设置类视图除外——
-  // 只能通过返回键收起,避免设置/编辑中被误缩回)
+  // 只能通过返回键收起,避免设置/编辑中被误缩回;
+  // Agent 模式同样屏蔽,只保留长按收回)
   useEffect(() => {
     if (!expanded) return
     const onDocPointerDown = (event: globalThis.PointerEvent) => {
       const island = islandRef.current
-      if (island && !island.contains(event.target as Node) && !isSettingsView(panelView)) {
+      if (
+        island &&
+        !island.contains(event.target as Node) &&
+        !isSettingsView(panelView) &&
+        !agentActive
+      ) {
         changeExpanded(false)
       }
     }
     const onDocKeyDown = (event: globalThis.KeyboardEvent) => {
-      if (event.key === 'Escape' && !isSettingsView(panelView)) changeExpanded(false)
+      if (event.key === 'Escape' && !isSettingsView(panelView) && !agentActive) {
+        changeExpanded(false)
+      }
     }
     document.addEventListener('pointerdown', onDocPointerDown)
     document.addEventListener('keydown', onDocKeyDown)
@@ -959,7 +1136,57 @@ export const DynamicIsland = memo(function DynamicIsland({
       document.removeEventListener('pointerdown', onDocPointerDown)
       document.removeEventListener('keydown', onDocKeyDown)
     }
-  }, [expanded, changeExpanded, panelView])
+  }, [expanded, changeExpanded, panelView, agentActive])
+
+  // Agent 模式:展开默认进聊天视图(媒体控制/列表视图让位;
+  // 设置类视图如"设置"保留,托盘入口仍可用)
+  useEffect(() => {
+    if (!agentActive || !expanded) return
+    setPanelView((view) => (view === 'control' || view === 'list' ? 'agent' : view))
+  }, [agentActive, expanded])
+
+  // Agent 面板岛体高度(px,逻辑值):内容自适应(AgentView 测量回调写入
+  // --agent-h),默认下限留一点空;离开 agent 视图重置,下次进入重新测量
+  const [agentPanelH, setAgentPanelH] = useState(AGENT_PANEL_MIN_H)
+  useEffect(() => {
+    if (panelView !== 'agent') setAgentPanelH(AGENT_PANEL_MIN_H)
+  }, [panelView])
+  // Agent 面板界面缩放(百分比 100-300,最低 100%):等比例缩放展开态 UI。
+  // 持久化 localStorage;视觉尺寸 = 逻辑值 × 缩放,窗口由宿主跟随
+  const AGENT_SCALE_KEY = 'widget-agent-scale'
+  const [agentScale, setAgentScale] = useState(() => {
+    try {
+      const v = Number(localStorage.getItem(AGENT_SCALE_KEY))
+      if (Number.isFinite(v) && v >= 100 && v <= 300) return Math.round(v)
+    } catch {
+      // 忽略存储失败
+    }
+    return 100
+  })
+  const handleAgentScaleChange = useCallback((scale: number) => {
+    const clamped = Math.min(300, Math.max(100, Math.round(scale)))
+    setAgentScale(clamped)
+    try {
+      localStorage.setItem(AGENT_SCALE_KEY, String(clamped))
+    } catch {
+      // 忽略存储失败
+    }
+  }, [])
+  // 视觉尺寸同步宿主:窗口跟随(宿主回调须引用稳定)。
+  // 缩放只放大面板宽度(UI 元素不缩放),高度仍由内容驱动
+  useEffect(() => {
+    if (panelView === 'agent') {
+      const s = agentScale / 100
+      onAgentPanelSize?.(Math.round(expandedWidth * s), agentPanelH)
+    }
+  }, [panelView, agentPanelH, agentScale, expandedWidth, onAgentPanelSize])
+  // 缩放变化立即同步窗口宽度(无论当前面板视图——设置视图里切缩放
+  // 也要即时看到放大效果;高度由各视图回调管理)
+  useEffect(() => {
+    if (!agentActive || !expanded) return
+    onAgentPanelWidth?.(Math.round(expandedWidth * (agentScale / 100)))
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅缩放/展开变化时触发
+  }, [agentScale, expanded])
 
   // 外部请求(托盘菜单"设置")打开设置视图:seq 变化即展开并切换。
   // 背景 / 帮助 / 主题色 / 字体从设置视图内部进入,不再有独立外部入口
@@ -1041,6 +1268,12 @@ export const DynamicIsland = memo(function DynamicIsland({
   useEffect(() => {
     onPanelViewChange?.(panelView)
   }, [panelView, onPanelViewChange])
+
+  // 外部请求收起(宿主在模式切换等场景调用;seq 递增触发,仅展开态有效)
+  useEffect(() => {
+    if (!collapseSeq) return
+    changeExpanded(false)
+  }, [collapseSeq, changeExpanded])
 
   // 卸载时清理全部计时器 / 按压渐进循环 / 收起与动画延迟
   // (含防抖与临时状态计时器,Web 演示版反复切换组件时防残留;
@@ -1160,14 +1393,20 @@ export const DynamicIsland = memo(function DynamicIsland({
   return (
     <div
       ref={islandRef}
-      className={`island-demo${stateClass ? ` ${stateClass}` : ''}${modeClass ? ` ${modeClass}` : ''}${expanded ? ' expanded' : ''}${press ? ' is-pressed' : ''}${collapsing ? ' island-collapsing' : ''}${animating ? ' is-animating' : ''}${lyricFold ? ' island-lyric-off' : ''}${panelView === 'background' ? ` island-bg-view${bgTarget === 'compact' ? ' island-bg-view--compact' : ''}` : ''}${panelView === 'font-library' || panelView === 'image-library' ? ' island-lib-view' : ''}${panelView === 'font' ? ' island-font-view' : ''}${panelView === 'font-color' ? ' island-font-color-view' : ''}${panelView === 'theme' ? ' island-theme-view' : ''}`}
+      className={`island-demo${stateClass ? ` ${stateClass}` : ''}${modeClass ? ` ${modeClass}` : ''}${expanded ? ' expanded' : ''}${press ? ' is-pressed' : ''}${collapsing ? ' island-collapsing' : ''}${animating ? ' is-animating' : ''}${lyricFold ? ' island-lyric-off' : ''}${panelView === 'background' ? ` island-bg-view${bgTarget === 'compact' ? ' island-bg-view--compact' : ''}` : ''}${panelView === 'font-library' || panelView === 'image-library' ? ' island-lib-view' : ''}${panelView === 'font' ? ' island-font-view' : ''}${panelView === 'font-color' ? ' island-font-color-view' : ''}${panelView === 'theme' ? ' island-theme-view' : ''}${panelView === 'agent' ? ' island-agent-view' : ''}${panelView === 'agent' && agent?.streaming ? ' island-agent-streaming' : ''}${panelView === 'agent-settings' ? ' island-agent-settings-view' : ''}`}
       role="button"
       tabIndex={0}
-      aria-label={`灵动岛,当前状态:${ISLAND_STATES[state].label},点击切换,长按展开`}
+      aria-label={`灵动岛,当前状态:${agentActive ? 'Agent' : ISLAND_STATES[state].label},点击切换,长按展开`}
       aria-expanded={expanded}
       style={
         {
-          width: expanded ? `${expandedWidth}px` : islandWidth,
+          // Agent 展开态:岛体宽度 = 逻辑展开宽 × 界面缩放(高度由 CSS
+          // var(--agent-h) × var(--agent-s) 计算)
+          width: expanded
+            ? agentActive
+              ? `${Math.round(expandedWidth * (agentScale / 100))}px`
+              : `${expandedWidth}px`
+            : islandWidth,
           '--state-color': theme,
           // 字体颜色(主文字/次级文字),null 时 CSS fallback 白色系
           '--text-color': resolvedTextColor ?? undefined,
@@ -1178,6 +1417,9 @@ export const DynamicIsland = memo(function DynamicIsland({
           fontFamily: islandFontFamily,
           // 字体粗细(全部文字生效)
           fontWeight: islandFontWeight,
+          // Agent 面板高度(逻辑值,CSS 变量驱动 .island-agent-view 高度
+          // 与消息列表 max-height;非 agent 模式不设)
+          '--agent-h': agentActive ? `${agentPanelH}px` : undefined,
         } as CSSProperties
       }
       onClick={handleClick}
@@ -1219,7 +1461,8 @@ export const DynamicIsland = memo(function DynamicIsland({
       )}
       <div className="island-content">
         <div className="island-icon">
-          <div className="icon-floater">{ISLAND_STATES[state].icon(state)}</div>
+          {/* Agent 模式:四角星图标;音乐模式:状态图标 */}
+          <div className="icon-floater">{agentActive ? <AgentIcon /> : ISLAND_STATES[state].icon(state)}</div>
         </div>
         <span
           ref={textRef}
@@ -1229,11 +1472,11 @@ export const DynamicIsland = memo(function DynamicIsland({
           onPointerMove={handleTextPointerMove}
           onPointerUp={handleTextPointerUp}
           onPointerCancel={handleTextPointerUp}
-          onDoubleClick={onTextDoubleClick ?? undefined}
+          onDoubleClick={agentActive ? undefined : (onTextDoubleClick ?? undefined)}
         >
           {showingScrub ? null : visibleText}
           {!showingScrub && textTruncated && <span className="text-truncate-ellipsis">…</span>}
-          {!showingScrub && isLoading && (
+          {!showingScrub && (agentActive ? agent.status === 'thinking' : isLoading) && (
             <span className="text-ellipsis" aria-hidden="true">
               <span className="dot" />
               <span className="dot" />
@@ -1344,7 +1587,28 @@ export const DynamicIsland = memo(function DynamicIsland({
               onOpenHelp={() => setPanelView('help')}
               onOpenTheme={onThemeChange ? () => setPanelView('theme') : undefined}
               onOpenFont={onFontAdd || onFontLibraryChange ? () => setPanelView('font') : undefined}
+              onOpenAgent={agentConfig ? () => setPanelView('agent-settings') : undefined}
               onBack={() => changeExpanded(false)}
+            />
+          ) : null}
+          {/* Agent 聊天视图(agent 模式展开默认;只保留长按收回,
+              设置类视图除外) */}
+          {panelView === 'agent' && agent ? (
+            <AgentView
+              {...agent}
+              onCollapse={() => changeExpanded(false)}
+              onHeightChange={setAgentPanelH}
+            />
+          ) : null}
+          {/* Agent 设置(设置视图"Agent 设置"入口,设置类视图:只能经返回键退出):
+              API Key / Base URL / 模型 / 系统提示词,持久化走主进程 settings.json */}
+          {panelView === 'agent-settings' && agentConfig ? (
+            <AgentSettingsView
+              config={agentConfig.config}
+              onSave={agentConfig.onSave}
+              scale={agentScale}
+              onScaleChange={handleAgentScaleChange}
+              onBack={() => setPanelView('settings')}
             />
           ) : null}
           {/* 字体设置视图(设置视图"字体"入口,岛内打开):

@@ -37,12 +37,23 @@ import {
 } from '../src/media/backgroundStore'
 import { PLAY_MODES, type PlaybackMode } from '../src/media/playbackModes'
 import { useMediaPlayer } from '../src/media/useMediaPlayer'
+import type { AgentPanelProps } from '../src/agent/types'
+import { useAgent } from '../src/hooks/useAgent'
+
+/** Agent 模式的岛体强调色(自定义主题色未设置时使用) */
+const AGENT_THEME = '#4d6bfe'
+/** 模式切换:收起岛体动画时长(ms),动画完成后再切换数据源 */
+const MODE_SWITCH_ANIMATE_MS = 420
+/** 模式 localStorage 镜像键(启动瞬间避免闪错模式,权威值在主进程 settings.json) */
+const MODE_STORAGE_KEY = 'widget-mode'
 
 const THEME_STORAGE_KEY = 'widget-theme-color'
 /** 背景裁切/不透明度参数持久化键(图片本体在 IndexedDB) */
 const BACKGROUND_KEY = 'widget-background'
 /** 旧版单独存储的不透明度键(兼容读取) */
 const BACKGROUND_OPACITY_KEY = 'widget-background-opacity'
+/** 挂件窗口常规宽度(与 electron/main.cjs 的 WINDOW_W 一致) */
+const WINDOW_W = 520
 /** 挂件窗口常规高度(与 electron/main.cjs 的 WINDOW_H 一致) */
 const WINDOW_H = 280
 /** 背景编辑器视图的窗口高度(岛体加高到 440 + 余量) */
@@ -58,6 +69,10 @@ const VIEW_WINDOW_H: Record<string, number> = {
   'image-library': BG_VIEW_WINDOW_H,
   'font-color': 364,
   theme: 364,
+  // Agent 聊天面板:高度内容自适应(下限 240),窗口由 onAgentPanelHeight
+  // 动态跟随(岛体 + 40 余量);VIEW_WINDOW_H 无需登记(回落 WINDOW_H)
+  // Agent 设置表单(API Key / 模型 / 系统提示词)
+  'agent-settings': 440,
 }
 
 /** 默认裁切(cover 居中,与 backgroundStore 一致) */
@@ -77,6 +92,65 @@ const DEFAULT_CROP = DEFAULT_BG_CROP
 export default function WidgetApp() {
   const player = useMediaPlayer()
   const system = useSystemMedia()
+  // Agent 模式(托盘右键切换):状态/消息/流式累积/发送/中止/配置
+  const agent = useAgent()
+  // 当前模式:音乐播放器 ↔ Agent(权威值在主进程 settings.json,经 IPC 同步;
+  // localStorage 仅作启动瞬间的快速回显)
+  const [mode, setMode] = useState<'music' | 'agent'>(() => {
+    try {
+      return localStorage.getItem(MODE_STORAGE_KEY) === 'agent' ? 'agent' : 'music'
+    } catch {
+      return 'music'
+    }
+  })
+  // 待应用模式(托盘切换请求):先收起岛体动画完成,再真正切换数据源,
+  // 避免"Agent 面板瞬间消失 + 尺寸突变"造成的 UI 变形错乱
+  const [pendingMode, setPendingMode] = useState<'music' | 'agent' | null>(null)
+  // 订阅托盘切换(进入待应用队列)+ 启动时向主进程确认持久化模式(直接应用)
+  useEffect(() => {
+    window.desktop?.onSetMode?.((next) => setPendingMode(next))
+    window.desktop?.getMode?.().then((persisted) => {
+      setMode(persisted)
+      try {
+        localStorage.setItem(MODE_STORAGE_KEY, persisted)
+      } catch {
+        // 忽略存储失败
+      }
+    })
+  }, [])
+  // 模式切换:收起岛体(当前模式数据保留到动画完成)→ 切换数据源 + 重置窗口
+  const [collapseSeq, setCollapseSeq] = useState(0)
+  useEffect(() => {
+    if (!pendingMode || pendingMode === mode) return
+    setCollapseSeq((s) => s + 1)
+    const timer = window.setTimeout(() => {
+      setMode(pendingMode)
+      setPendingMode(null)
+      try {
+        localStorage.setItem(MODE_STORAGE_KEY, pendingMode)
+      } catch {
+        // 忽略存储失败
+      }
+      // 音乐 → Agent:自动暂停当前播放的音频(外部平台或本地播放器),
+      // 避免切到 Agent 模式后声音继续;切回音乐时不自动恢复,
+      // 由用户手动继续(与数据源切换的"双向暂停"约定一致)。
+      // externalActive 为切换前(音乐模式)的值,闭包捕获正确
+      if (pendingMode === 'agent') {
+        if (externalActive) void system.control('pause')
+        else player.pause()
+      }
+      window.desktop?.setWindowSize?.(WINDOW_W, WINDOW_H)
+    }, MODE_SWITCH_ANIMATE_MS)
+    return () => window.clearTimeout(timer)
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- externalActive/system/player 取切换前状态即可
+  }, [pendingMode, mode])
+  // 切回音乐模式时中止正在运行的 Agent 轮次
+  useEffect(() => {
+    if (mode === 'music' && (agent.status === 'thinking' || agent.status === 'running')) {
+      agent.abort()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode])
   // 操作结果提示(模式/跳转不被客户端接受时在岛内短暂显示:
   // 紧凑态 = 左侧文字区文字,展开态 = 播放键下方,均为岛体原生文本样式)
   const [hint, setHint] = useState<string | null>(null)
@@ -259,9 +333,29 @@ export default function WidgetApp() {
     }
   }, [])
   // 高空间视图(背景编辑器 / 库页面 / 自定义颜色页)按映射同步调整
-  // 窗口高度,离开回落常规高度
+  // 窗口高度,离开回落常规高度与宽度(520)
   const handlePanelViewChange = useCallback((view: string) => {
-    window.desktop?.setWindowHeight(VIEW_WINDOW_H[view] ?? WINDOW_H)
+    window.desktop?.setWindowSize?.(WINDOW_W, VIEW_WINDOW_H[view] ?? WINDOW_H)
+  }, [])
+  // Agent 面板视觉尺寸(内容自适应 × 界面缩放):窗口 = 岛体 + 余量。
+  // <4px 的变化不 resize(流式回复时逐行长高,避免窗口高频抖动)
+  const lastAgentWindowSize = useRef({ w: 0, h: 0 })
+  const handleAgentPanelSize = useCallback((width: number, height: number) => {
+    const w = Math.round(width + 40)
+    const h = Math.round(height + 40)
+    const last = lastAgentWindowSize.current
+    if (Math.abs(w - last.w) < 4 && Math.abs(h - last.h) < 4) return
+    last.w = w
+    last.h = h
+    window.desktop?.setWindowSize?.(w, h)
+  }, [])
+  // 缩放即时反馈:宽度变化立即跟随(高度保持当前窗口,由视图回调管理)
+  const handleAgentPanelWidth = useCallback((width: number) => {
+    const w = Math.round(width + 40)
+    const last = lastAgentWindowSize.current
+    if (Math.abs(w - last.w) < 4) return
+    last.w = w
+    window.desktop?.setWindowSize?.(w, window.innerHeight)
   }, [])
   // 自定义字体库(设置视图"字体"入口):库条目 IndexedDB,当前字体 id 与颜色/粗细 localStorage
   const [font, setFont] = useState<{
@@ -470,13 +564,59 @@ export default function WidgetApp() {
   )
   /* eslint-enable react-hooks/exhaustive-deps */
 
-  // 主题色:自定义 > 播放模式色 > 状态色(组件内)
+  // Agent 模式文字区左滑/右滑:退出 Agent 切回音乐模式
+  // (经主进程持久化 + 托盘菜单同步,与托盘切换同一链路)
+  const handleAgentSwipeToMusic = useCallback(() => {
+    window.desktop?.setMode?.('music')
+  }, [])
+  // 音乐模式文字区三连击:切入 Agent 模式(与左滑/右滑退出对称)
+  const handleAgentTripleClick = useCallback(() => {
+    window.desktop?.setMode?.('agent')
+  }, [])
+
+  // 主题色:自定义 > 播放模式色 > 状态色(组件内);Agent 模式用专属强调色
   const mediaTheme = externalActive
     ? PLAY_MODES[externalMode].color
     : islandState === 'playing' || islandState === 'idle'
       ? PLAY_MODES[player.mode].color
       : null
-  const islandTheme = customTheme ?? mediaTheme
+  const islandTheme = customTheme ?? (mode === 'agent' ? AGENT_THEME : mediaTheme)
+
+  // Agent 面板 props(memo 保持引用稳定,配合 DynamicIsland(React.memo))
+  const agentPanelProps: AgentPanelProps | undefined = useMemo(
+    () =>
+      mode === 'agent'
+        ? {
+            status: agent.status,
+            messages: agent.messages,
+            streaming: agent.streaming,
+            lastError: agent.lastError,
+            sessions: agent.sessions,
+            onLoadSession: agent.loadSession,
+            onDeleteSession: agent.deleteSession,
+            tools: agent.tools,
+            currentTitle: agent.currentTitle,
+            onSend: agent.send,
+            onAbort: agent.abort,
+            onClear: agent.clear,
+          }
+        : undefined,
+    [
+      mode,
+      agent.status,
+      agent.messages,
+      agent.streaming,
+      agent.lastError,
+      agent.sessions,
+      agent.loadSession,
+      agent.deleteSession,
+      agent.tools,
+      agent.currentTitle,
+      agent.send,
+      agent.abort,
+      agent.clear,
+    ],
+  )
 
   // 鼠标穿透:stage(岛体+展开面板)内接收鼠标,离开立即穿透。
   // 用 stage 容器而非组件 onHoverChange:组件展开期间屏蔽自己的 hover 事件,
@@ -617,11 +757,18 @@ export default function WidgetApp() {
         <DynamicIsland
           state={islandState}
           track={islandTrack}
+          agent={agentPanelProps}
+          agentConfig={{
+            config: agent.config,
+            onSave: agent.saveConfig,
+          }}
           position={islandPosition}
           duration={islandDuration}
           onSeek={externalActive ? islandSeek : player.seek}
           onSwipeLeft={islandPrev}
           onSwipeRight={islandNext}
+          onAgentSwipeToMusic={handleAgentSwipeToMusic}
+          onAgentTripleClick={handleAgentTripleClick}
           onTextDoubleClick={islandToggle}
           mode={externalActive ? externalMode : player.mode}
           onCycleMode={handleCycleMode}
@@ -647,6 +794,9 @@ export default function WidgetApp() {
           onBackgroundChange={handleBackgroundChange}
           requestSettingsSeq={settingsSeq}
           onPanelViewChange={handlePanelViewChange}
+          onAgentPanelSize={handleAgentPanelSize}
+          onAgentPanelWidth={handleAgentPanelWidth}
+          collapseSeq={collapseSeq}
           fontLibrary={fontLibrary}
           currentFontId={font.currentFontId}
           fontColor={fontColorProp}

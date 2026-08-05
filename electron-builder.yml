@@ -12,6 +12,7 @@ files:
   - electron/main.cjs
   - electron/preload.cjs
   - electron/bridge.cjs
+  - electron/agent.cjs
   - electron/icon.png
   - package.json
 

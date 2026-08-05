@@ -68,6 +68,8 @@ export type PanelView =
   | 'font-library'
   | 'image-library'
   | 'settings'
+  | 'agent'
+  | 'agent-settings'
 
 /** 主题色预设(与播放模式/状态色同一色系,供主题色视图) */
 export const THEME_PRESETS = [
@@ -84,6 +86,16 @@ export const THEME_PRESETS = [
 export function clamp01(v: number): number {
   return Math.max(0, Math.min(1, v))
 }
+
+// Agent 面板岛体高度自适应:固定部分(头部 26 + 输入 34 + 间距 20 +
+// 内边距 26 ≈ 106,取 116 留余量)、下限 200(稍微留一点空)、上限 600(内容
+// 超高滚动)。CSS 的 .island-agent-view height 与 .island-agent-messages
+// max-height 同步用 --agent-h 变量(差值 = FIXED_H)
+export const AGENT_PANEL_FIXED_H = 116
+export const AGENT_PANEL_MIN_H = 200
+export const AGENT_PANEL_MAX_H = 600
+/** 展开首帧骨架屏时长(ms):形变动画期间先渲染轻量占位,之后挂载真实内容 */
+export const AGENT_PHASE_IN_MS = 120
 
 // 背景裁切参考尺寸:展开态 400×244、紧凑态 280×56(挂件典型宽度)。
 // 岛体根部背景图 CSS 变量与 BackgroundView 视口共用同一套计算
@@ -172,6 +184,20 @@ export function measureTextWidth(text: string, font: string): number {
  * 二分查找最大可见前缀,保证截断后的宽度严格不超限。
  * 仅用于非悬停场景:悬停时若放不下则改用 mask 渐隐让位。
  */
+// 按字素拆分(完整 emoji / ZWJ 序列 / 组合字符):UTF-16 按代码单元切片
+// 会劈开代理对(emoji 显示成 �)。Intl.Segmenter 不可用时退 code point 级
+const graphemeSegmenter =
+  typeof Intl.Segmenter !== 'undefined'
+    ? new Intl.Segmenter('zh', { granularity: 'grapheme' })
+    : null
+
+function splitGraphemes(text: string): string[] {
+  if (graphemeSegmenter) {
+    return [...graphemeSegmenter.segment(text)].map((s) => s.segment)
+  }
+  return Array.from(text)
+}
+
 export function truncateText(
   text: string,
   maxWidth: number,
@@ -180,14 +206,16 @@ export function truncateText(
   if (measureTextWidth(text, font) <= maxWidth) {
     return { visible: text, truncated: false }
   }
+  // 二分查找在字素序列上进行(LLM 回复常带 emoji,绝不能从中劈开)
+  const graphemes = splitGraphemes(text)
   let lo = 1
-  let hi = text.length
+  let hi = graphemes.length
   while (lo < hi) {
     const mid = Math.ceil((lo + hi) / 2)
-    if (measureTextWidth(text.slice(0, mid), font) <= maxWidth) lo = mid
+    if (measureTextWidth(graphemes.slice(0, mid).join(''), font) <= maxWidth) lo = mid
     else hi = mid - 1
   }
-  return { visible: text.slice(0, lo), truncated: true }
+  return { visible: graphemes.slice(0, lo).join(''), truncated: true }
 }
 
 /**

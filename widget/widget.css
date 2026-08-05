@@ -19,7 +19,7 @@ body,
 body {
   font-family:
     'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', system-ui, -apple-system,
-    'Segoe UI', sans-serif;
+    'Segoe UI', 'Segoe UI Emoji', sans-serif;
   -webkit-font-smoothing: antialiased;
 }
 
