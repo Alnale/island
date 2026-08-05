@@ -49,6 +49,7 @@ interface DesktopApi {
     }>
     skillsDirs: string[]
     excludedSkills: string[]
+    excludedTools: string[]
   }>
   /** Agent:写入配置(增量补丁) */
   agentSetConfig(
@@ -68,6 +69,7 @@ interface DesktopApi {
         }>
         skillsDirs?: string[]
         excludedSkills?: string[]
+        excludedTools?: string[]
       }
     >,
   ): Promise<unknown>

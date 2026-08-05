@@ -415,6 +415,8 @@ export function AgentView({
   onAbort,
   onClear,
   onOpenSettings,
+  onExcludedToolsChange,
+  excludedTools,
   onCollapse,
   onHeightChange,
 }: AgentViewProps) {
@@ -450,6 +452,12 @@ export function AgentView({
   // 删除中的会话 id(离场动画中;播完才真正删除)
   const [leavingSessionIds, setLeavingSessionIds] = useState<string[]>([])
   const leavingSessionTimersRef = useRef<number[]>([])
+  // 工具列表视图:搜索词 / 禁用·恢复的离场与入场动画(leaving = 从当前
+  // 区离场,entering = 移入另一区时回弹入场;动画计时器统一收集清理)
+  const [toolQuery, setToolQuery] = useState('')
+  const [leavingTools, setLeavingTools] = useState<string[]>([])
+  const [enteringTools, setEnteringTools] = useState<string[]>([])
+  const toolAnimTimersRef = useRef<number[]>([])
   // 面板子视图:聊天 / 对话历史 / 工具列表
   const [view, setView] = useState<AgentViewKind>('chat')
   // 视图切换过渡:先切主实例(新视图进场动画),旧视图副本盖在上层
@@ -594,9 +602,38 @@ export function AgentView({
   useEffect(
     () => () => {
       leavingSessionTimersRef.current.forEach((t) => window.clearTimeout(t))
+      toolAnimTimersRef.current.forEach((t) => window.clearTimeout(t))
     },
     [],
   )
+
+  // 工具禁用 / 恢复:先播离场动画(0.24s)再提交配置,行移入另一区时
+  // 带入场动画(0.34s 回弹);动画期间禁止重复操作(动画未完成即卸载
+  // 不残留,计时器统一收集)
+  const toggleToolDisabled = (name: string, disable: boolean) => {
+    const current = excludedTools ?? []
+    // 仅离场中拦截:入场动画期间允许再次操作(行还在原区,离场动画
+    // 会覆盖入场动画,无冲突)
+    if (leavingTools.includes(name)) return
+    const next = disable
+      ? [...new Set([...current, name])]
+      : current.filter((n) => n !== name)
+    if (next.length === current.length) return
+    setLeavingTools((prev) => [...prev, name])
+    toolAnimTimersRef.current.push(
+      window.setTimeout(() => {
+        setLeavingTools((prev) => prev.filter((n) => n !== name))
+        onExcludedToolsChange?.(next)
+        // 行移入目标区(禁用区 / 可用区):回弹入场动画
+        setEnteringTools((prev) => [...prev, name])
+        toolAnimTimersRef.current.push(
+          window.setTimeout(() => {
+            setEnteringTools((prev) => prev.filter((n) => n !== name))
+          }, 460),
+        )
+      }, 260),
+    )
+  }
 
   // ===== 快捷切换按钮(悬浮 ⋯ 时在左侧浮现;滚轮逐格切换、单击跳转) =====
   // 默认显示"收起面板"(末项);滚轮可切换到菜单的各个入口;单击执行当前项。
@@ -911,7 +948,31 @@ export function AgentView({
       )
     }
     if (which === 'tools') {
-      /* 工具列表视图:名称 + 描述 + 参数 schema(可展开) */
+      /* 工具列表视图:搜索 + 名称 / 描述 / 参数 schema(可展开) +
+         禁用工具(禁用区)与恢复 */
+      const q = toolQuery.trim().toLowerCase()
+      const excludedSet = new Set(excludedTools ?? [])
+      const matches = (name: string, desc: string) =>
+        !q || name.toLowerCase().includes(q) || desc.toLowerCase().includes(q)
+      const activeTools = tools.filter(
+        (t) => !excludedSet.has(t.name) && matches(t.name, t.description),
+      )
+      // 禁用区行:名称 + 查表描述(工具已不在清单时只有名称)
+      const disabledRows = (excludedTools ?? [])
+        .filter((name) => {
+          if (!q) return true
+          const info = tools.find((t) => t.name === name)
+          return (
+            name.toLowerCase().includes(q) ||
+            (info?.description.toLowerCase().includes(q) ?? false)
+          )
+        })
+        .map((name) => ({ name, info: tools.find((t) => t.name === name) }))
+      // 离场 / 入场动画类(禁用点击与恢复点击共用:先离场再移区入场)
+      const rowAnimClass = (name: string) =>
+        `${leavingTools.includes(name) ? ' island-ui-leave' : ''}${
+          enteringTools.includes(name) ? ' island-ui-enter' : ''
+        }`
       return (
         <div className="island-agent-history">
           <div className="island-agent-history-head">
@@ -941,17 +1002,69 @@ export function AgentView({
             <span className="island-agent-history-title">工具列表</span>
           </div>
           <div className="island-agent-history-list" ref={listRef} onScroll={handleScroll}>
+            {/* 搜索框:按名称 / 说明过滤可用区与禁用区 */}
+            <div className="island-tools-search">
+              <svg
+                className="island-ctl-svg"
+                width="12"
+                height="12"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth={2}
+                strokeLinecap="round"
+              >
+                <circle cx="11" cy="11" r="7" />
+                <path d="M21 21l-4.3-4.3" />
+              </svg>
+              <input
+                type="text"
+                value={toolQuery}
+                placeholder="搜索工具名称或说明…"
+                spellCheck={false}
+                onChange={(event) => setToolQuery(event.target.value)}
+              />
+              {toolQuery && (
+                <button
+                  type="button"
+                  className="island-tools-search-clear"
+                  title="清空搜索"
+                  onClick={(event) => {
+                    event.stopPropagation()
+                    setToolQuery('')
+                  }}
+                >
+                  ✕
+                </button>
+              )}
+            </div>
             {tools.length === 0 && <div className="island-agent-welcome">工具清单加载中…</div>}
-            {tools.map((t) => (
+            {tools.length > 0 && activeTools.length === 0 && disabledRows.length === 0 && (
+              <div className="island-agent-welcome">没有匹配的工具</div>
+            )}
+            {activeTools.map((t) => (
               <details
                 key={t.name}
-                className="island-agent-tools-item"
+                className={`island-agent-tools-item${rowAnimClass(t.name)}`}
                 onPointerDown={(event) => {
                   if (event.button === 0) event.stopPropagation()
                 }}
               >
                 <summary>
                   <span className="island-agent-tools-name">{t.name}</span>
+                  <button
+                    type="button"
+                    className="island-tools-disable"
+                    title="禁用此工具(对话中不可用)"
+                    onClick={(event) => {
+                      // preventDefault 阻止 summary 的展开/收起默认行为
+                      event.preventDefault()
+                      event.stopPropagation()
+                      toggleToolDisabled(t.name, true)
+                    }}
+                  >
+                    禁用
+                  </button>
                   <span className="island-agent-tools-toggle" aria-hidden="true">
                     ▸
                   </span>
@@ -964,6 +1077,34 @@ export function AgentView({
                 </div>
               </details>
             ))}
+            {/* 禁用区:被禁用的工具集中展示,可恢复(动画与禁用同款) */}
+            {disabledRows.length > 0 && (
+              <div className="island-tools-excluded">
+                <div className="island-tools-excluded-head">
+                  <span>已禁用({disabledRows.length})</span>
+                  <span className="island-tools-excluded-hint">禁用后对话中不再可用</span>
+                </div>
+                {disabledRows.map((row) => (
+                  <div key={row.name} className={`island-tools-excluded-row${rowAnimClass(row.name)}`}>
+                    <span className="island-tools-excluded-name">{row.name}</span>
+                    {row.info && (
+                      <span className="island-tools-excluded-desc">{row.info.description}</span>
+                    )}
+                    <button
+                      type="button"
+                      className="island-tools-restore"
+                      title="恢复此工具"
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        toggleToolDisabled(row.name, false)
+                      }}
+                    >
+                      恢复
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       )

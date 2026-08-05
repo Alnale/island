@@ -118,6 +118,10 @@ export interface AgentPanelProps {
   onClear(): void
   /** 打开 Agent 设置视图(⋯ 菜单"设置"入口) */
   onOpenSettings?(): void
+  /** 已禁用工具名(工具列表视图禁用;引擎下一轮起不注入) */
+  excludedTools?: string[]
+  /** 更新禁用工具列表(工具列表视图禁用 / 恢复) */
+  onExcludedToolsChange?(names: string[]): void
 }
 
 /**
@@ -166,4 +170,6 @@ export interface AgentConfig {
   skillsDirs: string[]
   /** 已排除技能(扫描跳过;LLM 对话 / 设置界面移除) */
   excludedSkills: string[]
+  /** 已禁用工具名(工具列表视图禁用;内置/MCP/技能一律生效) */
+  excludedTools: string[]
 }

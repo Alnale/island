@@ -139,6 +139,8 @@ const AGENT_CONFIG_DEFAULTS = {
   skillsDirs: DEFAULT_SKILLS_DIRS,
   /** 已排除技能(扫描跳过;LLM 对话 / 设置界面移除) */
   excludedSkills: [],
+  /** 已禁用工具名(工具列表视图禁用;内置/MCP/技能一律生效) */
+  excludedTools: [],
 }
 
 let agentEngine = null
@@ -199,6 +201,16 @@ function applyAgentConfigPatch(patch) {
       if (t && !ex.includes(t)) ex.push(t)
     }
     next.excludedSkills = ex.slice(0, 100)
+  }
+  // 已禁用工具(工具名字符串数组,去空去重)
+  if (Array.isArray(patch?.excludedTools)) {
+    const ex = []
+    for (const s of patch.excludedTools) {
+      if (typeof s !== 'string') continue
+      const t = s.trim().slice(0, 100)
+      if (t && !ex.includes(t)) ex.push(t)
+    }
+    next.excludedTools = ex.slice(0, 200)
   }
   if (Array.isArray(patch?.mcpServers)) {
     const servers = []
@@ -1320,7 +1332,69 @@ function createWindow() {
                 }
               }
             }
-            // 段 5:后台任务完成自动回复(全链路:background-done 事件 →
+            // 段 4.6:工具列表视图(搜索 / 禁用 / 禁用区 / 恢复,动画)。
+            // 从聊天视图 ⋯ 菜单进工具列表,合成事件驱动(React 受控输入
+            // 用原生 value setter;禁用/恢复先播离场动画再提交,等足 300ms)
+            {
+              const toolsResult = await win.webContents.executeJavaScript(`(async () => {
+                const sleep = (ms) => new Promise((res) => setTimeout(res, ms))
+                const out = {}
+                const menuBtn = document.querySelector('.island-agent-menu .island-agent-ctl')
+                menuBtn?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+                await sleep(250)
+                const toolsItem = [...document.querySelectorAll('.island-agent-menu-item')].find((b) => b.textContent.includes('工具列表'))
+                toolsItem?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+                await sleep(500)
+                const list = document.querySelector('.island-agent-history-list')
+                out.toolsShown = !!list
+                // 搜索框:输入过滤(受控输入原生 setter + input 事件)
+                const search = document.querySelector('.island-tools-search input')
+                out.searchShown = !!search
+                const rows = () => [...(list?.querySelectorAll('.island-agent-tools-item') ?? [])]
+                out.rowsBefore = rows().length
+                if (search) {
+                  const setVal = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
+                  const target = rows()[0]?.querySelector('.island-agent-tools-name')?.textContent ?? ''
+                  setVal.call(search, target.slice(0, Math.max(1, Math.floor(target.length / 2))))
+                  search.dispatchEvent(new Event('input', { bubbles: true }))
+                  await sleep(300)
+                  out.rowsAfterFilter = rows().length
+                  out.filterWorked = rows().length > 0 && rows().length <= out.rowsBefore
+                  setVal.call(search, '')
+                  search.dispatchEvent(new Event('input', { bubbles: true }))
+                  await sleep(200)
+                }
+                // 禁用第一个工具:离场动画(0.24s)+ 移入禁用区(入场动画)
+                const first = rows()[0]
+                const firstName = first?.querySelector('.island-agent-tools-name')?.textContent ?? ''
+                const disableBtn = first?.querySelector('.island-tools-disable')
+                await sleep(200)
+                disableBtn?.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+                await sleep(120)
+                out.disableLeaving = !!first?.classList.contains('island-ui-leave')
+                await sleep(400)
+                const excludedRows = () => [...(list?.querySelectorAll('.island-tools-excluded-row') ?? [])]
+                const excludedNames = excludedRows().map((r) => r.querySelector('.island-tools-excluded-name')?.textContent)
+                out.excludedSection = !!list?.querySelector('.island-tools-excluded')
+                out.disabledName = excludedNames[0] ?? '(无)'
+                out.disableMoved = excludedNames.includes(firstName)
+                out.enteringInExcluded = excludedRows()[0]?.classList.contains('island-ui-enter') ?? false
+                // 恢复:同样先离场再回到可用区
+                const restoreBtn = excludedRows()[0]?.querySelector('.island-tools-restore')
+                await sleep(200)
+                restoreBtn?.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+                await sleep(400)
+                out.restoreBack = rows().some((r) => r.querySelector('.island-agent-tools-name')?.textContent === firstName)
+                out.excludedEmpty = excludedRows().length === 0
+                return JSON.stringify(out)
+              })()`)
+              console.log('[widget] agent-tools-actions:', toolsResult)
+              // 返回对话(后续段 5 需要聊天视图)
+              await win.webContents.executeJavaScript(`(() => {
+                document.querySelector('.island-agent-history-back')?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+              })()`)
+              await new Promise((r) => setTimeout(r, 500))
+            }
             // 渲染端自动 send → LLM 主动回复,真实 API)
             const autoReplyResult = await win.webContents.executeJavaScript(`(async () => {
               const sleep = (ms) => new Promise((res) => setTimeout(res, ms))

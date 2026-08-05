@@ -121,6 +121,11 @@ export interface AgentConfig {
   /** 技能目录列表(扫描 SKILL.md,每个技能暴露 skill_<名字> 工具) */
   skillsDirs: string[]
   /**
+   * 已禁用工具名(工具列表视图禁用;内置/MCP/技能一律生效,引擎每轮
+   * 注入工具时过滤,手动调用同样不可用)
+   */
+  excludedTools: string[]
+  /**
    * 已排除技能(slug = 工具名去 skill_ 前缀;扫描时跳过,对话中不可用)。
    * 支持 LLM 对话移除(skills_config exclude/include)与设置界面手动移除
    */

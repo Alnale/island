@@ -2919,6 +2919,9 @@ function createAgentEngine(deps2) {
     ]);
     return [...mcpTools, ...skillTools];
   }
+  function excludedToolSet() {
+    return new Set(deps2.getConfig().excludedTools ?? []);
+  }
   const memoryStore = deps2.getMemoryStore?.() ?? null;
   async function getMemoryBlock() {
     if (!memoryStore) return "";
@@ -2937,7 +2940,8 @@ function createAgentEngine(deps2) {
     const allowAll = !Array.isArray(params.tools) || params.tools.length === 0;
     const allowed = new Set((Array.isArray(params.tools) ? params.tools : []).map(String));
     const subTools = [...tools, ...await getExternalTools()].filter(
-      (t) => allowAll || allowed.has(t.name)
+      // 已禁用工具不注入子代理(用户禁用的工具任何路径都不可用)
+      (t) => !excludedToolSet().has(t.name) && (allowAll || allowed.has(t.name))
     );
     const subMap = new Map(subTools.map((t) => [t.name, t]));
     const system = [
@@ -3091,7 +3095,9 @@ function createAgentEngine(deps2) {
     let usage = { input: 0, output: 0 };
     const manual = parseManualCall(text);
     if (manual) {
-      const turnTools = [...tools, ...await getExternalTools()];
+      const turnTools = [...tools, ...await getExternalTools()].filter(
+        (t) => !excludedToolSet().has(t.name)
+      );
       const found = findManualTool(turnTools, manual.name);
       if (!found.tool) {
         onEvent({ type: "error", message: found.hint });
@@ -3141,7 +3147,9 @@ function createAgentEngine(deps2) {
         evolutionStatus,
         bgStatus
       ].filter(Boolean).join("\n\n");
-      const turnTools = [...tools, ...await getExternalTools()];
+      const turnTools = [...tools, ...await getExternalTools()].filter(
+        (t) => !excludedToolSet().has(t.name)
+      );
       const turnMap = new Map(turnTools.map((t) => [t.name, t]));
       const result = await streamByConfig({
         config,

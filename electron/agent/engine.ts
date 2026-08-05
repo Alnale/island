@@ -573,6 +573,10 @@ export function createAgentEngine(deps: EngineDeps): AgentEngine {
     ])
     return [...mcpTools, ...skillTools]
   }
+  /** 已禁用工具集合(工具列表视图禁用;每轮实时读配置,禁用下一轮即生效) */
+  function excludedToolSet(): Set<string> {
+    return new Set(deps.getConfig().excludedTools ?? [])
+  }
 
   /** 记忆存储(主进程注入;未注入时记忆功能禁用) */
   const memoryStore = deps.getMemoryStore?.() ?? null
@@ -603,7 +607,8 @@ export function createAgentEngine(deps: EngineDeps): AgentEngine {
     const allowed = new Set((Array.isArray(params.tools) ? params.tools : []).map(String))
     // 子代理继承外部工具(MCP + 技能):未限制工具子集时全量可用
     const subTools = [...tools, ...(await getExternalTools())].filter(
-      (t) => allowAll || allowed.has(t.name),
+      // 已禁用工具不注入子代理(用户禁用的工具任何路径都不可用)
+      (t) => !excludedToolSet().has(t.name) && (allowAll || allowed.has(t.name)),
     )
     const subMap = new Map(subTools.map((t) => [t.name, t]))
     const system = [
@@ -812,7 +817,10 @@ export function createAgentEngine(deps: EngineDeps): AgentEngine {
     // (事件照常转发,UI 工具卡片与自动调用一致)
     const manual = parseManualCall(text)
     if (manual) {
-      const turnTools = [...tools, ...(await getExternalTools())]
+      // 已禁用工具同样不可手动调用(不注入,匹配不到给出提示)
+      const turnTools = [...tools, ...(await getExternalTools())].filter(
+        (t) => !excludedToolSet().has(t.name),
+      )
       const found = findManualTool(turnTools, manual.name)
       if (!found.tool) {
         onEvent({ type: 'error', message: found.hint })
@@ -875,8 +883,11 @@ export function createAgentEngine(deps: EngineDeps): AgentEngine {
         .filter(Boolean)
         .join('\n\n')
       // 本轮工具清单 = 内置 + MCP 服务工具 + 技能(每步刷新:
-      // MCP 服务崩溃/配置变更即时反映;命中缓存时零开销)
-      const turnTools = [...tools, ...(await getExternalTools())]
+      // MCP 服务崩溃/配置变更即时反映;命中缓存时零开销)。
+      // 已禁用工具(工具列表禁用)过滤掉,LLM 看不到也调不到
+      const turnTools = [...tools, ...(await getExternalTools())].filter(
+        (t) => !excludedToolSet().has(t.name),
+      )
       const turnMap = new Map(turnTools.map((t) => [t.name, t]))
       const result = await streamByConfig({
         config,

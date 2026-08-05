@@ -4546,6 +4546,158 @@
   word-break: break-word;
 }
 
+/* 工具搜索框:名称 / 说明过滤,清空按钮 */
+.island-tools-search {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  height: 30px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-dim, rgba(255, 255, 255, 0.45));
+}
+
+.island-tools-search input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--text-color, #fff);
+  font-size: 0.68rem;
+  font-family: inherit;
+}
+
+.island-tools-search input::placeholder {
+  color: var(--text-dim, rgba(255, 255, 255, 0.35));
+}
+
+.island-tools-search-clear {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border: none;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-dim, rgba(255, 255, 255, 0.6));
+  font-size: 0.58rem;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.island-tools-search-clear:hover {
+  background: rgba(255, 255, 255, 0.16);
+  color: var(--text-color, #fff);
+}
+
+/* 禁用按钮(工具行内):中性小胶囊,悬停变红提示 */
+.island-tools-disable {
+  flex: none;
+  padding: 2px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-dim, rgba(255, 255, 255, 0.55));
+  font-size: 0.58rem;
+  font-family: inherit;
+  cursor: pointer;
+  transition:
+    background 0.15s ease,
+    border-color 0.15s ease,
+    color 0.15s ease;
+}
+
+.island-tools-disable:hover {
+  background: rgba(248, 113, 113, 0.14);
+  border-color: rgba(248, 113, 113, 0.4);
+  color: #fca5a5;
+}
+
+/* 禁用区:被禁用的工具集中展示(可恢复) */
+.island-tools-excluded {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 2px;
+  padding: 8px 10px;
+  border: 1px dashed rgba(255, 255, 255, 0.14);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.island-tools-excluded-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.62rem;
+  color: var(--text-dim, rgba(255, 255, 255, 0.55));
+}
+
+.island-tools-excluded-hint {
+  margin-left: auto;
+  font-size: 0.56rem;
+  color: var(--text-dim, rgba(255, 255, 255, 0.32));
+}
+
+.island-tools-excluded-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  opacity: 0.75;
+}
+
+.island-tools-excluded-name {
+  flex: none;
+  font-size: 0.68rem;
+  font-weight: 600;
+  color: var(--text-dim, rgba(255, 255, 255, 0.6));
+  font-family: 'Cascadia Mono', 'JetBrains Mono', Consolas, monospace;
+  text-decoration: line-through;
+  text-decoration-color: rgba(255, 255, 255, 0.25);
+}
+
+.island-tools-excluded-desc {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.6rem;
+  color: var(--text-dim, rgba(255, 255, 255, 0.35));
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 恢复按钮:中性胶囊,悬停变绿提示 */
+.island-tools-restore {
+  flex: none;
+  padding: 2px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-dim, rgba(255, 255, 255, 0.55));
+  font-size: 0.58rem;
+  font-family: inherit;
+  cursor: pointer;
+  transition:
+    background 0.15s ease,
+    border-color 0.15s ease,
+    color 0.15s ease;
+}
+
+.island-tools-restore:hover {
+  background: rgba(74, 222, 128, 0.14);
+  border-color: rgba(74, 222, 128, 0.4);
+  color: #86efac;
+}
+
 /* ===== 展开首帧骨架屏(形变动画期间轻量占位,延迟后真实内容替换) ===== */
 .island-agent-skeleton {
   flex: 1;

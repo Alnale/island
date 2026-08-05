@@ -635,6 +635,10 @@ export default function WidgetApp() {
             onSend: agent.send,
             onAbort: agent.abort,
             onClear: agent.clear,
+            // 工具列表视图禁用/恢复(持久化 settings.json agent 段;
+            // 引擎每轮实时读配置,下一轮生效)
+            excludedTools: agent.config?.excludedTools ?? [],
+            onExcludedToolsChange: (names) => agent.saveConfig({ excludedTools: names }),
           }
         : undefined,
     [
@@ -651,6 +655,8 @@ export default function WidgetApp() {
       agent.send,
       agent.abort,
       agent.clear,
+      agent.config?.excludedTools,
+      agent.saveConfig,
     ],
   )
 
