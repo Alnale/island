@@ -36,14 +36,15 @@ __export(engine_exports, {
   createMemoryStore: () => createMemoryStore,
   createSummaryAgent: () => createSummaryAgent,
   createTools: () => createTools,
+  extractJsonTitle: () => extractJsonTitle,
   findManualTool: () => findManualTool,
   parseManualCall: () => parseManualCall,
   parseTitleJson: () => parseTitleJson
 });
 module.exports = __toCommonJS(engine_exports);
 var import_node_crypto2 = require("node:crypto");
-var import_node_fs5 = require("node:fs");
-var import_node_path4 = __toESM(require("node:path"), 1);
+var import_node_fs6 = require("node:fs");
+var import_node_path5 = __toESM(require("node:path"), 1);
 
 // electron/agent/deepseek.ts
 function historyToItems(history) {
@@ -1372,6 +1373,201 @@ function createTools(deps2) {
   ];
 }
 
+// electron/agent/settingsTools.ts
+var import_node_fs2 = require("node:fs");
+var import_node_path2 = __toESM(require("node:path"), 1);
+var MAX_FONT_BYTES = 30 * 1024 * 1024;
+var FONT_EXTENSIONS = {
+  ".ttf": "font/ttf",
+  ".otf": "font/otf",
+  ".woff": "font/woff",
+  ".woff2": "font/woff2"
+};
+var IMAGE_EXTENSIONS = {
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".webp": "image/webp",
+  ".bmp": "image/bmp"
+};
+async function fileToDataUrl(filePath, extMap, maxBytes, label) {
+  const p = String(filePath ?? "").trim();
+  if (!p) throw new Error(`${label}\u8DEF\u5F84\u4E0D\u80FD\u4E3A\u7A7A`);
+  const ext = import_node_path2.default.extname(p).toLowerCase();
+  const mime = extMap[ext];
+  if (!mime) throw new Error(`\u4E0D\u652F\u6301\u7684\u6587\u4EF6\u7C7B\u578B "${ext}",\u4EC5\u652F\u6301:${Object.keys(extMap).join(" / ")}`);
+  const stat = await import_node_fs2.promises.stat(p).catch(() => null);
+  if (!stat || !stat.isFile()) throw new Error(`\u6587\u4EF6\u4E0D\u5B58\u5728:${p}`);
+  if (stat.size <= 0) throw new Error(`\u6587\u4EF6\u4E3A\u7A7A:${p}`);
+  if (stat.size > maxBytes) {
+    throw new Error(`\u6587\u4EF6\u8FC7\u5927:${(stat.size / 1024 / 1024).toFixed(1)}MB,\u4E0A\u9650 ${Math.round(maxBytes / 1024 / 1024)}MB`);
+  }
+  const buf = await import_node_fs2.promises.readFile(p);
+  return { dataUrl: `data:${mime};base64,${buf.toString("base64")}`, name: import_node_path2.default.basename(p) };
+}
+function parseHexColor(color) {
+  const t = String(color ?? "").trim();
+  if (!/^#?[0-9a-fA-F]{6}$/.test(t)) {
+    throw new Error("\u989C\u8272\u683C\u5F0F\u4E0D\u6B63\u786E:\u9700\u8981 6 \u4F4D\u5341\u516D\u8FDB\u5236,\u5982 #4d6bfe \u6216 4d6bfe");
+  }
+  const hex = t.startsWith("#") ? t : `#${t}`;
+  return hex.toLowerCase();
+}
+function parseScale(percent) {
+  const n = Number(percent);
+  if (!Number.isFinite(n)) throw new Error("\u7F29\u653E\u6BD4\u4F8B\u9700\u8981\u662F\u6570\u5B57(100-300)");
+  return Math.min(300, Math.max(100, Math.round(n)));
+}
+function parseItemName(name) {
+  const t = String(name ?? "").trim();
+  if (!t) throw new Error("\u540D\u79F0\u4E0D\u80FD\u4E3A\u7A7A");
+  if (t.length > 50) throw new Error(`\u540D\u79F0\u8FC7\u957F(\u226450 \u5B57):${t.slice(0, 12)}\u2026`);
+  return t;
+}
+function createSettingsTools(deps2) {
+  const run = deps2.runIslandSettings;
+  if (!run) return [];
+  return [
+    {
+      name: "set_theme_color",
+      description: "\u8BBE\u7F6E\u7075\u52A8\u5C9B\u4E3B\u9898\u8272(\u5F3A\u8C03\u8272:\u6309\u94AE/\u6C14\u6CE1/\u8FDB\u5EA6\u6761\u7B49 UI \u7684\u4E3B\u8272),\u7ACB\u5373\u751F\u6548\u3002\u989C\u8272\u4E3A 6 \u4F4D\u5341\u516D\u8FDB\u5236(\u5982 #4d6bfe \u84DD\u8272\u3001#f87171 \u7EA2\u8272)\u3002\u9002\u5408:\u7528\u6237\u8981\u6C42\u6362\u4E3B\u9898\u8272\u3001\u6839\u636E\u573A\u666F\u914D\u8272\u7B49\u3002",
+      parameters: {
+        type: "object",
+        properties: {
+          color: { type: "string", description: "\u4E3B\u9898\u8272 hex,\u5982 #4d6bfe" }
+        },
+        required: ["color"]
+      },
+      async execute(params) {
+        const hex = parseHexColor(params.color);
+        await run("setThemeColor", [hex]);
+        return `\u5DF2\u5C06\u4E3B\u9898\u8272\u8BBE\u7F6E\u4E3A ${hex}`;
+      }
+    },
+    {
+      name: "set_agent_scale",
+      description: '\u8BBE\u7F6E Agent \u6A21\u5F0F\u754C\u9762\u7F29\u653E\u6BD4\u4F8B(100%-300%,\u9ED8\u8BA4 200%)\u3002\u53EA\u653E\u5927\u9762\u677F/\u7A97\u53E3\u5C3A\u5BF8,UI \u5143\u7D20(\u6587\u5B57/\u6309\u94AE)\u4E0D\u7F29\u653E\u2014\u2014\u9002\u5408\u7528\u6237\u89C9\u5F97"\u5B57\u592A\u5C0F/\u9762\u677F\u592A\u5C0F"\u65F6\u8C03\u5927\u3002',
+      parameters: {
+        type: "object",
+        properties: {
+          percent: { type: "number", description: "\u7F29\u653E\u767E\u5206\u6BD4,100-300,\u5982 150" }
+        },
+        required: ["percent"]
+      },
+      async execute(params) {
+        const scale = parseScale(params.percent);
+        await run("setAgentScale", [scale]);
+        return `\u5DF2\u5C06 Agent \u754C\u9762\u7F29\u653E\u8BBE\u7F6E\u4E3A ${scale}%`;
+      }
+    },
+    {
+      name: "import_font",
+      description: "\u5BFC\u5165\u5B57\u4F53\u6587\u4EF6\u5230\u5B57\u4F53\u5E93\u5E76\u5E94\u7528\u4E3A\u5F53\u524D\u5B57\u4F53(\u7ACB\u5373\u751F\u6548,\u5168\u5C9B\u6587\u5B57\u6362\u5B57\u4F53)\u3002\u652F\u6301 ttf/otf/woff/woff2,\u226430MB\u3002\u9002\u5408:\u7528\u6237\u63D0\u4F9B\u5B57\u4F53\u6587\u4EF6\u8DEF\u5F84\u8981\u6C42\u6362\u5B57\u4F53\u3002",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "\u5B57\u4F53\u6587\u4EF6\u7EDD\u5BF9\u8DEF\u5F84" },
+          name: { type: "string", description: "\u53EF\u9009:\u5B57\u4F53\u663E\u793A\u540D\u79F0,\u7F3A\u7701\u7528\u6587\u4EF6\u540D" }
+        },
+        required: ["path"]
+      },
+      async execute(params) {
+        const { dataUrl, name } = await fileToDataUrl(
+          String(params.path ?? ""),
+          FONT_EXTENSIONS,
+          MAX_FONT_BYTES,
+          "\u5B57\u4F53\u6587\u4EF6"
+        );
+        const display = String(params.name ?? "").trim() || name;
+        await run("importFont", [dataUrl, parseItemName(display)]);
+        return `\u5DF2\u5BFC\u5165\u5B57\u4F53\u300C${display}\u300D\u5E76\u5E94\u7528\u4E3A\u5F53\u524D\u5B57\u4F53`;
+      }
+    },
+    {
+      name: "list_fonts",
+      description: "\u5217\u51FA\u5B57\u4F53\u5E93\u5168\u90E8\u5B57\u4F53(id + \u540D\u79F0)\u3002\u6539\u540D/\u7BA1\u7406\u5B57\u4F53\u524D\u5148\u67E5 id\u3002",
+      parameters: { type: "object", properties: {} },
+      async execute() {
+        const items = await run("listFonts", []);
+        if (!Array.isArray(items) || items.length === 0) return "(\u5B57\u4F53\u5E93\u4E3A\u7A7A)";
+        return items.map((f) => `- ${f.id} ${f.name}`).join("\n");
+      }
+    },
+    {
+      name: "rename_font",
+      description: "\u4FEE\u6539\u5B57\u4F53\u5E93\u4E2D\u67D0\u4E2A\u5B57\u4F53\u7684\u540D\u79F0(\u7ACB\u5373\u751F\u6548;id \u7528 list_fonts \u67E5\u8BE2)\u3002",
+      parameters: {
+        type: "object",
+        properties: {
+          id: { type: "string", description: "\u5B57\u4F53\u6761\u76EE id" },
+          name: { type: "string", description: "\u65B0\u540D\u79F0(\u226450 \u5B57)" }
+        },
+        required: ["id", "name"]
+      },
+      async execute(params) {
+        const id = String(params.id ?? "").trim();
+        if (!id) throw new Error("id \u4E0D\u80FD\u4E3A\u7A7A");
+        const name = parseItemName(params.name);
+        await run("renameFont", [id, name]);
+        return `\u5DF2\u5C06\u5B57\u4F53 ${id} \u6539\u540D\u4E3A\u300C${name}\u300D`;
+      }
+    },
+    {
+      name: "import_background",
+      description: "\u5BFC\u5165\u56FE\u7247\u4F5C\u4E3A\u7075\u52A8\u5C9B\u81EA\u5B9A\u4E49\u80CC\u666F(\u5C55\u5F00\u6001\u4E0E\u7D27\u51D1\u6001\u540C\u65F6\u5E94\u7528,\u7ACB\u5373\u751F\u6548),\u5E76\u52A0\u5165\u56FE\u7247\u5E93\u3002\u652F\u6301 png/jpg/jpeg/gif/webp/bmp\u3002\u9002\u5408:\u7528\u6237\u7ED9\u56FE\u7247\u8DEF\u5F84\u8981\u6C42\u8BBE\u4E3A\u80CC\u666F\u3002",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "\u56FE\u7247\u6587\u4EF6\u7EDD\u5BF9\u8DEF\u5F84" },
+          name: { type: "string", description: "\u53EF\u9009:\u56FE\u7247\u5E93\u663E\u793A\u540D\u79F0,\u7F3A\u7701\u7528\u6587\u4EF6\u540D" }
+        },
+        required: ["path"]
+      },
+      async execute(params) {
+        const { dataUrl, name } = await fileToDataUrl(
+          String(params.path ?? ""),
+          IMAGE_EXTENSIONS,
+          20 * 1024 * 1024,
+          "\u56FE\u7247\u6587\u4EF6"
+        );
+        const display = String(params.name ?? "").trim() || name;
+        await run("importBackground", [dataUrl, parseItemName(display)]);
+        return `\u5DF2\u5BFC\u5165\u56FE\u7247\u300C${display}\u300D\u4F5C\u4E3A\u80CC\u666F\u5E76\u52A0\u5165\u56FE\u7247\u5E93`;
+      }
+    },
+    {
+      name: "list_library_images",
+      description: "\u5217\u51FA\u56FE\u7247\u5E93\u5168\u90E8\u56FE\u7247(id + \u540D\u79F0)\u3002\u6539\u540D/\u7BA1\u7406\u56FE\u7247\u524D\u5148\u67E5 id\u3002",
+      parameters: { type: "object", properties: {} },
+      async execute() {
+        const items = await run("listLibraryImages", []);
+        if (!Array.isArray(items) || items.length === 0) return "(\u56FE\u7247\u5E93\u4E3A\u7A7A)";
+        return items.map((img) => `- ${img.id} ${img.name}`).join("\n");
+      }
+    },
+    {
+      name: "rename_library_image",
+      description: "\u4FEE\u6539\u56FE\u7247\u5E93\u4E2D\u67D0\u5F20\u56FE\u7247\u7684\u540D\u79F0(\u7ACB\u5373\u751F\u6548;id \u7528 list_library_images \u67E5\u8BE2)\u3002",
+      parameters: {
+        type: "object",
+        properties: {
+          id: { type: "string", description: "\u56FE\u7247\u6761\u76EE id" },
+          name: { type: "string", description: "\u65B0\u540D\u79F0(\u226450 \u5B57)" }
+        },
+        required: ["id", "name"]
+      },
+      async execute(params) {
+        const id = String(params.id ?? "").trim();
+        if (!id) throw new Error("id \u4E0D\u80FD\u4E3A\u7A7A");
+        const name = parseItemName(params.name);
+        await run("renameLibraryImage", [id, name]);
+        return `\u5DF2\u5C06\u56FE\u7247 ${id} \u6539\u540D\u4E3A\u300C${name}\u300D`;
+      }
+    }
+  ];
+}
+
 // electron/agent/mcp.ts
 var import_node_child_process2 = require("node:child_process");
 var INIT_TIMEOUT_MS = 15e3;
@@ -1903,8 +2099,8 @@ function createMCPManager() {
 }
 
 // electron/agent/skills.ts
-var import_node_fs2 = require("node:fs");
-var import_node_path2 = __toESM(require("node:path"), 1);
+var import_node_fs3 = require("node:fs");
+var import_node_path3 = __toESM(require("node:path"), 1);
 var DOC_MAX = 8e3;
 var DESC_MAX2 = 300;
 function parseFrontmatter(text) {
@@ -1933,18 +2129,18 @@ async function scanDirs(dirs) {
     seen.add(dir);
     let entries;
     try {
-      entries = await import_node_fs2.promises.readdir(dir, { withFileTypes: true }).then((list) => list.map((e) => e.name));
+      entries = await import_node_fs3.promises.readdir(dir, { withFileTypes: true }).then((list) => list.map((e) => e.name));
     } catch {
       continue;
     }
     entries.sort();
     for (const name of entries) {
       if (name.startsWith(".") || name.startsWith("_")) continue;
-      const skillDir = import_node_path2.default.join(dir, name);
-      const mdPath = import_node_path2.default.join(skillDir, "SKILL.md");
+      const skillDir = import_node_path3.default.join(dir, name);
+      const mdPath = import_node_path3.default.join(skillDir, "SKILL.md");
       let text;
       try {
-        text = await import_node_fs2.promises.readFile(mdPath, "utf8");
+        text = await import_node_fs3.promises.readFile(mdPath, "utf8");
       } catch {
         continue;
       }
@@ -1975,7 +2171,7 @@ function createSkillLoader() {
       const skills = await scanDirs(skillsDirs ?? []);
       const excludedSet = new Set(excluded);
       const ownSet = new Set(ownDirs.map((d) => d.toLowerCase()));
-      const importedMark = (dir) => import_node_path2.default.join(dir, ".island-imported");
+      const importedMark = (dir) => import_node_path3.default.join(dir, ".island-imported");
       const tools = [];
       const used = /* @__PURE__ */ new Set();
       for (const skill of skills) {
@@ -1985,8 +2181,8 @@ function createSkillLoader() {
         let n = 2;
         while (used.has(name)) name = `skill_${slug}_${n++}`;
         used.add(name);
-        const inOwn = ownSet.has(import_node_path2.default.dirname(skill.dir).toLowerCase());
-        const imported = inOwn && await import_node_fs2.promises.access(importedMark(skill.dir)).then(() => true).catch(() => false);
+        const inOwn = ownSet.has(import_node_path3.default.dirname(skill.dir).toLowerCase());
+        const imported = inOwn && await import_node_fs3.promises.access(importedMark(skill.dir)).then(() => true).catch(() => false);
         const sourceKind = inOwn ? imported ? "imported" : "created" : "scanned";
         const desc = skill.description.replace(/\s+/g, " ").trim().slice(0, DESC_MAX2);
         tools.push({
@@ -1997,7 +2193,7 @@ function createSkillLoader() {
           async execute() {
             let text;
             try {
-              text = await import_node_fs2.promises.readFile(skill.mdPath, "utf8");
+              text = await import_node_fs3.promises.readFile(skill.mdPath, "utf8");
             } catch (err) {
               throw new Error(`\u6280\u80FD\u6587\u6863\u8BFB\u53D6\u5931\u8D25:${err.message}`);
             }
@@ -2016,7 +2212,7 @@ ${body}`;
 
 // electron/agent/memory.ts
 var import_node_crypto = require("node:crypto");
-var import_node_fs3 = require("node:fs");
+var import_node_fs4 = require("node:fs");
 var MAX_ENTRIES = 200;
 var MAX_CONTENT_CHARS = 500;
 var BLOCK_MAX = 6e3;
@@ -2035,7 +2231,7 @@ function createMemoryStore(getPath) {
     if (loadPromise) return loadPromise;
     loadPromise = (async () => {
       try {
-        const raw = await import_node_fs3.promises.readFile(getPath(), "utf8");
+        const raw = await import_node_fs4.promises.readFile(getPath(), "utf8");
         const data = JSON.parse(raw);
         if (Array.isArray(data.entries)) {
           entries = data.entries.filter(
@@ -2053,7 +2249,7 @@ function createMemoryStore(getPath) {
   }
   function scheduleWrite() {
     const payload = JSON.stringify({ entries }, null, 2);
-    writeChain = writeChain.then(() => import_node_fs3.promises.writeFile(getPath(), payload, "utf8")).catch(() => {
+    writeChain = writeChain.then(() => import_node_fs4.promises.writeFile(getPath(), payload, "utf8")).catch(() => {
     });
     return writeChain;
   }
@@ -2122,10 +2318,34 @@ function createMemoryStore(getPath) {
       scheduleWrite();
       return [...entries];
     },
+    /** 导入合并(设置界面"导入"按钮):按 id 与内容去重(已存在跳过);
+     * 导入的条目 updatedAt 置为当前(列表按更新时间倒序 → 置顶可见);
+     * 总量超 MAX_ENTRIES 时淘汰最旧(与 add 一致,新导入总是保留)。
+     * 返回导入/跳过计数 */
+    async importEntries(next) {
+      await ensureLoaded();
+      const seenIds = new Set(entries.map((e) => e.id));
+      const seenContents = new Set(entries.map((e) => e.content));
+      const fresh = [];
+      let skipped = 0;
+      for (const e of next) {
+        if (seenIds.has(e.id) || seenContents.has(e.content)) {
+          skipped += 1;
+          continue;
+        }
+        seenIds.add(e.id);
+        seenContents.add(e.content);
+        fresh.push({ ...e, updatedAt: Date.now() });
+      }
+      const existingSorted = [...entries].sort((a, b) => b.updatedAt - a.updatedAt);
+      entries = [...fresh, ...existingSorted].slice(0, MAX_ENTRIES);
+      scheduleWrite();
+      return { imported: fresh.length, skipped };
+    },
     /** 快照备份(进化提交前写 .bak;回滚用) */
     async snapshot(backupPath) {
       await ensureLoaded();
-      await import_node_fs3.promises.writeFile(backupPath, JSON.stringify({ entries }, null, 2), "utf8");
+      await import_node_fs4.promises.writeFile(backupPath, JSON.stringify({ entries }, null, 2), "utf8");
     }
   };
 }
@@ -2247,8 +2467,8 @@ function createMemoryTools(store) {
 }
 
 // electron/agent/evolution.ts
-var import_node_fs4 = require("node:fs");
-var import_node_path3 = __toESM(require("node:path"), 1);
+var import_node_fs5 = require("node:fs");
+var import_node_path4 = __toESM(require("node:path"), 1);
 var import_electron2 = require("electron");
 var EVAL_TIMEOUT_MS = 6e4;
 var LOG_MAX = 20;
@@ -2278,13 +2498,13 @@ function createEvolution(deps2) {
   let lastResult = null;
   let logs = [];
   let state = { version: 1, score: 0, updatedAt: 0 };
-  const statePath = () => import_node_path3.default.join(getMemoryDir(), "memory-state.json");
-  const snapshotsDir = () => import_node_path3.default.join(getMemoryDir(), "memory-snapshots");
-  const logPath = () => import_node_path3.default.join(getMemoryDir(), "evolution.json");
+  const statePath = () => import_node_path4.default.join(getMemoryDir(), "memory-state.json");
+  const snapshotsDir = () => import_node_path4.default.join(getMemoryDir(), "memory-snapshots");
+  const logPath = () => import_node_path4.default.join(getMemoryDir(), "evolution.json");
   const initPromise = Promise.all([loadLog(), loadState()]);
   async function loadLog() {
     try {
-      const raw = await import_node_fs4.promises.readFile(logPath(), "utf8");
+      const raw = await import_node_fs5.promises.readFile(logPath(), "utf8");
       const data = JSON.parse(raw);
       if (Array.isArray(data.logs)) logs = data.logs;
     } catch {
@@ -2293,13 +2513,13 @@ function createEvolution(deps2) {
   }
   async function saveLog() {
     try {
-      await import_node_fs4.promises.writeFile(logPath(), JSON.stringify({ logs: logs.slice(0, LOG_MAX) }, null, 2), "utf8");
+      await import_node_fs5.promises.writeFile(logPath(), JSON.stringify({ logs: logs.slice(0, LOG_MAX) }, null, 2), "utf8");
     } catch {
     }
   }
   async function loadState() {
     try {
-      const raw = await import_node_fs4.promises.readFile(statePath(), "utf8");
+      const raw = await import_node_fs5.promises.readFile(statePath(), "utf8");
       const data = JSON.parse(raw);
       state = {
         version: Number.isInteger(data.version) && Number(data.version) >= 1 ? Number(data.version) : 1,
@@ -2312,21 +2532,21 @@ function createEvolution(deps2) {
   }
   async function saveState() {
     try {
-      await import_node_fs4.promises.writeFile(statePath(), JSON.stringify(state, null, 2), "utf8");
+      await import_node_fs5.promises.writeFile(statePath(), JSON.stringify(state, null, 2), "utf8");
     } catch {
     }
   }
   async function ensureSnapshot(version) {
     const store = getStore();
-    const file = import_node_path3.default.join(snapshotsDir(), `v${version}.json`);
+    const file = import_node_path4.default.join(snapshotsDir(), `v${version}.json`);
     try {
-      await import_node_fs4.promises.access(file);
+      await import_node_fs5.promises.access(file);
       return file;
     } catch {
     }
-    await import_node_fs4.promises.mkdir(snapshotsDir(), { recursive: true });
+    await import_node_fs5.promises.mkdir(snapshotsDir(), { recursive: true });
     const entries = store ? await store.list() : [];
-    await import_node_fs4.promises.writeFile(file, JSON.stringify({ version, entries }, null, 2), "utf8");
+    await import_node_fs5.promises.writeFile(file, JSON.stringify({ version, entries }, null, 2), "utf8");
     return file;
   }
   function memoryDump(entries) {
@@ -2402,7 +2622,7 @@ function createEvolution(deps2) {
     const store = getStore();
     if (!store) return 0;
     try {
-      const raw = await import_node_fs4.promises.readFile(import_node_path3.default.join(snapshotsDir(), `v${version}.json`), "utf8");
+      const raw = await import_node_fs5.promises.readFile(import_node_path4.default.join(snapshotsDir(), `v${version}.json`), "utf8");
       const data = JSON.parse(raw);
       const entries = Array.isArray(data.entries) ? data.entries : [];
       await store.replaceAll(entries);
@@ -2530,15 +2750,15 @@ ${memoryDump(afterEntries)}`,
     async resetAll() {
       await initPromise;
       try {
-        await import_node_fs4.promises.rm(snapshotsDir(), { recursive: true, force: true });
+        await import_node_fs5.promises.rm(snapshotsDir(), { recursive: true, force: true });
       } catch {
       }
       try {
-        await import_node_fs4.promises.rm(logPath(), { force: true });
+        await import_node_fs5.promises.rm(logPath(), { force: true });
       } catch {
       }
       try {
-        await import_node_fs4.promises.rm(statePath(), { force: true });
+        await import_node_fs5.promises.rm(statePath(), { force: true });
       } catch {
       }
       state = { version: 1, score: null, updatedAt: 0 };
@@ -2597,6 +2817,30 @@ var TITLE_LITERAL_EXAMPLES = /* @__PURE__ */ new Set([
   "<\u5BF9\u8BDD\u6807\u9898>",
   "\u6839\u636E\u5BF9\u8BDD\u5185\u5BB9\u6982\u62EC\u7684\u6807\u9898"
 ]);
+function extractJsonTitle(raw) {
+  const text = (raw ?? "").trim();
+  if (!text) return "";
+  const candidates = [
+    text,
+    text.replace(/^```(?:json)?\s*|\s*```$/g, "").trim(),
+    text.slice(text.indexOf("{")).trim(),
+    text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1).trim()
+  ];
+  for (const c of candidates) {
+    if (!c) continue;
+    for (const candidate of [c, c.replace(/'/g, '"')]) {
+      try {
+        const obj = JSON.parse(candidate);
+        if (obj && typeof obj.title === "string" && obj.title.trim()) return obj.title.trim();
+      } catch {
+      }
+    }
+  }
+  return "";
+}
+function looksLikeCodeLiteral(title) {
+  return /^\[.*\]$/s.test(title) || /^\(.*\)$/s.test(title);
+}
 function trimHistory(history) {
   let total = 0;
   for (const m of history) total += estimateMessageTokens(m);
@@ -2765,9 +3009,9 @@ function createConfigTools(deps2) {
           if (existing.some((t) => t.name === `skill_${slug}`) && !params.overwrite) {
             throw new Error(`\u6280\u80FD ${slug} \u5DF2\u5B58\u5728(overwrite=true \u53EF\u8986\u76D6)`);
           }
-          const targetDir = import_node_path4.default.join(skillDir, slug);
-          const mdPath = import_node_path4.default.join(targetDir, "SKILL.md");
-          await import_node_fs5.promises.mkdir(targetDir, { recursive: true });
+          const targetDir = import_node_path5.default.join(skillDir, slug);
+          const mdPath = import_node_path5.default.join(targetDir, "SKILL.md");
+          await import_node_fs6.promises.mkdir(targetDir, { recursive: true });
           const md = `---
 name: ${slug}
 description: ${description}
@@ -2775,7 +3019,7 @@ description: ${description}
 
 ${content}
 `;
-          await import_node_fs5.promises.writeFile(mdPath, md, "utf8");
+          await import_node_fs6.promises.writeFile(mdPath, md, "utf8");
           return `\u5DF2\u521B\u5EFA\u6280\u80FD ${slug}:
 ${mdPath}
 \u5BF9\u8BDD\u4E2D\u53EF\u7528 /${slug} \u8C03\u7528(\u4E0B\u4E00\u8F6E\u8D77\u751F\u6548),\u4E5F\u53EF\u5728 \u8BBE\u7F6E \u2192 \u6280\u80FD\u76EE\u5F55(userData/skills) \u67E5\u770B`;
@@ -2882,8 +3126,11 @@ function createSummaryAgent(deps2) {
                 jsonMode: attempt.jsonMode,
                 noThinking: true
               });
-              const title = sanitizeTitle(parseTitleJson(result.text));
-              if (title && !TITLE_LITERAL_EXAMPLES.has(title)) return title;
+              const parsed = attempt.jsonMode ? extractJsonTitle(result.text) : parseTitleJson(result.text);
+              const title = sanitizeTitle(parsed);
+              if (title && !TITLE_LITERAL_EXAMPLES.has(title) && !looksLikeCodeLiteral(title)) {
+                return title;
+              }
               break;
             } catch {
               if (retry === 0) continue;
@@ -3048,6 +3295,9 @@ function createAgentEngine(deps2) {
       // 渲染端自动触发一轮对话让 LLM 主动回复(用户无需提问)
       onBackgroundDone: (info) => emit({ type: "background-done", ...info })
     }),
+    // 灵动岛设置工具(主题色/缩放/字体/背景图库):主进程注入了
+    // runIslandSettings 才注册(挂件环境;Web 演示版无主进程)
+    ...deps2.runIslandSettings ? createSettingsTools({ runIslandSettings: deps2.runIslandSettings }) : [],
     delegateTool,
     ...memoryStore ? createMemoryTools(memoryStore) : [],
     ...configTools,
@@ -3278,6 +3528,7 @@ function createAgentEngine(deps2) {
   createMemoryStore,
   createSummaryAgent,
   createTools,
+  extractJsonTitle,
   findManualTool,
   parseManualCall,
   parseTitleJson

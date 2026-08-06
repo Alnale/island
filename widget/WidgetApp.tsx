@@ -39,6 +39,12 @@ import { PLAY_MODES, type PlaybackMode } from '../src/media/playbackModes'
 import { useMediaPlayer } from '../src/media/useMediaPlayer'
 import type { AgentPanelProps } from '../src/agent/types'
 import { useAgent } from '../src/hooks/useAgent'
+import {
+  ISLAND_SETTINGS_EVENT,
+  registerIslandSettingsBridge,
+  THEME_STORAGE_KEY,
+  type IslandSettingsScope,
+} from '../src/settingsBridge'
 
 /** Agent 模式的岛体强调色(自定义主题色未设置时使用) */
 const AGENT_THEME = '#4d6bfe'
@@ -47,7 +53,7 @@ const MODE_SWITCH_ANIMATE_MS = 420
 /** 模式 localStorage 镜像键(启动瞬间避免闪错模式,权威值在主进程 settings.json) */
 const MODE_STORAGE_KEY = 'widget-mode'
 
-const THEME_STORAGE_KEY = 'widget-theme-color'
+// THEME_STORAGE_KEY 从 src/settingsBridge 导入(设置桥与 UI 共用同一键)
 /** 背景裁切/不透明度参数持久化键(图片本体在 IndexedDB) */
 const BACKGROUND_KEY = 'widget-background'
 /** 旧版单独存储的不透明度键(兼容读取) */
@@ -75,12 +81,93 @@ const VIEW_WINDOW_H: Record<string, number> = {
   help: HELP_VIEW_WINDOW_H,
   // Agent 聊天面板:高度内容自适应(下限 240),窗口由 onAgentPanelHeight
   // 动态跟随(岛体 + 40 余量);VIEW_WINDOW_H 无需登记(回落 WINDOW_H)
-  // Agent 设置表单(API Key / 模型 / 系统提示词)
-  'agent-settings': 440,
+  // Agent 设置表单(API Key / 模型 / 系统提示词;岛体 540 + 余量,
+  // 原 440/500 仍太扁,用户要求继续增高)
+  'agent-settings': 580,
 }
 
 /** 默认裁切(cover 居中,与 backgroundStore 一致) */
 const DEFAULT_CROP = DEFAULT_BG_CROP
+
+/**
+ * 读取背景参数(不透明度/裁切;图片本体走 IndexedDB)。
+ * 初始状态与设置桥事件重读共用(localStorage 损坏时回退默认;
+ * 旧版单一数值/单独键自动迁移为双槽位)
+ */
+function readBackgroundParams(): Pick<BackgroundState, 'opacity' | 'expanded' | 'compact'> {
+  let opacity: { expanded: number; compact: number } = { expanded: 0.4, compact: 0.4 }
+  const expanded = { ...DEFAULT_CROP }
+  const compact = { ...DEFAULT_CROP }
+  const readCrop = (
+    c: Partial<{ zoom: number; posX: number; posY: number }> | null | undefined,
+  ): { zoom: number; posX: number; posY: number } => ({
+    zoom: typeof c?.zoom === 'number' && c.zoom >= 1 && c.zoom <= 4 ? c.zoom : DEFAULT_CROP.zoom,
+    posX:
+      typeof c?.posX === 'number' && c.posX >= 0 && c.posX <= 100 ? c.posX : DEFAULT_CROP.posX,
+    posY:
+      typeof c?.posY === 'number' && c.posY >= 0 && c.posY <= 100 ? c.posY : DEFAULT_CROP.posY,
+  })
+  try {
+    const raw = localStorage.getItem(BACKGROUND_KEY)
+    if (raw) {
+      const parsed = JSON.parse(raw) as {
+        opacity?: unknown
+        expanded?: Partial<{ zoom: number; posX: number; posY: number }>
+        compact?: Partial<{ zoom: number; posX: number; posY: number }>
+        // 旧版单形态字段(迁移:旧裁切归展开态,紧凑态保持默认)
+        zoom?: unknown
+        posX?: unknown
+        posY?: unknown
+      }
+      if (parsed && typeof parsed === 'object') {
+        if (typeof parsed.opacity === 'number' && parsed.opacity >= 0 && parsed.opacity <= 1) {
+          // 旧版单一数值:迁移为双槽位(两形态同值,保持旧外观)
+          opacity = { expanded: parsed.opacity, compact: parsed.opacity }
+        } else if (parsed.opacity && typeof parsed.opacity === 'object') {
+          const o = parsed.opacity as { expanded?: unknown; compact?: unknown }
+          opacity = {
+            expanded:
+              typeof o.expanded === 'number' && o.expanded >= 0 && o.expanded <= 1
+                ? o.expanded
+                : 0.4,
+            compact:
+              typeof o.compact === 'number' && o.compact >= 0 && o.compact <= 1
+                ? o.compact
+                : 0.4,
+          }
+        }
+        if (parsed.expanded && typeof parsed.expanded === 'object') {
+          Object.assign(expanded, readCrop(parsed.expanded))
+        } else if (
+          typeof parsed.zoom === 'number' ||
+          typeof parsed.posX === 'number' ||
+          typeof parsed.posY === 'number'
+        ) {
+          Object.assign(
+            expanded,
+            readCrop({
+              zoom: typeof parsed.zoom === 'number' ? parsed.zoom : undefined,
+              posX: typeof parsed.posX === 'number' ? parsed.posX : undefined,
+              posY: typeof parsed.posY === 'number' ? parsed.posY : undefined,
+            }),
+          )
+        }
+        if (parsed.compact && typeof parsed.compact === 'object') {
+          Object.assign(compact, readCrop(parsed.compact))
+        }
+      }
+    } else {
+      // 兼容旧版:单独存储的不透明度(迁移为双槽位)
+      const old = Number(localStorage.getItem(BACKGROUND_OPACITY_KEY))
+      if (Number.isFinite(old) && old >= 0 && old <= 1) {
+        opacity = { expanded: old, compact: old }
+      }
+    }
+  } catch {
+    // 忽略存储失败
+  }
+  return { opacity, expanded, compact }
+}
 
 /**
  * 桌面挂件版灵动岛:
@@ -223,81 +310,11 @@ export default function WidgetApp() {
   }, [])
   // 自定义背景(托盘菜单"自定义背景"入口,岛内视图编辑):
   // 图片持久化到 IndexedDB,裁切/不透明度参数走 localStorage
-  const [background, setBackground] = useState<BackgroundState>(() => {
-    // 不透明度按形态独立(旧版单一数值自动迁移为双槽位)
-    let opacity: { expanded: number; compact: number } = { expanded: 0.4, compact: 0.4 }
-    const expanded = { ...DEFAULT_CROP }
-    const compact = { ...DEFAULT_CROP }
-    const readCrop = (
-      c: Partial<{ zoom: number; posX: number; posY: number }> | null | undefined,
-    ): { zoom: number; posX: number; posY: number } => ({
-      zoom: typeof c?.zoom === 'number' && c.zoom >= 1 && c.zoom <= 4 ? c.zoom : DEFAULT_CROP.zoom,
-      posX:
-        typeof c?.posX === 'number' && c.posX >= 0 && c.posX <= 100 ? c.posX : DEFAULT_CROP.posX,
-      posY:
-        typeof c?.posY === 'number' && c.posY >= 0 && c.posY <= 100 ? c.posY : DEFAULT_CROP.posY,
-    })
-    try {
-      const raw = localStorage.getItem(BACKGROUND_KEY)
-      if (raw) {
-        const parsed = JSON.parse(raw) as {
-          opacity?: unknown
-          expanded?: Partial<{ zoom: number; posX: number; posY: number }>
-          compact?: Partial<{ zoom: number; posX: number; posY: number }>
-          // 旧版单形态字段(迁移:旧裁切归展开态,紧凑态保持默认)
-          zoom?: unknown
-          posX?: unknown
-          posY?: unknown
-        }
-        if (parsed && typeof parsed === 'object') {
-          if (typeof parsed.opacity === 'number' && parsed.opacity >= 0 && parsed.opacity <= 1) {
-            // 旧版单一数值:迁移为双槽位(两形态同值,保持旧外观)
-            opacity = { expanded: parsed.opacity, compact: parsed.opacity }
-          } else if (parsed.opacity && typeof parsed.opacity === 'object') {
-            const o = parsed.opacity as { expanded?: unknown; compact?: unknown }
-            opacity = {
-              expanded:
-                typeof o.expanded === 'number' && o.expanded >= 0 && o.expanded <= 1
-                  ? o.expanded
-                  : 0.4,
-              compact:
-                typeof o.compact === 'number' && o.compact >= 0 && o.compact <= 1
-                  ? o.compact
-                  : 0.4,
-            }
-          }
-          if (parsed.expanded && typeof parsed.expanded === 'object') {
-            Object.assign(expanded, readCrop(parsed.expanded))
-          } else if (
-            typeof parsed.zoom === 'number' ||
-            typeof parsed.posX === 'number' ||
-            typeof parsed.posY === 'number'
-          ) {
-            Object.assign(
-              expanded,
-              readCrop({
-                zoom: typeof parsed.zoom === 'number' ? parsed.zoom : undefined,
-                posX: typeof parsed.posX === 'number' ? parsed.posX : undefined,
-                posY: typeof parsed.posY === 'number' ? parsed.posY : undefined,
-              }),
-            )
-          }
-          if (parsed.compact && typeof parsed.compact === 'object') {
-            Object.assign(compact, readCrop(parsed.compact))
-          }
-        }
-      } else {
-        // 兼容旧版:单独存储的不透明度(迁移为双槽位)
-        const old = Number(localStorage.getItem(BACKGROUND_OPACITY_KEY))
-        if (Number.isFinite(old) && old >= 0 && old <= 1) {
-          opacity = { expanded: old, compact: old }
-        }
-      }
-    } catch {
-      // 忽略存储失败
-    }
-    return { expandedImage: null, compactImage: null, opacity, expanded, compact }
-  })
+  const [background, setBackground] = useState<BackgroundState>(() => ({
+    expandedImage: null,
+    compactImage: null,
+    ...readBackgroundParams(),
+  }))
   // 托盘菜单请求打开设置:seq 递增触发岛内展开并切换视图
   // (背景 / 帮助手册 / 主题色从设置视图内部进入,无独立外部入口)
   const [settingsSeq, setSettingsSeq] = useState(0)
@@ -474,6 +491,55 @@ export default function WidgetApp() {
     imageLibraryRef.current = items
     setImageLibrary(items)
   }, [])
+  // 注册设置桥(LLM 设置工具入口;Web 演示版无主进程工具调用,不注册)
+  useEffect(() => {
+    registerIslandSettingsBridge()
+  }, [])
+  // LLM 设置工具(设置桥)应用后的**即时生效**:桥只写 localStorage /
+  // IndexedDB 并派发 island-settings-changed 事件,React 状态由这里按
+  // scopes 从存储重读刷新(主题色 / 背景图与参数 / 字体 / 图片库)
+  useEffect(() => {
+    const onSettingsChanged = (event: Event) => {
+      const scopes = (event as CustomEvent<{ scopes?: IslandSettingsScope[] }>).detail?.scopes ?? []
+      if (scopes.includes('theme')) {
+        try {
+          setCustomTheme(localStorage.getItem(THEME_STORAGE_KEY))
+        } catch {
+          // 忽略存储失败
+        }
+      }
+      if (scopes.includes('background')) {
+        loadBackgroundImage('expanded').then((img) =>
+          setBackground((prev) => ({ ...prev, expandedImage: img })),
+        )
+        loadBackgroundImage('compact').then((img) =>
+          setBackground((prev) => ({ ...prev, compactImage: img })),
+        )
+        setBackground((prev) => ({ ...prev, ...readBackgroundParams() }))
+      }
+      if (scopes.includes('font')) {
+        const s = loadFontSettings()
+        setFont({
+          currentFontId: s.currentFontId,
+          colorMode: s.colorMode,
+          colorValue: s.colorValue,
+          weight: s.weight,
+        })
+        void loadFontItems().then((items) => {
+          fontLibraryRef.current = items
+          setFontLibrary(items)
+        })
+      }
+      if (scopes.includes('imageLibrary')) {
+        void loadImageItems().then((items) => {
+          imageLibraryRef.current = items
+          setImageLibrary(items)
+        })
+      }
+    }
+    window.addEventListener(ISLAND_SETTINGS_EVENT, onSettingsChanged)
+    return () => window.removeEventListener(ISLAND_SETTINGS_EVENT, onSettingsChanged)
+  }, [])
   // 实时系统状态引用(异步检测用)
   const systemRef = useRef(system)
   systemRef.current = system
@@ -618,45 +684,64 @@ export default function WidgetApp() {
       : null
   const islandTheme = customTheme ?? (mode === 'agent' ? AGENT_THEME : mediaTheme)
 
-  // Agent 面板 props(memo 保持引用稳定,配合 DynamicIsland(React.memo))
+  // Agent 面板 props(memo 保持引用稳定,配合 DynamicIsland(React.memo))。
+  // 先解构字段再入依赖:exhaustive-deps 对 agent 整对象访问会要求把
+  // 整个对象入依赖(每次渲染新对象 → memo 恒失效),按字段解构后
+  // 依赖列表精确且稳定
+  const {
+    status: agentStatus,
+    messages: agentMessages,
+    streaming: agentStreaming,
+    lastError: agentLastError,
+    sessions: agentSessions,
+    loadSession,
+    deleteSession,
+    tools: agentTools,
+    currentTitle,
+    send: agentSend,
+    abort: agentAbort,
+    clear: agentClear,
+    saveConfig: agentSaveConfig,
+    config: agentConfig,
+  } = agent
   const agentPanelProps: AgentPanelProps | undefined = useMemo(
     () =>
       mode === 'agent'
         ? {
-            status: agent.status,
-            messages: agent.messages,
-            streaming: agent.streaming,
-            lastError: agent.lastError,
-            sessions: agent.sessions,
-            onLoadSession: agent.loadSession,
-            onDeleteSession: agent.deleteSession,
-            tools: agent.tools,
-            currentTitle: agent.currentTitle,
-            onSend: agent.send,
-            onAbort: agent.abort,
-            onClear: agent.clear,
+            status: agentStatus,
+            messages: agentMessages,
+            streaming: agentStreaming,
+            lastError: agentLastError,
+            sessions: agentSessions,
+            onLoadSession: loadSession,
+            onDeleteSession: deleteSession,
+            tools: agentTools,
+            currentTitle,
+            onSend: agentSend,
+            onAbort: agentAbort,
+            onClear: agentClear,
             // 工具列表视图禁用/恢复(持久化 settings.json agent 段;
             // 引擎每轮实时读配置,下一轮生效)
-            excludedTools: agent.config?.excludedTools ?? [],
-            onExcludedToolsChange: (names) => agent.saveConfig({ excludedTools: names }),
+            excludedTools: agentConfig?.excludedTools ?? [],
+            onExcludedToolsChange: (names) => agentSaveConfig({ excludedTools: names }),
           }
         : undefined,
     [
       mode,
-      agent.status,
-      agent.messages,
-      agent.streaming,
-      agent.lastError,
-      agent.sessions,
-      agent.loadSession,
-      agent.deleteSession,
-      agent.tools,
-      agent.currentTitle,
-      agent.send,
-      agent.abort,
-      agent.clear,
-      agent.config?.excludedTools,
-      agent.saveConfig,
+      agentStatus,
+      agentMessages,
+      agentStreaming,
+      agentLastError,
+      agentSessions,
+      loadSession,
+      deleteSession,
+      agentTools,
+      currentTitle,
+      agentSend,
+      agentAbort,
+      agentClear,
+      agentConfig?.excludedTools,
+      agentSaveConfig,
     ],
   )
 

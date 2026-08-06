@@ -48,12 +48,15 @@ nsis:
   createStartMenuShortcut: true
   shortcutName: 灵动岛挂件
   artifactName: 灵动岛挂件-安装版-${version}.${ext}
-  # 卸载时连同用户数据一并删除(%APPDATA%\dynamic-island:
-  # settings.json / localStorage / 上传音乐·背景·字体 IndexedDB)
-  # electron-builder 26 无勾选框,确认卸载即删除
-  deleteAppDataOnUninstall: true
-  # 自定义 NSIS 脚本:在开始菜单补「卸载 灵动岛挂件」快捷方式
-  # (electron-builder 26 辅助安装默认不生成独立的卸载入口)
+  # 卸载时**选择是否保留数据**(用户要求,2026-08-06):electron-builder
+  # 26 的 deleteAppDataOnUninstall 确认卸载即删、无勾选框,已关闭——
+  # 改由 nsis-custom.nsi 的卸载页面(「保留我的数据」复选框,默认勾选)
+  # + customUnInstall 条件删除接管(%APPDATA%\dynamic-island:
+  # settings.json / localStorage / 长期记忆 / 技能 / 上传音乐·背景·字体)
+  deleteAppDataOnUninstall: false
+  # 自定义 NSIS 脚本:在开始菜单补「卸载 灵动岛挂件」快捷方式 +
+  # 卸载数据保留选择页面(需 UTF-8 BOM——NSIS include 按 BOM 检测
+  # 编码,无 BOM 的 UTF-8 中文在 GBK 系统报 "Bad text encoding")
   include: electron/nsis-custom.nsi
 
 portable:

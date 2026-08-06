@@ -61,9 +61,13 @@ contextBridge.exposeInMainWorld('desktop', {
   agentAbort() {
     ipcRenderer.send('agent:abort')
   },
-  /** Agent:订阅引擎事件流(状态/文本增量/工具调用/工具结果/消息落定) */
+  /** Agent:订阅引擎事件流(状态/文本增量/工具调用/工具结果/消息落定)。
+   * 返回取消订阅函数(useAgent 与设置视图的 effect cleanup 调用,
+   * 避免视图卸载后回调继续持有 setState) */
   onAgentEvent(callback) {
-    ipcRenderer.on('agent:event', (_event, event) => callback(event))
+    const listener = (_event, event) => callback(event)
+    ipcRenderer.on('agent:event', listener)
+    return () => ipcRenderer.removeListener('agent:event', listener)
   },
   /** Agent:读取配置(API Key / Base URL / 模型 / 系统提示词) */
   agentGetConfig() {
@@ -84,6 +88,11 @@ contextBridge.exposeInMainWorld('desktop', {
   /** Agent:导出记忆到文件(保存对话框;JSON 结构同 memory.json) */
   agentMemoryExport() {
     return ipcRenderer.invoke('agent:memory-export')
+  },
+  /** Agent:导入记忆文件(打开对话框选导出文件 → 合并进现有记忆,
+      返回 {imported, skipped} 计数) */
+  agentMemoryImport() {
+    return ipcRenderer.invoke('agent:memory-import')
   },
   /** Agent:写入记忆(add/remove/update/replaceAll,返回最新列表) */
   agentMemorySet(patch) {

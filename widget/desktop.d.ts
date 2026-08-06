@@ -29,8 +29,9 @@ interface DesktopApi {
   agentSend(text: string, history: unknown[]): void
   /** Agent:中止当前轮 */
   agentAbort(): void
-  /** Agent:订阅引擎事件流(状态/文本增量/工具调用/工具结果/消息落定) */
-  onAgentEvent(callback: (event: unknown) => void): void
+  /** Agent:订阅引擎事件流(状态/文本增量/工具调用/工具结果/消息落定);
+   * 返回取消订阅函数(effect cleanup 用) */
+  onAgentEvent(callback: (event: unknown) => void): () => void
   /** Agent:读取配置(API Key / Base URL / 模型 / 系统提示词 / MCP / 技能目录) */
   agentGetConfig(): Promise<{
     apiKey: string
@@ -91,6 +92,14 @@ interface DesktopApi {
   agentMemorySet(patch: unknown): Promise<unknown>
   /** Agent:导出记忆到文件(保存对话框;JSON 结构同 memory.json) */
   agentMemoryExport(): Promise<{ canceled: boolean; path?: string; bytes?: number; error?: string }>
+  /** Agent:导入记忆文件(打开对话框选导出文件 → 合并进现有记忆,
+   * 返回导入/跳过计数) */
+  agentMemoryImport(): Promise<{
+    canceled: boolean
+    imported?: number
+    skipped?: number
+    error?: string
+  }>
   /** Agent:触发记忆自我进化(后台,完成发系统通知) */
   agentEvolve(focus?: string): Promise<{ started: boolean; message: string }>
   /** Agent:自我进化日志(version = 候选版本号) */

@@ -146,6 +146,30 @@ export function createMemoryStore(getPath: () => string) {
       scheduleWrite()
       return [...entries]
     },
+    /** 导入合并(设置界面"导入"按钮):按 id 与内容去重(已存在跳过);
+     * 导入的条目 updatedAt 置为当前(列表按更新时间倒序 → 置顶可见);
+     * 总量超 MAX_ENTRIES 时淘汰最旧(与 add 一致,新导入总是保留)。
+     * 返回导入/跳过计数 */
+    async importEntries(next: MemoryEntry[]): Promise<{ imported: number; skipped: number }> {
+      await ensureLoaded()
+      const seenIds = new Set(entries.map((e) => e.id))
+      const seenContents = new Set(entries.map((e) => e.content))
+      const fresh: MemoryEntry[] = []
+      let skipped = 0
+      for (const e of next) {
+        if (seenIds.has(e.id) || seenContents.has(e.content)) {
+          skipped += 1
+          continue
+        }
+        seenIds.add(e.id)
+        seenContents.add(e.content)
+        fresh.push({ ...e, updatedAt: Date.now() })
+      }
+      const existingSorted = [...entries].sort((a, b) => b.updatedAt - a.updatedAt)
+      entries = [...fresh, ...existingSorted].slice(0, MAX_ENTRIES)
+      scheduleWrite()
+      return { imported: fresh.length, skipped }
+    },
     /** 快照备份(进化提交前写 .bak;回滚用) */
     async snapshot(backupPath: string) {
       await ensureLoaded()

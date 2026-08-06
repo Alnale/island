@@ -239,6 +239,10 @@ export function useAgent(): AgentController {
           break
       }
     })
+    // send 引用稳定(useCallback [])且**声明在本 effect 之后**(TDZ:
+    // 依赖数组在渲染时求值,把 send 放进依赖会"used before declaration"
+    // 直接崩)——事件回调运行时 send 早已初始化,闭包引用安全
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   // 消息持久化:直接同步写(不防抖)。防抖 300ms 在页面刷新/渲染进程

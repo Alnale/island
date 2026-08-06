@@ -272,8 +272,40 @@ function getAgentEngine() {
     updateAgentConfig: (patch) => applyAgentConfigPatch(patch),
     // 技能创建写入目录(userData/skills,默认扫描源之一)
     getSkillDir: () => path.join(app.getPath('userData'), 'skills'),
+    // 灵动岛设置工具(主题色/缩放/字体/背景图库,应用后即时生效)
+    runIslandSettings,
   })
   return agentEngine
+}
+
+// ---------------------------------------------------------------------------
+// 灵动岛设置工具:调渲染端设置桥(LLM 改主题色/缩放/字体/背景图,即时生效)
+// ---------------------------------------------------------------------------
+
+// 引擎设置工具(electron/agent/settingsTools.ts)经此回调执行渲染端操作:
+// executeJavaScript 在页面上下文调用 window.__islandSettings(挂件版
+// WidgetApp 注册的 src/settingsBridge.ts)——桥写 localStorage/IndexedDB
+// 后派发 island-settings-changed 事件,UI 监听重读 → 即时生效。
+// 桥的错误统一转 {error} 结构,这里抛出(引擎按"工具执行失败"回填,
+// LLM 可自纠);executeJavaScript 会 await 桥方法返回的 Promise
+async function runIslandSettings(op, args) {
+  if (!win || win.isDestroyed()) throw new Error('挂件窗口不可用')
+  const argJson = (args ?? []).map((a) => JSON.stringify(a)).join(', ')
+  const result = await win.webContents.executeJavaScript(
+    `(async () => {
+      const fn = window.__islandSettings ? window.__islandSettings[${JSON.stringify(op)}] : null
+      if (typeof fn !== 'function') return { error: '设置桥未就绪(稍后重试)' }
+      try {
+        return await fn(${argJson})
+      } catch (err) {
+        return { error: (err && err.message) ? String(err.message) : String(err) }
+      }
+    })()`,
+  )
+  if (result && typeof result === 'object' && typeof result.error === 'string') {
+    throw new Error(result.error)
+  }
+  return result
 }
 
 // 独立的总结后台 Sub Agent(懒加载单例):与主对话引擎零共享——
@@ -1396,8 +1428,138 @@ function createWindow() {
               })()`)
               await new Promise((r) => setTimeout(r, 500))
             }
+            // 段 4.7:灵动岛设置工具端到端(设置桥 → 存储 → 事件 → UI 即时生效)。
+            // 直接调主进程 runIslandSettings(与引擎设置工具同一条链路,绕开
+            // LLM 调度保证确定性):主题色 / 缩放 / 背景导入+改名 / 字体导入
+            // +改名,断言 UI 即时生效(--state-color / 岛宽比例 / 库条目)。
+            // 前后状态备份,结束后恢复(不残留用户数据);IndexedDB 背景槽位
+            // 用原生事务读写(桥未暴露槽位读取)
+            {
+              const js = (code) => win.webContents.executeJavaScript(code)
+              const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+              const out = {}
+              // IndexedDB 背景库槽位读写('island-background' v2,store 'bg';
+              // put null = 清空槽位,加载器按 typeof string 判定)
+              const bgSlotJs = (slot, op, value) => `(async () => {
+                const db = await new Promise((res, rej) => {
+                  const r = indexedDB.open('island-background', 2)
+                  r.onsuccess = () => res(r.result)
+                  r.onerror = () => rej(r.error)
+                })
+                return await new Promise((res) => {
+                  const tx = db.transaction('bg', '${op === 'get' ? 'readonly' : 'readwrite'}')
+                  const req = ${op === 'get'
+                    ? `tx.objectStore('bg').get(${JSON.stringify(slot)})`
+                    : `tx.objectStore('bg').put(${JSON.stringify(value)}, ${JSON.stringify(slot)})`}
+                  req.onsuccess = () => res(typeof req.result === 'string' ? req.result : null)
+                  req.onerror = () => res(null)
+                })
+              })()`
+              // 备份:localStorage 设置项 + 背景双槽位图片(恢复时写回)
+              const backup = {
+                theme: await js(`localStorage.getItem('widget-theme-color')`),
+                scale: await js(`localStorage.getItem('widget-agent-scale')`),
+                bgParams: await js(`localStorage.getItem('widget-background')`),
+                fontSettings: await js(`localStorage.getItem('widget-font')`),
+                bgExpanded: await js(bgSlotJs('expanded', 'get')),
+                bgCompact: await js(bgSlotJs('compact', 'get')),
+              }
+              const TEST_PNG =
+                'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='
+              try {
+                // 1. 主题色:写存储 → 事件 → --state-color 即时生效
+                await runIslandSettings('setThemeColor', ['#f87171'])
+                await sleep(500)
+                out.themeApplied = await js(
+                  `document.querySelector('.island-demo').style.getPropertyValue('--state-color') === '#f87171'`,
+                )
+                // 2. 缩放:岛宽按比例即时变化(当前缩放 A → 150)
+                const scaleBefore = Number((await js(`localStorage.getItem('widget-agent-scale')`)) ?? '200') || 200
+                const widthBefore = await js(`document.querySelector('.island-demo').offsetWidth`)
+                await runIslandSettings('setAgentScale', [150])
+                await sleep(500)
+                const scaleAfter = await js(`localStorage.getItem('widget-agent-scale')`)
+                const widthAfter = await js(`document.querySelector('.island-demo').offsetWidth`)
+                out.scaleStored = scaleAfter
+                out.scaleRatioOk =
+                  Math.abs(widthAfter - Math.round((widthBefore * 150) / scaleBefore)) < 10
+                out.scaleDebug = JSON.stringify({ scaleBefore, widthBefore, widthAfter })
+                // 3. 背景导入 + 改名:导入(双槽位应用 + 入库)→ 改名 → 断言
+                const imgRes = await runIslandSettings('importBackground', [TEST_PNG, '巡检测试背景'])
+                await sleep(500)
+                // --bg-img-e 设置在 .island-bg-image 子元素上(背景层),
+                // 不在 .island-demo 主元素(实测断言选择器踩坑)
+                const bgVar = await js(
+                  `document.querySelector('.island-bg-image')?.style.getPropertyValue('--bg-img-e') ?? '(无背景层)'`,
+                )
+                out.bgApplied = typeof bgVar === 'string' && bgVar.startsWith('url("data:image/png')
+                const imgs = (await runIslandSettings('listLibraryImages', [])) ?? []
+                out.bgInLibrary = imgs.some((i) => i.id === imgRes.id && i.name === '巡检测试背景')
+                await runIslandSettings('renameLibraryImage', [imgRes.id, '巡检测试背景-改名'])
+                await sleep(300)
+                const imgs2 = (await runIslandSettings('listLibraryImages', [])) ?? []
+                out.bgRenamed = imgs2.some((i) => i.id === imgRes.id && i.name === '巡检测试背景-改名')
+                // 4. 字体导入 + 改名:入库并应用为当前字体
+                const fontRes = await runIslandSettings('importFont', [
+                  'data:font/ttf;base64,QUFBQUFBQUE=',
+                  '巡检测试字体',
+                ])
+                await sleep(400)
+                const fontSettings = await js(`localStorage.getItem('widget-font')`)
+                out.fontApplied = typeof fontSettings === 'string' && fontSettings.includes(fontRes.id)
+                const fonts = (await runIslandSettings('listFonts', [])) ?? []
+                out.fontInLibrary = fonts.some((f) => f.id === fontRes.id)
+                await runIslandSettings('renameFont', [fontRes.id, '巡检测试字体-改名'])
+                await sleep(300)
+                const fonts2 = (await runIslandSettings('listFonts', [])) ?? []
+                out.fontRenamed = fonts2.some((f) => f.id === fontRes.id && f.name === '巡检测试字体-改名')
+                // 5. 非法操作拒绝:不存在的图片 id 改名应报错
+                let renamedError = ''
+                try {
+                  await runIslandSettings('renameLibraryImage', ['i-not-exist', 'x'])
+                } catch (err) {
+                  renamedError = (err && err.message) || String(err)
+                }
+                out.renameInvalidRejected = renamedError.includes('图片不存在')
+              } catch (err) {
+                out.error = String((err && err.stack) || err)
+                console.error('[widget] agent-settings-tools failed:', err)
+              } finally {
+                // 恢复用户数据:localStorage 设置项(缺失的 removeItem)
+                const setOrRemove = (key, value) =>
+                  value === null
+                    ? js(`localStorage.removeItem(${JSON.stringify(key)})`)
+                    : js(`localStorage.setItem(${JSON.stringify(key)}, ${JSON.stringify(value)})`)
+                await setOrRemove('widget-theme-color', backup.theme)
+                await setOrRemove('widget-agent-scale', backup.scale)
+                await setOrRemove('widget-background', backup.bgParams)
+                await setOrRemove('widget-font', backup.fontSettings)
+                // 背景槽位恢复原图(原无则清空)
+                await js(bgSlotJs('expanded', 'put', backup.bgExpanded))
+                await js(bgSlotJs('compact', 'put', backup.bgCompact))
+                // 删除测试入库条目(图片/字体;按「巡检测试」名前缀定位)
+                const imgs3 = (await runIslandSettings('listLibraryImages', []).catch(() => [])) ?? []
+                for (const img of imgs3) {
+                  if (String(img.name).startsWith('巡检测试')) {
+                    await runIslandSettings('deleteLibraryImage', [img.id]).catch(() => {})
+                  }
+                }
+                const fonts3 = (await runIslandSettings('listFonts', []).catch(() => [])) ?? []
+                for (const f of fonts3) {
+                  if (String(f.name).startsWith('巡检测试')) {
+                    await runIslandSettings('deleteFontItem', [f.id]).catch(() => {})
+                  }
+                }
+                // 恢复后的存储重读(恢复走原生 js 写,未触发桥事件;手动补发)
+                await js(
+                  `window.dispatchEvent(new CustomEvent('island-settings-changed', { detail: { scopes: ['theme','scale','font','background','imageLibrary'] } }))`,
+                )
+                await sleep(400)
+              }
+              console.log('[widget] agent-settings-tools:', JSON.stringify(out))
+            }
             // 渲染端自动 send → LLM 主动回复,真实 API)
-            const autoReplyResult = await win.webContents.executeJavaScript(`(async () => {
+            await win.webContents.executeJavaScript(`(async () => {
               const sleep = (ms) => new Promise((res) => setTimeout(res, ms))
               const before = document.querySelectorAll('.island-agent-msg-assistant').length
               return JSON.stringify({ before })
@@ -1636,7 +1798,7 @@ ipcMain.handle('agent:config-set', (_event, patch) => applyAgentConfigPatch(patc
 ipcMain.handle('agent:memory-get', async () => {
   try {
     return await getMemoryStore().list()
-  } catch (err) {
+  } catch {
     return []
   }
 })
@@ -1655,6 +1817,44 @@ ipcMain.handle('agent:memory-export', async () => {
     if (canceled || !filePath) return { canceled: true }
     await fs.promises.writeFile(filePath, raw, 'utf8')
     return { canceled: false, path: filePath, bytes: raw.length }
+  } catch (err) {
+    return { canceled: false, error: (err && err.message) || String(err) }
+  }
+})
+
+// 导入记忆:打开对话框选导出的记忆文件(结构同 memory.json 的
+// {entries:[...]},兼容纯数组)→ 规范化后合并进现有记忆
+// (store.importEntries:按 id/内容去重、超 200 截断、新导入置顶)。
+// 返回 {imported, skipped} 计数供 UI 展示
+ipcMain.handle('agent:memory-import', async () => {
+  try {
+    const { canceled, filePaths } = await dialog.showOpenDialog(win, {
+      title: '导入长期记忆(选择导出的记忆文件)',
+      properties: ['openFile'],
+      filters: [{ name: '记忆文件', extensions: ['json'] }],
+    })
+    if (canceled || filePaths.length === 0) return { canceled: true }
+    const raw = await fs.promises.readFile(filePaths[0], 'utf8')
+    const data = JSON.parse(raw)
+    const list = Array.isArray(data) ? data : data?.entries
+    if (!Array.isArray(list)) {
+      return { canceled: false, error: '文件格式不正确:缺少 entries 列表' }
+    }
+    // 规范化:id/类型/内容(截 500)/时间戳兜底;来源保留文件里的值
+    // (updatedAt 由 store.importEntries 置为当前 → 列表置顶可见)
+    const normalized = list
+      .filter((e) => e && typeof e === 'object' && typeof e.content === 'string')
+      .map((e, i) => ({
+        id: typeof e.id === 'string' && e.id ? e.id : `imp-${Date.now()}-${i}`,
+        type: ['preference', 'fact', 'workflow', 'lesson'].includes(e.type) ? e.type : 'fact',
+        content: String(e.content).trim().slice(0, 500),
+        source: e.source ?? 'manual',
+        createdAt: typeof e.createdAt === 'number' ? e.createdAt : Date.now(),
+        updatedAt: typeof e.updatedAt === 'number' ? e.updatedAt : Date.now(),
+      }))
+      .filter((e) => e.content)
+    const result = await getMemoryStore().importEntries(normalized)
+    return { canceled: false, imported: result.imported, skipped: result.skipped }
   } catch (err) {
     return { canceled: false, error: (err && err.message) || String(err) }
   }

@@ -3517,7 +3517,10 @@
   user-select: text;
 }
 
-/* 工具卡片:名称 + 状态 + 可展开参数/结果(过程可知) */
+/* 工具卡片:名称 + 状态 + 可展开参数/结果(过程可知)。
+   展开/收起动画:grid-template-rows 0fr↔1fr 高度过渡(无过冲缓动——
+   弹簧曲线插值到负 fr 会被钳制,收起时抖动)+ 内容淡入/淡出。
+   头部为 button(原 details/summary 改受控状态,换取动画能力) */
 .island-agent-tool {
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 10px;
@@ -3525,18 +3528,24 @@
   overflow: hidden;
 }
 
-.island-agent-tool summary {
+.island-agent-tool-head {
   display: flex;
   align-items: center;
   gap: 7px;
+  width: 100%;
   padding: 7px 10px;
+  background: none;
+  border: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
   cursor: pointer;
-  list-style: none;
   user-select: none;
+  transition: background 0.12s ease;
 }
 
-.island-agent-tool summary::-webkit-details-marker {
-  display: none;
+.island-agent-tool-head:hover {
+  background: rgba(255, 255, 255, 0.03);
 }
 
 .island-agent-tool-state {
@@ -3583,18 +3592,137 @@
   margin-left: auto;
   font-size: 0.6rem;
   color: var(--text-dim, rgba(255, 255, 255, 0.4));
-  transition: transform 0.2s ease;
+  transition: transform 0.28s cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
-.island-agent-tool[open] .island-agent-tool-toggle {
+.island-agent-tool.open .island-agent-tool-toggle,
+.island-agent-tool-module.open .island-agent-tool-toggle {
   transform: rotate(90deg);
 }
 
+/* 高度动画载体:0fr 折叠 / 1fr 展开(内容高度自适应,无需 JS 测量);
+   overflow hidden 裁剪折叠时的剩余内边距(0fr 下 padding 仍撑出盒子) */
+.island-agent-tool-body-wrap {
+  display: grid;
+  grid-template-rows: 0fr;
+  overflow: hidden;
+  transition: grid-template-rows 0.28s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.island-agent-tool.open .island-agent-tool-body-wrap {
+  grid-template-rows: 1fr;
+}
+
 .island-agent-tool-body {
+  min-height: 0;
   padding: 0 10px 9px;
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+/* ===== 工具模块:连续工具调用收纳成一行头部(信息密度优化) =====
+   头部:图标(强调色)+ 名称/计数 + 状态汇总 + 总耗时 + 箭头;
+   点击展开/收起 = 同卡片的 0fr↔1fr 高度动画。挂载走 island-ui-in
+   精致缓动(与设置区条目一致) */
+.island-agent-tool-module {
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.05);
+  overflow: hidden;
+  animation: island-ui-in 0.3s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+
+.island-agent-tool-module-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  padding: 7px 10px;
+  background: none;
+  border: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.12s ease;
+}
+
+.island-agent-tool-module-head:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.island-agent-tool-module-head .island-ctl-svg {
+  flex: none;
+  color: var(--state-color, #4d6bfe);
+}
+
+.island-agent-tool-module-title {
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--text-color, #fff);
+  font-family: 'Cascadia Mono', 'JetBrains Mono', Consolas, monospace;
+}
+
+/* 状态汇总小字:执行中脉冲(纯透明度,不缩放文字) */
+.island-agent-tool-module-state {
+  font-size: 0.62rem;
+  font-weight: 600;
+}
+
+.island-agent-tool-module-state.run {
+  color: #93a5ff;
+  animation: agent-module-pulse 1.2s ease-in-out infinite;
+}
+
+.island-agent-tool-module-state.ok {
+  color: #4ade80;
+}
+
+.island-agent-tool-module-state.err {
+  color: #f87171;
+}
+
+@keyframes agent-module-pulse {
+  0%,
+  100% {
+    opacity: 0.45;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+.island-agent-tool-module-body {
+  display: grid;
+  grid-template-rows: 0fr;
+  overflow: hidden;
+  transition: grid-template-rows 0.28s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.island-agent-tool-module.open .island-agent-tool-module-body {
+  grid-template-rows: 1fr;
+}
+
+/* 展开时各卡淡入微沉(与高度过渡叠加,两层动画不冲突);
+   收起时淡出由同一 transition 反向驱动 */
+.island-agent-tool-module-inner {
+  min-height: 0;
+  padding: 0 8px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  opacity: 0;
+  transform: translateY(-4px);
+  transition:
+    opacity 0.2s ease,
+    transform 0.2s ease;
+}
+
+.island-agent-tool-module.open .island-agent-tool-module-inner {
+  opacity: 1;
+  transform: none;
 }
 
 .island-agent-tool-sec-title {
@@ -3809,12 +3937,13 @@
 }
 
 /* ===== Agent 设置视图(设置视图"Agent 设置"入口,设置类视图) =====
-   岛体加高 400px(挂件窗口同步 440,VIEW_WINDOW_H 登记)容纳表单。
+   岛体加高 540px(挂件窗口同步 580,VIEW_WINDOW_H 登记)容纳表单
+   (原 400 → 460 仍显扁:表单字段/分区内容挤在一起;用户要求继续增高)。
    同样放开 max-width:500px(界面放大对 agent 模式所有视图生效,
    否则在设置视图切 200% 看不到任何变化) */
 .island-demo.expanded.island-agent-settings-view {
   max-width: none;
-  height: 400px;
+  height: 540px;
 }
 
 /* 协议提示行(按 Base URL 自动检测当前 Provider) */

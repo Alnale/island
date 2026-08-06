@@ -8,7 +8,7 @@
  * 保存经 onSave 走主进程 settings.json(agent 段),记忆与进化走独立 IPC。
  */
 
-import { useEffect, useRef, useState, type KeyboardEvent, type WheelEvent } from 'react'
+import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type WheelEvent } from 'react'
 import type { AgentConfig, AgentToolInfo, McpServerConfig, MemoryEntry } from '../../../agent/types'
 import { useWheelSteps } from '../../../hooks/useWheelSteps'
 import { BackFoot, PanelHead } from './shared'
@@ -285,6 +285,8 @@ export function AgentSettingsView({ config, onSave, tools, scale, onScaleChange,
   const [editingMemory, setEditingMemory] = useState<{ id: string; content: string } | null>(null)
   // 导出状态(成功显示路径/取消/失败)
   const [exportMsg, setExportMsg] = useState('')
+  // 导入状态(成功显示导入/跳过计数;失败显示错误)
+  const [importMsg, setImportMsg] = useState('')
   // 离场动画中的条目 id(先播完收起动画,再真正移除)
   const [leavingMemory, setLeavingMemory] = useState<string[]>([])
   const [leavingSkills, setLeavingSkills] = useState<string[]>([])
@@ -329,19 +331,53 @@ export function AgentSettingsView({ config, onSave, tools, scale, onScaleChange,
       setExcludedSkills(config.excludedSkills ?? [])
     }
   }, [config])
-  // 记忆与进化日志异步加载(挂载时)
+  // 记忆与进化日志异步加载(挂载时);日志刷新抽成可复用回调——
+  // 挂载加载 + 进化事件驱动实时刷新(用户反馈:进化完成后日志不更新)
+  const refreshEvolutionLog = useCallback(() => {
+    window.desktop
+      ?.agentEvolutionLog?.()
+      .then((logs) => {
+        if (Array.isArray(logs)) setEvolutionLog(logs as typeof evolutionLog)
+      })
+      .catch(() => {})
+  }, [])
   useEffect(() => {
     window.desktop?.agentMemoryGet?.()
       .then((list) => {
         if (Array.isArray(list)) setMemory(list as MemoryEntry[])
       })
       .catch(() => {})
-    window.desktop?.agentEvolutionLog?.()
-      .then((logs) => {
-        if (Array.isArray(logs)) setEvolutionLog(logs as typeof evolutionLog)
-      })
-      .catch(() => {})
-  }, [])
+    refreshEvolutionLog()
+  }, [refreshEvolutionLog])
+  // 进化进度事件订阅(evolution-progress / done,渲染端原本忽略):
+  // 后台进化期间实时更新按钮状态(进化中…)、阶段消息与日志——
+  // 停留在视图也能看到每轮评审/应用结果;done 任何路径都会发出
+  // (正常完成/失败),evolving 状态可靠复位;卸载时取消订阅
+  useEffect(() => {
+    const off = window.desktop?.onAgentEvent?.((raw: unknown) => {
+      const event = raw as { type?: string; phase?: string }
+      if (event?.type !== 'evolution-progress' && event?.type !== 'evolution-done') return
+      if (event.type === 'evolution-progress') {
+        setEvolving(true)
+        setEvolutionMsg(`进化中:${event.phase ?? ''}`)
+        refreshEvolutionLog()
+      } else {
+        setEvolving(false)
+        setEvolutionMsg('进化完成')
+        refreshEvolutionLog()
+        // 进化会修改记忆(应用/回滚):同步刷新记忆列表,与回滚同款
+        window.desktop
+          ?.agentMemoryGet?.()
+          .then((list) => {
+            if (Array.isArray(list)) setMemory(list as MemoryEntry[])
+          })
+          .catch(() => {})
+      }
+    })
+    return () => {
+      if (typeof off === 'function') off()
+    }
+  }, [refreshEvolutionLog])
   // 注意:配置刷新(LLM 自我配置后)由父组件在**进入本视图前**触发
   // (DynamicIsland 切 panelView 时调 agentConfig.onRefresh)——不能在
   // 本视图挂载后刷新:异步返回的 config 更新会触发下方填充 effect,
@@ -515,6 +551,25 @@ export function AgentSettingsView({ config, onSave, tools, scale, onScaleChange,
     if (res.error) setExportMsg(`导出失败:${res.error}`)
     else setExportMsg(`已导出到 ${res.path ?? ''}`)
   }
+  // 导入记忆(打开对话框选导出的记忆文件 → 主进程校验并合并去重);
+  // 导入后立即刷新列表(合并结果立即可见)
+  const importMemory = async () => {
+    setImportMsg('')
+    const res = await window.desktop?.agentMemoryImport?.()
+    if (!res) return
+    if (res.canceled) return
+    if (res.error) {
+      setImportMsg(`导入失败:${res.error}`)
+      return
+    }
+    setImportMsg(`已导入 ${res.imported} 条${res.skipped ? `,跳过 ${res.skipped} 条(已存在)` : ''}`)
+    window.desktop
+      ?.agentMemoryGet?.()
+      .then((list) => {
+        if (Array.isArray(list)) setMemory(list as MemoryEntry[])
+      })
+      .catch(() => {})
+  }
 
   // ---- 自我进化 ----
   const runEvolve = async () => {
@@ -523,9 +578,11 @@ export function AgentSettingsView({ config, onSave, tools, scale, onScaleChange,
     try {
       const res = await window.desktop?.agentEvolve?.()
       setEvolutionMsg(res?.message ?? '已触发')
+      // 触发失败(已在运行中/未配置)恢复按钮;成功则保持"进化中…",
+      // 由 evolution-progress / done 事件驱动按钮状态与日志实时刷新
+      if (res && res.started === false) setEvolving(false)
     } catch {
       setEvolutionMsg('触发失败')
-    } finally {
       setEvolving(false)
     }
   }
@@ -1048,6 +1105,17 @@ export function AgentSettingsView({ config, onSave, tools, scale, onScaleChange,
             <button
               type="button"
               className="island-agent-scale-btn"
+              title="从导出的记忆文件合并导入"
+              onClick={(event) => {
+                event.stopPropagation()
+                void importMemory()
+              }}
+            >
+              导入
+            </button>
+            <button
+              type="button"
+              className="island-agent-scale-btn"
               disabled={memory.length === 0}
               onClick={(event) => {
                 event.stopPropagation()
@@ -1059,6 +1127,11 @@ export function AgentSettingsView({ config, onSave, tools, scale, onScaleChange,
           </div>
           {memoryError ? <span className="island-mcp-test-result fail">{memoryError}</span> : null}
           {exportMsg ? <span className="island-mcp-test-result ok">{exportMsg}</span> : null}
+          {importMsg ? (
+            <span className={`island-mcp-test-result ${importMsg.startsWith('导入失败') ? 'fail' : 'ok'}`}>
+              {importMsg}
+            </span>
+          ) : null}
         </div>
 
         {/* 自我进化:版本化多轮候选循环(参考 penguin-harness)——每轮

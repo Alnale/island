@@ -24,7 +24,7 @@ import {
   type RefObject,
   type WheelEvent,
 } from 'react'
-import type { AgentMessage, AgentPanelProps, AgentPart, AgentToolCallState, AgentToolInfo } from '../../../agent/types'
+import type { AgentMessage, AgentPanelProps, AgentPart, AgentToolInfo } from '../../../agent/types'
 import { useWheelSteps } from '../../../hooks/useWheelSteps'
 import { WheelSwap } from './WheelSwap'
 import { CopyButton, Markdown } from './Markdown'
@@ -229,12 +229,32 @@ function UserBubble({ m }: { m: AgentMessage }) {
   )
 }
 
-/** 工具卡片:从已落定消息的 parts 里取"调用 + 结果"对 */
-function ToolCard({ call }: { call: { id: string; name: string; args: Record<string, unknown>; ok?: boolean; result?: string; durationMs?: number } }) {
+/** 单个工具调用的数据(模块内卡片 / 流式卡片共用) */
+interface ToolCallData {
+  id: string
+  name: string
+  args: Record<string, unknown>
+  ok?: boolean
+  result?: string
+  durationMs?: number
+}
+
+/** 工具卡片:头部(状态 + 名称 + 耗时)+ 可展开参数/结果(过程可知)。
+    展开/收起 = 高度经 grid-template-rows 0fr↔1fr 动画(无需测量高度;
+    无过冲缓动——弹簧曲线插值到负 fr 会被钳制,收起时会抖动) */
+function ToolCard({ call }: { call: ToolCallData }) {
+  const [open, setOpen] = useState(false)
   return (
-    <details className="island-agent-tool">
+    <div className={`island-agent-tool${open ? ' open' : ''}`}>
       {/* 卡片是交互元素:拦截左键,长按卡片不触发岛体收回 */}
-      <summary
+      <button
+        type="button"
+        className="island-agent-tool-head"
+        aria-expanded={open}
+        onClick={(event) => {
+          event.stopPropagation()
+          setOpen((v) => !v)
+        }}
         onPointerDown={(event) => {
           if (event.button === 0) event.stopPropagation()
         }}
@@ -249,24 +269,100 @@ function ToolCard({ call }: { call: { id: string; name: string; args: Record<str
         <span className="island-agent-tool-toggle" aria-hidden="true">
           ▸
         </span>
-      </summary>
-      <div className="island-agent-tool-body">
-        <div className="island-agent-tool-sec">
-          <span className="island-agent-tool-sec-title">参数</span>
-          <pre className="island-agent-tool-code">{JSON.stringify(call.args ?? {}, null, 2)}</pre>
-        </div>
-        {call.result !== undefined && (
+      </button>
+      <div className="island-agent-tool-body-wrap">
+        <div className="island-agent-tool-body">
           <div className="island-agent-tool-sec">
-            <span className="island-agent-tool-sec-title">{call.ok === false ? '错误' : '结果'}</span>
-            <pre className="island-agent-tool-code">{call.result}</pre>
+            <span className="island-agent-tool-sec-title">参数</span>
+            <pre className="island-agent-tool-code">{JSON.stringify(call.args ?? {}, null, 2)}</pre>
           </div>
-        )}
+          {call.result !== undefined && (
+            <div className="island-agent-tool-sec">
+              <span className="island-agent-tool-sec-title">{call.ok === false ? '错误' : '结果'}</span>
+              <pre className="island-agent-tool-code">{call.result}</pre>
+            </div>
+          )}
+        </div>
       </div>
-    </details>
+    </div>
   )
 }
 
-/** 助手消息块:parts 按顺序渲染(文本段 + 工具卡片),尾部附 token 用量 */
+/** 工具模块:同一回复中**连续**的工具调用收纳成一个模块(信息密度优化——
+    逐个工具卡片平铺时,一轮回复 5~6 个工具占用大半面板高度)。
+    默认收纳:只有头部一行(图标 + 名称/计数 + 状态汇总 + 总耗时 + 箭头);
+    点击展开/收起,高度动画同卡片(0fr↔1fr 无过冲)。头部实时汇总:
+    执行中脉冲点 / 成功失败计数,收纳态也能一眼看到执行概况 */
+function ToolModule({ items }: { items: ToolCallData[] }) {
+  const [open, setOpen] = useState(false)
+  const running = items.some((i) => i.ok === undefined)
+  const okCount = items.filter((i) => i.ok === true).length
+  const errCount = items.filter((i) => i.ok === false).length
+  const totalMs = items.reduce((sum, i) => sum + (i.durationMs ?? 0), 0)
+  return (
+    <div className={`island-agent-tool-module${open ? ' open' : ''}`}>
+      {/* 模块头部:交互元素,拦截左键(长按不触发岛体收回) */}
+      <button
+        type="button"
+        className="island-agent-tool-module-head"
+        aria-expanded={open}
+        onClick={(event) => {
+          event.stopPropagation()
+          setOpen((v) => !v)
+        }}
+        onPointerDown={(event) => {
+          if (event.button === 0) event.stopPropagation()
+        }}
+      >
+        <svg
+          className="island-ctl-svg"
+          width="11"
+          height="11"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth={2}
+          strokeLinecap="round"
+          aria-hidden="true"
+        >
+          <line x1="4" y1="6" x2="20" y2="6" />
+          <circle cx="14" cy="6" r="2" />
+          <line x1="4" y1="12" x2="20" y2="12" />
+          <circle cx="8" cy="12" r="2" />
+          <line x1="4" y1="18" x2="20" y2="18" />
+          <circle cx="16" cy="18" r="2" />
+        </svg>
+        <span className="island-agent-tool-module-title">
+          {items.length === 1 ? items[0].name : `工具调用 ×${items.length}`}
+        </span>
+        {running ? (
+          <span className="island-agent-tool-module-state run">● 执行中</span>
+        ) : (
+          <>
+            {okCount > 0 && <span className="island-agent-tool-module-state ok">✓ {okCount}</span>}
+            {errCount > 0 && <span className="island-agent-tool-module-state err">✕ {errCount}</span>}
+          </>
+        )}
+        {totalMs > 0 && <span className="island-agent-tool-time">{totalMs}ms</span>}
+        <span className="island-agent-tool-toggle" aria-hidden="true">
+          ▸
+        </span>
+      </button>
+      <div className="island-agent-tool-module-body">
+        <div className="island-agent-tool-module-inner">
+          {items.map((call) => (
+            <ToolCard key={call.id} call={call} />
+          ))}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/** 助手消息块:parts 按顺序渲染(文本段 + 工具调用),尾部附 token 用量。
+    工具调用按**连续序列**分组:单次调用 = 一张卡片(点击直开参数/结果);
+    连续多次 = 收纳成工具模块(头部一行汇总,点击展开看各卡,再点卡片
+    展开参数)——一轮回复的工具再多也只占一行,信息密度优化 */
 function AssistantBlock({
   parts,
   usage,
@@ -274,36 +370,54 @@ function AssistantBlock({
   parts: AgentMessage['parts']
   usage?: AgentMessage['usage']
 }) {
+  // 归并节点序列:文本段与连续工具组交替;工具组内的卡片按执行顺序
+  // 排列(调用 + 结果配对;顺序即执行顺序,过程可知)
+  const nodes: Array<
+    | { kind: 'text'; text: string }
+    | { kind: 'tools'; items: ToolCallData[] }
+  > = []
+  let group: ToolCallData[] = []
+  const flushGroup = () => {
+    if (group.length > 0) {
+      nodes.push({ kind: 'tools', items: group })
+      group = []
+    }
+  }
+  parts.forEach((part) => {
+    if (part.type === 'text') {
+      flushGroup()
+      nodes.push({ kind: 'text', text: part.text })
+    } else if (part.type === 'tool-call') {
+      const result = parts.find(
+        (p): p is Extract<AgentMessage['parts'][number], { type: 'tool-result' }> =>
+          p.type === 'tool-result' && p.id === part.id,
+      )
+      group.push({
+        id: part.id,
+        name: part.name,
+        args: part.args,
+        ok: result?.ok,
+        result: result?.result,
+        durationMs: result?.durationMs,
+      })
+    }
+  })
+  flushGroup()
   return (
     <div className="island-agent-msg-assistant">
-      {parts.map((part, i) => {
-        if (part.type === 'text') {
+      {nodes.map((node, i) => {
+        if (node.kind === 'text') {
           return (
-            <div key={i} className="island-agent-text">
-              <Markdown text={part.text} />
+            <div key={`t-${i}`} className="island-agent-text">
+              <Markdown text={node.text} />
             </div>
           )
         }
-        if (part.type === 'tool-call') {
-          const result = parts.find(
-            (p): p is Extract<AgentMessage['parts'][number], { type: 'tool-result' }> =>
-              p.type === 'tool-result' && p.id === part.id,
-          )
-          return (
-            <ToolCard
-              key={part.id}
-              call={{
-                id: part.id,
-                name: part.name,
-                args: part.args,
-                ok: result?.ok,
-                result: result?.result,
-                durationMs: result?.durationMs,
-              }}
-            />
-          )
+        // 单次调用 = 卡片直开参数;连续多次 = 工具模块(收纳,点击展开)
+        if (node.items.length === 1) {
+          return <ToolCard key={node.items[0].id} call={node.items[0]} />
         }
-        return null
+        return <ToolModule key={node.items[0].id} items={node.items} />
       })}
       {/* 气泡脚注:复制按钮(复制本条回复文本)+ token 用量 */}
       <div className="island-agent-msg-foot">
@@ -321,22 +435,6 @@ function AssistantBlock({
         )}
       </div>
     </div>
-  )
-}
-
-/** 流式工具卡(执行中:状态随事件流转) */
-function StreamingToolCard({ tool }: { tool: AgentToolCallState }) {
-  return (
-    <ToolCard
-      call={{
-        id: tool.id,
-        name: tool.name,
-        args: tool.args,
-        ok: tool.ok,
-        result: tool.result,
-        durationMs: tool.durationMs,
-      }}
-    />
   )
 }
 
@@ -744,7 +842,8 @@ export function AgentView({
     setSuggestClosing(false)
     setSuggestions(matched)
     setSuggestionIndex(0)
-  }, [input, tools])
+    // closeSuggestions 引用稳定(useCallback 空依赖),入依赖不触发重跑
+  }, [input, tools, closeSuggestions])
 
   // 应用候选:替换开头的 /xxx 或 @xxx,保留后续文本(收起动画)
   const applySuggestion = (name: string) => {
@@ -1160,7 +1259,17 @@ export function AgentView({
                   </div>
                 )}
                 {streaming.tools.map((tool) => (
-                  <StreamingToolCard key={tool.id} tool={tool} />
+                  <ToolCard
+                    key={tool.id}
+                    call={{
+                      id: tool.id,
+                      name: tool.name,
+                      args: tool.args,
+                      ok: tool.ok,
+                      result: tool.result,
+                      durationMs: tool.durationMs,
+                    }}
+                  />
                 ))}
               </div>
             )}

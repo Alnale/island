@@ -19,6 +19,7 @@ import path from 'node:path'
 import { parseToolArgs } from './deepseek'
 import { streamByConfig } from './provider'
 import { createTools, getBiliBackgroundStatus } from './tools'
+import { createSettingsTools } from './settingsTools'
 import { createMCPManager, type MCPManager } from './mcp'
 import { createSkillLoader } from './skills'
 import { createMemoryTools, formatMemoryBlock } from './memory'
@@ -122,6 +123,47 @@ const TITLE_LITERAL_EXAMPLES = new Set([
   '<对话标题>',
   '根据对话内容概括的标题',
 ])
+
+/**
+ * JSON 模式的**严格**标题解析:JSON 模式尝试必须解析出合法 JSON 对象
+ * 的字符串 title 才采信——解析失败(模型输出 Python 风格单引号 dict、
+ * 代码字面量等垃圾)一律返回空串,由降级链进入下一措辞。
+ * 与 parseTitleJson 的区别:后者解析失败会把原文整串兜底返回(纯文本
+ * 措辞才允许);JSON 模式若也兜底,垃圾会被当成标题(实测标题变
+ * "['data']"——模型在 json 模式输出了 Python 列表字面量,parseTitleJson
+ * 全部解析失败后返回原文,成了岛上的标题)。
+ * 额外容忍:先按原文解析,失败后把单引号替换为双引号再试一次
+ * (模型在 json 模式常输出 Python 风格 dict:{'title': 'xxx'})
+ */
+export function extractJsonTitle(raw: string): string {
+  const text = (raw ?? '').trim()
+  if (!text) return ''
+  const candidates = [
+    text,
+    text.replace(/^```(?:json)?\s*|\s*```$/g, '').trim(),
+    text.slice(text.indexOf('{')).trim(),
+    text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1).trim(),
+  ]
+  for (const c of candidates) {
+    if (!c) continue
+    // 原文 → 单引号替换为双引号(容忍 Python 风格 dict)
+    for (const candidate of [c, c.replace(/'/g, '"')]) {
+      try {
+        const obj = JSON.parse(candidate) as { title?: unknown }
+        if (obj && typeof obj.title === 'string' && obj.title.trim()) return obj.title.trim()
+      } catch {
+        // 尝试下一个候选
+      }
+    }
+  }
+  return ''
+}
+
+/** 明显不是标题的代码字面量(模型输出垃圾时防串味):
+ * 括号包裹的数组/元组字面量(如 ['data'])、空括号 */
+function looksLikeCodeLiteral(title: string): boolean {
+  return /^\[.*\]$/s.test(title) || /^\(.*\)$/s.test(title)
+}
 
 /** 历史裁剪:总估算超预算时从最旧丢弃(至少保留最近 MIN_KEEP_MESSAGES 条) */
 function trimHistory(history: AgentMessage[]): AgentMessage[] {
@@ -515,10 +557,19 @@ export function createSummaryAgent(deps: { getConfig: () => AgentConfig }): {
                 jsonMode: attempt.jsonMode,
                 noThinking: true,
               })
-              const title = sanitizeTitle(parseTitleJson(result.text))
-              // 命中 prompt 示例词(模型照抄示例)视为无效,进入下一级
-              if (title && !TITLE_LITERAL_EXAMPLES.has(title)) return title
-              // 空/空白 content 或照抄示例(官方已知问题):进入下一级尝试
+              // JSON 措辞走**严格解析**(必须解析出合法 JSON 的 title,
+              // 垃圾输出如 "['data']" 直接判无效进入下一级);纯文本措辞
+              // 才允许 parseTitleJson 的原文兜底
+              const parsed = attempt.jsonMode
+                ? extractJsonTitle(result.text)
+                : parseTitleJson(result.text)
+              const title = sanitizeTitle(parsed)
+              // 命中 prompt 示例词(模型照抄示例)/ 代码字面量垃圾
+              // (如 ['data'])视为无效,进入下一级
+              if (title && !TITLE_LITERAL_EXAMPLES.has(title) && !looksLikeCodeLiteral(title)) {
+                return title
+              }
+              // 空/空白 content 或垃圾输出(官方已知问题):进入下一级尝试
               break
             } catch {
               // 调用失败(超时/网络):同措辞重试一次;仍失败进入下一级
@@ -741,6 +792,11 @@ export function createAgentEngine(deps: EngineDeps): AgentEngine {
       // 渲染端自动触发一轮对话让 LLM 主动回复(用户无需提问)
       onBackgroundDone: (info) => emit({ type: 'background-done', ...info }),
     }),
+    // 灵动岛设置工具(主题色/缩放/字体/背景图库):主进程注入了
+    // runIslandSettings 才注册(挂件环境;Web 演示版无主进程)
+    ...(deps.runIslandSettings
+      ? createSettingsTools({ runIslandSettings: deps.runIslandSettings })
+      : []),
     delegateTool,
     ...(memoryStore ? createMemoryTools(memoryStore) : []),
     ...configTools,

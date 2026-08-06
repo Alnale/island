@@ -24,6 +24,9 @@ export default defineConfig({
   build: {
     outDir: 'dist-widget',
     emptyOutDir: true,
+    // mermaid 懒加载分包本体约 660KB(dynamic import,按需加载不阻塞
+    // 首屏)——放宽体积告警阈值,避免每次构建误报
+    chunkSizeWarningLimit: 800,
     rollupOptions: {
       input: {
         widget: fileURLToPath(new URL('./widget/widget.html', import.meta.url)),

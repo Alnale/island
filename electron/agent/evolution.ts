@@ -83,13 +83,6 @@ interface EvolutionChange {
   hypothesis?: string
 }
 
-/** 评审响应(JSON):分数 + 问题 + 建议 */
-interface ReviewResult {
-  total: number
-  issues: string[]
-  changes: EvolutionChange[]
-}
-
 /** JSON 解析(容忍 markdown 代码块包裹/前导说明文本) */
 function parseJsonLoose(raw: string): Record<string, unknown> | null {
   const text = raw.trim()

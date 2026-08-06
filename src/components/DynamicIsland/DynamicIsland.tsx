@@ -1109,6 +1109,11 @@ export const DynamicIsland = memo(function DynamicIsland({
       )
       setIslandWidth(`${natural}px`)
     }
+    // 依赖只取 agentActive:**不能**随 displayText 重跑——本 effect 会
+    // 清空悬停态(hoveredRef/setHovered),紧凑态文字变化(如 agent 状态
+    // 文案)时重跑会把用户正在悬停的岛体打回自然宽;文字驱动的布局
+    // 由 displayText/visibleText 的 effect(上方)负责
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agentActive])
 
   const handleMouseLeave = () => {
@@ -1208,6 +1213,22 @@ export const DynamicIsland = memo(function DynamicIsland({
     } catch {
       // 忽略存储失败
     }
+  }, [])
+  // LLM 设置工具(set_agent_scale,经设置桥写 localStorage)的即时生效:
+  // 监听 island-settings-changed 的 scale 域,从存储重读缩放状态
+  useEffect(() => {
+    const onSettingsChanged = (event: Event) => {
+      const scopes = (event as CustomEvent<{ scopes?: string[] }>).detail?.scopes
+      if (!scopes?.includes('scale')) return
+      try {
+        const v = Number(localStorage.getItem(AGENT_SCALE_KEY))
+        if (Number.isFinite(v) && v >= 100 && v <= 300) setAgentScale(Math.round(v))
+      } catch {
+        // 忽略存储失败
+      }
+    }
+    window.addEventListener('island-settings-changed', onSettingsChanged)
+    return () => window.removeEventListener('island-settings-changed', onSettingsChanged)
   }, [])
   // 视觉尺寸同步宿主:窗口跟随(宿主回调须引用稳定)。
   // 缩放只放大面板宽度(UI 元素不缩放),高度仍由内容驱动

@@ -14,12 +14,12 @@ import { execFileSync, spawn, type ChildProcess } from 'node:child_process'
 import { promises as fs } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
 
 import { createMemoryStore, formatMemoryBlock } from '../electron/agent/memory'
 import { createMCPManager } from '../electron/agent/mcp'
 import { createSkillLoader } from '../electron/agent/skills'
-import { createAgentEngine, createConfigTools, parseManualCall, findManualTool, compressArgs, parseTitleJson } from '../electron/agent/engine'
+import { createAgentEngine, createConfigTools, parseManualCall, findManualTool, compressArgs, parseTitleJson, extractJsonTitle } from '../electron/agent/engine'
+import { createSettingsTools } from '../electron/agent/settingsTools'
 import { createEvolution } from '../electron/agent/evolution'
 import type { AgentTool, MemoryEntry } from '../electron/agent/types'
 
@@ -50,6 +50,20 @@ async function test(name: string, fn: () => void | Promise<void>) {
 
 function assert(cond: unknown, msg: string): asserts cond {
   if (!cond) throw new Error(`断言失败:${msg}`)
+}
+
+/** 断言异步函数抛出(错误消息可选包含关键字) */
+async function assertRejects(fn: () => Promise<unknown>, keyword?: string, msg = '应抛出'): Promise<void> {
+  try {
+    await fn()
+  } catch (err) {
+    const text = String((err as Error)?.message ?? err)
+    if (keyword && !text.includes(keyword)) {
+      throw new Error(`断言失败:${msg}(错误应含「${keyword}」,实际:${text})`)
+    }
+    return
+  }
+  throw new Error(`断言失败:${msg}`)
 }
 
 /** 轮询等待条件成立(最多 timeout ms) */
@@ -169,7 +183,7 @@ await test('上限 200 条:淘汰最旧', async () => {
 await test('remove:按 id 与内容片段', async () => {
   const store = createMemoryStore(() => memoryFile(4))
   const added = await store.add({ content: '待删除一', type: 'fact' })
-  const added2 = await store.add({ content: '待删除二', type: 'fact' })
+  await store.add({ content: '待删除二', type: 'fact' })
   const n1 = await store.remove(added.entry.id)
   assert(n1 === 1, '按 id 删除应删 1 条')
   const n2 = await store.remove('待删除二')
@@ -183,6 +197,54 @@ await test('update:改内容与类型', async () => {
   const updated = await store.update(added.entry.id, { content: '新内容', type: 'lesson' })
   assert(updated?.content === '新内容' && updated.type === 'lesson', 'update 应生效')
   assert((await store.update('不存在的id', { content: 'x' })) === null, '未知 id 返回 null')
+})
+
+await test('importEntries:按 id/内容去重合并,新导入置顶', async () => {
+  const store = createMemoryStore(() => memoryFile(8))
+  const existing = await store.add({ content: '已有条目', type: 'fact' })
+  // 导入:1 条与现有 id 相同、1 条与现有内容相同、2 条全新
+  const r = await store.importEntries([
+    { id: existing.entry.id, type: 'fact', content: '已有条目(同 id)', createdAt: 1, updatedAt: 1 },
+    { id: 'x2', type: 'preference', content: '已有条目', createdAt: 1, updatedAt: 1 },
+    { id: 'x3', type: 'lesson', content: '导入的教训', createdAt: 1, updatedAt: 1 },
+    { id: 'x4', type: 'workflow', content: '导入的工作流', createdAt: 1, updatedAt: 1 },
+  ])
+  assert(r.imported === 2 && r.skipped === 2, `应导入 2 跳过 2,实际 ${JSON.stringify(r)}`)
+  const list = await store.list()
+  // 新导入在前(list 按 updatedAt 倒序,导入的 updatedAt 未改时为旧值,
+  // 置顶由合并顺序保证——entries 数组里 fresh 在 existing 前)
+  assert(list[0].content === '导入的教训' || list[0].content === '导入的工作流', '新导入的应排最前')
+  assert(list.length === 3, '合并后共 3 条(2 新 + 1 旧)')
+})
+
+await test('importEntries:总量超 200 时淘汰最旧,新导入保留', async () => {
+  const store = createMemoryStore(() => memoryFile(9))
+  // 用 replaceAll 造 195 条时间戳严格递增的旧数据(逐条 add 的
+  // Date.now 可能同毫秒,排序不稳定,断言会误报)
+  await store.replaceAll(
+    Array.from({ length: 195 }, (_, i) => ({
+      id: `old-${i}`,
+      type: 'fact' as const,
+      content: `旧条目 ${i}`,
+      createdAt: 1000 + i,
+      updatedAt: 1000 + i,
+    })),
+  )
+  const r = await store.importEntries(
+    Array.from({ length: 10 }, (_, i) => ({
+      id: `imp-${i}`,
+      type: 'fact' as const,
+      content: `导入条目 ${i}`,
+      createdAt: 1,
+      updatedAt: 1,
+    })),
+  )
+  assert(r.imported === 10 && r.skipped === 0, '10 条全新应全部导入')
+  const list = await store.list()
+  assert(list.length === 200, `应裁剪到 200,实际 ${list.length}`)
+  assert(list.some((e) => e.content === '导入条目 0'), '新导入的应保留')
+  assert(!list.some((e) => e.content === '旧条目 0'), '最旧的应被淘汰')
+  assert(list.some((e) => e.content === '旧条目 194'), '最新的旧条目应保留')
 })
 
 await test('并发写:串行队列不丢数据', async () => {
@@ -627,7 +689,9 @@ await test('skills_config add/remove/list', async () => {
   const sc = tools.find((t) => t.name === 'skills_config')!
   const addOut = await sc.execute({ action: 'add', dir: 'C:/skills' })
   assert(addOut.includes('C:/skills'), 'add 结果应含目录')
-  assert((writes.at(-1)?.skillsDirs as string[]).includes('C:/skills'), '应写入 skillsDirs')
+  const lastWrite = writes[writes.length - 1]
+  assert(lastWrite !== undefined, '应有写入记录')
+  assert((lastWrite.skillsDirs as string[]).includes('C:/skills'), '应写入 skillsDirs')
   const dup = await sc.execute({ action: 'add', dir: 'C:/skills' })
   assert(dup.includes('已存在'), '重复 add 应提示已存在')
   const removeOut = await sc.execute({ action: 'remove', dir: 'C:/skills' })
@@ -650,7 +714,9 @@ await test('skills_config exclude/include:移除/恢复技能', async () => {
   // exclude 已注册技能 → 写入 excludedSkills
   const exOut = await sc.execute({ action: 'exclude', skill: 'note-taking' })
   assert(exOut.includes('已移除技能 note-taking'), `exclude 结果:${exOut}`)
-  assert((writes.at(-1)?.excludedSkills as string[]).includes('note-taking'), '应写入 excludedSkills')
+  const lastExclude = writes[writes.length - 1]
+  assert(lastExclude !== undefined, '应有写入记录')
+  assert((lastExclude.excludedSkills as string[]).includes('note-taking'), '应写入 excludedSkills')
   assert(state.config.excludedSkills.includes('note-taking'), '状态应更新')
   // 重复 exclude 幂等
   await sc.execute({ action: 'exclude', skill: 'note-taking' })
@@ -812,7 +878,7 @@ await test('findManualTool:精确/模糊唯一/多命中/未找到', () => {
 
 console.log('\n=== 自我进化(evolution.ts) ===')
 
-function makeEvolutionDeps(initialEntries: MemoryEntry[] = []) {
+function makeEvolutionDeps() {
   // 进化测试的 memory.json 必须与 memory-state.json / memory-snapshots 同目录
   const store = createMemoryStore(() => path.join(memoryDir, 'memory.json'))
   const config = { apiKey: '', baseURL: '', model: '', systemPrompt: '提示词', reasoningEffort: 'high', mcpServers: [], skillsDirs: [] }
@@ -985,6 +1051,24 @@ await test('parseTitleJson:标准 JSON / 代码块 / 前缀文本 / 非法', () 
   assert(parseTitleJson('{"title": "尾随"}后面还有') === '尾随', '尾随内容应解析')
 })
 
+await test('extractJsonTitle:严格解析,垃圾输出拒绝(回归 "[\'data\']")', () => {
+  // 合法 JSON 正常取 title
+  assert(extractJsonTitle('{"title": "下载视频"}') === '下载视频', '标准 JSON 应取 title')
+  assert(extractJsonTitle('```json\n{"title": "代码块标题"}\n```') === '代码块标题', '代码块包裹应解析')
+  assert(extractJsonTitle('好的:{"title": "前缀标题"}') === '前缀标题', '前缀文本应解析')
+  // Python 风格单引号 dict(模型在 json 模式常输出;解析失败后单引号
+  // 替换为双引号再试)
+  assert(extractJsonTitle("{'title': '单引号标题'}") === '单引号标题', 'Python 风格 dict 应解析')
+  // 值内含双引号时单引号归一化会破坏 JSON → 拒绝(安全侧)
+  assert(extractJsonTitle("{'title': '[\"data\"]'}") === '', '值含双引号的单引号 dict 拒绝')
+  // 垃圾输出(实测 bug:标题变成 "['data']")→ 严格模式拒绝返回空
+  assert(extractJsonTitle("['data']") === '', 'Python 列表字面量应拒绝')
+  assert(extractJsonTitle("['data'];") === '', '带分号的列表字面量应拒绝')
+  assert(extractJsonTitle('["data"]') === '', '双引号列表字面量应拒绝')
+  assert(extractJsonTitle('不是JSON文本') === '', '非法文本应拒绝(不兜底原文)')
+  assert(extractJsonTitle('') === '', '空串返回空')
+})
+
 // ---------------------------------------------------------------------------
 // 8. 引擎集成(listAllTools / testMCP)
 // ---------------------------------------------------------------------------
@@ -1019,7 +1103,7 @@ await test('listAllTools 含内置 + MCP + 技能;dispose 无异常', async () =
     assert(all.some((t) => t.name.startsWith('skill_')), 'listAllTools 应含技能工具')
     assert(all.some((t) => t.name === 'mcp_config' || t.name === 'skills_config' || t.name === 'evolve_memory' || t.name === 'remember'), '应含自我配置/进化/记忆工具')
     // 连接失败的服务静默跳过,不影响其他工具
-    const cfg2 = { ...cfg, mcpServers: [...cfg.mcpServers, { name: 'dead', type: 'stdio' as const, command: 'definitely-not-exists-xyz', args: [] }] }
+    // (死服务配置由 engine 以 cfg 创建;此处仅复列断言存活工具仍在)
     const all2 = await engine.listAllTools()
     assert(all2.some((t) => t.name === 'mcp_mock_read_file'), '存活服务工具仍在')
     assert(!all2.some((t) => t.name.startsWith('mcp_dead_')), '死服务工具应跳过')
@@ -1042,6 +1126,138 @@ await test('testMCP:真实 stdio 服务连通', async () => {
   } finally {
     engine.dispose()
   }
+})
+
+// ---------------------------------------------------------------------------
+// 9. 灵动岛设置工具(createSettingsTools,mock 渲染端设置桥)
+// ---------------------------------------------------------------------------
+
+console.log('\n=== 灵动岛设置工具(createSettingsTools) ===')
+
+await test('设置工具:未注入桥时不注册;注入后 8 个工具齐', () => {
+  assert(createSettingsTools({}).length === 0, '无 runIslandSettings 不应注册')
+  const tools = createSettingsTools({ runIslandSettings: async () => ({ ok: true }) })
+  const names = tools.map((t) => t.name)
+  assert(names.length === 8, `应有 8 个工具,实际 ${names.length}:${names.join(',')}`)
+  for (const n of [
+    'set_theme_color',
+    'set_agent_scale',
+    'import_font',
+    'list_fonts',
+    'rename_font',
+    'import_background',
+    'list_library_images',
+    'rename_library_image',
+  ]) {
+    assert(names.includes(n), `应含工具 ${n}`)
+  }
+})
+
+await test('set_theme_color:hex 校验与归一化', async () => {
+  const calls: Array<{ op: string; args: unknown[] }> = []
+  const tools = createSettingsTools({
+    runIslandSettings: async (op, args) => {
+      calls.push({ op, args })
+      return { ok: true }
+    },
+  })
+  const tool = tools.find((t) => t.name === 'set_theme_color')!
+  const out = await tool.execute({ color: 'f87171' })
+  assert(out.includes('#f87171'), '输出应含归一化后的颜色')
+  assert(calls.length === 1 && calls[0].op === 'setThemeColor' && calls[0].args[0] === '#f87171', '应调桥且 hex 归一化为 # 前缀小写')
+  await assertRejects(() => tool.execute({ color: 'red' }), '颜色格式不正确', '非法颜色应拒绝')
+  await assertRejects(() => tool.execute({}), '颜色格式不正确', '缺 color 应拒绝')
+  await assertRejects(() => tool.execute({ color: '#12345' }), '颜色格式不正确', '5 位 hex 应拒绝')
+})
+
+await test('set_agent_scale:钳制 100-300', async () => {
+  const calls: Array<{ op: string; args: unknown[] }> = []
+  const tools = createSettingsTools({ runIslandSettings: async (op, args) => { calls.push({ op, args }); return { ok: true } } })
+  const tool = tools.find((t) => t.name === 'set_agent_scale')!
+  await tool.execute({ percent: 150 })
+  await tool.execute({ percent: 50 })
+  await tool.execute({ percent: 500 })
+  await tool.execute({ percent: 150.6 })
+  const scales = calls.map((c) => c.args[0] as number)
+  assert(scales[0] === 150 && scales[1] === 100 && scales[2] === 300 && scales[3] === 151, `钳制/取整错误:${scales.join(',')}`)
+  await assertRejects(() => tool.execute({ percent: 'abc' }), '需要是数字', '非数字应拒绝')
+})
+
+await test('import_font:扩展名/存在性/大小校验与 data URL 传递', async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-font-test-'))
+  try {
+    const calls: Array<{ op: string; args: unknown[] }> = []
+    const tools = createSettingsTools({ runIslandSettings: async (op, args) => { calls.push({ op, args }); return { ok: true } } })
+    const tool = tools.find((t) => t.name === 'import_font')!
+    // 成功:小 ttf → data URL 前缀正确
+    const fontPath = path.join(tmpDir, 'test-font.ttf')
+    await fs.writeFile(fontPath, Buffer.from([0x00, 0x01, 0x00, 0x00, 0x66, 0x6f, 0x6f, 0x74]))
+    const out = await tool.execute({ path: fontPath })
+    assert(out.includes('test-font.ttf'), '输出应含字体名')
+    assert(calls[0].op === 'importFont' && calls[0].args[0].startsWith('data:font/ttf;base64,'), '应调桥且 data URL 为 font/ttf')
+    assert(typeof calls[0].args[1] === 'string' && calls[0].args[1].includes('test-font.ttf'), '缺省名称应为文件名')
+    // 自定义名称
+    await tool.execute({ path: fontPath, name: '我的字体' })
+    assert(calls[1].args[1] === '我的字体', '自定义名称应传递')
+    // 扩展名拒绝
+    await assertRejects(() => tool.execute({ path: path.join(tmpDir, 'bad.exe') }), '不支持的文件类型', '非字体扩展名应拒绝')
+    // 文件不存在
+    await assertRejects(() => tool.execute({ path: path.join(tmpDir, 'missing.ttf') }), '文件不存在', '不存在应拒绝')
+    // 空文件
+    await fs.writeFile(path.join(tmpDir, 'empty.ttf'), '')
+    await assertRejects(() => tool.execute({ path: path.join(tmpDir, 'empty.ttf') }), '文件为空', '空文件应拒绝')
+    // 超 30MB
+    await fs.writeFile(path.join(tmpDir, 'big.ttf'), Buffer.alloc(31 * 1024 * 1024))
+    await assertRejects(() => tool.execute({ path: path.join(tmpDir, 'big.ttf') }), '文件过大', '超 30MB 应拒绝')
+  } finally {
+    await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {})
+  }
+})
+
+await test('import_background:图片扩展名校验与双槽位应用', async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-img-test-'))
+  try {
+    const calls: Array<{ op: string; args: unknown[] }> = []
+    const tools = createSettingsTools({ runIslandSettings: async (op, args) => { calls.push({ op, args }); return { ok: true } } })
+    const tool = tools.find((t) => t.name === 'import_background')!
+    const pngPath = path.join(tmpDir, 'bg.png')
+    await fs.writeFile(pngPath, Buffer.from([0x89, 0x50, 0x4e, 0x47]))
+    await tool.execute({ path: pngPath })
+    assert(calls[0].op === 'importBackground' && calls[0].args[0].startsWith('data:image/png;base64,'), '应调桥且 data URL 为 image/png')
+    await assertRejects(() => tool.execute({ path: path.join(tmpDir, 'bg.avif') }), '不支持的文件类型', 'avif 应拒绝')
+    await assertRejects(() => tool.execute({ path: path.join(tmpDir, 'missing.png') }), '文件不存在', '不存在应拒绝')
+  } finally {
+    await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {})
+  }
+})
+
+await test('list/rename:列表格式化与名称校验', async () => {
+  const calls: Array<{ op: string; args: unknown[] }> = []
+  const tools = createSettingsTools({
+    runIslandSettings: async (op, args) => {
+      calls.push({ op, args })
+      if (op === 'listFonts') return [{ id: 'f-1', name: '字体甲' }, { id: 'f-2', name: '字体乙' }]
+      if (op === 'listLibraryImages') return [{ id: 'i-1', name: '图一' }]
+      return { ok: true }
+    },
+  })
+  const listFonts = tools.find((t) => t.name === 'list_fonts')!
+  const out1 = await listFonts.execute({})
+  assert(out1.includes('f-1 字体甲') && out1.includes('f-2 字体乙'), '列表应含 id 与名称')
+  const listImgs = tools.find((t) => t.name === 'list_library_images')!
+  const out2 = await listImgs.execute({})
+  assert(out2.includes('i-1 图一'), '图片列表应含 id 与名称')
+  const emptyTools = createSettingsTools({ runIslandSettings: async (op) => (op === 'listFonts' ? [] : []) })
+  assert((await emptyTools.find((t) => t.name === 'list_fonts')!.execute({})).includes('为空'), '空库应有提示')
+  const renameImg = tools.find((t) => t.name === 'rename_library_image')!
+  await renameImg.execute({ id: 'i-1', name: '新名字' })
+  assert(calls.some((c) => c.op === 'renameLibraryImage' && c.args[0] === 'i-1' && c.args[1] === '新名字'), '改名应调桥')
+  await assertRejects(() => renameImg.execute({ id: 'i-1', name: '' }), '名称不能为空', '空名称应拒绝')
+  await assertRejects(() => renameImg.execute({ id: '', name: 'x' }), 'id 不能为空', '空 id 应拒绝')
+  await assertRejects(() => renameImg.execute({ id: 'i-1', name: 'x'.repeat(60) }), '名称过长', '超长名称应拒绝')
+  const renameFont = tools.find((t) => t.name === 'rename_font')!
+  await renameFont.execute({ id: 'f-1', name: '字体甲新' })
+  assert(calls.some((c) => c.op === 'renameFont' && c.args[1] === '字体甲新'), '字体改名应调桥')
 })
 
 // ---------------------------------------------------------------------------

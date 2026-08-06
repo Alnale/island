@@ -189,6 +189,12 @@ export interface EngineDeps {
   updateAgentConfig?(patch: Partial<AgentConfig>): void
   /** 技能目录绝对路径(create_skill 写入;main.cjs 注入 userData/skills) */
   getSkillDir?(): string
+  /**
+   * 灵动岛设置工具:调渲染端设置桥(主进程注入,executeJavaScript 调
+   * window.__islandSettings → 写 localStorage/IndexedDB → 派发
+   * island-settings-changed 事件即时生效)。未注入则不注册设置工具
+   */
+  runIslandSettings?(op: string, args: unknown[]): Promise<unknown>
 }
 
 /** 记忆存储的引擎可见子集(避免 types ↔ memory 循环引用) */
