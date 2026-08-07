@@ -22,6 +22,8 @@ import { formatTime } from '../../utils/format'
 import type { PlaybackMode } from '../../media/playbackModes'
 import { DEFAULT_BG_CROP, type ImageLibraryItem } from '../../media/backgroundStore'
 import { type FontColorMode, type FontLibraryItem } from '../../media/fontStore'
+import { useAgentPanelLayout } from '../../hooks/useAgentPanelLayout'
+import { loadImageNaturalSize, sampleImageBrightness } from '../../media/imageUtils'
 import { ParticleTime } from './ParticleTime'
 import {
   AgentSettingsView,
@@ -38,18 +40,17 @@ import {
   LyricApiView,
   ThemeView,
 } from './views'
-import type { AgentConfig, AgentPanelProps, AgentPart, AgentToolInfo } from '../../agent/types'
+import type { AgentConfig, AgentPanelProps } from '../../agent/types'
+import { textFromMessage } from '../../agent/text'
 import {
-  AGENT_PANEL_MIN_H,
   BG_COMPACT_REF_H,
   BG_COMPACT_REF_W,
   BG_CROP_REF_H,
   BG_CROP_REF_W,
   COLLAPSE_HIDE_MS,
   ELLIPSIS_SLOT_PX,
-  EXPANDED_MIN_WIDTH_PX,
-  EXPANDED_VIEWPORT_MARGIN_PX,
   EXPANDED_WIDTH_PX,
+  clampExpandedWidth,
   FADE_IN_DELAY_MS,
   FADE_IN_FAST_MS,
   FADE_IN_MS,
@@ -61,8 +62,6 @@ import {
   MAX_WIDTH_PX,
   MODE_ICON_MORPH_MS,
   MORPH_ANIMATE_MS,
-  PROGRESS_RIGHT_MARGIN_PX,
-  PROGRESS_WIDTH_PX,
   SEEK_STEP_SEC,
   SUPPRESS_CLICK_MS,
   SWIPE_THRESHOLD_PX,
@@ -72,6 +71,7 @@ import {
   TRACK_CYCLE_MS,
   applyTextLayout,
   bgSizePctFor,
+  conflictsWithBar,
   measureNaturalWidth,
   measureTextWidth,
   truncateText,
@@ -204,14 +204,13 @@ interface DynamicIslandProps {
    * 传入后媒体数据(track/playlist 等)与手势(双击/滑动)自动让位
    */
   agent?: AgentPanelProps
-  /** Agent 配置(设置视图"Agent 设置"入口;提供后设置视图显示该入口) */
+  /** Agent 配置(设置视图"Agent 设置"入口;提供后设置视图显示该入口)。
+   * 工具清单走 agent.tools 单通道(审计 P1 #4,消双通道冗余) */
   agentConfig?: {
     config: AgentConfig | null
     onSave: (patch: Partial<AgentConfig>) => void
     /** 重新拉取配置(Agent 设置视图打开时调用——LLM 自我配置后刷新) */
     onRefresh?: () => void
-    /** 工具清单(已注册技能/MCP 的预览展示;agent:tools 异步加载) */
-    tools?: AgentToolInfo[]
   }
   /**
    * Agent 面板视觉尺寸变化(px,内容自适应 × 界面缩放;仅 agent 视图生效)。
@@ -291,7 +290,9 @@ const isSettingsView = (view: string) => SETTINGS_VIEWS.includes(view as PanelVi
  * - 深度思考中:thinking + 仅有 reasoning 流(无文本输出);
  * - 正在回复:thinking + 文本流已开始(流式增量实时可见);
  * - 正在执行:工具循环阶段(带当前工具名);
- * - 回复已完成:最近一条助手文本预览(岛内自动截断省略);
+ * - 回复已完成:优先显示独立 Sub Agent 对 LLM 回复的心理揣测
+ *   (每轮回复后静默更新,如「表面淡定,内心在慌」,替代标题更有人味),
+ *   其次当前对话实时总结标题,再回退最近一条助手文本预览(岛内自动截断);
  * - 出错 → 提示展开查看;无回复 → 待命
  */
 function agentCompactLabel(agent: AgentPanelProps): string {
@@ -306,16 +307,16 @@ function agentCompactLabel(agent: AgentPanelProps): string {
     const last = tools && tools.length > 0 ? tools[tools.length - 1] : null
     return last ? `正在执行:${last.name}` : 'Agent 正在执行…'
   }
-  // 回复已完成:优先显示当前对话的实时总结标题(每轮回复后静默更新),
-  // 无总结时回退最近一条助手文本预览
+  // 回复已完成:心理揣测(独立 Sub Agent 根据当前对话揣测 LLM 回复时的
+  // 心态,俏皮话 10 字左右、上限 15 字)→ 实时总结标题 → 最近一条助手文本预览
+  if (agent.mindGuess) return agent.mindGuess
   if (agent.currentTitle) return agent.currentTitle
+  // 回退:最近一条含文本的助手消息(空格分隔,紧凑显示等价原实现)
   for (let i = agent.messages.length - 1; i >= 0; i--) {
     const m = agent.messages[i]
     if (m.role !== 'assistant') continue
-    const texts = m.parts
-      .filter((p): p is Extract<AgentPart, { type: 'text' }> => p.type === 'text')
-      .map((p) => p.text)
-    if (texts.length > 0) return texts.join(' ')
+    const text = textFromMessage(m, ' ').trim()
+    if (text) return text
   }
   return 'Agent 待命'
 }
@@ -622,22 +623,34 @@ export const DynamicIsland = memo(function DynamicIsland({
     const font = getComputedStyle(textEl).font
     const fullTextWidth = measureTextWidth(displayText, font)
 
-    // 第一轮:非悬停时的字符截断(用 canvas 测量完整文字,不依赖 DOM 渲染状态)
-    const available = MAX_WIDTH_PX - ISLAND_BASE_PX - ELLIPSIS_SLOT_PX
-    const { visible, truncated } = truncateText(displayText, available, font)
-    if (visible !== visibleTextRef.current) {
-      visibleTextRef.current = visible
-      setVisibleText(visible)
-      setTextTruncated(truncated)
-      return
+    // 第一轮:非悬停时的字符截断(用 canvas 测量完整文字,不依赖 DOM 渲染状态)。
+    // Agent 模式(2026-08-07):紧凑态文字(揣测 ≤16 码元/标题/回复)已按码元
+    // 截断,且无进度条——**不按像素截断,岛宽随文字长度自适应扩展**
+    // (用户要求:文字区随对应字数扩展岛宽;16 字约 340px < MAX_WIDTH_PX)
+    if (agentActiveRef.current) {
+      if (visibleTextRef.current !== displayText) {
+        visibleTextRef.current = displayText
+        setVisibleText(displayText)
+        setTextTruncated(false)
+        return
+      }
+    } else {
+      const available = MAX_WIDTH_PX - ISLAND_BASE_PX - ELLIPSIS_SLOT_PX
+      const { visible, truncated } = truncateText(displayText, available, font)
+      if (visible !== visibleTextRef.current) {
+        visibleTextRef.current = visible
+        setVisibleText(visible)
+        setTextTruncated(truncated)
+        return
+      }
     }
 
     // 第二轮:截断内容已提交,测量最终宽度 → 计算悬停目标宽度 → px→px 过渡触发回弹
     const finalNatural = measureNaturalWidth(island)
-    const conflicts =
-      fullTextWidth + PROGRESS_WIDTH_PX + PROGRESS_RIGHT_MARGIN_PX + TEXT_LEFT_PX >
-      MAX_WIDTH_PX
-    const targetPx = hoveredRef.current
+    const conflicts = conflictsWithBar(fullTextWidth)
+    // Agent 模式:紧凑态无进度条,悬停**不扩展**(扩展 = 进度条占位空白,
+    // 收起面板时鼠标悬浮在岛上会触发,实测 bug);其余模式悬停为进度条预留
+    const targetPx = hoveredRef.current && !agentActiveRef.current
       ? conflicts
         ? MAX_WIDTH_PX
         : Math.min(finalNatural + HOVER_EXTEND_PX, MAX_WIDTH_PX)
@@ -691,9 +704,11 @@ export const DynamicIsland = memo(function DynamicIsland({
       setBgNaturalE(null)
       return
     }
-    const img = new Image()
-    img.onload = () => setBgNaturalE({ w: img.naturalWidth, h: img.naturalHeight })
-    img.src = expandedImage
+    // 失败保持原值(与内联时 onload-only 语义一致);loadImageNaturalSize
+    // 是 Promise,成功后 setState
+    void loadImageNaturalSize(expandedImage).then((s) => {
+      if (s) setBgNaturalE(s)
+    })
   }, [expandedImage])
   const [bgNaturalC, setBgNaturalC] = useState<{ w: number; h: number } | null>(null)
   useEffect(() => {
@@ -701,9 +716,9 @@ export const DynamicIsland = memo(function DynamicIsland({
       setBgNaturalC(null)
       return
     }
-    const img = new Image()
-    img.onload = () => setBgNaturalC({ w: img.naturalWidth, h: img.naturalHeight })
-    img.src = compactImage
+    void loadImageNaturalSize(compactImage).then((s) => {
+      if (s) setBgNaturalC(s)
+    })
   }, [compactImage])
   const bgSizeExpanded = bgNaturalE
     ? bgSizePctFor(BG_CROP_REF_W, BG_CROP_REF_H, expandedCrop.zoom, bgNaturalE.w, bgNaturalE.h)
@@ -859,9 +874,7 @@ export const DynamicIsland = memo(function DynamicIsland({
       const hoverNow = island.matches(':hover')
       const hasBar = ISLAND_STATES[stateRef.current].progress !== 'none'
       if (hoverNow && hasBar) {
-        const conflicts =
-          fullTextWidth + PROGRESS_WIDTH_PX + PROGRESS_RIGHT_MARGIN_PX + TEXT_LEFT_PX >
-          MAX_WIDTH_PX
+        const conflicts = conflictsWithBar(fullTextWidth)
         const targetPx = conflicts
           ? MAX_WIDTH_PX
           : Math.min(natural + HOVER_EXTEND_PX, MAX_WIDTH_PX)
@@ -1012,12 +1025,7 @@ export const DynamicIsland = memo(function DynamicIsland({
           suppressClickRef.current = false
         }, SUPPRESS_CLICK_MS)
         releasePress() // 按压回弹 → 同时伸缩展开
-        setExpandedWidth(
-          Math.max(
-            EXPANDED_MIN_WIDTH_PX,
-            Math.min(EXPANDED_WIDTH_PX, window.innerWidth - EXPANDED_VIEWPORT_MARGIN_PX),
-          ),
-        )
+        setExpandedWidth(clampExpandedWidth())
         // Agent 模式:展开同一帧切到聊天视图(与 setExpanded 批量提交),
         // 高度目标直接是 --agent-h,避免"先朝 244 形变再改目标"的二次
         // 重定向抖动(视图切换 effect 兜底运行中/设置类视图保留)
@@ -1079,9 +1087,7 @@ export const DynamicIsland = memo(function DynamicIsland({
     if (!showBar) return // 通知状态无进度条:悬停只抬起/发光,不展开
     const font = getComputedStyle(textEl).font
     const fullTextWidth = measureTextWidth(displayText, font)
-    const conflicts =
-      fullTextWidth + PROGRESS_WIDTH_PX + PROGRESS_RIGHT_MARGIN_PX + TEXT_LEFT_PX >
-      MAX_WIDTH_PX
+    const conflicts = conflictsWithBar(fullTextWidth)
     const natural = measureNaturalWidth(island)
     const targetPx = conflicts ? MAX_WIDTH_PX : Math.min(natural + HOVER_EXTEND_PX, MAX_WIDTH_PX)
     applyTextLayout(island, textEl, fullTextWidth, targetPx, true)
@@ -1185,93 +1191,28 @@ export const DynamicIsland = memo(function DynamicIsland({
     setPanelView((view) => (view === 'control' || view === 'list' ? 'agent' : view))
   }, [agentActive, expanded])
 
-  // Agent 面板岛体高度(px,逻辑值):内容自适应(AgentView 测量回调写入
-  // --agent-h),默认下限留一点空;离开 agent 视图重置,下次进入重新测量
-  const [agentPanelH, setAgentPanelH] = useState(AGENT_PANEL_MIN_H)
-  useEffect(() => {
-    if (panelView !== 'agent') setAgentPanelH(AGENT_PANEL_MIN_H)
-  }, [panelView])
-  // Agent 面板界面缩放(百分比 100-300,最低 100%):等比例缩放展开态 UI。
-  // 持久化 localStorage;视觉尺寸 = 逻辑值 × 缩放,窗口由宿主跟随。
-  // 默认 200%(用户要求:初次安装初次进入 Agent 模式时默认放大——小屏
-  // 挂件默认 100% 观感偏小;已有 localStorage(用户改过)保留原值)
-  const AGENT_SCALE_KEY = 'widget-agent-scale'
-  const [agentScale, setAgentScale] = useState(() => {
-    try {
-      const v = Number(localStorage.getItem(AGENT_SCALE_KEY))
-      if (Number.isFinite(v) && v >= 100 && v <= 300) return Math.round(v)
-    } catch {
-      // 忽略存储失败
-    }
-    return 200
+  // Agent 面板高度/缩放布局(2026-08-07 抽出 hook:高度 JS 动画状态机、
+  // 界面缩放与持久化、进入视图滑升、缩放同步窗口宽度——行为与内联时
+  // 完全一致,高度动画首次可独立测试)
+  const { setAgentPanelH, agentScale, handleAgentScaleChange } = useAgentPanelLayout({
+    islandRef,
+    panelView,
+    expandedWidth,
+    expanded,
+    agentActive,
+    onAgentPanelSize,
+    onAgentPanelWidth,
   })
-  const handleAgentScaleChange = useCallback((scale: number) => {
-    const clamped = Math.min(300, Math.max(100, Math.round(scale)))
-    setAgentScale(clamped)
-    try {
-      localStorage.setItem(AGENT_SCALE_KEY, String(clamped))
-    } catch {
-      // 忽略存储失败
-    }
-  }, [])
-  // LLM 设置工具(set_agent_scale,经设置桥写 localStorage)的即时生效:
-  // 监听 island-settings-changed 的 scale 域,从存储重读缩放状态
-  useEffect(() => {
-    const onSettingsChanged = (event: Event) => {
-      const scopes = (event as CustomEvent<{ scopes?: string[] }>).detail?.scopes
-      if (!scopes?.includes('scale')) return
-      try {
-        const v = Number(localStorage.getItem(AGENT_SCALE_KEY))
-        if (Number.isFinite(v) && v >= 100 && v <= 300) setAgentScale(Math.round(v))
-      } catch {
-        // 忽略存储失败
-      }
-    }
-    window.addEventListener('island-settings-changed', onSettingsChanged)
-    return () => window.removeEventListener('island-settings-changed', onSettingsChanged)
-  }, [])
-  // 视觉尺寸同步宿主:窗口跟随(宿主回调须引用稳定)。
-  // 缩放只放大面板宽度(UI 元素不缩放),高度仍由内容驱动
-  useEffect(() => {
-    if (panelView === 'agent') {
-      const s = agentScale / 100
-      onAgentPanelSize?.(Math.round(expandedWidth * s), agentPanelH)
-    }
-  }, [panelView, agentPanelH, agentScale, expandedWidth, onAgentPanelSize])
-  // 缩放变化立即同步窗口宽度(无论当前面板视图——设置视图里切缩放
-  // 也要即时看到放大效果;高度由各视图回调管理)
-  useEffect(() => {
-    if (!agentActive || !expanded) return
-    onAgentPanelWidth?.(Math.round(expandedWidth * (agentScale / 100)))
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅缩放/展开变化时触发
-  }, [agentScale, expanded])
 
-  // 外部请求(托盘菜单"设置")打开设置视图:seq 变化即展开并切换。
-  // 背景 / 帮助 / 主题色 / 字体从设置视图内部进入,不再有独立外部入口
+  // 外部请求(托盘菜单"设置"/初次引导"帮助")打开设置类视图:seq 变化即
+  // 展开并切换(两个 effect 仅视图名不同,合并;两 seq 不会同时触发)
   useEffect(() => {
-    if (!requestSettingsSeq) return
-    setPanelView('settings')
-    setExpandedWidth(
-      Math.max(
-        EXPANDED_MIN_WIDTH_PX,
-        Math.min(EXPANDED_WIDTH_PX, window.innerWidth - EXPANDED_VIEWPORT_MARGIN_PX),
-      ),
-    )
+    const seq = requestSettingsSeq || requestHelpSeq
+    if (!seq) return
+    setPanelView(requestSettingsSeq ? 'settings' : 'help')
+    setExpandedWidth(clampExpandedWidth())
     changeExpanded(true)
-  }, [requestSettingsSeq, changeExpanded])
-
-  // 外部请求打开帮助手册(初次安装引导):seq 变化即展开并直接进入帮助视图
-  useEffect(() => {
-    if (!requestHelpSeq) return
-    setPanelView('help')
-    setExpandedWidth(
-      Math.max(
-        EXPANDED_MIN_WIDTH_PX,
-        Math.min(EXPANDED_WIDTH_PX, window.innerWidth - EXPANDED_VIEWPORT_MARGIN_PX),
-      ),
-    )
-    changeExpanded(true)
-  }, [requestHelpSeq, changeExpanded])
+  }, [requestSettingsSeq, requestHelpSeq, changeExpanded])
 
   // 当前应用字体:库中按 id 取(dataUrl 注入 @font-face,名称用于预览/搜索)
   const currentFont = fontLibrary?.find((f) => f.id === currentFontId) ?? null
@@ -1304,35 +1245,10 @@ export const DynamicIsland = memo(function DynamicIsland({
       setAutoDarkText(false)
       return
     }
-    const img = new Image()
-    img.onload = () => {
-      try {
-        // 32×32 采样缩放后取原图平均亮度(忽略透明像素)
-        const canvas = document.createElement('canvas')
-        canvas.width = 32
-        canvas.height = 32
-        const ctx = canvas.getContext('2d', { willReadFrequently: true })
-        if (!ctx) {
-          setAutoDarkText(false)
-          return
-        }
-        ctx.drawImage(img, 0, 0, 32, 32)
-        const { data } = ctx.getImageData(0, 0, 32, 32)
-        let sum = 0
-        let count = 0
-        for (let i = 0; i < data.length; i += 4) {
-          if (data[i + 3] > 125) {
-            sum += 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]
-            count++
-          }
-        }
-        setAutoDarkText(count > 0 && sum / count > 130)
-      } catch {
-        setAutoDarkText(false)
-      }
-    }
-    img.onerror = () => setAutoDarkText(false)
-    img.src = bg
+    // 采样失败(null)→ 按深色底白字(与内联时 onerror 语义一致)
+    void sampleImageBrightness(bg).then((avg) => {
+      setAutoDarkText(avg != null && avg > 130)
+    })
   }, [backgroundExpandedImage, backgroundCompactImage, expanded, fontColor?.mode])
 
   // 面板视图变化通知宿主(背景视图需要更高的岛体与窗口)
@@ -1472,7 +1388,7 @@ export const DynamicIsland = memo(function DynamicIsland({
   return (
     <div
       ref={islandRef}
-      className={`island-demo${stateClass ? ` ${stateClass}` : ''}${modeClass ? ` ${modeClass}` : ''}${expanded ? ' expanded' : ''}${press ? ' is-pressed' : ''}${collapsing ? ' island-collapsing' : ''}${animating ? ' is-animating' : ''}${lyricFold ? ' island-lyric-off' : ''}${panelView === 'background' ? ` island-bg-view${bgTarget === 'compact' ? ' island-bg-view--compact' : ''}` : ''}${panelView === 'font-library' || panelView === 'image-library' ? ' island-lib-view' : ''}${panelView === 'font' ? ' island-font-view' : ''}${panelView === 'font-color' ? ' island-font-color-view' : ''}${panelView === 'theme' ? ' island-theme-view' : ''}${panelView === 'help' ? ' island-help-view' : ''}${panelView === 'agent' ? ' island-agent-view' : ''}${panelView === 'agent' && agent?.streaming ? ' island-agent-streaming' : ''}${panelView === 'agent-settings' ? ' island-agent-settings-view' : ''}`}
+      className={`island-demo${stateClass ? ` ${stateClass}` : ''}${modeClass ? ` ${modeClass}` : ''}${expanded ? ' expanded' : ''}${press ? ' is-pressed' : ''}${collapsing ? ' island-collapsing' : ''}${animating ? ' is-animating' : ''}${lyricFold ? ' island-lyric-off' : ''}${panelView === 'background' ? ` island-bg-view${bgTarget === 'compact' ? ' island-bg-view--compact' : ''}` : ''}${panelView === 'font-library' || panelView === 'image-library' ? ' island-lib-view' : ''}${panelView === 'font' ? ' island-font-view' : ''}${panelView === 'font-color' ? ' island-font-color-view' : ''}${panelView === 'theme' ? ' island-theme-view' : ''}${panelView === 'help' ? ' island-help-view' : ''}${panelView === 'agent' ? ' island-agent-view' : ''}${panelView === 'agent-settings' ? ' island-agent-settings-view' : ''}${panelView === 'settings' ? ' island-settings-view' : ''}${panelView === 'lyric-api' ? ' island-lyric-api-view' : ''}`}
       role="button"
       tabIndex={0}
       aria-label={`灵动岛,当前状态:${agentActive ? 'Agent' : ISLAND_STATES[state].label},点击切换,长按展开`}
@@ -1493,15 +1409,17 @@ export const DynamicIsland = memo(function DynamicIsland({
           // 字体颜色(主文字/次级文字),null 时 CSS fallback 白色系
           '--text-color': resolvedTextColor ?? undefined,
           '--text-dim': textDimColor,
+          // Agent 界面缩放系数(100% = 1):消息内嵌图片按此等比放大
+          // (AgentImage 组件读取;原 CSS 注释声称 JS 设置但从未落盘)
+          '--agent-s': agentActive ? agentScale / 100 : 1,
           transform: pressTransform,
           transformOrigin: pressOrigin,
           // 自定义字体:岛体 font-family 覆盖,后代继承
           fontFamily: islandFontFamily,
           // 字体粗细(全部文字生效)
           fontWeight: islandFontWeight,
-          // Agent 面板高度(逻辑值,CSS 变量驱动 .island-agent-view 高度
-          // 与消息列表 max-height;非 agent 模式不设)
-          '--agent-h': agentActive ? `${agentPanelH}px` : undefined,
+          // Agent 面板高度(CSS 变量 --agent-h)由高度动画循环直接写 DOM,
+          // 不经过 React state(60fps 动画不触发整岛重渲染)——此处不再声明
         } as CSSProperties
       }
       onClick={handleClick}
@@ -1696,7 +1614,9 @@ export const DynamicIsland = memo(function DynamicIsland({
             <AgentSettingsView
               config={agentConfig.config}
               onSave={agentConfig.onSave}
-              tools={agentConfig.tools}
+              // tools 单通道:AgentPanelProps(与 AgentView 工具列表同源,
+              // 审计 P1 #4 消双通道冗余)
+              tools={agent?.tools}
               scale={agentScale}
               onScaleChange={handleAgentScaleChange}
               onBack={() => setPanelView('settings')}

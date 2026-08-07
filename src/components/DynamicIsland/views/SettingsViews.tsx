@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode, type WheelEvent } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import {
   LYRIC_PROVIDERS,
   loadLyricAuto,
@@ -7,9 +7,8 @@ import {
   saveLyricProvider,
   type LyricProvider,
 } from '../../../media/lyricProviders'
-import { useWheelSteps } from '../../../hooks/useWheelSteps'
 import { BackFoot, PanelHead } from './shared'
-import { WheelSwap } from './WheelSwap'
+import { QuickMenu } from './QuickMenu'
 
 /** 帮助手册条目:简约线框图标 + 标题 + 一句话说明 */
 interface HelpEntry {
@@ -588,17 +587,21 @@ export function LyricApiView({ onBack }: LyricApiViewProps) {
           关闭:一直按手动选择生效(切换即时刷新当前歌曲)
         </span>
         <div className="island-agent-form-foot">
+          {/* 保存歌词 API(2026-08-07 用户要求:复用保存配置同款——按钮
+              内联"已保存",无绿勾气泡;key 变化重挂载重放 island-ui-in
+              回弹淡入,2.2s 后平滑恢复) */}
           <button
             type="button"
-            className="island-ctl island-ctl--upload"
+            className={`island-ctl island-ctl--upload island-save-btn${saved ? ' saved' : ''}`}
             onClick={(event) => {
               event.stopPropagation()
               save()
             }}
           >
-            <span>保存歌词 API</span>
+            <span key={saved ? 'saved' : 'save'} className={`island-save-label${saved ? ' saved' : ''}`}>
+              {saved ? '已保存' : '保存歌词 API'}
+            </span>
           </button>
-          <span className="island-agent-saved">{saved ? '已保存 ✓' : ''}</span>
         </div>
       </div>
       <BackFoot onBack={onBack} />
@@ -609,66 +612,40 @@ export function LyricApiView({ onBack }: LyricApiViewProps) {
 /**
  * 帮助手册视图(托盘菜单入口 / 初次安装自动打开,岛内显示):
  * - **大尺寸承载教学内容**(200% 缩放的大小,岛体 800×640,窗口跟随);
- * - **左上角模式标签**:点击或滚轮切换「音乐模式 / Agent 模式」两种手册
- *   (共用 useWheelSteps,逐格循环切换,每格手册内容重放淡入动画);
+ * - **左上角模式标签**:复用通用 QuickMenu(整合按钮 + 同行联通展开 +
+ *   滚轮逐格循环切换 + 高亮滑块 + 宽度过渡,与 Agent 设置菜单同款),
+ *   **默认选中的类型是音乐模式**(用户要求);
  * - **教学布局**:简约线框图标 + 标题 + 一句话说明,双列卡片网格。
  */
 export function HelpView({ onBack }: HelpViewProps) {
   const [manual, setManual] = useState<'music' | 'agent'>('music')
-  // 切换前的手册与方向(WheelSwap 旧内容滑出/新内容回弹滑入)
-  const [prevManual, setPrevManual] = useState<'music' | 'agent' | null>(null)
-  const [dir, setDir] = useState<1 | -1>(1)
-  // 滚轮每格 +1:重挂载手册网格重放淡入动画
-  const [tick, setTick] = useState(0)
-  const wheelSteps = useWheelSteps()
-  const switchManual = (next: 'music' | 'agent', d: 1 | -1 = 1) => {
-    if (next === manual) return
-    setPrevManual(manual)
-    setDir(d)
-    setTick((t) => t + 1)
-    setManual(next)
-  }
-  // 滚轮切换(在整合按钮上滚动:逐格循环切换,上下滚同效)
-  const handleManualWheel = (event: WheelEvent<HTMLDivElement>) => {
-    const step = wheelSteps(event)
-    if (!step) return
-    switchManual(manual === 'music' ? 'agent' : 'music', step)
-  }
   const entries = manual === 'music' ? MUSIC_HELP_ITEMS : AGENT_HELP_ITEMS
-  // 模式按钮内容(图标 + 名称):WheelSwap 旧/新两层共用
+  // 模式按钮内容(图标 + 名称):QuickMenu 按钮 WheelSwap 与菜单项共用
+  const manualLabel = (m: 'music' | 'agent') => (m === 'music' ? '音乐模式' : 'Agent 模式')
   const manualNode = (m: 'music' | 'agent') => (
     <>
       <span className="island-help-mode-icon" aria-hidden="true">
         {HELP_TAB_ICONS[m]}
       </span>
-      <span>{m === 'music' ? '音乐模式' : 'Agent 模式'}</span>
+      <span>{manualLabel(m)}</span>
     </>
   )
   return (
     <div className="island-panel-list island-help-view">
-      <PanelHead title="帮助手册" count={manual === 'music' ? '音乐模式' : 'Agent 模式'} />
-      {/* 左上角模式切换:**整合为单个按钮**——点击切换 / 滚轮逐格循环
-          切换,内容经 WheelSwap 交换动画(与快捷按钮同款) */}
-      <div className="island-help-tabs" onWheel={handleManualWheel}>
-        <button
-          type="button"
-          className="island-help-mode"
-          title="点击或滚轮切换"
-          onClick={(event) => {
-            event.stopPropagation()
-            switchManual(manual === 'music' ? 'agent' : 'music')
-          }}
-        >
-          <WheelSwap tick={tick} dir={dir} prev={prevManual ? manualNode(prevManual) : null}>
-            {manualNode(manual)}
-          </WheelSwap>
-        </button>
-        <span className="island-help-tab-hint" aria-hidden="true">
-          滚轮切换
-        </span>
-      </div>
+      <PanelHead title="帮助手册" count={manualLabel(manual)} />
+      {/* 左上角模式切换:通用 QuickMenu(悬浮展开两项 / 滚轮逐格切换 /
+          单击菜单项切换;默认音乐模式);每格手册内容重放淡入 */}
+      <QuickMenu
+        items={(['music', 'agent'] as const)}
+        value={manual}
+        onChange={(m) => setManual(m)}
+        getLabel={manualNode}
+        title="点击或滚轮切换"
+        className="island-help-mode-menu"
+        wheelWhenOpen
+      />
       {/* 教学卡片网格:简约图标 + 标题 + 说明;每格切换重放淡入 */}
-      <div key={tick} className="island-help-grid">
+      <div key={manual} className="island-help-grid">
         {entries.map((item) => (
           <div key={item.title} className="island-help-card">
             <span className="island-help-card-icon" aria-hidden="true">

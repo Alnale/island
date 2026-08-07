@@ -25,7 +25,13 @@ export function openIdb(
         onUpgrade?.(db, req.transaction ?? null)
       }
       req.onsuccess = () => resolve(req.result)
-      req.onerror = () => reject(req.error)
+      req.onerror = () => {
+        // 打开失败(磁盘繁忙/存储损坏/配额等瞬时错误)不能把失败 Promise
+        // 永久缓存在 cache——否则后续所有同库操作全部走同一失败路径,
+        // 背景/字体/上传功能直到应用重启才恢复;失败即移除,下次重试
+        dbCache.delete(dbName)
+        reject(req.error)
+      }
     })
     dbCache.set(dbName, cached)
   }

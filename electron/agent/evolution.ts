@@ -45,7 +45,7 @@ export interface EvolutionHandle {
   /** 系统提示状态注入块(进行中/最近结果;无历史返回空串) */
   getStatus(): Promise<string>
   /** 进化日志(设置界面展示) */
-  getLog(): EvolutionLogEntry[]
+  getLog(): Promise<EvolutionLogEntry[]>
   /** 回滚到最近一个已接受版本(防降级:拒绝的候选不产生版本) */
   rollback(): Promise<string>
   /** 清除全部版本与日志,回到初始状态(v1 无快照)——设置界面"清除所有版本" */

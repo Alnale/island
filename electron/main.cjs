@@ -24,18 +24,42 @@ const {
   screen,
   dialog,
   shell,
+  safeStorage,
+  Notification,
 } = require('electron')
 const path = require('node:path')
 const fs = require('node:fs')
 
 // Agent 引擎(由 scripts/build-electron.mjs 打包):DeepSeek Responses API
-// provider + 工具系统,主进程内运行(纯异步网络/文件 IO,无阻塞点)
+// provider + 工具系统,主进程内运行(纯异步网络/文件 IO,无阻塞点)。
+// 产物不入库(dev:widget 已前置构建);fresh clone 直接运行给出明确指引
+// 而非崩在 require
+if (!fs.existsSync(path.join(__dirname, 'agent.cjs'))) {
+  console.error('[main] electron/agent.cjs 不存在——请先运行 pnpm build:electron(dev:widget 已自动前置)')
+  process.exit(1)
+}
 const agentEngineModule = require('./agent.cjs')
+
+// settings.json 持久化(原子写/损坏恢复/apiKey 加密/防抖,可单测)
+const { createSettingsStore } = require('./settings-store.cjs')
+
+// 截图/巡检测试模式(仅 WIDGET_SCREENSHOT env 时激活;依赖注入,见文件头)
+const { runScreenshotTests } = require('./screenshot-tests.cjs')
 
 // 透明窗口在 Windows GPU 合成下,叠在其他应用上方时半透明区域
 // (岛体背景)的 alpha 偶发突变(闪全黑/全透明)。
 // 禁用硬件加速走软件渲染:小窗口 60fps 无压力,合成稳定
 app.disableHardwareAcceleration()
+
+// 未捕获异常兜底:退出/销毁竞态下窗口 IPC handler 抛异常时,Electron
+// 默认弹错误框甚至退进程——记录日志继续运行(挂件托盘常驻语义;
+// 具体竞态点已用 isDestroyed 防护,这里是最后防线)
+process.on('uncaughtException', (err) => {
+  console.error('[main] uncaughtException:', err)
+})
+process.on('unhandledRejection', (err) => {
+  console.error('[main] unhandledRejection:', err)
+})
 
 // ---------------------------------------------------------------------------
 // 常量
@@ -58,27 +82,36 @@ let quitting = false
 
 // ---------------------------------------------------------------------------
 // 配置持久化(userData/settings.json)
+// 架构(2026-08-06):内存缓存 + 原子写 + 防抖——原实现每次读盘 + 直接写
+// 目标文件:强杀/断电会截断 JSON,下次保存以 {} 为基底覆盖写回(apiKey/
+// mode/agent 配置整份丢失);loadSettings 在 agent 每轮被调用数十次(同步
+// readFileSync 压主进程事件循环)
 // ---------------------------------------------------------------------------
 
+// settings.json 持久化(2026-08-07 抽 electron/settings-store.cjs,审计
+// P1:原子写 + 损坏恢复 + apiKey 加密 + 防抖合帧首次可单元测试)。
+// 函数名保持不变(薄包装),main.cjs 全部既有引用零改动;测试经工厂
+// 注入内存 stub 直测 store
+const settingsStore = createSettingsStore({
+  safeStorage,
+  getUserDataPath: () => app.getPath('userData'),
+})
 function settingsPath() {
-  return path.join(app.getPath('userData'), 'settings.json')
+  return settingsStore.path()
 }
-
 function loadSettings() {
-  try {
-    return JSON.parse(fs.readFileSync(settingsPath(), 'utf8'))
-  } catch {
-    return {}
-  }
+  return settingsStore.load()
 }
-
 function saveSettings(patch) {
-  try {
-    const next = { ...loadSettings(), ...patch }
-    fs.writeFileSync(settingsPath(), JSON.stringify(next, null, 2))
-  } catch (err) {
-    console.error('[widget] save settings failed:', err)
-  }
+  return settingsStore.save(patch)
+}
+function flushSettings() {
+  return settingsStore.flush()
+}
+/** 丢弃内存缓存(巡检恢复磁盘文件后调用:flush 对 null 缓存是 no-op,
+ * 磁盘恢复即生效,不会被退出时的旧缓存 flush 覆盖,审计 P0) */
+function resetSettingsCache() {
+  return settingsStore.resetCache()
 }
 
 // ---------------------------------------------------------------------------
@@ -128,12 +161,17 @@ const AGENT_CONFIG_DEFAULTS = {
   apiKey: '',
   baseURL: 'https://api.deepseek.com',
   model: 'deepseek-v4-flash',
+  // exec_command 确认门:默认关闭(现行为);开启后每轮首个命令需渲染端确认
+  confirmExec: false,
   systemPrompt:
     '你是运行在桌面灵动岛挂件里的个人助手,名叫「岛灵」。' +
     '你可以调用本机工具(执行命令、读写文件、联网搜索、发通知等),' +
     '根据用户自然语言直接完成操作,无需沙箱限制。' +
     '回答简洁自然,使用与用户相同的语言;执行工具时先说明意图。',
   reasoningEffort: 'high',
+  /** 主对话输出预算(2026-08-08):缺省 8192(预算只是上限,LLM 任务
+   * 巨大时经 set_output_budget 按需调大),persist=true 写 settings.json */
+  maxOutputTokens: 8192,
   /** MCP 服务列表(每个服务暴露 mcp_<服务>_<工具> 工具) */
   mcpServers: [],
   /** 技能目录列表(扫描 SKILL.md,每个技能暴露 skill_<名字> 工具) */
@@ -142,9 +180,39 @@ const AGENT_CONFIG_DEFAULTS = {
   excludedSkills: [],
   /** 已禁用工具名(工具列表视图禁用;内置/MCP/技能一律生效) */
   excludedTools: [],
+  /**
+   * 主动陪伴(2026-08-07):用户无操作满 proactiveInterval × 单位,
+   * 由总结 Sub Agent 判断语境是否需要主动开口,是则主 Agent 完整回合
+   * 主动回复(默认开启)
+   */
+  proactiveEnabled: true,
+  /** 主动陪伴间隔数值(钳制 5–480;用户发送或主动回复后重新计时) */
+  proactiveInterval: 60,
+  /** 主动陪伴间隔单位(s=秒 / m=分钟(默认)/ h=小时) */
+  proactiveIntervalUnit: 'm',
+  /** 总结标题文风(Sub Agent 设置:预设 id 或自定义 ≤100 字;空 = 默认) */
+  summaryStyle: '',
+  /** 心理揣测人格(Sub Agent 设置:预设 id 或自定义 ≤100 字;空 = 默认) */
+  mindPersona: '',
 }
 
 let agentEngine = null
+
+/**
+ * 当前 Agent 配置(统一入口:defaults 合并 + 旧版迁移)。
+ * 2026-08-07 单位选择:旧 proactiveIntervalMinutes(数值,分钟)迁移为
+ * {proactiveInterval: 同值, proactiveIntervalUnit: 'm'}——数值不变,
+ * 单位语义 = 分钟,与"切换单位数值不变"的用户约定一致
+ */
+function currentAgentConfig() {
+  const agent = { ...(loadSettings().agent ?? {}) }
+  if (typeof agent.proactiveIntervalMinutes === 'number' && typeof agent.proactiveInterval !== 'number') {
+    agent.proactiveInterval = agent.proactiveIntervalMinutes
+    agent.proactiveIntervalUnit = 'm'
+  }
+  delete agent.proactiveIntervalMinutes
+  return { ...AGENT_CONFIG_DEFAULTS, ...agent }
+}
 
 // 记忆系统:独立文件 userData/memory.json(与 settings.json 分离——
 // 记忆高频变更,独立文件不污染配置;损坏不影响配置)。主进程持有
@@ -166,7 +234,7 @@ let evolutionHandle = null
 function getEvolution() {
   if (evolutionHandle) return evolutionHandle
   evolutionHandle = agentEngineModule.createEvolution({
-    getConfig: () => ({ ...AGENT_CONFIG_DEFAULTS, ...(loadSettings().agent ?? {}) }),
+    getConfig: () => (currentAgentConfig()),
     getStore: () => getMemoryStore(),
     getMemoryDir: () => app.getPath('userData'),
     onEvent: (event) => win?.webContents.send('agent:event', event),
@@ -184,6 +252,41 @@ function applyAgentConfigPatch(patch) {
       next[key] = value.slice(0, 20000)
     }
   }
+  // Sub Agent 设置(2026-08-07):文风/人格,预设 id 或自定义 ≤100 字
+  for (const key of ['summaryStyle', 'mindPersona']) {
+    const value = patch?.[key]
+    if (typeof value === 'string') {
+      next[key] = value.trim().slice(0, 100)
+    }
+  }
+  // 布尔开关(确认门 / 主动陪伴)
+  if (typeof patch?.confirmExec === 'boolean') {
+    next.confirmExec = patch.confirmExec
+  }
+  if (typeof patch?.proactiveEnabled === 'boolean') {
+    next.proactiveEnabled = patch.proactiveEnabled
+  }
+  // 主动陪伴间隔(2026-08-07 单位选择:数值 5–480 取整,单位 s/m/h 枚举)。
+  // 兼容旧 proactiveIntervalMinutes:patch 带旧字段而新字段缺失时迁移
+  // (数值不变,单位 = 分钟);写回统一清旧字段防脏
+  // 主对话输出预算(2026-08-08):数字字段,钳制 4096–262144(官方
+  // 上限 384K 留余量);LLM set_output_budget persist=true 走这里
+  if (typeof patch?.maxOutputTokens === 'number' && Number.isFinite(patch.maxOutputTokens)) {
+    next.maxOutputTokens = Math.min(262144, Math.max(4096, Math.round(patch.maxOutputTokens)))
+  }
+  if (typeof patch?.proactiveInterval === 'number' && Number.isFinite(patch.proactiveInterval)) {
+    next.proactiveInterval = Math.min(480, Math.max(5, Math.round(patch.proactiveInterval)))
+  } else if (
+    typeof patch?.proactiveIntervalMinutes === 'number' &&
+    Number.isFinite(patch.proactiveIntervalMinutes)
+  ) {
+    next.proactiveInterval = Math.min(480, Math.max(5, Math.round(patch.proactiveIntervalMinutes)))
+    next.proactiveIntervalUnit = 'm'
+  }
+  if (patch?.proactiveIntervalUnit === 's' || patch?.proactiveIntervalUnit === 'm' || patch?.proactiveIntervalUnit === 'h') {
+    next.proactiveIntervalUnit = patch.proactiveIntervalUnit
+  }
+  delete next.proactiveIntervalMinutes
   if (Array.isArray(patch?.skillsDirs)) {
     const dirs = []
     for (const d of patch.skillsDirs) {
@@ -252,16 +355,56 @@ function applyAgentConfigPatch(patch) {
   return next
 }
 
+// exec_command 确认门 pending(引擎 confirmCommand 持此 promise,
+// 渲染端经 agent:tool-confirm IPC 回用户选择)
+let pendingCommandConfirm = null
+
+/** 安全转发事件到挂件窗口(审计 P2-5):win 存在但 webContents 已销毁的
+ * 竞态窗口 send 会抛原生异常,依赖全局 uncaughtException 兜底不可靠 */
+function sendToWidget(channel, payload) {
+  if (win && !win.isDestroyed()) win.webContents.send(channel, payload)
+}
+
+/**
+ * 主动陪伴:主动回合消息落定后,主进程跑心理揣测 → ① **Windows 系统
+ * 通知**展示(用户要求的"系统消息"展示揣测)② mind-proactive 事件送
+ * 渲染端更新紧凑态文字区——与通知同一句,两处一致、不重复调用 LLM。
+ * 抽成具名函数:onEvent 钩子与巡检(deps 注入 runProactiveGuess,绕开
+ * LLM 调度的确定性测试,同 runIslandSettings 模式)共用。
+ * getMindAgent 是独立 Sub Agent 单例(事件静默),guess 失败返回空串
+ * → 不通知,可接受
+ */
+function runProactiveGuess(message) {
+  return getMindAgent()
+    .guess([message])
+    .then((g) => {
+      if (!g) return null
+      new Notification({ title: '岛灵 · 心理揣测', body: g }).show()
+      sendToWidget('agent:event', {
+        type: 'mind-proactive',
+        messageId: message.id,
+        guess: g,
+      })
+      return g
+    })
+    .catch(() => null)
+}
+
 function getAgentEngine() {
   if (agentEngine) return agentEngine
   agentEngine = agentEngineModule.createAgentEngine({
-    getConfig: () => ({ ...AGENT_CONFIG_DEFAULTS, ...(loadSettings().agent ?? {}) }),
+    getConfig: () => (currentAgentConfig()),
     onEvent: (event) => {
       // 后台任务完成通知(background-done)只在 Agent 模式转发:
       // 渲染端收到会**自动触发一轮对话**(LLM 主动告知结果)——音乐
       // 模式下自动对话没有意义,还会污染历史
       if (event.type === 'background-done' && currentMode() !== 'agent') return
-      win?.webContents.send('agent:event', event)
+      sendToWidget('agent:event', event)
+      // 主动陪伴(2026-08-07):主动回合消息落定 → 心理揣测系统通知 +
+      // mind-proactive 事件(见 runProactiveGuess)
+      if (event.type === 'message' && event.message?.proactive) {
+        void runProactiveGuess(event.message)
+      }
     },
     onSwitchToMusic: () => setWidgetMode('music', 'tool'),
     // 记忆系统(引擎记忆工具 + 系统提示记忆块)
@@ -274,6 +417,31 @@ function getAgentEngine() {
     getSkillDir: () => path.join(app.getPath('userData'), 'skills'),
     // 灵动岛设置工具(主题色/缩放/字体/背景图库,应用后即时生效)
     runIslandSettings,
+    // exec_command 确认门:发确认请求给渲染端,等用户选择(超时拒绝)。
+    // **并行确认互斥**(2026-08-07 审计 P0):LLM 一轮内并行多个
+    // exec_command(executeToolBatch 是 Promise.all)时,新请求到达立即
+    // 以"拒绝"落定旧请求(引擎结构化回填,LLM 可自纠)——否则旧 promise
+    // 永挂(其定时器触发时槽已指向新请求,无人 resolve),整轮冻结,
+    // agent:abort 也解不开;定时器只处理**自己那次**(=== slot)
+    confirmCommand: (command) =>
+      new Promise((resolve) => {
+        if (pendingCommandConfirm) {
+          clearTimeout(pendingCommandConfirm.timer)
+          pendingCommandConfirm.resolve(false)
+        }
+        const slot = { resolve, timer: null }
+        slot.timer = setTimeout(() => {
+          if (pendingCommandConfirm === slot) {
+            pendingCommandConfirm = null
+            resolve(false)
+          }
+        }, 120000)
+        pendingCommandConfirm = slot
+        sendToWidget('agent:event', {
+          type: 'tool-confirm-request',
+          command: String(command ?? '').slice(0, 400),
+        })
+      }),
   })
   return agentEngine
 }
@@ -288,7 +456,16 @@ function getAgentEngine() {
 // 后派发 island-settings-changed 事件,UI 监听重读 → 即时生效。
 // 桥的错误统一转 {error} 结构,这里抛出(引擎按"工具执行失败"回填,
 // LLM 可自纠);executeJavaScript 会 await 桥方法返回的 Promise
+// 操作白名单(审计 P2):只放行 settingsTools.ts 注册的操作名(IslandSettingsOp),
+// 防 constructor/__proto__ 等原型链键命中被调用;新增操作时两端同步,
+// 漏加 = 安全侧失败(工具报"未知操作",LLM 可自纠)
+const ISLAND_SETTINGS_OPS = new Set([
+  'getSettings', 'setThemeColor', 'setAgentScale', 'importFont', 'listFonts',
+  'renameFont', 'importBackground', 'listLibraryImages', 'renameLibraryImage',
+  'setFontColor', 'setBackgroundOpacity', 'deleteFontItem', 'deleteLibraryImage',
+])
 async function runIslandSettings(op, args) {
+  if (!ISLAND_SETTINGS_OPS.has(op)) throw new Error(`未知的设置操作:${String(op)}`)
   if (!win || win.isDestroyed()) throw new Error('挂件窗口不可用')
   const argJson = (args ?? []).map((a) => JSON.stringify(a)).join(', ')
   const result = await win.webContents.executeJavaScript(
@@ -315,9 +492,30 @@ let summaryAgent = null
 function getSummaryAgent() {
   if (summaryAgent) return summaryAgent
   summaryAgent = agentEngineModule.createSummaryAgent({
-    getConfig: () => ({ ...AGENT_CONFIG_DEFAULTS, ...(loadSettings().agent ?? {}) }),
+    getConfig: () => (currentAgentConfig()),
+    // 主动陪伴判断(judgeProactive)需要同源上下文:记忆块/进化状态进
+    // 判断系统提示,否则判断不知道助手"记得什么、在忙什么"
+    getMemoryStore: () => getMemoryStore(),
+    getEvolution: () => getEvolution(),
   })
   return summaryAgent
+}
+
+// 独立的心理揣测后台 Sub Agent(懒加载单例):与总结标题/主对话引擎
+// 均零共享,失败返回空串(渲染端回退标题/回复预览);
+// 注入记忆/进化依赖——揣测的系统提示与主引擎同源(自定义提示词 +
+// 长期记忆块 + 进化状态 + 后台任务状态),否则心理是猜的空气
+let mindAgent = null
+
+function getMindAgent() {
+  if (mindAgent) return mindAgent
+  mindAgent = agentEngineModule.createMindAgent({
+    getConfig: () => (currentAgentConfig()),
+    // 与主引擎同款记忆/进化单例(记忆块进系统提示,揣测知道助手记得什么)
+    getMemoryStore: () => getMemoryStore(),
+    getEvolution: () => getEvolution(),
+  })
+  return mindAgent
 }
 
 // ---------------------------------------------------------------------------
@@ -418,9 +616,16 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
+      // 安全项显式声明(2026-08-06 架构审计):sandbox/webSecurity 依赖
+      // Electron 默认值会随版本漂移,显式声明防静默降级
+      sandbox: true,
+      webSecurity: true,
       spellcheck: false,
     },
   })
+  // 禁止窗口内新开浏览器窗口(渲染端链接一律走 app:open-external 系统
+  // 浏览器,经 http/https 白名单;防 window.open 弹出裸窗口)
+  win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
 
   win.setAlwaysOnTop(settings.alwaysOnTop !== false, 'screen-saver')
   // 默认点击穿透;渲染端鼠标进入岛体后经 IPC 切换为可点击
@@ -437,12 +642,12 @@ function createWindow() {
   win.once('ready-to-show', () => win.show())
   // 加载完成后广播当前模式(渲染端启动时也走 getMode 兜底)
   win.webContents.once('did-finish-load', () => {
-    win?.webContents.send('widget:set-mode', { mode: currentMode(), source: 'user' })
+    sendToWidget('widget:set-mode', { mode: currentMode(), source: 'user' })
     // 初次安装:settings.json 不存在 → 落盘首启标记并自动打开帮助手册
     // (教学引导;文件存在后下次启动不再弹出)
     if (!fs.existsSync(settingsPath())) {
       saveSettings({ firstRun: true })
-      setTimeout(() => win?.webContents.send('widget:open-help'), 800)
+      setTimeout(() => sendToWidget('widget:open-help'), 800)
     }
   })
 
@@ -454,1174 +659,42 @@ function createWindow() {
     }
   })
 
-  // 渲染进程异常诊断(卡死/崩溃排查)
+  // 渲染进程异常诊断(卡死/崩溃排查);崩溃(crashed/oom)自动重载——
+  // 否则挂件白屏必须手动重启应用(内存压力/IDB 大图等场景常见)
   win.webContents.on('render-process-gone', (_event, details) => {
     console.error('[widget] renderer gone:', details.reason)
+    if (details.reason === 'crashed' || details.reason === 'oom') {
+      setTimeout(() => {
+        if (win && !win.isDestroyed() && !quitting) win.webContents.reload()
+      }, 500)
+    }
   })
 
   // 调试:设置 WIDGET_SCREENSHOT=<path> 时,页面加载后截一张窗口图用于验证。
-  // 可选 WIDGET_SCREENSHOT_MODE=expanded:先模拟长按展开面板再截图。
+  // 截图/巡检模式(设置 WIDGET_SCREENSHOT=<path> 时):逻辑抽在
+  // electron/screenshot-tests.cjs(2026-08-06 架构优化,原内嵌 ~1160 行),
+  // 依赖经 deps 注入,不参与正常运行路径
   if (process.env.WIDGET_SCREENSHOT) {
-    win.webContents.once('did-finish-load', () => {
-      setTimeout(async () => {
-        try {
-          if (process.env.WIDGET_SCREENSHOT_MODE === 'expanded' || process.env.WIDGET_SCREENSHOT_MODE === 'layout') {
-            await win.webContents.executeJavaScript(`(async () => {
-              const island = document.querySelector('.island-demo')
-              if (!island) return 'no island'
-              const r = island.getBoundingClientRect()
-              const x = r.left + r.width / 2
-              const y = r.top + r.height / 2
-              const down = new PointerEvent('pointerdown', { bubbles: true, clientX: x, clientY: y, pointerId: 1, isPrimary: true, button: 0 })
-              const up = new PointerEvent('pointerup', { bubbles: true, clientX: x, clientY: y, pointerId: 1, isPrimary: true, button: 0 })
-              island.dispatchEvent(down)
-              await new Promise((res) => setTimeout(res, 600))
-              island.dispatchEvent(up)
-              await new Promise((res) => setTimeout(res, 800))
-              return 'expanded=' + island.classList.contains('expanded')
-            })()`)
-          }
-          if (process.env.WIDGET_SCREENSHOT_MODE === 'layout') {
-            // 布局诊断:输出展开面板各区域的位置
-            const layout = await win.webContents.executeJavaScript(`(() => {
-              const q = (sel) => {
-                const el = document.querySelector(sel)
-                if (!el) return null
-                const r = el.getBoundingClientRect()
-                return { top: Math.round(r.top), height: Math.round(r.height), bottom: Math.round(r.bottom) }
-              }
-              return JSON.stringify({
-                panel: q('.island-panel'),
-                head: q('.island-panel-head'),
-                lyric: q('.island-panel-lyric-inline'),
-                progressRow: q('.island-panel-progress-row'),
-                controls: q('.island-panel-controls'),
-                island: q('.island-demo'),
-              })
-            })()`)
-            console.log('[widget] layout:', layout)
-          }
-          if (process.env.WIDGET_SCREENSHOT_MODE === 'theme') {
-            // 展开 + 打开取色面板(视觉验证)
-            await win.webContents.executeJavaScript(`(async () => {
-              const sleep = (ms) => new Promise((res) => setTimeout(res, ms))
-              const island = document.querySelector('.island-demo')
-              const r = island.getBoundingClientRect()
-              const x = r.left + r.width / 2
-              const y = r.top + r.height / 2
-              island.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, clientX: x, clientY: y, pointerId: 1, isPrimary: true, button: 0 }))
-              setTimeout(() => island.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, clientX: x, clientY: y, pointerId: 1, isPrimary: true, button: 0 })), 600)
-              await sleep(1100)
-              document.querySelector('.island-ctl--theme')?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-              await sleep(500)
-              return 'theme view open: ' + !!document.querySelector('.island-panel-theme')
-            })()`)
-          }
-          if (process.env.WIDGET_SCREENSHOT_MODE === 'stress') {
-            // 压力测试:10 轮 展开→操作→收起,采样动画帧间隔,检测卡死/卡顿
-            const result = await win.webContents.executeJavaScript(`(async () => {
-              const sleep = (ms) => new Promise((res) => setTimeout(res, ms))
-              const out = { rounds: [] }
-              const island = document.querySelector('.island-demo')
-              const r = island.getBoundingClientRect()
-              const x = r.left + r.width / 2
-              const y = r.top + r.height / 2
-              const pressIsland = () => {
-                island.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, clientX: x, clientY: y, pointerId: 1, isPrimary: true, button: 0 }))
-                setTimeout(() => island.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, clientX: x, clientY: y, pointerId: 1, isPrimary: true, button: 0 })), 600)
-              }
-              // 采样 RAF 间隔(动画流畅度)
-              const sampleFps = (ms) => new Promise((res) => {
-                const gaps = []
-                let last = performance.now()
-                const tick = (now) => {
-                  gaps.push(now - last)
-                  last = now
-                  if (performance.now() - start < ms) requestAnimationFrame(tick)
-                  else res(Math.round(gaps.reduce((a, b) => a + b, 0) / gaps.length))
-                }
-                const start = performance.now()
-                requestAnimationFrame(tick)
-              })
-              let slowFrames = 0
-              for (let i = 0; i < 10; i++) {
-                const t0 = performance.now()
-                pressIsland()
-                await sleep(1000)
-                const mid = await sampleFps(600)
-                // 展开中点模式按钮
-                document.querySelector('.island-ctl--mode')?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-                await sleep(200)
-                // 点面板外收起
-                document.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, clientX: 10, clientY: 60, pointerId: 2, isPrimary: true, button: 0 }))
-                await sleep(900)
-                const collapsed = !island.classList.contains('expanded')
-                const dt = Math.round(performance.now() - t0)
-                if (mid > 80) slowFrames++
-                out.rounds.push({ i, collapsed, avgFrameMs: mid, roundMs: dt })
-                await sleep(200)
-              }
-              out.slowFrames = slowFrames
-              out.rendererAlive = true
-              return JSON.stringify(out)
-            })()`)
-            console.log('[widget] stress:', result)
-          }
-          if (process.env.WIDGET_SCREENSHOT_MODE === 'test') {
-            // 综合交互测试(全视图巡检):长按展开 → 托盘设置 → 主题色(应用/恢复)
-            // → 字体 → 字体库 → 背景 → 帮助 → 逐级返回收起(设置类视图只能经返回键退出)
-            const sleep = (ms) => new Promise((res) => setTimeout(res, ms))
-            const expanded = await win.webContents.executeJavaScript(`(async () => {
-              const sleep = (ms) => new Promise((res) => setTimeout(res, ms))
-              const island = document.querySelector('.island-demo')
-              const r = island.getBoundingClientRect()
-              const x = r.left + r.width / 2
-              const y = r.top + r.height / 2
-              island.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, clientX: x, clientY: y, pointerId: 1, isPrimary: true, button: 0 }))
-              setTimeout(() => island.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, clientX: x, clientY: y, pointerId: 1, isPrimary: true, button: 0 })), 600)
-              await sleep(1100)
-              return island.classList.contains('expanded')
-            })()`)
-            console.log('[widget] test expanded:', expanded)
-            // 歌词开关提示:默认已开,先关再开,播放键下方显示来源提示
-            const lyricHint = await win.webContents.executeJavaScript(`(async () => {
-              const sleep = (ms) => new Promise((res) => setTimeout(res, ms))
-              const btn = document.querySelector('.island-ctl--lyric')
-              if (!btn) return false
-              btn.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-              await sleep(150)
-              btn.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-              await sleep(150)
-              const hintEl = document.querySelector('.island-hint-play')
-              return !!hintEl && hintEl.textContent.includes('网易云')
-            })()`)
-            console.log('[widget] test lyricHint:', lyricHint)
-            // 托盘"设置"入口:展开并切换到设置视图(渲染端 requestSettingsSeq)
-            win.webContents.send('widget:open-settings')
-            await sleep(600)
-            const result = await win.webContents.executeJavaScript(`(async () => {
-              const sleep = (ms) => new Promise((res) => setTimeout(res, ms))
-              const out = {}
-              const island = document.querySelector('.island-demo')
-              const settingsItem = (text) =>
-                [...document.querySelectorAll('.island-settings-item')].find((s) => s.textContent.includes(text))
-              // 1. 设置视图
-              out.settingsShown = !!document.querySelector('.island-settings-items')
-              // 2. 主题色视图:取色器渲染 + 应用/恢复
-              settingsItem('主题色').dispatchEvent(new MouseEvent('click', { bubbles: true }))
-              await sleep(400)
-              out.pickerShown = !!document.querySelector('.island-theme-view .island-font-sv')
-              const swatch = [...document.querySelectorAll('.island-theme-swatch')].find((s) => s.title === '#f87171')
-              swatch.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-              await sleep(400)
-              out.themeApplied = island.style.getPropertyValue('--state-color') === '#f87171'
-              document.querySelector('.island-theme-swatch--follow').dispatchEvent(new MouseEvent('click', { bubbles: true }))
-              await sleep(400)
-              out.themeReset = island.style.getPropertyValue('--state-color') !== '#f87171'
-              document.querySelector('.island-theme-view .island-bg-back').dispatchEvent(new MouseEvent('click', { bubbles: true }))
-              await sleep(400)
-              out.backToSettings = !!document.querySelector('.island-settings-items')
-              // 3. 字体视图 → 字体库 → 返回
-              settingsItem('字体').dispatchEvent(new MouseEvent('click', { bubbles: true }))
-              await sleep(400)
-              out.fontShown = !!document.querySelector('.island-font-view')
-              const libBtn = [...document.querySelectorAll('.island-font-actions .island-ctl')].find((s) => s.textContent.includes('字体库'))
-              libBtn.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-              await sleep(400)
-              out.fontLibraryShown = !!document.querySelector('.island-lib-view .island-lib-search')
-              document.querySelector('.island-lib-foot .island-ctl--back').dispatchEvent(new MouseEvent('click', { bubbles: true }))
-              await sleep(400)
-              out.backToFont = !!document.querySelector('.island-font-view')
-              document.querySelector('.island-font-foot .island-bg-back').dispatchEvent(new MouseEvent('click', { bubbles: true }))
-              await sleep(400)
-              out.backToSettings2 = !!document.querySelector('.island-settings-items')
-              // 4. 背景视图 → 不透明度按形态独立(紧凑态改滑杆,展开态不受影响)→ 返回
-              settingsItem('自定义图片背景').dispatchEvent(new MouseEvent('click', { bubbles: true }))
-              await sleep(400)
-              out.bgShown = !!document.querySelector('.island-panel-bg')
-              out.bgSegShown = !!document.querySelector('.island-bg-seg')
-              const opSlider = () => document.querySelectorAll('.island-bg-slider input[type=range]')[1]
-              const segBtn = (text) => [...document.querySelectorAll('.island-bg-seg button')].find((b) => b.textContent.includes(text))
-              if (opSlider()) {
-                const setVal = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
-                const dragTo = async (v) => {
-                  setVal.call(opSlider(), v)
-                  opSlider().dispatchEvent(new Event('input', { bubbles: true }))
-                  opSlider().dispatchEvent(new Event('change', { bubbles: true }))
-                  await sleep(300)
-                }
-                // 展开态改 40
-                await dragTo('40')
-                const expandedA = opSlider().value
-                // 切紧凑态:滑杆应显示紧凑态原值(≠ 40,不受展开态改动影响)
-                segBtn('紧凑态').dispatchEvent(new MouseEvent('click', { bubbles: true }))
-                await sleep(300)
-                const compactShown = opSlider().value
-                // 紧凑态改 70
-                await dragTo('70')
-                const compactB = opSlider().value
-                // 切回展开态:应仍为 40(紧凑态的改动不生效于展开态)
-                segBtn('展开态').dispatchEvent(new MouseEvent('click', { bubbles: true }))
-                await sleep(300)
-                const expandedB = opSlider().value
-                out.opacityIndependent =
-                  compactShown !== expandedA && compactB === '70' && expandedB === expandedA
-                out.opacityDebug = JSON.stringify({ expandedA, compactShown, compactB, expandedB })
-              } else {
-                out.opacityIndependent = 'n/a (无背景图时无滑杆)'
-              }
-              document.querySelector('.island-panel-bg .island-bg-back').dispatchEvent(new MouseEvent('click', { bubbles: true }))
-              await sleep(400)
-              out.backToSettings3 = !!document.querySelector('.island-settings-items')
-              // 5. 帮助视图 → 返回
-              settingsItem('帮助手册').dispatchEvent(new MouseEvent('click', { bubbles: true }))
-              await sleep(400)
-              out.helpShown = !!document.querySelector('.island-help-items')
-              document.querySelector('.island-panel-list:has(.island-help-items) .island-bg-back').dispatchEvent(new MouseEvent('click', { bubbles: true }))
-              await sleep(400)
-              out.backToSettings4 = !!document.querySelector('.island-settings-items')
-              // 6. 设置 → 返回收起(设置视图只能经返回键退出)
-              document.querySelector('.island-panel-list:has(.island-settings-items) .island-bg-back').dispatchEvent(new MouseEvent('click', { bubbles: true }))
-              await sleep(900)
-              out.collapsed = !island.classList.contains('expanded')
-              return JSON.stringify(out)
-            })()`)
-            console.log('[widget] test:', result)
-          }
-          if (process.env.WIDGET_SCREENSHOT_MODE === 'agent') {
-            // Agent 功能巡检(严格 UI 测试):托盘设置 → Agent 设置视图 →
-            // 表单/MCP 双传输编辑/测试连接/技能目录/记忆增删/进化/保存。
-            // 分两段:段 1 进入 agent-settings 视图停留(主进程截图),
-            // 段 2 逐项交互断言(React 受控输入用原生 value setter)。
-            // env WIDGET_MOCK_SERVER = mock MCP stdio 服务器路径(测试命令
-            // 先以保活 stdin 方式启动;command 用 node,由 PATH 解析)
-            const mockServer = process.env.WIDGET_MOCK_SERVER || ''
-            // 巡检会点击"保存配置"(表单状态写回 settings.json)——备份
-            // 用户配置,巡检结束恢复(实测:巡检保存覆盖了用户 siyuan 配置)
-            const settingsFile = settingsPath()
-            let settingsBackup = null
-            try {
-              settingsBackup = fs.readFileSync(settingsFile, 'utf8')
-            } catch {
-              // 无配置可备份
-            }
-            // 托盘"设置"入口:展开并切换到设置视图(与 test 模式一致)
-            win.webContents.send('widget:open-settings')
-            await new Promise((r) => setTimeout(r, 800))
-            // 段 0:歌词 API 接入点(设置 → 歌词 API:预设厂家选择 + 保存)
-            const lyricApiResult = await win.webContents.executeJavaScript(`(async () => {
-              const sleep = (ms) => new Promise((res) => setTimeout(res, ms))
-              const out = {}
-              const settingsItem = (text) =>
-                [...document.querySelectorAll('.island-settings-item')].find((s) => s.textContent.includes(text))
-              out.lyricApiEntry = !!settingsItem('歌词 API')
-              settingsItem('歌词 API')?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-              await sleep(400)
-              const view = document.querySelector('.island-lyric-api')
-              out.lyricApiViewShown = !!view
-              out.presetCount = view?.querySelectorAll('.island-lyric-provider').length ?? 0
-              // 选 QQ音乐 → 保存 → localStorage 校验。
-              // 注意:保存后 React 重渲染可能替换节点,每次操作**实时查询**
-              // (缓存引用会失效,与 MCP 填表同问题)
-              const providerBtn = (text) =>
-                [...(document.querySelectorAll('.island-lyric-provider') ?? [])].find((b) => b.textContent.includes(text))
-              const saveBtn = () =>
-                [...(document.querySelectorAll('.island-lyric-api button') ?? [])].find((b) => b.textContent.includes('保存歌词 API'))
-              providerBtn('QQ音乐')?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-              await sleep(200)
-              saveBtn()?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-              await sleep(300)
-              out.savedProvider = localStorage.getItem('widget-lyric-provider') ?? '(无)'
-              out.savedQq = (localStorage.getItem('widget-lyric-provider') ?? '').includes('qq')
-              // 恢复默认(网易云)并返回设置(返回键也实时查询)
-              providerBtn('网易云')?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-              await sleep(200)
-              saveBtn()?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-              await sleep(300)
-              out.restoredProvider = localStorage.getItem('widget-lyric-provider') ?? '(无)'
-              // 自动切换开关:默认开启 → 点击关闭 → localStorage 校验 → 恢复开启
-              const toggle = document.querySelector('.island-lyric-api .island-toggle')
-              out.toggleShown = !!toggle
-              out.toggleDefaultOn = toggle?.classList.contains('on') ?? false
-              out.autoDefault = localStorage.getItem('widget-lyric-auto') ?? '(未设置=默认开)'
-              toggle?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-              await sleep(300)
-              out.autoAfterOff = localStorage.getItem('widget-lyric-auto') ?? '(无)'
-              toggle?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-              await sleep(300)
-              out.autoRestored = localStorage.getItem('widget-lyric-auto') ?? '(无)'
-              // 返回键在 .island-panel-list 根部(BackFoot 在 .island-lyric-api 外)
-              const backBtn = document.querySelector('.island-panel-list:has(.island-lyric-api) .island-bg-back')
-              out.backBtnFound = !!backBtn
-              out.backBtnText = backBtn?.textContent ?? '(无)'
-              backBtn?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-              await sleep(400)
-              out.backToSettings = !!document.querySelector('.island-settings-items')
-              out.lyricApiStillShown = !!document.querySelector('.island-lyric-api')
-              return JSON.stringify(out)
-            })()`)
-            console.log('[widget] agent-lyric-api:', lyricApiResult)
-            // 段 1:展开 → 设置视图 → Agent 设置视图
-            const enterResult = await win.webContents.executeJavaScript(`(async () => {
-              const sleep = (ms) => new Promise((res) => setTimeout(res, ms))
-              const out = {}
-              const island = document.querySelector('.island-demo')
-              const settingsItem = (text) =>
-                [...document.querySelectorAll('.island-settings-item')].find((s) => s.textContent.includes(text))
-              out.openSettings = !!document.querySelector('.island-settings-items')
-              const agentEntry = settingsItem('Agent 设置')
-              out.agentEntryShown = !!agentEntry
-              agentEntry?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-              await sleep(500)
-              const view = document.querySelector('.island-agent-settings')
-              out.agentSettingsShown = !!view
-              if (view) {
-                const form = view.querySelector('.island-agent-form')
-                out.formShown = !!form
-                out.apiKeyInput = !!form?.querySelector('input[placeholder*="sk-"]')
-                // Base URL 输入无 placeholder,按输入框数量与顺序断言
-                const formInputs = form?.querySelectorAll('input') ?? []
-                out.baseUrlInput = formInputs.length >= 4
-                out.modelInput = !!form?.querySelector('input[value="deepseek-v4-flash"]')
-                out.promptTextarea = !!form?.querySelector('textarea')
-                out.sectionTitles = [...view.querySelectorAll('.island-agent-section-title')].map((s) => s.textContent)
-                out.scaleBtns = [...form.querySelectorAll('.island-agent-scale-btn')].filter((b) => b.textContent.includes('%')).length
-              // 配置刷新验证:LLM 对话中写进 settings.json 的 MCP 服务,
-              // 打开设置视图时应立即可见(useAgent 挂载时只读一次配置,
-              // AgentSettingsView 挂载时 onRefresh 重新拉取)
-              const mcpCards = view.querySelectorAll('.island-mcp-card')
-              out.mcpCardCount = mcpCards.length
-              // input 的 value 不在 textContent 里,检查服务名输入框的值
-              out.mcpCardInputs = [...mcpCards].map((c) =>
-                [...c.querySelectorAll('input')].map((i) => i.value).join('|'),
-              )
-              out.mcpPreconfiguredShown = [...mcpCards].some(
-                (c) => c.querySelector('input[placeholder="如 filesystem"]')?.value === 'preconfigured',
-              )
-              }
-              out.expanded = island.classList.contains('expanded')
-              return JSON.stringify(out)
-            })()`)
-            console.log('[widget] agent-enter:', enterResult)
-            console.log('[widget] window size at agent-settings:', win.getSize())
-            // 截图 1:agent-settings 视图(独立文件名,避免被末尾通用截图覆盖)
-            {
-              const image = await win.webContents.capturePage()
-              fs.writeFileSync(process.env.WIDGET_SCREENSHOT + '.agent1.png', image.toPNG())
-              console.log('[widget] screenshot(agent-settings) saved')
-            }
-            // 段 2:交互断言
-            const interactResult = await win.webContents.executeJavaScript(`(async () => {
-              const sleep = (ms) => new Promise((res) => setTimeout(res, ms))
-              const out = {}
-              const view = document.querySelector('.island-agent-settings')
-              const form = view?.querySelector('.island-agent-form')
-              if (!view || !form) return JSON.stringify({ fatal: 'agent-settings 视图未打开' })
-              // React 受控输入赋值(原生 setter + input 事件);元素不存在时
-              // 记录并跳过(选择器与 DOM 不匹配时报错不如继续断言)
-              const setInput = (el, value) => {
-                if (!el) return false
-                const proto = el.tagName === 'TEXTAREA'
-                  ? window.HTMLTextAreaElement.prototype
-                  : window.HTMLInputElement.prototype
-                const setter = Object.getOwnPropertyDescriptor(proto, 'value').set
-                setter.call(el, value)
-                el.dispatchEvent(new Event('input', { bubbles: true }))
-                return true
-              }
-              const scrollInto = async (el) => {
-                el?.scrollIntoView({ block: 'center' })
-                await sleep(150)
-              }
-              const btnByText = (text) => [...view.querySelectorAll('.island-agent-scale-btn, .island-ctl')].find((b) => b.textContent.includes(text))
-
-              // ---- MCP 服务编辑 ----
-              const addBtn = btnByText('添加服务')
-              await scrollInto(addBtn)
-              addBtn?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-              await sleep(200)
-              // 取**最后一张**卡(刚添加的)——第一张可能是用户已有配置
-              // (实测:填写时误改已有 siyuan 卡,覆盖了用户配置!)
-              const cards = view.querySelectorAll('.island-mcp-card')
-              const card = cards[cards.length - 1]
-              out.mcpCardShown = !!card
-              out.mcpCardCountBefore = cards.length
-              // 类型切换:stdio → sse(sse 显示 URL/请求头,隐藏 command)
-              const sseBtn = [...card.querySelectorAll('.island-mcp-type-row button')].find((b) => b.textContent.includes('sse'))
-              sseBtn?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-              await sleep(200)
-              const urlInput = card.querySelector('input[placeholder*="https://"]')
-              out.mcpSseUrlShown = !!urlInput
-              out.mcpSseCommandHidden = ![...card.querySelectorAll('.island-agent-field span')].some((s) => s.textContent.includes('启动命令'))
-              // 切回 stdio 并填入 mock 配置(只操作新添加的卡)
-              const stdioBtn = [...card.querySelectorAll('.island-mcp-type-row button')].find((b) => b.textContent.includes('stdio'))
-              stdioBtn?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-              await sleep(200)
-              // 填表:每次填写后等 React 渲染并**重新查询 DOM**——受控输入
-              // 触发重渲染可能替换节点,旧引用的事件不再冒泡(实测:旧引用
-              // 只生效第一个字段,其余丢失)
-              const fillCard = async (selector, value) => {
-                const cardNow = (() => {
-                  const cs = view.querySelectorAll('.island-mcp-card')
-                  return cs[cs.length - 1]
-                })()
-                const input = cardNow.querySelector(selector)
-                await scrollInto(input)
-                setInput(input, value)
-                await sleep(200)
-              }
-              await fillCard('input[placeholder="如 filesystem"]', 'ui-mock')
-              await fillCard('input[placeholder*="npx"]', 'node')
-              await fillCard('textarea', ${JSON.stringify(mockServer)})
-              // 测试连接(真实连 mock stdio 服务器,断言 6 个工具)
-              // 重新查询当前卡片(React 重渲染可能替换 DOM)后点击测试
-              const freshCard = (() => {
-                const cs = view.querySelectorAll('.island-mcp-card')
-                return cs[cs.length - 1]
-              })()
-              const freshTestBtn = [...freshCard.querySelectorAll('.island-mcp-actions button')].find((b) => b.textContent.includes('测试'))
-              out.testBtnDisabled = freshTestBtn?.disabled ?? 'n/a'
-              await scrollInto(freshTestBtn)
-              freshTestBtn?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-              await sleep(3000)
-              const testResultEl = freshCard.querySelector('.island-mcp-test-result')
-              out.mcpTestText = testResultEl?.textContent ?? '(无结果)'
-              out.mcpTestOk = (testResultEl?.textContent ?? '').includes('连接成功')
-
-              // ---- 技能目录 ----
-              const skillsSection = [...view.querySelectorAll('.island-agent-section')].find((s) => s.textContent.includes('技能目录'))
-              const skillsRows = skillsSection?.querySelectorAll('.island-skills-dir-row') ?? []
-              out.skillsDirRows = [...skillsRows].map((r) => r.textContent.trim().slice(0, 60))
-              out.skillsDefaultScanned = [...skillsRows].some((r) => r.textContent.includes('.claude'))
-              // 已注册技能预览(全部技能目录扫描结果,不截断)
-              const regRows = skillsSection?.querySelectorAll('.island-skills-reg-row') ?? []
-              out.skillsRegisteredCount = regRows.length
-              out.skillsRegisteredShown = regRows.length >= 8
-              out.skillsRegisteredSample = [...regRows].slice(0, 3).map((r) => r.textContent.trim().slice(0, 40))
-              // 技能移除/恢复:点第一行的"移除" → 行消失 + 已排除区出现 → 恢复。
-              // 注意:已排除区也复用 .island-skills-reg-row 类,限定直接子行
-              const skillRows = () => [
-                ...(skillsSection?.querySelectorAll('.island-skills-registered > .island-skills-reg-row') ?? []),
-              ]
-              const firstRm = skillRows()[0]?.querySelector('.island-skills-reg-rm')
-              const firstSlug = skillRows()[0]?.querySelector('.island-skills-reg-name')?.textContent
-              await scrollInto(firstRm)
-              firstRm?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-              await sleep(400)
-              out.skillRemoved = skillRows().length === regRows.length - 1
-              out.excludedSectionShown = !!skillsSection?.querySelector('.island-skills-excluded')
-              out.excludedSlug = skillsSection?.querySelector('.island-skills-excluded .island-skills-reg-name')?.textContent
-              // 分区断言:扫描到的区(用户无自建技能时"自己创建"区不存在)
-              const regCounts = [...(skillsSection?.querySelectorAll('.island-skills-reg-count') ?? [])].map(
-                (c) => c.textContent,
-              )
-              out.skillPartition = regCounts
-              out.scannedPartitionShown = regCounts.some((c) => c.includes('扫描到的'))
-              out.ownPartitionShown = regCounts.some((c) => c.includes('自己创建'))
-              // 恢复(已排除区第一行的"恢复")
-              const restoreBtn = skillsSection?.querySelector('.island-skills-excluded .island-agent-scale-btn')
-              await scrollInto(restoreBtn)
-              restoreBtn?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-              await sleep(400)
-              out.skillRestored = skillRows().length === regRows.length
-              out.skillRestoredSlug = firstSlug ?? ''
-
-              // ---- 记忆管理器(添加按钮按文本匹配——记忆条目的"改/删"
-              // 按钮也在区里,querySelector 第一个会选错) ----
-              const memSection = [...view.querySelectorAll('.island-agent-section')].find((s) => s.textContent.includes('长期记忆'))
-              const memDraftInput = memSection?.querySelector('input[placeholder*="我喜欢"]')
-              const memAddBtn = [...(memSection?.querySelectorAll('.island-agent-scale-btn') ?? [])].find((b) => b.textContent === '添加')
-              out.memAddBtnText = memAddBtn?.textContent ?? '(无)'
-              out.memBtnAll = [...(memSection?.querySelectorAll('.island-agent-scale-btn') ?? [])].map((b) => b.textContent)
-              await scrollInto(memDraftInput)
-              const memInputSet = setInput(memDraftInput, 'UI 测试记忆条目')
-              out.memInputFound = memInputSet
-              await sleep(250) // 等 React 提交输入(立即点击会读到旧 state 空内容)
-              memAddBtn?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-              await sleep(400)
-              out.memErrorText = memSection?.querySelector('.island-mcp-test-result.fail')?.textContent ?? '(无错误)'
-              const memRows = memSection?.querySelectorAll('.island-memory-row') ?? []
-              out.memoryAdded = [...memRows].some((r) => r.textContent.includes('UI 测试记忆条目'))
-              out.memoryCount = memRows.length
-              // 删除刚添加的条目
-              const addedRow = [...memRows].find((r) => r.textContent.includes('UI 测试记忆条目'))
-              const delBtn = addedRow?.querySelector('.island-mcp-remove')
-              await scrollInto(delBtn)
-              delBtn?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-              await sleep(400)
-              const memRows2 = memSection?.querySelectorAll('.island-memory-row') ?? []
-              out.memoryRemoved = ![...memRows2].some((r) => r.textContent.includes('UI 测试记忆条目'))
-
-              // ---- 记忆类型按钮滚轮切换(本体直接滚动,逐格循环;保留下拉) ----
-              // 合成 WheelEvent(deltaY 与 DOM 一致:正向 = 下一项)即可驱动
-              // React onWheel,无需 sendInputEvent;步间冷却 100ms < 等待 250ms。
-              // 按钮 key={tick} 每格重挂载——每次操作后**重新查询 DOM**
-              // (旧引用指向已卸载节点,派发/读取都失效,实测)
-              const queryTypeBtn = () => document.querySelector('.island-memory-type-btn')
-              // 读 .island-wheel-swap-in 层的徽标(交换动画的旧层仍在 DOM)
-              const typeLabel = (btn) =>
-                btn?.querySelector('.island-wheel-swap-in .island-memory-type')?.textContent?.trim() ??
-                '(无)'
-              let typeBtn = queryTypeBtn()
-              await scrollInto(typeBtn)
-              out.typeBtnShown = !!typeBtn
-              out.typeDefault = typeLabel(typeBtn)
-              if (typeBtn) {
-                // 正向一格(草稿初始 type=fact → 工作流)
-                typeBtn.dispatchEvent(new WheelEvent('wheel', { bubbles: true, deltaY: 120 }))
-                await sleep(250)
-                typeBtn = queryTypeBtn()
-                out.typeFwd = typeLabel(typeBtn)
-                out.typeFwdOk = typeLabel(typeBtn) === '工作流'
-                out.typeTickClass = typeBtn?.classList.contains('tick') ?? false
-                // 反向一格(工作流 → 事实)
-                typeBtn?.dispatchEvent(new WheelEvent('wheel', { bubbles: true, deltaY: -120 }))
-                await sleep(250)
-                typeBtn = queryTypeBtn()
-                out.typeBwd = typeLabel(typeBtn)
-                out.typeBwdOk = typeLabel(typeBtn) === '事实'
-                // 下拉菜单保留:点击展开 → 4 个选项 → 点外关闭
-                typeBtn?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-                await sleep(300)
-                out.typePopShown = !!document.querySelector('.island-memory-type-pop')
-                out.typeOptCount = document.querySelectorAll('.island-memory-type-opt').length
-                document.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
-                await sleep(400)
-                out.typePopClosed = !document.querySelector('.island-memory-type-pop')
-              }
-
-              // ---- 自我进化区(按标题元素匹配——记忆区提示文本也含"自我进化") ----
-              const evoSection = [...view.querySelectorAll('.island-agent-section')].find(
-                (s) => s.querySelector('.island-agent-section-title')?.textContent.includes('自我进化'),
-              )
-              out.evoSectionShown = !!evoSection
-              out.evoSectionText = evoSection?.textContent?.slice(0, 60) ?? '(无)'
-              out.evoBtns = [...(evoSection?.querySelectorAll('button') ?? [])].map((b) => b.textContent)
-              const evolveBtn = [...(evoSection?.querySelectorAll('.island-agent-scale-btn') ?? [])].find((b) => b.textContent.includes('运行记忆进化'))
-              out.evolveBtnShown = !!evolveBtn
-              // 新功能:导入技能按钮 + 清除所有版本按钮 + 空态初始化提示
-              out.importBtnShown = [...view.querySelectorAll('button')].some((b) => b.textContent.includes('导入技能'))
-              out.resetBtnShown = [...(evoSection?.querySelectorAll('button') ?? [])].some((b) => b.textContent.includes('清除所有版本'))
-              out.initialStateShown = (evoSection?.textContent ?? '').includes('暂无进化记录')
-              const rollbackBtn = [...(evoSection?.querySelectorAll('.island-agent-scale-btn') ?? [])].find((b) => b.textContent.includes('回滚'))
-              out.rollbackBtnShown = !!rollbackBtn
-              // 触发进化(无 API Key → 后台失败通知,按钮变"进化中…"后恢复)
-              await scrollInto(evolveBtn)
-              evolveBtn?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-              await sleep(300)
-              out.evolveClicked = (evolveBtn?.textContent ?? '').includes('进化中') || (evoSection?.querySelector('.island-mcp-test-result')?.textContent ?? '').includes('已开始')
-
-              // ---- 保存 ----
-              const saveBtn = btnByText('保存配置')
-              await scrollInto(saveBtn)
-              saveBtn?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-              await sleep(400)
-              out.saved = (view.querySelector('.island-agent-saved')?.textContent ?? '').includes('已保存')
-
-              // ---- 返回 → 设置 → 收起 ----
-              const backBtn = view.querySelector('.island-bg-back')
-              backBtn?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-              await sleep(400)
-              out.backToSettings = !!document.querySelector('.island-settings-items')
-              document.querySelector('.island-panel-list:has(.island-settings-items) .island-bg-back')?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-              await sleep(900)
-              out.collapsed = !document.querySelector('.island-demo').classList.contains('expanded')
-              return JSON.stringify(out)
-            })()`)
-            console.log('[widget] agent-interact:', interactResult)
-            // 段 2.5:技能同步与三区——模拟 LLM 创建(无标记 → 灵动岛创建区)
-            // 与手动导入(带 .island-imported 标记 → 手动导入区),重进设置立即可见
-            const syncSkillDir = path.join(app.getPath('userData'), 'skills', 'ui-sync-test')
-            const impSkillDir = path.join(app.getPath('userData'), 'skills', 'ui-import-test')
-            try {
-              fs.mkdirSync(syncSkillDir, { recursive: true })
-              fs.writeFileSync(
-                path.join(syncSkillDir, 'SKILL.md'),
-                '---\nname: ui-sync-test\ndescription: UI 同步验证技能\n---\n\n# Sync Test\n\n步骤 1\n',
-                'utf8',
-              )
-              fs.mkdirSync(impSkillDir, { recursive: true })
-              fs.writeFileSync(
-                path.join(impSkillDir, 'SKILL.md'),
-                '---\nname: ui-import-test\ndescription: UI 导入验证技能\n---\n\n# Import Test\n\n步骤 1\n',
-                'utf8',
-              )
-              fs.writeFileSync(path.join(impSkillDir, '.island-imported'), 'imported by user\n')
-            } catch (err) {
-              console.error('[widget] sync skill write failed:', err)
-            }
-            // 收起 → 重新打开设置 → Agent 设置
-            win.webContents.send('widget:open-settings')
-            await new Promise((r) => setTimeout(r, 800))
-            const syncResult = await win.webContents.executeJavaScript(`(async () => {
-              const sleep = (ms) => new Promise((res) => setTimeout(res, ms))
-              const settingsItem = (text) =>
-                [...document.querySelectorAll('.island-settings-item')].find((s) => s.textContent.includes(text))
-              settingsItem('Agent 设置')?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-              await sleep(600)
-              const rows = [...document.querySelectorAll('.island-skills-registered > .island-skills-reg-row')]
-              const out = { skillRows: rows.length }
-              out.syncSkillShown = rows.some((r) => r.textContent.includes('ui-sync-test'))
-              // 分区:自己创建的技能进入"自己创建"区(不在"扫描到的"区)
-              const regCounts = [...document.querySelectorAll('.island-skills-reg-count')].map((c) => c.textContent)
-              out.createdCount = regCounts.find((c) => c.includes('灵动岛创建')) ?? '(无创建区)'
-              out.importedCount = regCounts.find((c) => c.includes('手动导入')) ?? '(无导入区)'
-              out.scannedCount = regCounts.find((c) => c.includes('扫描到的')) ?? '(无扫描区)'
-              out.createdRowShown = !!document.querySelector('.island-skills-registered > .island-skills-reg-row')
-                ?.textContent.includes('ui-sync-test')
-              out.importedRowShown = [...document.querySelectorAll('.island-skills-registered > .island-skills-reg-row')]
-                .some((r) => r.textContent.includes('ui-import-test'))
-              // 收起:当前在 agent-settings 视图(设置类,屏蔽长按)→
-              // 先返回设置视图,再返回收起(否则段 3 长按被屏蔽,输入框找不到)
-              document
-                .querySelector('.island-agent-settings .island-bg-back')
-                ?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-              await sleep(400)
-              document
-                .querySelector('.island-panel-list:has(.island-settings-items) .island-bg-back')
-                ?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-              await sleep(900)
-              return JSON.stringify(out)
-            })()`)
-            console.log('[widget] agent-skill-sync:', syncResult)
-            // 删除测试技能文件(用户数据零残留)
-            try {
-              fs.rmSync(path.join(app.getPath('userData'), 'skills', 'ui-sync-test'), { recursive: true, force: true })
-              fs.rmSync(path.join(app.getPath('userData'), 'skills', 'ui-import-test'), { recursive: true, force: true })
-            } catch {
-              // 忽略
-            }
-            // 段 3:聊天输入框的 / 与 @ 候选列表(切 Agent 模式 → 长按展开
-            // → 输入前缀 → 断言技能/MCP 候选、过滤、Enter 选中、Esc 关闭)
-            win.webContents.send('widget:set-mode', { mode: 'agent', source: 'user' })
-            await new Promise((r) => setTimeout(r, 600))
-            const suggestResult = await win.webContents.executeJavaScript(`(async () => {
-              const sleep = (ms) => new Promise((res) => setTimeout(res, ms))
-              const out = {}
-              const island = document.querySelector('.island-demo')
-              // 长按展开(Agent 模式紧凑态长按展开)
-              const r = island.getBoundingClientRect()
-              const x = r.left + r.width / 2
-              const y = r.top + r.height / 2
-              island.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, clientX: x, clientY: y, pointerId: 1, isPrimary: true, button: 0 }))
-              setTimeout(() => island.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, clientX: x, clientY: y, pointerId: 1, isPrimary: true, button: 0 })), 600)
-              await sleep(1100)
-              out.expanded = island.classList.contains('expanded')
-              const ta = document.querySelector('.island-agent-input textarea')
-              out.inputShown = !!ta
-              // 调试:展开后面板实际视图
-              out.settingsShown = !!document.querySelector('.island-settings-items')
-              out.agentViewShown = !!document.querySelector('.island-agent-view')
-              out.panelHtml = document.querySelector('.island-panel')?.className ?? '(无面板)'
-              out.panelContent = (document.querySelector('.island-panel')?.innerHTML ?? '').replace(/<[^>]+>/g, ' ').trim().slice(0, 120)
-              if (!ta) return JSON.stringify(out)
-              const setVal = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set
-              const type = async (v) => {
-                setVal.call(ta, v)
-                ta.dispatchEvent(new Event('input', { bubbles: true }))
-                await sleep(250)
-              }
-              // 输入 '/':候选列表应列出**全部**技能(不截断;用户技能
-              // 远多于 6 个,超高滚动)
-              await type('/')
-              const items = () => [...document.querySelectorAll('.island-agent-suggest-item')]
-              const suggestBox = () => document.querySelector('.island-agent-suggest')
-              out.suggestSlashCount = items().length
-              out.suggestSlashTexts = items().map((i) => i.querySelector('.island-agent-suggest-cmd')?.textContent).slice(0, 4)
-              out.skillListed = items().some((i) => i.textContent.includes('skill_'))
-              out.skillsAllListed = items().length >= 8
-              // 候选列表高度跟随岛体:200px 岛体时列表可视高应远小于
-              // 全展开(~192px),且超高可滚动
-              if (suggestBox()) {
-                out.suggestBoxH = suggestBox().clientHeight
-                out.suggestScrollable = suggestBox().scrollHeight > suggestBox().clientHeight + 2
-              }
-              // 输入 '/darwin':过滤出 darwin 技能
-              await type('/darwin')
-              const filtered = items()
-              out.suggestFiltered = filtered.length
-              out.filterMatches = filtered.length > 0 && filtered.every((i) => i.textContent.includes('darwin'))
-              // 输入 '@':MCP 候选(siyuan 服务若连接成功;内置 mcp_config 应排除)
-              await type('@')
-              const atItems = items()
-              out.suggestAtCount = atItems.length
-              out.atTexts = atItems.map((i) => i.querySelector('.island-agent-suggest-cmd')?.textContent).slice(0, 4)
-              out.mcpConfigExcluded = !atItems.some((i) => i.textContent.includes('@mcp_config'))
-              // Enter 选中第一个候选(不发送)
-              const firstCmd = atItems[0]?.querySelector('.island-agent-suggest-cmd')?.textContent ?? ''
-              ta.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
-              await sleep(250)
-              out.afterEnter = ta.value.slice(0, 50)
-              out.enterApplied = ta.value === firstCmd
-              // Esc 关闭候选(收起动画:160 + 卡片数×30ms 后卸载,等足)
-              await type('/darwin')
-              ta.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
-              await sleep(200)
-              out.escClosing = document.querySelector('.island-agent-suggest.closing') !== null
-              await sleep(700)
-              out.escClosed = items().length === 0
-              return JSON.stringify(out)
-            })()`)
-            console.log('[widget] agent-suggest:', suggestResult)
-            // 段 4:工具列表预览框(岛体高度由聊天驱动,列表滚动)
-            const toolsResult = await win.webContents.executeJavaScript(`(async () => {
-              const sleep = (ms) => new Promise((res) => setTimeout(res, ms))
-              const out = {}
-              const island = document.querySelector('.island-demo')
-              const panel = document.querySelector('.island-agent-view')
-              out.islandHBefore = island?.offsetHeight ?? 0
-              // 清空输入框(候选测试残留),打开 ⋯ 菜单 → 工具列表
-              const ta = document.querySelector('.island-agent-input textarea')
-              if (ta) {
-                const setVal = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set
-                setVal.call(ta, '')
-                ta.dispatchEvent(new Event('input', { bubbles: true }))
-              }
-              await sleep(200)
-              const menuBtn = document.querySelector('.island-agent-menu .island-agent-ctl')
-              menuBtn?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-              await sleep(250)
-              const toolsItem = [...document.querySelectorAll('.island-agent-menu-item')].find((b) => b.textContent.includes('工具列表'))
-              toolsItem?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-              await sleep(500)
-              const list = document.querySelector('.island-agent-history-list')
-              out.toolsListShown = !!list
-              out.islandHAfter = island?.offsetHeight ?? 0
-              // 高度未撑大:进入 tools 前后岛体高度基本一致(聊天高度驱动)
-              out.heightStable = Math.abs((island?.offsetHeight ?? 0) - out.islandHBefore) < 40
-              if (list) {
-                out.listScrollable = list.scrollHeight > list.clientHeight + 4
-                out.listClientH = list.clientHeight
-                out.listScrollH = list.scrollHeight
-                // 滚动生效:滚到底再回顶
-                list.scrollTop = list.scrollHeight
-                await sleep(150)
-                out.scrolledDown = list.scrollTop > 0
-                list.scrollTop = 0
-              }
-              // 返回对话(切回 chat 应重测高度)
-              document.querySelector('.island-agent-history-back')?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-              await sleep(500)
-              out.backToChat = !!document.querySelector('.island-agent-input textarea')
-              // 对话历史视图:与工具列表相同设计(岛体高度保持,列表滚动)
-              const hBefore = island?.offsetHeight ?? 0
-              const menuBtn2 = document.querySelector('.island-agent-menu .island-agent-ctl')
-              menuBtn2?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-              await sleep(250)
-              const histItem = [...document.querySelectorAll('.island-agent-menu-item')].find((b) => b.textContent.includes('对话历史'))
-              histItem?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-              await sleep(500)
-              const hList = document.querySelector('.island-agent-history-list')
-              out.historyListShown = !!hList
-              out.historyHeightStable = Math.abs((island?.offsetHeight ?? 0) - hBefore) < 40
-              out.historyScrollable = hList ? hList.scrollHeight > hList.clientHeight + 4 : false
-              return JSON.stringify(out)
-            })()`)
-            console.log('[widget] agent-tools-preview:', toolsResult)
-            // 段 4.5:快捷切换按钮(悬浮 ⋯ 时左侧浮现,默认"收起面板";
-            // 滚轮逐格切换;单击跳转;横移过间隙不消失)。
-            // 合成 MouseEvent 不触发 CSS :hover,须 sendInputEvent 注入
-            // 真实鼠标事件(悬停/滚轮/点击)驱动
-            {
-              // 段 4 末停在对话历史视图:先返回聊天视图(快捷按钮与后续
-              // 段 5 的自动回复都需聊天视图;历史视图无 ⋯ 菜单)
-              await win.webContents.executeJavaScript(`(() => {
-                document.querySelector('.island-agent-history-back')?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-              })()`)
-              await new Promise((r) => setTimeout(r, 500))
-              const qe = (sel) =>
-                win.webContents.executeJavaScript(`(() => {
-                  const el = document.querySelector(${JSON.stringify(sel)})
-                  if (!el) return null
-                  const r = el.getBoundingClientRect()
-                  return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) }
-                })()`)
-              const quickProbe = () =>
-                win.webContents.executeJavaScript(`(() => {
-                  const zone = document.querySelector('.island-agent-quick')
-                  const btn = zone?.querySelector('.island-agent-quick-btn')
-                  const br = btn?.getBoundingClientRect()
-                  // 读 .island-wheel-swap-in 层:交换动画的旧内容层(透明度
-                  // 0)仍在 DOM,btn.textContent 会拼出两个标签
-                  const label =
-                    btn?.querySelector('.island-wheel-swap-in')?.textContent?.trim() ??
-                    btn?.textContent ??
-                    '(无)'
-                  return {
-                    zoneVisible: zone ? getComputedStyle(zone).opacity !== '0' : false,
-                    label,
-                    pos: br ? { x: Math.round(br.left + br.width / 2), y: Math.round(br.top + br.height / 2) } : null,
-                  }
-                })()`)
-              const q0 = await quickProbe()
-              console.log('[widget] agent-quick-init:', JSON.stringify(q0))
-              const dotPos = await qe('.island-agent-menu .island-agent-ctl')
-              if (dotPos) {
-                // 悬浮 ⋯:快捷按钮浮现,默认显示"收起面板"
-                win.webContents.sendInputEvent({ type: 'mouseMove', x: dotPos.x, y: dotPos.y })
-                await new Promise((r) => setTimeout(r, 450))
-                const q1 = await quickProbe()
-                console.log('[widget] agent-quick-hover:', JSON.stringify(q1))
-                // 截图:悬浮态(快捷按钮 + ⋯ 并存)
-                const quickImg = await win.webContents.capturePage()
-                fs.writeFileSync(process.env.WIDGET_SCREENSHOT + '.agent-quick.png', quickImg.toPNG())
-                console.log('[widget] screenshot(agent-quick hover) saved')
-                if (q1?.pos) {
-                  // 横移到快捷按钮(途经间隙中点):按钮必须保持可见
-                  win.webContents.sendInputEvent({
-                    type: 'mouseMove',
-                    x: Math.round((dotPos.x + q1.pos.x) / 2),
-                    y: dotPos.y,
-                  })
-                  await new Promise((r) => setTimeout(r, 300))
-                  const q2 = await quickProbe()
-                  console.log('[widget] agent-quick-midgap:', JSON.stringify(q2))
-                  // 移到快捷按钮上,滚轮切换。先从 DOM 推断当前菜单项构成
-                  // (与引擎 busy/messages 一致),据此计算期望步进序列:
-                  // 默认"收起面板"(末项),正向滚轮 = 下一项,反向 = 上一项。
-                  // 注意:sendInputEvent 的 deltaY 符号与 DOM wheel 事件相反
-                  // (实测 +120 → 反向一步),故"正向"注入 -120、"反向"注入
-                  // +120;一次注入 = 一步(引擎步间冷却 100ms < 注入间隔 250ms)
-                  win.webContents.sendInputEvent({ type: 'mouseMove', x: q1.pos.x, y: q1.pos.y })
-                  await new Promise((r) => setTimeout(r, 250))
-                  const listState = await win.webContents.executeJavaScript(`(() => ({
-                    userMsgs: document.querySelectorAll('.island-agent-msg-user').length,
-                    busy: !!document.querySelector('.island-agent-stop') || !!document.querySelector('.island-agent-dot.thinking'),
-                  }))()`)
-                  const items = []
-                  if (listState.busy) items.push('停止生成')
-                  if (listState.userMsgs > 0) items.push('新对话')
-                  items.push('对话历史', '工具列表', '设置', '收起面板')
-                  const nItems = items.length
-                  const defIdx = nItems - 1
-                  const fwdStep = (defIdx + 1) % nItems
-                  const toHistory = (items.indexOf('对话历史') - defIdx + nItems) % nItems
-                  console.log(
-                    '[widget] agent-quick-expect:',
-                    JSON.stringify({ items, fwd: items[fwdStep], toHistory }),
-                  )
-                  const sendWheel = async (deltaY) => {
-                    win.webContents.sendInputEvent({
-                      type: 'mouseWheel',
-                      x: q1.pos.x,
-                      y: q1.pos.y,
-                      deltaX: 0,
-                      deltaY,
-                    })
-                    await new Promise((r) => setTimeout(r, 250))
-                    return quickProbe()
-                  }
-                  // 正向一步:收起面板 → 下一项
-                  const s1 = await sendWheel(-120)
-                  console.log(
-                    '[widget] agent-quick-fwd:',
-                    JSON.stringify({ ...s1, expect: items[fwdStep], ok: s1?.label === items[fwdStep] }),
-                  )
-                  // 反向一步:回到收起面板
-                  const s2 = await sendWheel(120)
-                  console.log(
-                    '[widget] agent-quick-bwd:',
-                    JSON.stringify({ ...s2, expect: items[defIdx], ok: s2?.label === items[defIdx] }),
-                  )
-                  // 正向 toHistory 步:收起面板 → 对话历史
-                  let s3 = s2
-                  for (let i = 0; i < toHistory; i++) s3 = await sendWheel(-120)
-                  console.log(
-                    '[widget] agent-quick-to-history:',
-                    JSON.stringify({ ...s3, expect: '对话历史', ok: s3?.label === '对话历史' }),
-                  )
-                  // 单击 → 跳转(选中"对话历史"应进入历史视图;若步进未按
-                  // 预期则跳过点击,不误触其他项)
-                  if (s3?.label === '对话历史') {
-                    win.webContents.sendInputEvent({
-                      type: 'mouseDown',
-                      x: q1.pos.x,
-                      y: q1.pos.y,
-                      button: 'left',
-                      clickCount: 1,
-                    })
-                    win.webContents.sendInputEvent({
-                      type: 'mouseUp',
-                      x: q1.pos.x,
-                      y: q1.pos.y,
-                      button: 'left',
-                      clickCount: 1,
-                    })
-                    await new Promise((r) => setTimeout(r, 700))
-                    const q5 = await win.webContents.executeJavaScript(`(() => ({
-                      historyShown: !!document.querySelector('.island-agent-history-list'),
-                      backBtn: !!document.querySelector('.island-agent-history-back'),
-                      chatGone: !document.querySelector('.island-agent-input textarea'),
-                    }))()`)
-                    console.log('[widget] agent-quick-click:', JSON.stringify(q5))
-                  } else {
-                    console.log('[widget] agent-quick-click: skipped(滚轮步进未达预期)')
-                  }
-                  // 返回对话(后续段 5 需要聊天视图)
-                  await win.webContents.executeJavaScript(`(() => {
-                    document.querySelector('.island-agent-history-back')?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-                  })()`)
-                  await new Promise((r) => setTimeout(r, 500))
-                }
-              }
-            }
-            // 段 4.6:工具列表视图(搜索 / 禁用 / 禁用区 / 恢复,动画)。
-            // 从聊天视图 ⋯ 菜单进工具列表,合成事件驱动(React 受控输入
-            // 用原生 value setter;禁用/恢复先播离场动画再提交,等足 300ms)
-            {
-              const toolsResult = await win.webContents.executeJavaScript(`(async () => {
-                const sleep = (ms) => new Promise((res) => setTimeout(res, ms))
-                const out = {}
-                const menuBtn = document.querySelector('.island-agent-menu .island-agent-ctl')
-                menuBtn?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-                await sleep(250)
-                const toolsItem = [...document.querySelectorAll('.island-agent-menu-item')].find((b) => b.textContent.includes('工具列表'))
-                toolsItem?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-                await sleep(500)
-                const list = document.querySelector('.island-agent-history-list')
-                out.toolsShown = !!list
-                // 搜索框:输入过滤(受控输入原生 setter + input 事件)
-                const search = document.querySelector('.island-tools-search input')
-                out.searchShown = !!search
-                const rows = () => [...(list?.querySelectorAll('.island-agent-tools-item') ?? [])]
-                out.rowsBefore = rows().length
-                if (search) {
-                  const setVal = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
-                  const target = rows()[0]?.querySelector('.island-agent-tools-name')?.textContent ?? ''
-                  setVal.call(search, target.slice(0, Math.max(1, Math.floor(target.length / 2))))
-                  search.dispatchEvent(new Event('input', { bubbles: true }))
-                  await sleep(300)
-                  out.rowsAfterFilter = rows().length
-                  out.filterWorked = rows().length > 0 && rows().length <= out.rowsBefore
-                  setVal.call(search, '')
-                  search.dispatchEvent(new Event('input', { bubbles: true }))
-                  await sleep(200)
-                }
-                // 禁用第一个工具:离场动画(0.24s)+ 移入禁用区(入场动画)
-                const first = rows()[0]
-                const firstName = first?.querySelector('.island-agent-tools-name')?.textContent ?? ''
-                const disableBtn = first?.querySelector('.island-tools-disable')
-                await sleep(200)
-                disableBtn?.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
-                await sleep(120)
-                out.disableLeaving = !!first?.classList.contains('island-ui-leave')
-                await sleep(400)
-                const excludedRows = () => [...(list?.querySelectorAll('.island-tools-excluded-row') ?? [])]
-                const excludedNames = excludedRows().map((r) => r.querySelector('.island-tools-excluded-name')?.textContent)
-                out.excludedSection = !!list?.querySelector('.island-tools-excluded')
-                out.disabledName = excludedNames[0] ?? '(无)'
-                out.disableMoved = excludedNames.includes(firstName)
-                out.enteringInExcluded = excludedRows()[0]?.classList.contains('island-ui-enter') ?? false
-                // 恢复:同样先离场再回到可用区
-                const restoreBtn = excludedRows()[0]?.querySelector('.island-tools-restore')
-                await sleep(200)
-                restoreBtn?.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
-                await sleep(400)
-                out.restoreBack = rows().some((r) => r.querySelector('.island-agent-tools-name')?.textContent === firstName)
-                out.excludedEmpty = excludedRows().length === 0
-                return JSON.stringify(out)
-              })()`)
-              console.log('[widget] agent-tools-actions:', toolsResult)
-              // 返回对话(后续段 5 需要聊天视图)
-              await win.webContents.executeJavaScript(`(() => {
-                document.querySelector('.island-agent-history-back')?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-              })()`)
-              await new Promise((r) => setTimeout(r, 500))
-            }
-            // 段 4.7:灵动岛设置工具端到端(设置桥 → 存储 → 事件 → UI 即时生效)。
-            // 直接调主进程 runIslandSettings(与引擎设置工具同一条链路,绕开
-            // LLM 调度保证确定性):主题色 / 缩放 / 背景导入+改名 / 字体导入
-            // +改名,断言 UI 即时生效(--state-color / 岛宽比例 / 库条目)。
-            // 前后状态备份,结束后恢复(不残留用户数据);IndexedDB 背景槽位
-            // 用原生事务读写(桥未暴露槽位读取)
-            {
-              const js = (code) => win.webContents.executeJavaScript(code)
-              const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
-              const out = {}
-              // IndexedDB 背景库槽位读写('island-background' v2,store 'bg';
-              // put null = 清空槽位,加载器按 typeof string 判定)
-              const bgSlotJs = (slot, op, value) => `(async () => {
-                const db = await new Promise((res, rej) => {
-                  const r = indexedDB.open('island-background', 2)
-                  r.onsuccess = () => res(r.result)
-                  r.onerror = () => rej(r.error)
-                })
-                return await new Promise((res) => {
-                  const tx = db.transaction('bg', '${op === 'get' ? 'readonly' : 'readwrite'}')
-                  const req = ${op === 'get'
-                    ? `tx.objectStore('bg').get(${JSON.stringify(slot)})`
-                    : `tx.objectStore('bg').put(${JSON.stringify(value)}, ${JSON.stringify(slot)})`}
-                  req.onsuccess = () => res(typeof req.result === 'string' ? req.result : null)
-                  req.onerror = () => res(null)
-                })
-              })()`
-              // 备份:localStorage 设置项 + 背景双槽位图片(恢复时写回)
-              const backup = {
-                theme: await js(`localStorage.getItem('widget-theme-color')`),
-                scale: await js(`localStorage.getItem('widget-agent-scale')`),
-                bgParams: await js(`localStorage.getItem('widget-background')`),
-                fontSettings: await js(`localStorage.getItem('widget-font')`),
-                bgExpanded: await js(bgSlotJs('expanded', 'get')),
-                bgCompact: await js(bgSlotJs('compact', 'get')),
-              }
-              const TEST_PNG =
-                'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='
-              try {
-                // 1. 主题色:写存储 → 事件 → --state-color 即时生效
-                await runIslandSettings('setThemeColor', ['#f87171'])
-                await sleep(500)
-                out.themeApplied = await js(
-                  `document.querySelector('.island-demo').style.getPropertyValue('--state-color') === '#f87171'`,
-                )
-                // 2. 缩放:岛宽按比例即时变化(当前缩放 A → 150)
-                const scaleBefore = Number((await js(`localStorage.getItem('widget-agent-scale')`)) ?? '200') || 200
-                const widthBefore = await js(`document.querySelector('.island-demo').offsetWidth`)
-                await runIslandSettings('setAgentScale', [150])
-                await sleep(500)
-                const scaleAfter = await js(`localStorage.getItem('widget-agent-scale')`)
-                const widthAfter = await js(`document.querySelector('.island-demo').offsetWidth`)
-                out.scaleStored = scaleAfter
-                out.scaleRatioOk =
-                  Math.abs(widthAfter - Math.round((widthBefore * 150) / scaleBefore)) < 10
-                out.scaleDebug = JSON.stringify({ scaleBefore, widthBefore, widthAfter })
-                // 3. 背景导入 + 改名:导入(双槽位应用 + 入库)→ 改名 → 断言
-                const imgRes = await runIslandSettings('importBackground', [TEST_PNG, '巡检测试背景'])
-                await sleep(500)
-                // --bg-img-e 设置在 .island-bg-image 子元素上(背景层),
-                // 不在 .island-demo 主元素(实测断言选择器踩坑)
-                const bgVar = await js(
-                  `document.querySelector('.island-bg-image')?.style.getPropertyValue('--bg-img-e') ?? '(无背景层)'`,
-                )
-                out.bgApplied = typeof bgVar === 'string' && bgVar.startsWith('url("data:image/png')
-                const imgs = (await runIslandSettings('listLibraryImages', [])) ?? []
-                out.bgInLibrary = imgs.some((i) => i.id === imgRes.id && i.name === '巡检测试背景')
-                await runIslandSettings('renameLibraryImage', [imgRes.id, '巡检测试背景-改名'])
-                await sleep(300)
-                const imgs2 = (await runIslandSettings('listLibraryImages', [])) ?? []
-                out.bgRenamed = imgs2.some((i) => i.id === imgRes.id && i.name === '巡检测试背景-改名')
-                // 4. 字体导入 + 改名:入库并应用为当前字体
-                const fontRes = await runIslandSettings('importFont', [
-                  'data:font/ttf;base64,QUFBQUFBQUE=',
-                  '巡检测试字体',
-                ])
-                await sleep(400)
-                const fontSettings = await js(`localStorage.getItem('widget-font')`)
-                out.fontApplied = typeof fontSettings === 'string' && fontSettings.includes(fontRes.id)
-                const fonts = (await runIslandSettings('listFonts', [])) ?? []
-                out.fontInLibrary = fonts.some((f) => f.id === fontRes.id)
-                await runIslandSettings('renameFont', [fontRes.id, '巡检测试字体-改名'])
-                await sleep(300)
-                const fonts2 = (await runIslandSettings('listFonts', [])) ?? []
-                out.fontRenamed = fonts2.some((f) => f.id === fontRes.id && f.name === '巡检测试字体-改名')
-                // 5. 非法操作拒绝:不存在的图片 id 改名应报错
-                let renamedError = ''
-                try {
-                  await runIslandSettings('renameLibraryImage', ['i-not-exist', 'x'])
-                } catch (err) {
-                  renamedError = (err && err.message) || String(err)
-                }
-                out.renameInvalidRejected = renamedError.includes('图片不存在')
-              } catch (err) {
-                out.error = String((err && err.stack) || err)
-                console.error('[widget] agent-settings-tools failed:', err)
-              } finally {
-                // 恢复用户数据:localStorage 设置项(缺失的 removeItem)
-                const setOrRemove = (key, value) =>
-                  value === null
-                    ? js(`localStorage.removeItem(${JSON.stringify(key)})`)
-                    : js(`localStorage.setItem(${JSON.stringify(key)}, ${JSON.stringify(value)})`)
-                await setOrRemove('widget-theme-color', backup.theme)
-                await setOrRemove('widget-agent-scale', backup.scale)
-                await setOrRemove('widget-background', backup.bgParams)
-                await setOrRemove('widget-font', backup.fontSettings)
-                // 背景槽位恢复原图(原无则清空)
-                await js(bgSlotJs('expanded', 'put', backup.bgExpanded))
-                await js(bgSlotJs('compact', 'put', backup.bgCompact))
-                // 删除测试入库条目(图片/字体;按「巡检测试」名前缀定位)
-                const imgs3 = (await runIslandSettings('listLibraryImages', []).catch(() => [])) ?? []
-                for (const img of imgs3) {
-                  if (String(img.name).startsWith('巡检测试')) {
-                    await runIslandSettings('deleteLibraryImage', [img.id]).catch(() => {})
-                  }
-                }
-                const fonts3 = (await runIslandSettings('listFonts', []).catch(() => [])) ?? []
-                for (const f of fonts3) {
-                  if (String(f.name).startsWith('巡检测试')) {
-                    await runIslandSettings('deleteFontItem', [f.id]).catch(() => {})
-                  }
-                }
-                // 恢复后的存储重读(恢复走原生 js 写,未触发桥事件;手动补发)
-                await js(
-                  `window.dispatchEvent(new CustomEvent('island-settings-changed', { detail: { scopes: ['theme','scale','font','background','imageLibrary'] } }))`,
-                )
-                await sleep(400)
-              }
-              console.log('[widget] agent-settings-tools:', JSON.stringify(out))
-            }
-            // 渲染端自动 send → LLM 主动回复,真实 API)
-            await win.webContents.executeJavaScript(`(async () => {
-              const sleep = (ms) => new Promise((res) => setTimeout(res, ms))
-              const before = document.querySelectorAll('.island-agent-msg-assistant').length
-              return JSON.stringify({ before })
-            })()`)
-            win.webContents.send('agent:event', {
-              type: 'background-done',
-              title: 'B站下载完成',
-              message: '视频《测试视频》已完成,输出目录 C:/test/downloads',
-            })
-            await new Promise((r) => setTimeout(r, 4000))
-            const eventDebug = await win.webContents.executeJavaScript(`(() => {
-              return JSON.stringify({
-                userCount: document.querySelectorAll('.island-agent-msg-user').length,
-                errorText: document.querySelector('.island-agent-error')?.textContent ?? '(无错误)',
-                statusText: document.querySelector('.island-agent-head')?.textContent?.slice(0, 40) ?? '(无头部)',
-              })
-            })()`)
-            console.log('[widget] agent-auto-reply-debug:', eventDebug)
-            // 轮询:LLM 应自动回复(存在文本非空的助手消息;刚初始化可能
-            // 只有 1 条回复,不能按"数量增长"判断——debug 已确认回复
-            // 数秒内完成,此时轮询才启动,startCount 早已是 1)
-            const autoReply = await win.webContents.executeJavaScript(`(async () => {
-              const sleep = (ms) => new Promise((res) => setTimeout(res, ms))
-              const deadline = Date.now() + 60000
-              while (Date.now() < deadline) {
-                const msgs = document.querySelectorAll('.island-agent-msg-assistant')
-                const last = msgs[msgs.length - 1]
-                const text = last?.textContent ?? ''
-                if (text.length > 10 && !text.includes('正在思考') && !text.includes('【系统通知】')) {
-                  return JSON.stringify({ replied: true, count: msgs.length, text: text.slice(0, 120) })
-                }
-                await sleep(2000)
-              }
-              return JSON.stringify({ replied: false, count: document.querySelectorAll('.island-agent-msg-assistant').length })
-            })()`)
-            console.log('[widget] agent-auto-reply:', autoReply)
-            // 恢复用户配置(巡检的"保存配置"把表单状态写回了 settings.json;
-            // 测试服务(ui-mock 等)不残留,用户原配置原样恢复)
-            if (settingsBackup !== null) {
-              try {
-                fs.writeFileSync(settingsFile, settingsBackup, 'utf8')
-                console.log('[widget] settings restored')
-              } catch (err) {
-                console.error('[widget] settings restore failed:', err)
-              }
-            }
-          }
-          const image = await win.webContents.capturePage()
-          fs.writeFileSync(process.env.WIDGET_SCREENSHOT, image.toPNG())
-          console.log('[widget] screenshot saved')
-          // WIDGET_SCREENSHOT_QUIT=1:截图/巡检完成后优雅退出(不走托盘
-          // 常驻;避免测试命令强杀进程树导致 renderer gone: crashed 假象)
-          if (process.env.WIDGET_SCREENSHOT_QUIT === '1') {
-            quitting = true
-            setTimeout(() => app.quit(), 300)
-          }
-        } catch (err) {
-          console.error('[widget] screenshot failed:', err)
-        }
-      }, 3000)
+    runScreenshotTests({
+      win,
+      app,
+      fs,
+      path,
+      settingsPath,
+      runIslandSettings,
+      resetSettingsCache,
+      // 主动陪伴:主动消息 → 心理揣测 + 系统通知 + mind-proactive 事件
+      // (巡检直接调主进程函数,绕开 LLM 调度的确定性测试)
+      runProactiveGuess,
+      // 主动陪伴完整回合(引擎 proactiveTurn;巡检端到端验证真实回合
+      // 流式落定 → 主进程钩子 → 揣测通知的完整链路)
+      startProactiveTurn: (history, opts) => getAgentEngine().proactiveTurn(history, opts),
+      // 主动陪伴 tick 最近结果(巡检轮询:判定调度器按 10s 真实触发,
+      // 不依赖 judge 结果——judge-no 也证明调度链路通了)
+      getLastProactiveTick,
     })
   }
+
 
   // 每次启动固定顶部居中,不持久化位置
   win.on('closed', () => {
@@ -1646,12 +719,13 @@ function toggleWindow() {
 // ---------------------------------------------------------------------------
 
 ipcMain.on('widget:pointer', (_event, active) => {
-  if (!win) return
+  // 窗口销毁竞态(托盘退出/重启瞬间渲染端仍有在途 IPC):isDestroyed 检查
+  // 防原生层抛异常(实测退出瞬间 drag-move 的 setPosition 抛过
+  // "conversion failure",win 已销毁时调用任何窗口方法都会抛)
+  if (!win || win.isDestroyed()) return
   // 点击穿透开关:true = 鼠标在岛上,正常接收事件;false = 穿透给下层窗口
   win.setIgnoreMouseEvents(!active, { forward: !active })
 })
-
-ipcMain.on('widget:hide', () => win?.hide())
 
 // 消息气泡链接:系统浏览器打开(仅 http/https,防协议注入;
 // 渲染端 Markdown 渲染器也只把 http(s) 渲染为可点击链接)
@@ -1659,34 +733,42 @@ ipcMain.on('app:open-external', (_event, url) => {
   if (typeof url === 'string' && /^https?:\/\//i.test(url)) void shell.openExternal(url)
 })
 
-ipcMain.on('widget:quit', () => {
-  quitting = true
-  app.quit()
-})
-ipcMain.on('widget:topmost', (_event, on) => {
-  win?.setAlwaysOnTop(Boolean(on), 'screen-saver')
-  saveSettings({ alwaysOnTop: Boolean(on) })
-})
+// 死通道清理(审计 P2-1):widget:hide / widget:quit / widget:topmost
+// 原为渲染端无人调用的通道(托盘退出走 app.quit、置顶走 tray 直调),
+// 已删除;set-window-size 是渲染端唯一窗口尺寸通道
 
-// 调整窗口高度:背景编辑器视图需要更高空间,离开视图回落常规高度
-ipcMain.on('widget:set-height', (_event, height) => {
-  if (!win) return
-  const h = Number(height)
-  if (!Number.isFinite(h)) return
-  const clamped = Math.max(200, Math.min(2000, Math.round(h)))
-  win.setSize(WINDOW_W, clamped)
-})
+// 窗口尺寸调整节流:min-interval 16ms(≈一帧)——Agent 面板高度动画
+// 每帧上报窗口跟随(平滑无台阶),帧内多次请求只保留最后一次;
+// 普通视图切换(低频)不受影响;OS 窗口 resize 本身廉价,避免的是
+// 渲染端逐事件高频 IPC 与帧内重复 resize
+let windowResizeLastAt = 0
+let windowResizeTimer = null
+let windowResizePending = null
+function scheduleWindowResize(fn) {
+  windowResizePending = fn
+  if (windowResizeTimer) return
+  const wait = Math.max(0, 16 - (Date.now() - windowResizeLastAt))
+  windowResizeTimer = setTimeout(() => {
+    windowResizeTimer = null
+    windowResizeLastAt = Date.now()
+    const f = windowResizePending
+    windowResizePending = null
+    if (f) f()
+  }, wait)
+}
 
 // 调整窗口尺寸(Agent 面板缩放:宽高按岛体视觉尺寸 + 余量;
-// 其余视图由 set-height 保持 520 宽)。合理范围钳制,防脏数据
+// 其余视图由 set-size 保持 520 宽;widget:set-height 死通道已删)。
+// 合理范围钳制,防脏数据
 ipcMain.on('widget:set-size', (_event, width, height) => {
-  if (!win) return
   const w = Number(width)
   const h = Number(height)
   if (!Number.isFinite(w) || !Number.isFinite(h)) return
   const cw = Math.max(400, Math.min(1600, Math.round(w)))
   const ch = Math.max(200, Math.min(2000, Math.round(h)))
-  win.setSize(cw, ch)
+  scheduleWindowResize(() => {
+    if (win && !win.isDestroyed()) win.setSize(cw, ch)
+  })
 })
 
 // 右键长按拖拽移动挂件。
@@ -1702,7 +784,7 @@ let dragState = null
 const SANE_POS_LIMIT = 100000
 
 ipcMain.on('widget:drag-start', (_event, sx, sy) => {
-  if (!win) return
+  if (!win || win.isDestroyed()) return
   if (!Number.isFinite(sx) || !Number.isFinite(sy)) return
   const [wx, wy] = win.getPosition()
   // 窗口位置异常时拒绝进入拖拽状态,避免污染按下偏移
@@ -1721,8 +803,13 @@ ipcMain.on('widget:drag-start', (_event, sx, sy) => {
   dragState = { pressOffsetX, pressOffsetY }
 })
 
+// 自校正降频:getPosition 是同步 OS 往返,每事件都查浪费——拖拽跟手只
+// 需 ~10Hz 校正(绝对定位本身不累积误差,校正只为 OS 取整/钳制纠偏)
+const DRAG_CORRECT_MS = 100
+let dragLastCorrectAt = 0
+
 ipcMain.on('widget:drag-move', (_event, sx, sy) => {
-  if (!win || !dragState) return
+  if (!win || win.isDestroyed() || !dragState) return
   if (!Number.isFinite(sx) || !Number.isFinite(sy)) return
   // 位置自由:窗口 = 鼠标 - 按下偏移,不限制在屏幕内。
   // 计算后校验:非有限值或超出合理范围(异常输入/偏移被污染)一律丢弃
@@ -1754,7 +841,11 @@ ipcMain.on('widget:drag-move', (_event, sx, sy) => {
     return
   }
   // 自校正:窗口实际落点与目标不一致(OS 取整等)时重算偏移,
-  // 保证下一次移动继续"跟手",不累积相对偏移;异常落点不采信
+  // 保证下一次移动继续"跟手",不累积相对偏移;异常落点不采信。
+  // 降频到 ~10Hz(每事件校正 = 每次移动两次同步 OS 往返,纯浪费)
+  const now = Date.now()
+  if (now - dragLastCorrectAt < DRAG_CORRECT_MS) return
+  dragLastCorrectAt = now
   const [ax, ay] = win.getPosition()
   if (
     Number.isFinite(ax) &&
@@ -1770,29 +861,87 @@ ipcMain.on('widget:drag-move', (_event, sx, sy) => {
 
 ipcMain.on('widget:drag-end', () => {
   dragState = null
+  dragLastCorrectAt = 0
 })
 
 // ---------------------------------------------------------------------------
 // IPC:Agent 模式(渲染端 → 引擎)
 // ---------------------------------------------------------------------------
 
+/** IPC 数组参数兜底(agent:send/summarize/mind-guess 共用,审计 P2 #7) */
+function asArray(value, fallback = []) {
+  return Array.isArray(value) ? value : fallback
+}
+
 // 发送一轮对话:引擎无状态,history 为渲染端回传的完整历史
 ipcMain.on('agent:send', (_event, text, history) => {
   if (typeof text !== 'string') return
-  getAgentEngine().send(text, Array.isArray(history) ? history : [])
+  getAgentEngine().send(text, asArray(history))
+})
+
+// exec_command 确认门回执(渲染端用户点允许/拒绝)
+ipcMain.on('agent:tool-confirm', (_event, approved) => {
+  if (!pendingCommandConfirm) return
+  clearTimeout(pendingCommandConfirm.timer)
+  pendingCommandConfirm.resolve(Boolean(approved))
+  pendingCommandConfirm = null
 })
 
 ipcMain.on('agent:abort', () => {
   getAgentEngine().abort()
 })
 
-// 配置读取/写入(API Key / Base URL / 模型 / 系统提示词,存 settings.json)
-ipcMain.handle('agent:config-get', () => ({
-  ...AGENT_CONFIG_DEFAULTS,
-  ...(loadSettings().agent ?? {}),
-}))
+// 配置读取/写入(API Key / Base URL / 模型 / 系统提示词,存 settings.json;
+// 经 currentAgentConfig:defaults 合并 + 旧 proactiveIntervalMinutes 迁移)
+ipcMain.handle('agent:config-get', () => currentAgentConfig())
 
 ipcMain.handle('agent:config-set', (_event, patch) => applyAgentConfigPatch(patch))
+
+/** 主动陪伴 tick 最近一次结果(巡检经 deps 轮询:判定调度器确实按
+ * 10s 间隔触发,不依赖 LLM judge 结果——judge-no 也应记录) */
+let lastProactiveTick = null
+
+function getLastProactiveTick() {
+  return lastProactiveTick
+}
+
+// 主动陪伴 tick(2026-08-07):渲染端调度器触发(无操作满 N 分钟)。
+// 判模式/配置/引擎忙 → 总结 Sub Agent 判断语境 → should 则主 Agent
+// 完整回合主动回复。**resolve 时机 = judge 完成后**(渲染端 in-flight
+// 覆盖 judge 全程,期间用户 send 天然优先——judge 结果到来时引擎已
+// busy,proactiveTurn 自动放弃)。judge-no 携带 reason 供渲染端回退
+// idle 时钟(下次判断在 N 分钟后,防闲置时每分钟一次 LLM 判断调用)。
+// 每次调用记录 lastProactiveTick(巡检轮询用)
+ipcMain.handle('agent:proactive-tick', async (_event, messages, idleMinutes) => {
+  let result
+  try {
+    if (currentMode() !== 'agent') result = { started: false, reason: 'mode' }
+    else if (!currentAgentConfig().proactiveEnabled) result = { started: false, reason: 'disabled' }
+    else if (getAgentEngine().busy) result = { started: false, reason: 'busy' }
+    else {
+      // 防御过滤:只收 user/assistant(系统消息/脏数据不参与判断)
+      const list = asArray(messages).filter(
+        (m) => m && typeof m === 'object' && (m.role === 'user' || m.role === 'assistant'),
+      )
+      if (list.length === 0) result = { started: false, reason: 'empty' }
+      else {
+        const minutes = Math.min(480, Math.max(1, Math.round(Number(idleMinutes) || 60)))
+        const verdict = await getSummaryAgent().judgeProactive(list, minutes)
+        if (!verdict.should) result = { started: false, reason: 'judge-no' }
+        else {
+          getAgentEngine().proactiveTurn(list, { hint: verdict.hint })
+          result = { started: true }
+        }
+      }
+    }
+  } catch (err) {
+    // judge 调用失败不抛 unhandled rejection(渲染端无需感知,静默跳过)
+    console.error('[agent] proactive-tick failed:', err)
+    result = { started: false, reason: 'judge-error' }
+  }
+  lastProactiveTick = { at: Date.now(), ...result }
+  return result
+})
 
 // 记忆读写(设置界面记忆管理器;条目数组整体替换,主进程校验)
 ipcMain.handle('agent:memory-get', async () => {
@@ -1808,7 +957,8 @@ ipcMain.handle('agent:memory-get', async () => {
 ipcMain.handle('agent:memory-export', async () => {
   try {
     const memoryPath = path.join(app.getPath('userData'), 'memory.json')
-    const raw = await fs.promises.readFile(memoryPath, 'utf8')
+    // 记忆文件不存在(从未写入)→ 导出空记忆(审计 P2-3,原 ENOENT 抛错)
+    const raw = await fs.promises.readFile(memoryPath, 'utf8').catch(() => '{"entries":[]}')
     const { canceled, filePath } = await dialog.showSaveDialog(win, {
       title: '导出长期记忆',
       defaultPath: path.join(app.getPath('documents'), `island-memory-${new Date().toISOString().slice(0, 10)}.json`),
@@ -1910,8 +1060,21 @@ ipcMain.handle('agent:evolution-log', async () => {
     return []
   }
 })
-ipcMain.handle('agent:evolution-rollback', async () => getEvolution().rollback())
-ipcMain.handle('agent:evolution-reset', async () => getEvolution().resetAll())
+// IPC handler 统一错误保护(审计 P1-1):handle 拒绝(reject)会变成渲染端
+// unhandled rejection;统一 try/catch,失败返回 {error} 结构(与
+// memory-export/memory-import 既有约定一致,渲染端据此展示)
+function safeHandle(channel, fn) {
+  ipcMain.handle(channel, async (_event, ...args) => {
+    try {
+      return await fn(...args)
+    } catch (err) {
+      return { error: (err && err.message) || String(err) }
+    }
+  })
+}
+safeHandle('agent:evolution-rollback', async () => getEvolution().rollback())
+safeHandle('agent:evolution-reset', async () => getEvolution().resetAll())
+safeHandle('agent:tools', async () => getAgentEngine().listAllTools())
 
 /** 从 SKILL.md 文本提取 frontmatter 的 name(导入技能命名用) */
 function skillNameFromMd(text) {
@@ -1992,9 +1155,9 @@ ipcMain.on('widget:set-mode', (_event, mode) => {
   if (mode === 'agent' || mode === 'music') setWidgetMode(mode)
 })
 
-// Agent 工具清单(名称/描述/参数 schema,供 UI 工具列表视图展示)。
-// 异步:内置工具 + MCP 服务工具(未连接的服务启动失败即跳过)+ 技能
-ipcMain.handle('agent:tools', async () => getAgentEngine().listAllTools())
+// Agent 工具清单(safeHandle 注册:名称/描述/参数 schema,供 UI 工具列表
+// 视图展示;异步:内置工具 + MCP 服务工具(未连接的服务启动失败即跳过)
+// + 技能)
 
 // 测试 MCP 服务连通性(独立连接 → 列工具 → 销毁;Agent 设置界面"测试"按钮)
 ipcMain.handle('agent:mcp-test', async (_event, server) => {
@@ -2009,7 +1172,14 @@ ipcMain.handle('agent:mcp-test', async (_event, server) => {
 // 静默总结对话标题(新对话入历史时后台生成,不打扰用户);
 // 走独立的总结 Sub Agent(与主对话引擎隔离)
 ipcMain.handle('agent:summarize', (_event, messages) =>
-  getSummaryAgent().summarize(Array.isArray(messages) ? messages : []),
+  getSummaryAgent().summarize(asArray(messages)),
+)
+
+// 心理揣测(紧凑态文字区展示):独立 Sub Agent 根据当前对话揣测
+// LLM 回复时的心态(≤10 汉字俏皮话);与总结/主对话引擎均隔离,
+// 失败返回空串由渲染端回退标题/回复预览
+ipcMain.handle('agent:mind-guess', (_event, messages) =>
+  getMindAgent().guess(asArray(messages)),
 )
 
 // ---------------------------------------------------------------------------
@@ -2114,6 +1284,11 @@ if (!gotLock) {
   app.on('second-instance', () => showWindow())
 
   app.whenReady().then(() => {
+    // Windows 通知 AppUserModelID(Bug 修复 2026-08-07):不设置的话
+    // new Notification().show() 静默失败——右下角不弹(实测:主动陪伴
+    // 心理嘀咕从未出现;evolution/notify 的通知同样受影响)。必须与
+    // 打包后 electron-builder 的 appId 一致(无 build.appId 配置时用固定值)
+    app.setAppUserModelId('com.dynamic-island.widget')
     createWindow()
     createTray()
     startBridge()
@@ -2121,6 +1296,8 @@ if (!gotLock) {
 
   app.on('before-quit', () => {
     quitting = true
+    // 防抖中的 settings 写立即落盘(退出瞬间的 mode/配置修改不丢)
+    flushSettings()
     try {
       bridgeProc?.kill()
     } catch {

@@ -3,6 +3,14 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- CSP:挂件页无远程内容,default-src 'self' 兜底;connect-src 放行
+         本地 SMTC 桥/歌词 API/dev HMR;style-src unsafe-inline 为 React
+         内联 style 与 mermaid 注入必需;img/font 仅 data:(file:// 下
+         'self' 不匹配,资源均以 data URL 内联) -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' http://127.0.0.1:8765 ws://127.0.0.1:* http://127.0.0.1:* https://*; object-src 'none'; base-uri 'none'"
+    />
     <title>灵动岛挂件</title>
   </head>
   <body>

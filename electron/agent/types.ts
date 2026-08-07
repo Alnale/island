@@ -40,12 +40,24 @@ export type AgentPart =
   | { type: 'reasoning'; text: string }
   | ToolCallPart
   | ToolResultPart
+  | { type: 'image'; dataUrl: string }
 
 /** 一条消息:user(整条文本)或 assistant(parts 序列) */
 export interface AgentMessage {
   id: string
-  role: 'user' | 'assistant'
+  /**
+   * user / assistant 为对话消息;system 为**请求侧内部指令**(主动陪伴
+   * 回合的指令,仅引擎构造进 historyIn,永不进入渲染端消息列表——
+   * 渲染端 loadHistory 只认 user/assistant)
+   */
+  role: 'user' | 'assistant' | 'system'
   parts: AgentPart[]
+  /**
+   * 主动陪伴回合落定的助手消息标记(渲染端据此重置 idle 时钟防触发
+   * 循环;随 localStorage 持久化,后续 send 回传时按 assistant 正常
+   * 序列化,引擎忽略该标记)
+   */
+  proactive?: boolean
 }
 
 /** 引擎 → 渲染端的事件流(经主进程转发) */
@@ -57,7 +69,7 @@ export type AgentEvent =
   | { type: 'tool-call'; id: string; name: string; args: string }
   | { type: 'tool-result'; id: string; name: string; ok: boolean; result: string; durationMs: number }
   /** 一轮回复完整落定(含工具调用与结果的权威 parts + token 用量) */
-  | { type: 'message'; message: AgentMessage; usage?: { input: number; output: number } }
+  | { type: 'message'; message: AgentMessage; usage?: { input: number; output: number; cached?: number } }
   | { type: 'error'; message: string }
   /** 记忆自我进化后台任务进度(渲染端忽略,状态机不受影响) */
   | { type: 'evolution-progress'; phase: string }
@@ -68,6 +80,14 @@ export type AgentEvent =
    * 不提问就不知道结果)。主进程只在 Agent 模式转发
    */
   | { type: 'background-done'; title: string; message: string }
+  /** exec_command 确认门:引擎请求用户确认(主进程转发;渲染端允许/拒绝后
+   * 经 agent:tool-confirm 回传) */
+  | { type: 'tool-confirm-request'; command: string }
+  /**
+   * 主动陪伴:主进程对主动回合消息的心理揣测结果(与 Windows 系统通知
+   * 同一条 guess)——渲染端更新紧凑态文字区 mindGuess,与通知一致
+   */
+  | { type: 'mind-proactive'; messageId: string; guess: string }
 
 /**
  * MCP 服务端配置(settings.json 的 agent.mcpServers 段)。
@@ -116,6 +136,13 @@ export interface AgentConfig {
   systemPrompt: string
   /** 思考强度(官方文档 reasoning.effort:low/medium/high,默认 high) */
   reasoningEffort: string
+  /**
+   * 主对话/子代理循环输出预算 max_output_tokens(含思维链 token,
+   * 2026-08-08):缺省引擎 MAIN_MAX_OUTPUT_TOKENS(16384);可由 LLM
+   * 经 set_output_budget 工具自主调整(任务巨大时调大、完成后调回),
+   * persist=true 时写这里持久化,重启保留
+   */
+  maxOutputTokens?: number
   /** MCP 服务端列表(每个服务暴露 mcp_<服务>_<工具> 工具) */
   mcpServers: McpServerConfig[]
   /** 技能目录列表(扫描 SKILL.md,每个技能暴露 skill_<名字> 工具) */
@@ -124,12 +151,42 @@ export interface AgentConfig {
    * 已禁用工具名(工具列表视图禁用;内置/MCP/技能一律生效,引擎每轮
    * 注入工具时过滤,手动调用同样不可用)
    */
-  excludedTools: string[]
+  excludedTools?: string[]
   /**
    * 已排除技能(slug = 工具名去 skill_ 前缀;扫描时跳过,对话中不可用)。
    * 支持 LLM 对话移除(skills_config exclude/include)与设置界面手动移除
    */
-  excludedSkills: string[]
+  excludedSkills?: string[]
+  /**
+   * exec_command 确认门(2026-08-06):开启后每轮首个命令执行需用户在
+   * 渲染端确认(防 prompt injection 链式放大到任意命令);默认关闭
+   */
+  confirmExec?: boolean
+  /**
+   * 主动陪伴(2026-08-07):开启后用户无操作满 proactiveInterval × 单位,
+   * 由总结 Sub Agent 判断语境是否需要主动开口,是则主 Agent 完整回合
+   * 主动回复(默认开启)。2026-08-07 支持单位选择(秒/分钟/小时,
+   * 数值不变仅换单位——旧 proactiveIntervalMinutes 由主进程迁移)
+   */
+  proactiveEnabled?: boolean
+  /** 主动陪伴间隔数值(默认 60,钳制 5–480;配合 proactiveIntervalUnit) */
+  proactiveInterval?: number
+  /** 主动陪伴间隔单位:s=秒 / m=分钟(默认)/ h=小时 */
+  proactiveIntervalUnit?: 's' | 'm' | 'h'
+  /**
+   * 总结标题文风(2026-08-07 Sub Agent 设置):预设 id(SUMMARY_STYLES)
+   * 或自定义文本 ≤100 字;注入总结系统提示
+   */
+  summaryStyle?: string
+  /** 心理揣测人格(2026-08-07 Sub Agent 设置):预设 id(MIND_PERSONAS)
+   * 或自定义文本 ≤100 字;注入揣测系统提示 */
+  mindPersona?: string
+}
+
+/** 工具执行上下文(可选第二参):主回合中止信号——delegate 子代理
+ * 据此停止内部循环,用户点"停止"后不再烧 token */
+export interface ToolExecCtx {
+  signal?: AbortSignal
 }
 
 /**
@@ -147,7 +204,21 @@ export interface AgentTool {
     properties: Record<string, unknown>
     required?: string[]
   }
-  execute(params: Record<string, unknown>): Promise<string> | string
+  /**
+   * 执行兜底超时(ms,缺省引擎 60s)。长任务工具必须覆盖:
+   * xxt login 300s / doc_convert 默认 120s——否则被引擎统一 60s
+   * 超时先杀,工具内部声明的长超时形同虚设
+   */
+  timeoutMs?: number
+  /**
+   * 执行结果:字符串 = 纯文本(回填 LLM);
+   * 对象 = 文本 + 图片附件(data URL,引擎注入助手消息 image part 供
+   * 渲染端展示——如 bili 登录二维码,不依赖 LLM 复述长 base64)
+   */
+  execute(
+    params: Record<string, unknown>,
+    ctx?: ToolExecCtx,
+  ): Promise<string | { text: string; image?: string }>
   /**
    * 技能来源分区(设置界面三区展示):
    * created = 灵动岛创建(引擎 create / 自然语言,userData/skills 无导入标记);
@@ -169,6 +240,14 @@ export interface ProviderOutcome {
   text: string
   usage: { input_tokens: number; output_tokens: number; cached_tokens?: number } | null
   aborted: boolean
+  /**
+   * 响应因输出预算(max_output_tokens)不足被截断(2026-08-08):
+   * Responses = response.incomplete(reason max_output_tokens)、
+   * Chat = finish_reason 'length'、Anthropic = stop_reason 'max_tokens'。
+   * 引擎据此向 LLM 注入"预算不足"提示,引导其用 set_output_budget
+   * 按需调大后继续,而不是顶着被截断的半截回复
+   */
+  truncated?: boolean
 }
 
 /** 引擎依赖(主进程注入) */
@@ -190,6 +269,11 @@ export interface EngineDeps {
   /** 技能目录绝对路径(create_skill 写入;main.cjs 注入 userData/skills) */
   getSkillDir?(): string
   /**
+   * exec_command 确认门(confirmExec 开启时,每轮首个命令执行前调用;
+   * 主进程持 pending,渲染端经 IPC 回用户选择,超时/无注入 = 拒绝)
+   */
+  confirmCommand?(command: string): Promise<boolean>
+  /**
    * 灵动岛设置工具:调渲染端设置桥(主进程注入,executeJavaScript 调
    * window.__islandSettings → 写 localStorage/IndexedDB → 派发
    * island-settings-changed 事件即时生效)。未注入则不注册设置工具
@@ -210,6 +294,7 @@ export interface MemoryStoreLike {
   update(id: string, patch: { content?: string; type?: MemoryEntry['type']; tags?: string[] }): Promise<MemoryEntry | null>
   replaceAll(next: MemoryEntry[]): Promise<MemoryEntry[]>
   snapshot(backupPath: string): Promise<void>
+  importEntries(next: MemoryEntry[]): Promise<{ imported: number; skipped: number }>
 }
 
 /** 自我进化 harness 的引擎可见子集 */

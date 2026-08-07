@@ -1,0 +1,6 @@
+output/
+docflow.db
+.claude/
+temp/
+uploads/
+__pycache__/

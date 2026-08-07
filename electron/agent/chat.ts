@@ -41,6 +41,7 @@
  * (首个 delta 带 id/name,后续只带 index + arguments 增量)。
  */
 
+import { parseSse, truncateResult } from './sse'
 import type { AgentConfig, AgentEvent, AgentMessage, AgentPart, AgentTool, ProviderOutcome } from './types'
 
 /** 工具 → Chat Completions tools(官方格式:function 嵌套) */
@@ -86,6 +87,13 @@ export function historyToMessages(history: AgentMessage[]): Array<Record<string,
       if (text) out.push({ role: 'user', content: text })
       continue
     }
+    // system 角色(主动陪伴回合的内部指令等):Chat Completions 允许
+    // system 出现在任意位置,放这里保证安全序列化(不落 assistant 分支)
+    if (msg.role === 'system') {
+      const text = joinText(msg.parts)
+      if (text) out.push({ role: 'system', content: text })
+      continue
+    }
     const reasoning = joinReasoning(msg.parts)
     const text = joinText(msg.parts)
     const calls = msg.parts.filter(
@@ -109,47 +117,11 @@ export function historyToMessages(history: AgentMessage[]): Array<Record<string,
     for (const p of msg.parts) {
       if (p.type === 'tool-result') {
         // 结果截断回填(参考后端 token 预算治理):完整结果已走事件给 UI
-        const result = p.result.length > 8000 ? p.result.slice(0, 8000) + '\n…(已截断)' : p.result
-        out.push({ role: 'tool', tool_call_id: p.id, content: result })
+        out.push({ role: 'tool', tool_call_id: p.id, content: truncateResult(p.result) })
       }
     }
   }
   return out
-}
-
-/** 解析 SSE 字节流:按空行分帧,取 data: 的 JSON(OpenAI 兼容格式) */
-async function* parseSse(body: ReadableStream<Uint8Array>, signal: AbortSignal): AsyncGenerator<Record<string, unknown>> {
-  const reader = body.getReader()
-  const decoder = new TextDecoder()
-  let buffer = ''
-  try {
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-      buffer += decoder.decode(value, { stream: true })
-      let sep: number
-      while ((sep = buffer.search(/\r?\n\r?\n/)) !== -1) {
-        const frame = buffer.slice(0, sep)
-        buffer = buffer.slice(sep + 2)
-        const dataLine = frame
-          .split(/\r?\n/)
-          .map((l) => l.trim())
-          .find((l) => l.startsWith('data:'))
-        if (!dataLine) continue
-        const payload = dataLine.slice(5).trim()
-        if (!payload || payload === '[DONE]') continue
-        try {
-          const parsed = JSON.parse(payload)
-          if (parsed && typeof parsed === 'object') yield parsed as Record<string, unknown>
-        } catch {
-          // 非 JSON 帧(注释/心跳)跳过
-        }
-      }
-      if (signal.aborted) throw new DOMException('aborted', 'AbortError')
-    }
-  } finally {
-    reader.releaseLock()
-  }
 }
 
 /**
@@ -173,8 +145,10 @@ export async function streamChatCompletion(params: {
   onEvent: (event: AgentEvent) => void
   jsonMode?: boolean
   thinking?: boolean
+  /** 输出上限覆盖(与 Responses 同语义:主循环 8192 防工具参数被截断) */
+  maxOutputTokens?: number
 }): Promise<ProviderOutcome> {
-  const { config, system, history, tools, signal, onEvent, jsonMode, thinking } = params
+  const { config, system, history, tools, signal, onEvent, jsonMode, thinking, maxOutputTokens } = params
   const base = config.baseURL.trim().replace(/\/+$/, '')
   const url = `${base}/chat/completions`
 
@@ -195,8 +169,9 @@ export async function streamChatCompletion(params: {
     reasoning_effort: config.reasoningEffort || 'high',
     // JSON 输出(json_mode 官方指南):prompt 必须含 "json" 字样
     ...(jsonMode ? { response_format: { type: 'json_object' } } : {}),
-    // 输出上限:单轮回复防失控(官方:输出上限 384K,不设会烧输出 token)
-    max_tokens: 4096,
+    // 输出上限:单轮回复防失控(官方:输出上限 384K,不设会烧输出 token);
+    // 主对话循环传 8192(思考模式高 effort 下 4096 会截断工具参数)
+    max_tokens: maxOutputTokens ?? 4096,
     stream: true,
   }
 
@@ -233,8 +208,11 @@ export async function streamChatCompletion(params: {
   const textParts: string[] = []
   let usage: { input_tokens: number; output_tokens: number } | null = null
   let cachedTokens: number | undefined
+  // 响应被输出预算截断标记(finish_reason 'length',2026-08-08)
+  let truncated = false
 
-  for await (const d of parseSse(res.body, signal)) {
+  for await (const evt of parseSse(res.body, signal)) {
+    const d = evt.data
     const choice = (Array.isArray(d.choices) ? d.choices[0] : undefined) as
       | Record<string, unknown>
       | undefined
@@ -277,6 +255,8 @@ export async function streamChatCompletion(params: {
         cachedTokens = u.prompt_cache_hit_tokens
       }
     }
+    // 输出预算截断(OpenAI 格式:finish_reason 'length',2026-08-08)
+    if (choice?.finish_reason === 'length') truncated = true
     if (signal.aborted) throw new DOMException('aborted', 'AbortError')
   }
 
@@ -294,19 +274,9 @@ export async function streamChatCompletion(params: {
     text: textParts.join(''),
     usage: usage ? { ...usage, cached_tokens: cachedTokens } : null,
     aborted: signal.aborted,
+    truncated: truncated || undefined,
   }
 }
 
-/** 解析工具参数 JSON(容错:非对象/空串 → {}) */
-export function parseToolArgs(raw: string): Record<string, unknown> {
-  const text = raw.trim()
-  if (!text) return {}
-  try {
-    const parsed = JSON.parse(text)
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
-      ? (parsed as Record<string, unknown>)
-      : {}
-  } catch {
-    return { _raw: text }
-  }
-}
+/* parseToolArgs 死副本已删(2026-08-07 审计 P1:与 deepseek.ts 逐字节
+ * 相同且零引用,引擎统一从 deepseek 导入) */

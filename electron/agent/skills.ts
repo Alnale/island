@@ -103,6 +103,12 @@ async function scanDirs(dirs: string[]): Promise<ParsedSkill[]> {
 
 /** 技能工具工厂(每次 listTools 重新扫描,配置变更即时生效) */
 export function createSkillLoader() {
+  // 扫描缓存(审计 P2 #8):引擎每轮循环**每步**都拉工具清单(10 技能 ×
+  // 10 步 ≈ 100 次文件读/轮);按 dirs 键缓存 ~1s——配置变更下一轮生效
+  // 的语义不受影响(下一轮至少间隔数秒),连续轮内零重复读盘。
+  // excluded 只影响过滤不影响扫描,不进缓存键
+  let scanCache: { key: string; skills: ParsedSkill[]; at: number } | null = null
+  const SCAN_CACHE_TTL_MS = 1000
   return {
     /**
      * 扫描并注册技能工具。excluded:已排除技能 slug 列表(设置/LLM 对话
@@ -118,7 +124,12 @@ export function createSkillLoader() {
       excluded: string[] = [],
       ownDirs: string[] = [],
     ): Promise<AgentTool[]> {
-      const skills = await scanDirs(skillsDirs ?? [])
+      const key = JSON.stringify(skillsDirs ?? [])
+      const now = Date.now()
+      if (!scanCache || scanCache.key !== key || now - scanCache.at >= SCAN_CACHE_TTL_MS) {
+        scanCache = { key, skills: await scanDirs(skillsDirs ?? []), at: now }
+      }
+      const skills = scanCache.skills
       const excludedSet = new Set(excluded)
       // 归一化 ownDirs(比较用:绝对路径统一小写,Windows 大小写不敏感)
       const ownSet = new Set(ownDirs.map((d) => d.toLowerCase()))

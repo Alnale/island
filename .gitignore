@@ -14,6 +14,10 @@ dist-widget
 release
 *.local
 
+# Electron 打包产物(由 pnpm build:electron 生成;dev:widget 已前置构建)
+electron/agent.cjs
+electron/bridge.cjs
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
@@ -28,3 +32,8 @@ release
 # 本地验证临时目录 / 测试下载
 .tmp
 downloads
+
+# 双岛巡检截图输出(WIDGET_SCREENSHOT 目录)
+.dual-shots/
+# bili-tool 运行时产物(登录二维码等)
+tools/bili/config/login-qrcode.png

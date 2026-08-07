@@ -21,6 +21,7 @@
  * → message_delta(usage) → message_stop / error。
  */
 
+import { parseSse, truncateResult } from './sse'
 import type { AgentConfig, AgentEvent, AgentMessage, AgentPart, AgentTool, ProviderOutcome } from './types'
 
 /** 历史 → Anthropic messages(工具结果重排 + 相邻同角色合并) */
@@ -35,6 +36,18 @@ export function historyToAnthropic(history: AgentMessage[]): Array<{ role: 'user
 
   for (const msg of history) {
     if (msg.role === 'user') {
+      const text = msg.parts
+        .filter((p): p is Extract<AgentPart, { type: 'text' }> => p.type === 'text')
+        .map((p) => p.text)
+        .join('\n')
+      if (text) pushBlock('user', { type: 'text', text })
+      continue
+    }
+    // system 角色(主动陪伴回合的内部指令等):Anthropic messages 无
+    // system 角色(顶层 system 参数是全局提示词,动态段拼进去会破坏
+    // 前缀缓存),兼容降级——并入 user 文本块(指令文本自带"系统任务"
+    // 声明,模型能识别;非主路径,牺牲语义换格式合法)
+    if (msg.role === 'system') {
       const text = msg.parts
         .filter((p): p is Extract<AgentPart, { type: 'text' }> => p.type === 'text')
         .map((p) => p.text)
@@ -59,7 +72,7 @@ export function historyToAnthropic(history: AgentMessage[]): Array<{ role: 'user
         pendingResults.push({
           type: 'tool_result',
           tool_use_id: part.id,
-          content: part.result.length > 8000 ? part.result.slice(0, 8000) + '\n…(已截断)' : part.result,
+          content: truncateResult(part.result),
         })
       }
     }
@@ -99,14 +112,16 @@ export async function streamAnthropic(params: {
   tools: AgentTool[]
   signal: AbortSignal
   onEvent: (event: AgentEvent) => void
+  /** 输出上限覆盖(与 Responses 同语义:主循环 8192 防工具参数被截断) */
+  maxOutputTokens?: number
 }): Promise<ProviderOutcome> {
-  const { config, system, history, tools, signal, onEvent } = params
+  const { config, system, history, tools, signal, onEvent, maxOutputTokens } = params
   const base = config.baseURL.trim().replace(/\/+$/, '')
   const url = `${base}/v1/messages`
 
   const body: Record<string, unknown> = {
     model: config.model.trim() || 'deepseek-v4-flash',
-    max_tokens: 4096,
+    max_tokens: maxOutputTokens ?? 4096,
     system: system || undefined,
     messages: historyToAnthropic(history),
     // 有工具才带 tools(静默总结等无工具请求不带,请求体最小化)
@@ -153,41 +168,10 @@ export async function streamAnthropic(params: {
   let inputTokens = 0
   let outputTokens = 0
   let cacheReadTokens = 0
+  // 响应被输出预算截断标记(stop_reason 'max_tokens',2026-08-08)
+  let truncated = false
 
-  const parseSse = async function* (reader: ReadableStreamDefaultReader<Uint8Array>): AsyncGenerator<{ type: string; data: Record<string, unknown> }> {
-    const decoder = new TextDecoder()
-    let buffer = ''
-    try {
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        buffer += decoder.decode(value, { stream: true })
-        let sep: number
-        while ((sep = buffer.search(/\r?\n\r?\n/)) !== -1) {
-          const frame = buffer.slice(0, sep)
-          buffer = buffer.slice(sep + 2)
-          const dataLine = frame
-            .split(/\r?\n/)
-            .map((l) => l.trim())
-            .find((l) => l.startsWith('data:'))
-          if (!dataLine) continue
-          const payload = dataLine.slice(5).trim()
-          if (!payload || payload === '[DONE]') continue
-          try {
-            const parsed = JSON.parse(payload) as Record<string, unknown>
-            if (parsed && typeof parsed.type === 'string') yield { type: parsed.type, data: parsed }
-          } catch {
-            // 非 JSON 帧跳过
-          }
-        }
-        if (signal.aborted) throw new DOMException('aborted', 'AbortError')
-      }
-    } finally {
-      reader.releaseLock()
-    }
-  }
-
-  for await (const evt of parseSse(res.body.getReader())) {
+  for await (const evt of parseSse(res.body, signal)) {
     const d = evt.data
     switch (evt.type) {
       case 'message_start': {
@@ -249,6 +233,8 @@ export async function streamAnthropic(params: {
       case 'message_delta': {
         const usage = d.usage as Record<string, unknown> | undefined
         if (typeof usage?.output_tokens === 'number') outputTokens = usage.output_tokens
+        // 输出预算截断(stop_reason 'max_tokens',2026-08-08)
+        if (d.stop_reason === 'max_tokens') truncated = true
         break
       }
       case 'message_stop': {
@@ -278,5 +264,6 @@ export async function streamAnthropic(params: {
       cached_tokens: cacheReadTokens > 0 ? cacheReadTokens : undefined,
     },
     aborted: signal.aborted,
+    truncated: truncated || undefined,
   }
 }

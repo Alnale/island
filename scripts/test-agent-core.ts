@@ -18,10 +18,21 @@ import path from 'node:path'
 import { createMemoryStore, formatMemoryBlock } from '../electron/agent/memory'
 import { createMCPManager } from '../electron/agent/mcp'
 import { createSkillLoader } from '../electron/agent/skills'
-import { createAgentEngine, createConfigTools, parseManualCall, findManualTool, compressArgs, parseTitleJson, extractJsonTitle } from '../electron/agent/engine'
+import { createAgentEngine, createConfigTools, parseManualCall, findManualTool, compressArgs, parseTitleJson, extractJsonTitle, validateRequiredArgs } from '../electron/agent/engine'
+import { streamResponse } from '../electron/agent/deepseek'
+import {
+  getTasksStatusBlock,
+  listTasks,
+  pruneTasks,
+  registerTask,
+  removeTask,
+  setTaskDoneHandler,
+  updateTask,
+  type AgentTask,
+} from '../electron/agent/tasks'
 import { createSettingsTools } from '../electron/agent/settingsTools'
 import { createEvolution } from '../electron/agent/evolution'
-import type { AgentTool, MemoryEntry } from '../electron/agent/types'
+import type { AgentTool, McpServerConfig, MemoryEntry } from '../electron/agent/types'
 
 // 打包产物运行时路径会变(import.meta.url 指向 node_modules/.cache),
 // mock 服务器目录由 esbuild define 注入(__ROOT__ = 项目根)
@@ -337,7 +348,7 @@ await test('工具调用:参数往返', async () => {
   try {
     const tools = await mgr.listTools([stdioCfg])
     const echo = tools.find((t) => t.name === 'mcp_mock_echo')!
-    const out = await echo.execute({ input: '你好世界' })
+    const out = String(await echo.execute({ input: '你好世界' }))
     assert(out.includes('echo:') && out.includes('你好世界'), `echo 应回显参数,实际:${out}`)
   } finally {
     mgr.dispose()
@@ -366,7 +377,7 @@ await test('图像内容块 → 文本标注', async () => {
   try {
     const tools = await mgr.listTools([stdioCfg])
     const image = tools.find((t) => t.name === 'mcp_mock_image')!
-    const out = await image.execute({})
+    const out = String(await image.execute({}))
     assert(out.includes('[图像结果') && out.includes('image/png'), `应标注图像,实际:${out}`)
   } finally {
     mgr.dispose()
@@ -387,7 +398,7 @@ await test('进程崩溃自动重启', async () => {
     assert(threw, 'crash_me 调用应失败(进程自杀)')
     // 同一工具列表里 echo 是同一客户端实例:调用触发自动重启
     const echo = tools.find((t) => t.name === 'mcp_mock_echo')!
-    const out = await echo.execute({ input: '重启后' })
+    const out = String(await echo.execute({ input: '重启后' }))
     assert(out.includes('重启后'), `崩溃后应自动重启并成功,实际:${out}`)
   } finally {
     mgr.dispose()
@@ -454,7 +465,7 @@ await test('sse 工具调用(事件流推送路径)', async () => {
   try {
     const tools = await mgr.listTools([sseCfg])
     const echo = tools.find((t) => t.name.includes('echo'))!
-    const out = await echo.execute({ text: 'sse你好' })
+    const out = String(await echo.execute({ text: 'sse你好' }))
     assert(out.includes('sse你好'), `sse echo 应回显,实际:${out}`)
   } finally {
     mgr.dispose()
@@ -484,7 +495,7 @@ await test('sse 直接响应体变体(兼容路径)', async () => {
     const cfg = { name: 'direct', type: 'sse' as const, command: '', url: `http://127.0.0.1:${sseDirectPort}/sse` }
     const tools = await mgr.listTools([cfg])
     const echo = tools.find((t) => t.name.includes('echo'))!
-    const out = await echo.execute({ text: 'direct' })
+    const out = String(await echo.execute({ text: 'direct' }))
     assert(out.includes('direct'), `直接响应路径应成功,实际:${out}`)
   } finally {
     mgr.dispose()
@@ -498,7 +509,7 @@ await test('sse bare 推送变体(无 event 行)', async () => {
     const tools = await mgr.listTools([cfg])
     assert(tools.length === 2, 'bare 推送也应能握手列工具')
     const echo = tools.find((t) => t.name.includes('echo'))!
-    const out = await echo.execute({ text: 'bare' })
+    const out = String(await echo.execute({ text: 'bare' }))
     assert(out.includes('bare'), `bare 推送调用应成功,实际:${out}`)
   } finally {
     mgr.dispose()
@@ -566,7 +577,7 @@ await test('执行:返回文档 + 技能目录绝对路径', async () => {
   const tools = await loader.listTools([skillsDir])
   // 重名技能按目录名字母序分配名称,用描述区分(记笔记的才是 note-taking)
   const note = tools.find((t) => t.description.includes('记笔记'))!
-  const out = await note.execute({})
+  const out = String(await note.execute({}))
   assert(out.includes('步骤 1'), '应返回文档正文')
   assert(out.includes(path.join(skillsDir, 'note-taking')), '应含技能目录绝对路径')
 })
@@ -584,7 +595,7 @@ await test('不存在的目录静默跳过', async () => {
 console.log('\n=== LLM 自我配置工具(createConfigTools) ===')
 
 function makeConfigToolsDeps(
-  initial: { mcpServers?: unknown[]; skillsDirs?: string[]; excludedSkills?: string[] } = {},
+  initial: { mcpServers?: McpServerConfig[]; skillsDirs?: string[]; excludedSkills?: string[] } = {},
   opts: { skillDir?: string } = {},
 ) {
   const state = {
@@ -628,18 +639,18 @@ function makeConfigToolsDeps(
 await test('mcp_config add(stdio):写入配置并校验参数', async () => {
   const { state, writes, tools } = makeConfigToolsDeps()
   const mcp = tools.find((t) => t.name === 'mcp_config')!
-  const out = await mcp.execute({
+  const out = String(await mcp.execute({
     action: 'add',
     name: 'filesystem',
     command: 'npx -y @modelcontextprotocol/server-filesystem',
     args: ['C:/dir', 'D:/dir'],
     env: { TOKEN: 'abc' },
-  })
+  }))
   assert(out.includes('filesystem'), 'add 结果应含服务名')
   assert(writes.length === 1, '应写一次配置')
   const servers = writes[0].mcpServers as Array<Record<string, unknown>>
   assert(servers.length === 1 && servers[0].name === 'filesystem', '服务名应写入')
-  assert(servers[0].type === 'stdio' && servers[0].command.includes('npx'), 'stdio 字段应写入')
+  assert(servers[0].type === 'stdio' && (servers[0].command as string).includes('npx'), 'stdio 字段应写入')
   assert((servers[0].env as Record<string, string>).TOKEN === 'abc', 'env 应写入')
   assert(state.config.mcpServers.length === 1, '状态应更新')
 })
@@ -654,7 +665,7 @@ await test('mcp_config add(sse):url 校验', async () => {
     threw = true
   }
   assert(threw, '非法 url 应抛错')
-  const out = await mcp.execute({ action: 'add', name: 'remote', type: 'sse', url: 'https://example.com/mcp/sse' })
+  const out = String(await mcp.execute({ action: 'add', name: 'remote', type: 'sse', url: 'https://example.com/mcp/sse' }))
   assert(out.includes('remote'), '合法 sse 应添加成功')
 })
 
@@ -680,21 +691,21 @@ await test('mcp_config:重复 add / remove 不存在 → 抛错', async () => {
 await test('mcp_config test:注入的 testMcp 被调用', async () => {
   const { tools } = makeConfigToolsDeps({ mcpServers: [{ name: 'ok-server', type: 'stdio', command: 'x' }] })
   const mcp = tools.find((t) => t.name === 'mcp_config')!
-  const out = await mcp.execute({ action: 'test', name: 'ok-server' })
+  const out = String(await mcp.execute({ action: 'test', name: 'ok-server' }))
   assert(out.includes('3 个工具'), `test 应返回工具数,实际:${out}`)
 })
 
 await test('skills_config add/remove/list', async () => {
   const { writes, tools } = makeConfigToolsDeps()
   const sc = tools.find((t) => t.name === 'skills_config')!
-  const addOut = await sc.execute({ action: 'add', dir: 'C:/skills' })
+  const addOut = String(await sc.execute({ action: 'add', dir: 'C:/skills' }))
   assert(addOut.includes('C:/skills'), 'add 结果应含目录')
   const lastWrite = writes[writes.length - 1]
   assert(lastWrite !== undefined, '应有写入记录')
   assert((lastWrite.skillsDirs as string[]).includes('C:/skills'), '应写入 skillsDirs')
-  const dup = await sc.execute({ action: 'add', dir: 'C:/skills' })
+  const dup = String(await sc.execute({ action: 'add', dir: 'C:/skills' }))
   assert(dup.includes('已存在'), '重复 add 应提示已存在')
-  const removeOut = await sc.execute({ action: 'remove', dir: 'C:/skills' })
+  const removeOut = String(await sc.execute({ action: 'remove', dir: 'C:/skills' }))
   assert(removeOut.includes('已移除'), 'remove 应成功')
   let threw = false
   try {
@@ -709,10 +720,10 @@ await test('skills_config exclude/include:移除/恢复技能', async () => {
   const { state, writes, tools } = makeConfigToolsDeps()
   const sc = tools.find((t) => t.name === 'skills_config')!
   // list 应列出技能(含排除状态标注)
-  const listOut = await sc.execute({ action: 'list' })
+  const listOut = String(await sc.execute({ action: 'list' }))
   assert(listOut.includes('note-taking') && listOut.includes('trump-perspective'), 'list 应列出注册技能')
   // exclude 已注册技能 → 写入 excludedSkills
-  const exOut = await sc.execute({ action: 'exclude', skill: 'note-taking' })
+  const exOut = String(await sc.execute({ action: 'exclude', skill: 'note-taking' }))
   assert(exOut.includes('已移除技能 note-taking'), `exclude 结果:${exOut}`)
   const lastExclude = writes[writes.length - 1]
   assert(lastExclude !== undefined, '应有写入记录')
@@ -730,7 +741,7 @@ await test('skills_config exclude/include:移除/恢复技能', async () => {
   }
   assert(threw, 'exclude 不存在的技能应抛错')
   // include 恢复
-  const inOut = await sc.execute({ action: 'include', skill: 'note-taking' })
+  const inOut = String(await sc.execute({ action: 'include', skill: 'note-taking' }))
   assert(inOut.includes('已恢复技能 note-taking'), `include 结果:${inOut}`)
   assert(!state.config.excludedSkills.includes('note-taking'), '恢复后不在排除列表')
   // include 未排除的技能 → 抛错
@@ -748,12 +759,12 @@ await test('skills_config create:自然语言创建技能', async () => {
   const { tools } = makeConfigToolsDeps({}, { skillDir })
   const sc = tools.find((t) => t.name === 'skills_config')!
   // 创建成功:文件落盘 + frontmatter 规范化
-  const out = await sc.execute({
+  const out = String(await sc.execute({
     action: 'create',
     name: 'My Great Skill',
     description: '处理XX任务的技能,用于XX场景',
     content: '# My Skill\n\n步骤 1: 做A\n步骤 2: 做B',
-  })
+  }))
   assert(out.includes('已创建技能 my-great-skill'), `create 结果:${out}`)
   assert(out.includes('SKILL.md'), '应返回文件路径')
   const md = await fs.readFile(path.join(skillDir, 'my-great-skill', 'SKILL.md'), 'utf8')
@@ -768,13 +779,13 @@ await test('skills_config create:自然语言创建技能', async () => {
   }
   assert(threw, '同名技能未 overwrite 应抛错')
   // overwrite 覆盖成功
-  const overwriteOut = await sc.execute({
+  const overwriteOut = String(await sc.execute({
     action: 'create',
     name: 'my-great-skill',
     description: '新描述',
     content: '新内容',
     overwrite: true,
-  })
+  }))
   assert(overwriteOut.includes('已创建技能 my-great-skill'), 'overwrite 应成功')
   const md2 = await fs.readFile(path.join(skillDir, 'my-great-skill', 'SKILL.md'), 'utf8')
   assert(md2.includes('新描述') && md2.includes('新内容'), '覆盖后内容为新版')
@@ -794,7 +805,7 @@ await test('skills_config create:自然语言创建技能', async () => {
   }
   // slug 化:大写/空格/符号 → 小写连字符;中文按工具名约束丢弃
   // (LLM 工具名仅 ASCII,与 skills.ts toSlug 一致)
-  const out2 = await sc.execute({ action: 'create', name: '测试 SKILL X!', description: 'd', content: 'c' })
+  const out2 = String(await sc.execute({ action: 'create', name: '测试 SKILL X!', description: 'd', content: 'c' }))
   assert(out2.includes('已创建技能 skill-x'), `slug 应规范化:${out2}`)
 })
 
@@ -893,12 +904,12 @@ function makeEvolutionDeps() {
 }
 
 await test('无 API Key:进化后台启动 → 优雅失败(通知)', async () => {
-  globalThis.__notifications = []
+  (globalThis as any).__notifications = []
   const { evo, events } = makeEvolutionDeps()
   const res = await evo.requestEvolve()
   assert(res.started === true, '应返回已启动')
   await waitFor(
-    () => (globalThis.__notifications as Array<{ title?: string }>).some((n) => (n.title ?? '').includes('失败')),
+    () => ((globalThis as any).__notifications as Array<{ title?: string }>).some((n) => (n.title ?? '').includes('失败')),
     15000,
     '进化失败通知',
   )
@@ -1018,7 +1029,7 @@ await test('compressArgs:字符串截断/嵌套/数组/深度', () => {
   assert(nested.a.b[1] === 'ok', '短元素原样')
   // 深度超限 → 占位
   const deep = compressArgs({ a: { b: { c: { d: { e: { f: 'deep' } } } } } }) as Record<string, unknown>
-  assert(deep.a.b.c.d.e === '(参数已截断)', '深度超 4 层应占位')
+  assert((deep as any).a.b.c.d.e === '(参数已截断)', '深度超 4 层应占位')
   // 非字符串/非对象原样
   assert(compressArgs(42) === 42, '数字原样')
   assert(compressArgs(null) === null, 'null 原样')
@@ -1129,6 +1140,198 @@ await test('testMCP:真实 stdio 服务连通', async () => {
 })
 
 // ---------------------------------------------------------------------------
+// 8.5 输出预算动态调整(set_output_budget,2026-08-08 用户要求 LLM 自主修改)
+// ---------------------------------------------------------------------------
+
+console.log('\n=== 输出预算动态调整(set_output_budget) ===')
+
+/** mock fetch 的 SSE 响应:第一轮返回工具调用(set_output_budget),
+ * 后续轮返回纯文本回复。捕获请求体供断言 max_output_tokens */
+function budgetSseServer(captured: Array<Record<string, unknown>>, call: Record<string, unknown> | null) {
+  let count = 0
+  return async (_url: string | URL | Request, opts?: RequestInit) => {
+    count++
+    try {
+      captured.push(JSON.parse(String(opts?.body ?? '{}')) as Record<string, unknown>)
+    } catch {
+      // 忽略解析失败
+    }
+    if (call && count === 1) {
+      const args = JSON.stringify(call)
+      return sseResponse([
+        { type: 'response.created', response: { id: `r${count}` } },
+        {
+          type: 'response.output_item.added',
+          output_index: 0,
+          item: { type: 'function_call', id: 'item_1', call_id: 'call_1', name: 'set_output_budget', arguments: '' },
+        },
+        { type: 'response.function_call_arguments.delta', output_index: 0, delta: args.slice(0, 10) },
+        { type: 'response.function_call_arguments.delta', output_index: 0, delta: args.slice(10) },
+        { type: 'response.function_call_arguments.done', item_id: 'item_1', arguments: args },
+        {
+          type: 'response.output_item.done',
+          output_index: 0,
+          item: { type: 'function_call', id: 'item_1', call_id: 'call_1', name: 'set_output_budget', arguments: args },
+        },
+        { type: 'response.completed', response: { usage: { input_tokens: 10, output_tokens: 5 } } },
+      ])
+    }
+    return sseResponse([
+      { type: 'response.created', response: { id: `r${count}` } },
+      { type: 'response.output_item.added', output_index: 0, item: { type: 'message', id: `item_${count}` } },
+      { type: 'response.output_text.delta', output_index: 0, delta: '好的' },
+      { type: 'response.output_item.done', output_index: 0, item: { type: 'message', id: `item_${count}` } },
+      { type: 'response.completed', response: { usage: { input_tokens: 10, output_tokens: 5 } } },
+    ])
+  }
+}
+
+/** 构造引擎(可注入 updateAgentConfig) */
+function budgetEngine(patched: Array<Record<string, unknown>>, maxOutputTokens?: number) {
+  return createAgentEngine({
+    getConfig: () => ({
+      apiKey: 'k',
+      baseURL: 'https://api.deepseek.com',
+      model: 'deepseek-v4-flash',
+      systemPrompt: '',
+      reasoningEffort: 'high',
+      maxOutputTokens,
+      mcpServers: [],
+      skillsDirs: [],
+    }),
+    onEvent: () => {},
+    onSwitchToMusic: () => {},
+    updateAgentConfig: (p) => patched.push(p),
+    getMemoryStore: () => null,
+  })
+}
+
+await test('引擎初始预算 = 配置 maxOutputTokens ?? 缺省 8192;越界回退', () => {
+  const p: Array<Record<string, unknown>> = []
+  const e1 = budgetEngine(p, 65536)
+  assert(e1.outputBudget === 65536, `应取配置值 65536,实际 ${e1.outputBudget}`)
+  e1.dispose()
+  const e2 = budgetEngine(p)
+  assert(e2.outputBudget === 8192, `缺省应 8192,实际 ${e2.outputBudget}`)
+  e2.dispose()
+  const e3 = budgetEngine(p, 999999999)
+  assert(e3.outputBudget === 8192, `越界配置应回退缺省,实际 ${e3.outputBudget}`)
+  e3.dispose()
+})
+
+await test('set_output_budget:action=get 查询不改预算不写配置;schema 正确', async () => {
+  const patched: Array<Record<string, unknown>> = []
+  const captured: Array<Record<string, unknown>> = []
+  const engine = budgetEngine(patched)
+  const origFetch = globalThis.fetch
+  globalThis.fetch = budgetSseServer(captured, { action: 'get' })
+  try {
+    const t = engine.listTools().find((x) => x.name === 'set_output_budget')
+    assert(t !== undefined, 'set_output_budget 应注册')
+    assert((t!.parameters.required ?? []).includes('action'), 'action 应必填')
+    const props = t!.parameters.properties as Record<string, { type?: string; enum?: string[] }>
+    assert(props.action?.enum?.includes('get') && props.action?.enum?.includes('set'), 'action 应含 get/set')
+    assert(props.maxOutputTokens?.type === 'number', 'maxOutputTokens 应为 number')
+    assert(props.persist?.type === 'boolean', 'persist 应为 boolean')
+    // LLM 调用 action=get:预算不变、不写配置
+    engine.send('查看当前输出预算', [])
+    await waitFor(() => captured.length >= 1 && !engine.busy, 10000, 'get 回合完成')
+    assert(engine.outputBudget === 8192, 'get 不应改变预算')
+    assert(patched.length === 0, 'get 不应写配置')
+  } finally {
+    globalThis.fetch = origFetch
+    engine.dispose()
+  }
+})
+
+await test('LLM 调用 set_output_budget(action=set,persist)→ 预算即时变 + 配置写入 + 后续请求带新预算', async () => {
+  const patched: Array<Record<string, unknown>> = []
+  const captured: Array<Record<string, unknown>> = []
+  const engine = budgetEngine(patched)
+  const origFetch = globalThis.fetch
+  globalThis.fetch = budgetSseServer(captured, { action: 'set', maxOutputTokens: 65536, persist: true })
+  try {
+    engine.send('请把输出预算调到 65536 并保存', [])
+    await waitFor(() => engine.outputBudget === 65536, 8000, '预算应调整为 65536')
+    await waitFor(() => patched.length === 1, 8000, 'persist 应写配置')
+    assert(patched[0]?.maxOutputTokens === 65536, `配置应写 65536,实际 ${JSON.stringify(patched[0])}`)
+    await waitFor(() => captured.length >= 2, 8000, '应有第二轮请求')
+    // 第二轮(工具执行后)请求体应带新预算
+    const second = captured[1]
+    assert(second?.max_output_tokens === 65536, `第二轮请求应带 65536,实际 ${String(second?.max_output_tokens)}`)
+  } finally {
+    globalThis.fetch = origFetch
+    engine.dispose()
+  }
+})
+
+await test('set_output_budget:越界钳制到 4096-262144', async () => {
+  const patched: Array<Record<string, unknown>> = []
+  const captured: Array<Record<string, unknown>> = []
+  const engine = budgetEngine(patched)
+  const origFetch = globalThis.fetch
+  globalThis.fetch = budgetSseServer(captured, { action: 'set', maxOutputTokens: 999999999, persist: true })
+  try {
+    engine.send('把预算调到最大', [])
+    await waitFor(() => engine.outputBudget === 262144, 8000, '应钳制到 262144')
+    assert(patched[0]?.maxOutputTokens === 262144, '钳制后 persist 写 262144')
+    await waitFor(() => !engine.busy, 10000, '回合结束')
+  } finally {
+    globalThis.fetch = origFetch
+    engine.dispose()
+  }
+})
+
+await test('预算不足提示:截断(response.incomplete)→ 下一轮请求注入 system 提示', async () => {
+  const captured: Array<Record<string, unknown>> = []
+  const engine = budgetEngine([])
+  const origFetch = globalThis.fetch
+  let count = 0
+  globalThis.fetch = async (_url: string | URL | Request, opts?: RequestInit) => {
+    count++
+    try {
+      captured.push(JSON.parse(String(opts?.body ?? '{}')) as Record<string, unknown>)
+    } catch {
+      // 忽略
+    }
+    if (count === 1) {
+      // 第一轮:响应被 max_output_tokens 截断(无工具调用,纯文本被切)
+      return sseResponse([
+        { type: 'response.created', response: { id: 'r1' } },
+        { type: 'response.output_item.added', output_index: 0, item: { type: 'message', id: 'item_1' } },
+        { type: 'response.output_text.delta', output_index: 0, delta: '这是被截断的回复前' },
+        { type: 'response.incomplete', reason: 'max_output_tokens', response_id: 'r1' },
+      ])
+    }
+    // 第二轮:纯文本回复(引擎应已注入预算不足提示)
+    return sseResponse([
+      { type: 'response.created', response: { id: 'r2' } },
+      { type: 'response.output_item.added', output_index: 0, item: { type: 'message', id: 'item_2' } },
+      { type: 'response.output_text.delta', output_index: 0, delta: '已收到提示' },
+      { type: 'response.output_item.done', output_index: 0, item: { type: 'message', id: 'item_2' } },
+      { type: 'response.completed', response: { usage: { input_tokens: 10, output_tokens: 5 } } },
+    ])
+  }
+  try {
+    engine.send('写一篇长文章', [])
+    await waitFor(() => captured.length >= 2 && !engine.busy, 10000, '两轮完成')
+    const second = captured[1]
+    const input = (second?.input ?? []) as Array<Record<string, unknown>>
+    const hintItem = input.find(
+      (it) =>
+        it.type === 'message' &&
+        (it.role === 'system' || it.role === 'user') &&
+        JSON.stringify(it.content).includes('输出预算'),
+    )
+    assert(hintItem !== undefined, `第二轮 input 应含预算不足提示,实际:${JSON.stringify(input).slice(0, 300)}`)
+    assert(JSON.stringify(hintItem).includes('set_output_budget'), '提示应引导调 set_output_budget')
+  } finally {
+    globalThis.fetch = origFetch
+    engine.dispose()
+  }
+})
+
+// ---------------------------------------------------------------------------
 // 9. 灵动岛设置工具(createSettingsTools,mock 渲染端设置桥)
 // ---------------------------------------------------------------------------
 
@@ -1138,7 +1341,7 @@ await test('设置工具:未注入桥时不注册;注入后 8 个工具齐', () 
   assert(createSettingsTools({}).length === 0, '无 runIslandSettings 不应注册')
   const tools = createSettingsTools({ runIslandSettings: async () => ({ ok: true }) })
   const names = tools.map((t) => t.name)
-  assert(names.length === 8, `应有 8 个工具,实际 ${names.length}:${names.join(',')}`)
+  assert(names.length === 11, `应有 11 个工具,实际 ${names.length}:${names.join(',')}`)
   for (const n of [
     'set_theme_color',
     'set_agent_scale',
@@ -1162,7 +1365,7 @@ await test('set_theme_color:hex 校验与归一化', async () => {
     },
   })
   const tool = tools.find((t) => t.name === 'set_theme_color')!
-  const out = await tool.execute({ color: 'f87171' })
+  const out = String(await tool.execute({ color: 'f87171' }))
   assert(out.includes('#f87171'), '输出应含归一化后的颜色')
   assert(calls.length === 1 && calls[0].op === 'setThemeColor' && calls[0].args[0] === '#f87171', '应调桥且 hex 归一化为 # 前缀小写')
   await assertRejects(() => tool.execute({ color: 'red' }), '颜色格式不正确', '非法颜色应拒绝')
@@ -1192,9 +1395,9 @@ await test('import_font:扩展名/存在性/大小校验与 data URL 传递', as
     // 成功:小 ttf → data URL 前缀正确
     const fontPath = path.join(tmpDir, 'test-font.ttf')
     await fs.writeFile(fontPath, Buffer.from([0x00, 0x01, 0x00, 0x00, 0x66, 0x6f, 0x6f, 0x74]))
-    const out = await tool.execute({ path: fontPath })
+    const out = String(await tool.execute({ path: fontPath }))
     assert(out.includes('test-font.ttf'), '输出应含字体名')
-    assert(calls[0].op === 'importFont' && calls[0].args[0].startsWith('data:font/ttf;base64,'), '应调桥且 data URL 为 font/ttf')
+    assert(calls[0].op === 'importFont' && (calls[0].args[0] as string).startsWith('data:font/ttf;base64,'), '应调桥且 data URL 为 font/ttf')
     assert(typeof calls[0].args[1] === 'string' && calls[0].args[1].includes('test-font.ttf'), '缺省名称应为文件名')
     // 自定义名称
     await tool.execute({ path: fontPath, name: '我的字体' })
@@ -1223,7 +1426,7 @@ await test('import_background:图片扩展名校验与双槽位应用', async ()
     const pngPath = path.join(tmpDir, 'bg.png')
     await fs.writeFile(pngPath, Buffer.from([0x89, 0x50, 0x4e, 0x47]))
     await tool.execute({ path: pngPath })
-    assert(calls[0].op === 'importBackground' && calls[0].args[0].startsWith('data:image/png;base64,'), '应调桥且 data URL 为 image/png')
+    assert(calls[0].op === 'importBackground' && (calls[0].args[0] as string).startsWith('data:image/png;base64,'), '应调桥且 data URL 为 image/png')
     await assertRejects(() => tool.execute({ path: path.join(tmpDir, 'bg.avif') }), '不支持的文件类型', 'avif 应拒绝')
     await assertRejects(() => tool.execute({ path: path.join(tmpDir, 'missing.png') }), '文件不存在', '不存在应拒绝')
   } finally {
@@ -1242,13 +1445,13 @@ await test('list/rename:列表格式化与名称校验', async () => {
     },
   })
   const listFonts = tools.find((t) => t.name === 'list_fonts')!
-  const out1 = await listFonts.execute({})
+  const out1 = String(await listFonts.execute({}))
   assert(out1.includes('f-1 字体甲') && out1.includes('f-2 字体乙'), '列表应含 id 与名称')
   const listImgs = tools.find((t) => t.name === 'list_library_images')!
-  const out2 = await listImgs.execute({})
+  const out2 = String(await listImgs.execute({}))
   assert(out2.includes('i-1 图一'), '图片列表应含 id 与名称')
   const emptyTools = createSettingsTools({ runIslandSettings: async (op) => (op === 'listFonts' ? [] : []) })
-  assert((await emptyTools.find((t) => t.name === 'list_fonts')!.execute({})).includes('为空'), '空库应有提示')
+  assert(String(await emptyTools.find((t) => t.name === 'list_fonts')!.execute({})).includes('为空'), '空库应有提示')
   const renameImg = tools.find((t) => t.name === 'rename_library_image')!
   await renameImg.execute({ id: 'i-1', name: '新名字' })
   assert(calls.some((c) => c.op === 'renameLibraryImage' && c.args[0] === 'i-1' && c.args[1] === '新名字'), '改名应调桥')
@@ -1258,6 +1461,318 @@ await test('list/rename:列表格式化与名称校验', async () => {
   const renameFont = tools.find((t) => t.name === 'rename_font')!
   await renameFont.execute({ id: 'f-1', name: '字体甲新' })
   assert(calls.some((c) => c.op === 'renameFont' && c.args[1] === '字体甲新'), '字体改名应调桥')
+})
+
+// ---------------------------------------------------------------------------
+// 通用后台任务注册表(tasks.ts;人工场景监控 + 对话反馈空间)
+// ---------------------------------------------------------------------------
+
+// 每例结束清空注册表与回调,防跨用例污染
+function resetTasks() {
+  setTaskDoneHandler(undefined)
+  for (const t of listTasks()) removeTask(t.id)
+}
+
+await test('任务注册表:注册等待任务 → 状态块实时可见', async () => {
+  resetTasks()
+  registerTask({ id: 'login-1', title: 'B站扫码登录', status: 'waiting', detail: '等待用户扫码确认(二维码 2 分钟内有效)' })
+  registerTask({ id: 'dl-1', title: 'B站下载', status: 'running', detail: '视频下载(BV1xx)(进程 42),输出目录 C:\\dl' })
+  const block = getTasksStatusBlock()
+  assert(block.includes('【后台任务状态'), '应有状态块标题')
+  assert(block.includes('B站扫码登录:等待中,等待用户扫码确认'), '等待任务应显示等待中 + 细节')
+  assert(block.includes('B站下载:进行中,视频下载(BV1xx)'), '进行中任务应显示进行中 + 细节')
+  assert(block.includes('提醒用户当前需要做什么'), '状态块应指导 LLM 提醒用户人工操作')
+  // 文案稳定(两次调用逐字一致,不破坏 DeepSeek 前缀缓存)
+  assert(getTasksStatusBlock() === block, '状态不变时文案应逐字稳定')
+})
+
+await test('任务注册表:进入终态触发 done 回调一次;失败也有反馈', async () => {
+  resetTasks()
+  const events: AgentTask[] = []
+  setTaskDoneHandler((t) => events.push(t))
+  registerTask({ id: 'login-1', title: 'B站扫码登录', status: 'waiting', detail: '等待用户扫码确认' })
+  updateTask('login-1', { status: 'done', detail: '用户已扫码确认,已登录 B 站' })
+  assert(events.length === 1 && events[0].status === 'done', '完成应触发回调一次')
+  assert(events[0].detail === '用户已扫码确认,已登录 B 站', '回调应携带终态细节')
+  // 已终态再更新被忽略(防重复回调)
+  updateTask('login-1', { status: 'failed', detail: 'x' })
+  assert(events.length === 1, '已终态任务再更新不应重复触发')
+  // 失败同样进入终态触发回调(登录失败/下载失败都有对话反馈空间)
+  registerTask({ id: 'login-2', title: 'B站扫码登录', status: 'waiting', detail: '等待用户扫码确认' })
+  updateTask('login-2', { status: 'failed', detail: '二维码已过期或未扫码确认,可重新生成' })
+  assert(events.length >= 2 && events[1]?.status === 'failed', '失败应触发回调')
+  const block = getTasksStatusBlock()
+  assert(block.includes('B站扫码登录:已完成,用户已扫码确认'), '终态应出现在状态块')
+  assert(block.includes('B站扫码登录:已失败,二维码已过期'), '失败状态应出现在状态块')
+})
+
+await test('任务注册表:终态回调载荷可拼 background-done 标题/消息', async () => {
+  resetTasks()
+  let fired: AgentTask | undefined
+  setTaskDoneHandler((t) => {
+    fired = t
+  })
+  registerTask({ id: 'dl-1', title: 'B站下载', status: 'running', detail: '视频下载(BV1xx)(进程 42),输出目录 C:\\dl' })
+  updateTask('dl-1', { status: 'done', detail: '视频下载(BV1xx)已完成:\nC:\\dl\\video.mp4' })
+  assert(fired, '终态应触发')
+  const suffix = fired!.status === 'done' ? '完成' : '失败'
+  const title = `${fired!.title}${suffix}`
+  assert(title === 'B站下载完成', '标题应拼「任务名+完成/失败」(background-done 用)')
+  assert(fired!.detail.includes('C:\\dl\\video.mp4'), '消息应含输出文件绝对路径')
+})
+
+await test('任务注册表:注册覆盖 + 移除 + 无任务空串', async () => {
+  resetTasks()
+  assert(getTasksStatusBlock() === '', '无任务应返回空串')
+  registerTask({ id: 'a', title: 'A', status: 'waiting', detail: 'd1' })
+  registerTask({ id: 'a', title: 'A2', status: 'waiting', detail: 'd2' })
+  const block = getTasksStatusBlock()
+  assert(block.includes('A2:等待中,d2') && !block.includes('d1'), '同 id 注册应覆盖')
+  removeTask('a')
+  assert(getTasksStatusBlock() === '', '移除后应无任务')
+})
+
+await test('任务注册表:pruneTasks 清理超 TTL 终态记录', async () => {
+  resetTasks()
+  const now = Date.now()
+  // 注入时间戳模拟:old 已超 24h TTL(25h 前更新),fresh 仍在 TTL 内(12h 前)
+  registerTask({ id: 'old', title: '旧任务', status: 'done', detail: '已完成', at: now })
+  registerTask({ id: 'fresh', title: '新任务', status: 'done', detail: '已完成', at: now + 12 * 60 * 60 * 1000 })
+  pruneTasks(now + 25 * 60 * 60 * 1000)
+  const block = getTasksStatusBlock()
+  assert(!block.includes('旧任务'), '超 TTL 终态应被清理')
+  assert(block.includes('新任务'), 'TTL 内终态应保留')
+})
+
+// ---------------------------------------------------------------------------
+// 工具参数校验与自主纠错(validateRequiredArgs,2026-08-08)
+// ---------------------------------------------------------------------------
+
+console.log('\n=== 工具参数校验与自主纠错(validateRequiredArgs) ===')
+
+/** 复刻生产 write_file 的 schema(与 tools.ts 一致) */
+const writeFileTool: AgentTool = {
+  name: 'write_file',
+  description: '写入本机文件',
+  parameters: {
+    type: 'object',
+    properties: {
+      path: { type: 'string', description: '文件绝对路径' },
+      content: { type: 'string', description: '要写入的完整内容' },
+    },
+    required: ['path', 'content'],
+  },
+  async execute() {
+    return 'ok'
+  },
+}
+
+await test('write_file 空参数 → 错误文本列出缺失参数名+类型+说明', () => {
+  const err = validateRequiredArgs(writeFileTool, {})
+  assert(err !== null, '空参数应校验失败')
+  assert(err.includes('write_file'), '错误应含工具名')
+  assert(err.includes('"path"') && err.includes('"content"'), '应列出两个缺失参数')
+  assert(err.includes('文件绝对路径') && err.includes('要写入的完整内容'), '应带参数说明(LLM 可据此自纠)')
+  assert(!err.includes('_raw'), '无解析失败原文时不应有 _raw 段')
+})
+
+await test('write_file 完整参数 → 校验通过', () => {
+  const err = validateRequiredArgs(writeFileTool, { path: 'C:\\a.txt', content: '内容' })
+  assert(err === null, '完整参数应通过')
+})
+
+await test('空字符串参数视为缺失(值存在但为空)', () => {
+  const err = validateRequiredArgs(writeFileTool, { path: '', content: 'x' })
+  assert(err !== null && err.includes('"path"') && !err.includes('"content"'), '仅缺 path')
+})
+
+await test('数值 0 / 布尔 false 是合法值(不误判缺失)', () => {
+  const tool: AgentTool = {
+    name: 't',
+    description: 'd',
+    parameters: { type: 'object', properties: { n: { type: 'number' }, b: { type: 'boolean' } }, required: ['n', 'b'] },
+    async execute() {
+      return 'ok'
+    },
+  }
+  assert(validateRequiredArgs(tool, { n: 0, b: false }) === null, '0 与 false 不应判缺失')
+})
+
+await test('无 required 的工具(list_dir 等)不校验', () => {
+  const tool: AgentTool = {
+    name: 'list_dir',
+    description: 'd',
+    parameters: { type: 'object', properties: { path: { type: 'string' } }, required: [] },
+    async execute() {
+      return 'ok'
+    },
+  }
+  assert(validateRequiredArgs(tool, {}) === null, '空参数也通过(参数全可选)')
+})
+
+await test('解析失败原文(_raw)附带在错误文本里', () => {
+  const err = validateRequiredArgs(writeFileTool, { _raw: '{"path": broken' })
+  assert(err !== null && err.includes('无法解析为 JSON') && err.includes('{"path": broken'), '应附原始参数')
+})
+
+await test('enum 参数缺失时错误文本带可选值', () => {
+  const tool: AgentTool = {
+    name: 'bili',
+    description: 'd',
+    parameters: {
+      type: 'object',
+      properties: { action: { type: 'string', enum: ['search', 'open'], description: '操作' } },
+      required: ['action'],
+    },
+    async execute() {
+      return 'ok'
+    },
+  }
+  const err = validateRequiredArgs(tool, {})
+  assert(err !== null && err.includes('search/open'), '应列出 enum 可选值')
+})
+
+// ---------------------------------------------------------------------------
+// Responses SSE 工具参数累积(streamResponse + mock fetch,2026-08-08 回归:
+// delta 按 output_index 匹配 / function_call_arguments.done 权威参数)
+// ---------------------------------------------------------------------------
+
+console.log('\n=== Responses SSE 工具参数累积(streamResponse) ===')
+
+/** 构造 SSE 响应体(mock fetch 用) */
+function sseResponse(frames: Array<Record<string, unknown>>): Response {
+  const text = frames.map((f) => `data: ${JSON.stringify(f)}\n\n`).join('')
+  return new Response(new Blob([text]), { status: 200 })
+}
+
+const mockConfig = {
+  apiKey: 'test-key',
+  baseURL: 'https://api.deepseek.com',
+  model: 'deepseek-v4-flash',
+  systemPrompt: '',
+  reasoningEffort: 'high',
+  mcpServers: [],
+  skillsDirs: [],
+}
+
+await test('delta 按 output_index 匹配累积(不带 call_id)+ done 权威参数', async () => {
+  const origFetch = globalThis.fetch
+  let capturedBody = ''
+  globalThis.fetch = async (_url: string | URL | Request, opts?: RequestInit) => {
+    capturedBody = String(opts?.body ?? '')
+    const frames = [
+      { type: 'response.created', response: { id: 'r1' } },
+      // output_item.added:call_id 与 item.id / output_index 都记录
+      {
+        type: 'response.output_item.added',
+        output_index: 2,
+        item: { type: 'function_call', id: 'item_1', call_id: 'call_1', name: 'write_file', arguments: '' },
+      },
+      // 实测 delta 事件不带 call_id,只有 output_index(2026-08-08)
+      { type: 'response.function_call_arguments.delta', output_index: 2, delta: '{"pa' },
+      { type: 'response.function_call_arguments.delta', output_index: 2, delta: 'th": "C:\\\\a.txt", "content": "你好"}' },
+      // 权威完整参数(item_id 匹配)
+      {
+        type: 'response.function_call_arguments.done',
+        item_id: 'item_1',
+        arguments: '{"path": "C:\\\\a.txt", "content": "你好"}',
+      },
+      // output_item.done 不带 arguments(旧兜底路径失效时也不丢参数)
+      {
+        type: 'response.output_item.done',
+        output_index: 2,
+        item: { type: 'function_call', id: 'item_1', call_id: 'call_1', name: 'write_file' },
+      },
+      { type: 'response.completed', response: { usage: { input_tokens: 10, output_tokens: 5 } } },
+    ]
+    return sseResponse(frames)
+  }
+  try {
+    const partials: string[] = []
+    const finals: string[] = []
+    const outcome = await streamResponse({
+      config: mockConfig,
+      system: 's',
+      history: [],
+      tools: [writeFileTool],
+      signal: new AbortController().signal,
+      onEvent: (e) => {
+        if (e.type === 'tool-partial-call') partials.push(e.args)
+        if (e.type === 'tool-call') finals.push(e.args)
+      },
+    })
+    assert(outcome.calls.length === 1, `应有 1 个调用,实际 ${outcome.calls.length}`)
+    assert(outcome.calls[0].name === 'write_file', '工具名应为 write_file')
+    assert(outcome.calls[0].args === '{"path": "C:\\\\a.txt", "content": "你好"}', `权威参数应完整,实际 ${outcome.calls[0].args}`)
+    assert(partials.length >= 2 && partials[1]?.includes('你好'), `流式增量应按 output_index 累积,实际 ${partials.length} 条`)
+    assert(finals.length >= 2 && finals[finals.length - 1] === outcome.calls[0].args, '最终 tool-call 事件应为完整参数')
+    const body = JSON.parse(capturedBody) as Record<string, unknown>
+    assert(body.max_output_tokens === 4096, '不传 maxOutputTokens 时缺省 4096')
+  } finally {
+    globalThis.fetch = origFetch
+  }
+})
+
+await test('仅 output_item.done 带完整参数(无 delta/done 事件)→ 参数不丢', async () => {
+  const origFetch = globalThis.fetch
+  globalThis.fetch = async () =>
+    sseResponse([
+      { type: 'response.created', response: { id: 'r2' } },
+      {
+        type: 'response.output_item.added',
+        output_index: 0,
+        item: { type: 'function_call', id: 'item_1', call_id: 'call_1', name: 'write_file', arguments: '' },
+      },
+      {
+        type: 'response.output_item.done',
+        output_index: 0,
+        item: {
+          type: 'function_call',
+          id: 'item_1',
+          call_id: 'call_1',
+          name: 'write_file',
+          arguments: '{"path": "C:\\\\a.txt", "content": "x"}',
+        },
+      },
+      { type: 'response.completed', response: { usage: { input_tokens: 1, output_tokens: 1 } } },
+    ])
+  try {
+    const outcome = await streamResponse({
+      config: mockConfig,
+      system: 's',
+      history: [],
+      tools: [writeFileTool],
+      signal: new AbortController().signal,
+      onEvent: () => {},
+    })
+    assert(outcome.calls[0]?.args === '{"path": "C:\\\\a.txt", "content": "x"}', 'output_item.done 参数应生效')
+  } finally {
+    globalThis.fetch = origFetch
+  }
+})
+
+await test('maxOutputTokens 覆盖传入请求体(任意值透传)', async () => {
+  const origFetch = globalThis.fetch
+  let captured = ''
+  globalThis.fetch = async (_url: string | URL | Request, opts?: RequestInit) => {
+    captured = String(opts?.body ?? '')
+    return sseResponse([{ type: 'response.completed', response: { usage: { input_tokens: 1, output_tokens: 1 } } }])
+  }
+  try {
+    await streamResponse({
+      config: mockConfig,
+      system: 's',
+      history: [],
+      tools: [],
+      signal: new AbortController().signal,
+      onEvent: () => {},
+      maxOutputTokens: 8192,
+    })
+    const body = JSON.parse(captured) as Record<string, unknown>
+    assert(body.max_output_tokens === 8192, `应传 8192,实际 ${String(body.max_output_tokens)}`)
+  } finally {
+    globalThis.fetch = origFetch
+  }
 })
 
 // ---------------------------------------------------------------------------

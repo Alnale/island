@@ -2,22 +2,51 @@
  * Electron 桌面预加载脚本暴露的桌面 API。
  * 由 electron/preload.cjs 注入,Web 演示环境(纯浏览器)不存在,访问时可选链。
  */
+/** Agent 配置(与 src/agent/types.ts 的 AgentConfig 同构;desktop.d.ts
+ * 自包含,不跨层 import——审计 P2 #5 抽具名类型供读写共用) */
+type IslandAgentConfig = {
+  apiKey: string
+  baseURL: string
+  model: string
+  systemPrompt: string
+  reasoningEffort: string
+  mcpServers: Array<{
+    name: string
+    command: string
+    type?: 'stdio' | 'sse'
+    args?: string[]
+    env?: Record<string, string>
+    url?: string
+    headers?: Record<string, string>
+  }>
+  skillsDirs: string[]
+  excludedSkills: string[]
+  excludedTools: string[]
+  /** exec_command 确认门开关(main 实际返回,补全类型,审计 P1-2) */
+  confirmExec?: boolean
+  /** 主动陪伴开关(main 默认 true;2026-08-07) */
+  proactiveEnabled: boolean
+  /** 主动陪伴间隔数值(main 默认 60,钳制 5–480;2026-08-07) */
+  proactiveInterval: number
+  /** 主动陪伴间隔单位(s=秒 / m=分钟 / h=小时;main 默认 m) */
+  proactiveIntervalUnit: 's' | 'm' | 'h'
+  /** 总结标题文风(Sub Agent 设置:预设 id 或自定义 ≤100 字) */
+  summaryStyle: string
+  /** 心理揣测人格(Sub Agent 设置:预设 id 或自定义 ≤100 字) */
+  mindPersona: string
+}
+
 interface DesktopApi {
   /** 鼠标进入/离开灵动岛交互区:通知主进程开关"点击穿透"(挂件核心体验) */
   pointer(active: boolean): void
-  /** 隐藏挂件窗口(托盘可恢复) */
-  hide(): void
-  /** 退出应用 */
-  quit(): void
-  /** 置顶开关 */
-  setAlwaysOnTop(on: boolean): void
-  /** 托盘菜单"设置":订阅回调(渲染端在岛内展开设置视图) */
-  onOpenSettings(callback: () => void): void
-  /** 初次安装引导:订阅回调(渲染端在岛内展开帮助手册) */
-  onOpenHelp(callback: () => void): void
-  /** 调整窗口高度(背景编辑器视图需要更高空间) */
-  setWindowHeight(height: number): void
-  /** 调整窗口尺寸(Agent 面板缩放需要宽度;高度用于高空间视图) */
+  /** 托盘菜单"设置":订阅回调(渲染端在岛内展开设置视图);返回取消订阅函数 */
+  onOpenSettings(callback: () => void): () => void
+  /** 初次安装引导:订阅回调(渲染端在岛内展开帮助手册);返回取消订阅函数 */
+  onOpenHelp(callback: () => void): () => void
+  /** 打开外部链接(http/https 经主进程校验后 shell.openExternal) */
+  openExternal(url: string): void
+  /** 调整窗口尺寸(Agent 面板缩放需要宽度;高度用于高空间视图;
+   * 死通道 hide/quit/setAlwaysOnTop/setWindowHeight 已删,审计 P2-1) */
   setWindowSize(width: number, height: number): void
   /** 右键长按拖拽移动挂件:开始(记录基准位置) */
   dragStart(screenX: number, screenY: number): void
@@ -29,29 +58,13 @@ interface DesktopApi {
   agentSend(text: string, history: unknown[]): void
   /** Agent:中止当前轮 */
   agentAbort(): void
+  /** Agent:exec_command 确认门回执(用户允许/拒绝) */
+  agentConfirmTool(approved: boolean): void
   /** Agent:订阅引擎事件流(状态/文本增量/工具调用/工具结果/消息落定);
    * 返回取消订阅函数(effect cleanup 用) */
   onAgentEvent(callback: (event: unknown) => void): () => void
   /** Agent:读取配置(API Key / Base URL / 模型 / 系统提示词 / MCP / 技能目录) */
-  agentGetConfig(): Promise<{
-    apiKey: string
-    baseURL: string
-    model: string
-    systemPrompt: string
-    reasoningEffort: string
-    mcpServers: Array<{
-      name: string
-      command: string
-      type?: 'stdio' | 'sse'
-      args?: string[]
-      env?: Record<string, string>
-      url?: string
-      headers?: Record<string, string>
-    }>
-    skillsDirs: string[]
-    excludedSkills: string[]
-    excludedTools: string[]
-  }>
+  agentGetConfig(): Promise<IslandAgentConfig>
   /** Agent:写入配置(增量补丁) */
   agentSetConfig(
     patch: Partial<
@@ -71,11 +84,25 @@ interface DesktopApi {
         skillsDirs?: string[]
         excludedSkills?: string[]
         excludedTools?: string[]
+        confirmExec?: boolean
+        proactiveEnabled?: boolean
+        proactiveInterval?: number
+        proactiveIntervalUnit?: 's' | 'm' | 'h'
+        summaryStyle?: string
+        mindPersona?: string
       }
     >,
-  ): Promise<unknown>
-  /** Agent:工具清单(名称/描述/参数 schema,UI 展示用;含 MCP/技能) */
-  agentGetTools(): Promise<Array<{ name: string; description: string; parameters: unknown }>>
+  ): Promise<IslandAgentConfig>
+  /** Agent:工具清单(名称/描述/参数 schema,UI 展示用;含 MCP/技能;
+   * sourceKind = 技能来源分区,审计 P1-2 补全) */
+  agentGetTools(): Promise<
+    Array<{
+      name: string
+      description: string
+      parameters: { type: 'object'; properties: Record<string, unknown>; required?: string[] }
+      sourceKind?: 'created' | 'imported' | 'scanned'
+    }>
+  >
   /** Agent:测试 MCP 服务连通性(独立连接 → 列工具 → 销毁) */
   agentTestMcp(server: {
     name: string
@@ -104,10 +131,10 @@ interface DesktopApi {
   agentEvolve(focus?: string): Promise<{ started: boolean; message: string }>
   /** Agent:自我进化日志(version = 候选版本号) */
   agentEvolutionLog(): Promise<Array<{ at: number; version: number; before: number; after: number; applied: boolean; summary: string; changes: number }>>
-  /** Agent:回滚到最近一次进化前快照 */
-  agentEvolutionRollback(): Promise<string>
-  /** Agent:清除全部进化版本(回到初始状态) */
-  agentEvolutionReset(): Promise<string>
+  /** Agent:回滚到最近一次进化前快照(失败返回 {error},safeHandle 统一) */
+  agentEvolutionRollback(): Promise<string | { error: string }>
+  /** Agent:清除全部进化版本(回到初始状态)(失败返回 {error}) */
+  agentEvolutionReset(): Promise<string | { error: string }>
   /** Agent:导入技能(选择技能包文件夹或单个 .md 文件) */
   agentSkillImport(): Promise<{
     canceled: boolean
@@ -117,6 +144,11 @@ interface DesktopApi {
   }>
   /** Agent:静默总结对话标题(后台,不打扰用户) */
   agentSummarize(messages: unknown[]): Promise<string>
+  /** Agent:心理揣测(独立 Sub Agent,紧凑态文字区展示) */
+  agentMindGuess(messages: unknown[]): Promise<string>
+  /** Agent:主动陪伴 tick(渲染端调度器触发;{started} 供 in-flight 复位,
+   * reason 'judge-no' 供回退 idle 时钟防高频判断调用) */
+  agentProactiveTick(messages: unknown[], idleMinutes: number): Promise<{ started: boolean; reason?: string }>
   /** 模式切换(托盘右键菜单):订阅回调(payload = 目标模式 + 切换来源;
    * source 'tool' = Agent 工具 switch_to_music 触发的切换) */
   onSetMode(callback: (payload: { mode: 'music' | 'agent'; source: 'user' | 'tool' }) => void): void

@@ -1,0 +1,1100 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DocFlow — DOC/DOCX/PDF 多格式文档转换</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<!-- Loading Overlay -->
+<div class="loading-overlay" id="loadingOverlay">
+  <div class="lo-inner">
+    <!-- Layer 1: Constructivist Grid Foundation -->
+    <div class="lo-grid-system">
+      <div class="lo-grid-h lo-grid-h-1"></div>
+      <div class="lo-grid-h lo-grid-h-2"></div>
+      <div class="lo-grid-h lo-grid-h-3"></div>
+      <div class="lo-grid-v lo-grid-v-1"></div>
+      <div class="lo-grid-v lo-grid-v-2"></div>
+      <div class="lo-grid-v lo-grid-v-3"></div>
+      <div class="lo-grid-v lo-grid-v-4"></div>
+    </div>
+
+    <!-- Layer 2: Brutalist Exposed Structure -->
+    <div class="lo-brutalist">
+      <!-- Primary thick borders -->
+      <div class="lo-edge lo-edge-top"></div>
+      <div class="lo-edge lo-edge-bottom"></div>
+      <div class="lo-edge lo-edge-left"></div>
+      <div class="lo-edge lo-edge-right"></div>
+      <!-- Secondary structural lines -->
+      <div class="lo-edge lo-edge-inner-top"></div>
+      <div class="lo-edge lo-edge-inner-bottom"></div>
+      <div class="lo-edge lo-edge-inner-left"></div>
+      <div class="lo-edge lo-edge-inner-right"></div>
+      <!-- Corner blocks -->
+      <div class="lo-cblock lo-cblock-tl"></div>
+      <div class="lo-cblock lo-cblock-tr"></div>
+      <div class="lo-cblock lo-cblock-bl"></div>
+      <div class="lo-cblock lo-cblock-br"></div>
+      <!-- Tick marks -->
+      <div class="lo-tick lo-tick-top"></div>
+      <div class="lo-tick lo-tick-bottom"></div>
+      <div class="lo-tick lo-tick-left"></div>
+      <div class="lo-tick lo-tick-right"></div>
+      <!-- Measurement annotations -->
+      <div class="lo-measure lo-measure-top">42mm</div>
+      <div class="lo-measure lo-measure-mid">2026</div>
+      <div class="lo-measure lo-measure-bot">96dpi</div>
+      <!-- Version annotation -->
+      <div class="lo-version">V3.1</div>
+      <!-- Hatching patterns -->
+      <div class="lo-hatch lo-hatch-tl"></div>
+      <div class="lo-hatch lo-hatch-br"></div>
+    </div>
+
+    <!-- Layer 3: Deconstructivist Fragments -->
+    <div class="lo-fragments">
+      <div class="lo-frag lo-frag-1"></div>
+      <div class="lo-frag lo-frag-2"></div>
+      <div class="lo-frag lo-frag-3"></div>
+      <div class="lo-frag lo-frag-4"></div>
+      <div class="lo-frag lo-frag-5"></div>
+      <div class="lo-frag lo-frag-6 lo-frag-acc"></div>
+      <div class="lo-frag lo-frag-7 lo-frag-acc"></div>
+      <div class="lo-frag lo-frag-8"></div>
+      <div class="lo-frag lo-frag-9 lo-frag-acc"></div>
+      <div class="lo-frag lo-frag-10"></div>
+      <div class="lo-frag lo-frag-11"></div>
+      <div class="lo-frag lo-frag-12 lo-frag-acc"></div>
+    </div>
+
+    <!-- Layer 4: Constructivist Geometric Composition -->
+    <div class="lo-geo">
+      <div class="lo-circle lo-circle-1"></div>
+      <div class="lo-circle lo-circle-2"></div>
+      <div class="lo-circle lo-circle-3"></div>
+      <div class="lo-tri lo-tri-1"></div>
+      <div class="lo-tri lo-tri-2"></div>
+      <div class="lo-tri lo-tri-3"></div>
+      <div class="lo-rect lo-rect-1"></div>
+      <div class="lo-rect lo-rect-2"></div>
+      <div class="lo-rect lo-rect-3"></div>
+      <div class="lo-rect lo-rect-4"></div>
+    </div>
+
+    <!-- Layer 5: Diagonal Energy Lines -->
+    <div class="lo-diag lo-diag-1"></div>
+    <div class="lo-diag lo-diag-2"></div>
+    <div class="lo-diag lo-diag-3"></div>
+    <div class="lo-diag lo-diag-4"></div>
+
+    <!-- Layer 6: Corner Brackets -->
+    <div class="lo-corner lo-corner-tl"></div>
+    <div class="lo-corner lo-corner-tr"></div>
+    <div class="lo-corner lo-corner-bl"></div>
+    <div class="lo-corner lo-corner-br"></div>
+
+    <!-- Layer 7: Functional Typography -->
+    <div class="lo-deco-text lo-deco-text-1">DOC</div>
+    <div class="lo-deco-text lo-deco-text-2">FLOW</div>
+    <div class="lo-deco-text lo-deco-text-3">PDF</div>
+    <div class="lo-deco-text lo-deco-text-4">CONVERT</div>
+
+    <!-- Layer 8: Cross Marker -->
+    <div class="lo-cross"></div>
+
+    <!-- Layer 9: Dot Matrix -->
+    <div class="lo-dots">
+      <div class="lo-dot"></div><div class="lo-dot"></div><div class="lo-dot"></div>
+      <div class="lo-dot"></div><div class="lo-dot"></div><div class="lo-dot"></div>
+      <div class="lo-dot"></div><div class="lo-dot"></div><div class="lo-dot"></div>
+      <div class="lo-dot"></div><div class="lo-dot"></div><div class="lo-dot"></div>
+    </div>
+
+    <!-- Layer 10: Ruler Marks -->
+    <div class="lo-ruler lo-ruler-top"></div>
+    <div class="lo-ruler lo-ruler-left"></div>
+
+    <!-- Layer 11: Central Title -->
+    <div class="lo-title"><span>D</span><span>o</span><span>c</span><span>F</span><span>l</span><span>o</span><span>w</span></div>
+    <div class="lo-subtitle">DOC/DOCX/PDF 多格式文档转换</div>
+
+    <!-- Layer 12: Deconstructed Progress -->
+    <div class="lo-progress">
+      <div class="lo-pbar"></div>
+      <div class="lo-pbar"></div>
+      <div class="lo-pbar"></div>
+      <div class="lo-pbar"></div>
+      <div class="lo-pbar"></div>
+      <div class="lo-pbar"></div>
+      <div class="lo-pbar"></div>
+      <div class="lo-pbar"></div>
+      <div class="lo-pbar"></div>
+      <div class="lo-pbar"></div>
+      <div class="lo-pbar"></div>
+      <div class="lo-pbar"></div>
+      <div class="lo-pbar"></div>
+      <div class="lo-pbar"></div>
+      <div class="lo-pbar"></div>
+    </div>
+
+    <!-- Layer 13: Status -->
+    <div class="lo-status">loading</div>
+
+    <!-- Layer 14: Snapshot Flash Effect -->
+    <div class="lo-snapshot">
+      <div class="lo-snapshot-flash"></div>
+      <div class="lo-snapshot-iris lo-snapshot-iris-top"></div>
+      <div class="lo-snapshot-iris lo-snapshot-iris-bottom"></div>
+      <div class="lo-snapshot-iris lo-snapshot-iris-left"></div>
+      <div class="lo-snapshot-iris lo-snapshot-iris-right"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════
+     Loading Overlay — Neo-Expressionist
+     ═══════════════════════════════════════════════════════════════ -->
+<div class="loading-overlay-neo" id="loadingOverlayNeo">
+  <div class="neo-inner">
+    <!-- Canvas Grain Texture -->
+    <div class="neo-grain"></div>
+    <!-- Cross-Hatch Texture -->
+    <div class="neo-crosshatch"></div>
+    <!-- Paint Splatters — enhanced -->
+    <div class="neo-splatters">
+      <div class="neo-splatter neo-sp-1"></div>
+      <div class="neo-splatter neo-sp-1 neo-sp-1b"></div>
+      <div class="neo-splatter neo-sp-2"></div>
+      <div class="neo-splatter neo-sp-3"></div>
+      <div class="neo-splatter neo-sp-3 neo-sp-3b"></div>
+      <div class="neo-splatter neo-sp-4"></div>
+      <div class="neo-splatter neo-sp-5"></div>
+      <div class="neo-splatter neo-sp-5 neo-sp-5b"></div>
+    </div>
+    <!-- Ink Blots -->
+    <div class="neo-inkblots">
+      <div class="neo-blot neo-blot-1"></div>
+      <div class="neo-blot neo-blot-2"></div>
+      <div class="neo-blot neo-blot-3"></div>
+    </div>
+    <!-- Brush Strokes -->
+    <div class="neo-strokes">
+      <div class="neo-stroke neo-stroke-1"></div>
+      <div class="neo-stroke neo-stroke-2"></div>
+      <div class="neo-stroke neo-stroke-3"></div>
+      <div class="neo-stroke neo-stroke-4"></div>
+    </div>
+    <!-- Paint Drips -->
+    <div class="neo-drips">
+      <div class="neo-drip neo-drip-1"></div>
+      <div class="neo-drip neo-drip-2"></div>
+      <div class="neo-drip neo-drip-3"></div>
+      <div class="neo-drip neo-drip-4"></div>
+      <div class="neo-drip neo-drip-5"></div>
+      <div class="neo-drip neo-drip-6"></div>
+      <div class="neo-drip neo-drip-7"></div>
+    </div>
+    <!-- Gestural Marks — scribble style -->
+    <div class="neo-marks">
+      <div class="neo-mark neo-mark-x">✕</div>
+      <div class="neo-mark neo-mark-o">○</div>
+      <div class="neo-mark neo-mark-zigzag">⌇</div>
+      <div class="neo-mark neo-mark-arrow">→</div>
+      <div class="neo-mark neo-mark-hatch">⫘</div>
+      <div class="neo-mark neo-mark-scribble">⌾</div>
+    </div>
+    <!-- Energy Waves -->
+    <div class="neo-energy">
+      <div class="neo-wave neo-wave-1"></div>
+      <div class="neo-wave neo-wave-2"></div>
+      <div class="neo-wave neo-wave-3"></div>
+    </div>
+    <!-- Rough Framing -->
+    <div class="neo-frame neo-frame-tl"></div>
+    <div class="neo-frame neo-frame-tr"></div>
+    <div class="neo-frame neo-frame-bl"></div>
+    <div class="neo-frame neo-frame-br"></div>
+    <!-- Raw Text -->
+    <div class="neo-text-raw neo-text-1">DOC</div>
+    <div class="neo-text-raw neo-text-2">FLOW</div>
+    <div class="neo-text-raw neo-text-3">PDF</div>
+    <div class="neo-text-raw neo-text-4">CONVERT</div>
+    <!-- Title — Chromatic Aberration + Smear -->
+    <div class="neo-title-wrap">
+      <div class="neo-title neo-title-r" aria-hidden="true"><span>D</span><span>o</span><span>c</span><span>F</span><span>l</span><span>o</span><span>w</span></div>
+      <div class="neo-title neo-title-g" aria-hidden="true"><span>D</span><span>o</span><span>c</span><span>F</span><span>l</span><span>o</span><span>w</span></div>
+      <div class="neo-title"><span>D</span><span>o</span><span>c</span><span>F</span><span>l</span><span>o</span><span>w</span></div>
+      <div class="neo-smear-line"></div>
+    </div>
+    <div class="neo-subtitle">DOC/DOCX/PDF 多格式文档转换</div>
+    <!-- Brush Progress Bar -->
+    <div class="neo-progress">
+      <div class="neo-pbar"></div>
+      <div class="neo-pbar"></div>
+      <div class="neo-pbar"></div>
+      <div class="neo-pbar"></div>
+      <div class="neo-pbar"></div>
+    </div>
+    <!-- Status -->
+    <div class="neo-status">loading</div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════
+     Loading Overlay — Maximalist
+     ═══════════════════════════════════════════════════════════════ -->
+<div class="loading-overlay-max" id="loadingOverlayMax">
+  <div class="max-inner">
+    <!-- Radial Gradient Burst -->
+    <div class="max-burst"></div>
+    <!-- Brocade Pattern -->
+    <div class="max-brocade"></div>
+    <!-- Concentric Frames -->
+    <div class="max-frames">
+      <div class="max-frame max-frame-1"></div>
+      <div class="max-frame max-frame-2"></div>
+      <div class="max-frame max-frame-3"></div>
+    </div>
+    <!-- Corner Flourishes -->
+    <div class="max-flourish max-fl-tl"></div>
+    <div class="max-flourish max-fl-tr"></div>
+    <div class="max-flourish max-fl-bl"></div>
+    <div class="max-flourish max-fl-br"></div>
+    <!-- Guilloche Circles -->
+    <div class="max-guilloche max-gc-1"></div>
+    <div class="max-guilloche max-gc-2"></div>
+    <div class="max-guilloche max-gc-3"></div>
+    <!-- Star Medallions -->
+    <div class="max-medallion max-med-1">✦</div>
+    <div class="max-medallion max-med-2">✧</div>
+    <div class="max-medallion max-med-3">✦</div>
+    <div class="max-medallion max-med-4">✧</div>
+    <!-- Decorative Borders -->
+    <div class="max-border max-border-top"></div>
+    <div class="max-border max-border-bottom"></div>
+    <div class="max-border max-border-left"></div>
+    <div class="max-border max-border-right"></div>
+    <!-- Jeweled Accent Lines -->
+    <div class="max-jewel-line max-jl-1"></div>
+    <div class="max-jewel-line max-jl-2"></div>
+    <!-- Ornate Title -->
+    <div class="max-title-wrap">
+      <div class="max-title-ornament max-ornament-l">❖</div>
+      <div class="max-title"><span>D</span><span>o</span><span>c</span><span>F</span><span>l</span><span>o</span><span>w</span></div>
+      <div class="max-title-ornament max-ornament-r">❖</div>
+    </div>
+    <div class="max-subtitle">DOC/DOCX/PDF 多格式文档转换</div>
+    <!-- Ornate Progress Bar -->
+    <div class="max-progress">
+      <div class="max-pbar"></div>
+      <div class="max-pbar"></div>
+      <div class="max-pbar"></div>
+      <div class="max-pbar"></div>
+      <div class="max-pbar"></div>
+      <div class="max-pbar"></div>
+    </div>
+    <!-- Status -->
+    <div class="max-status">loading</div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════
+     Loading Overlay — Neo-Brutalist
+     ═══════════════════════════════════════════════════════════════ -->
+<div class="loading-overlay-brut" id="loadingOverlayBrut">
+  <div class="brut-inner">
+    <!-- Raw Grid -->
+    <div class="brut-grid">
+      <div class="brut-grid-h"></div>
+      <div class="brut-grid-h"></div>
+      <div class="brut-grid-h"></div>
+      <div class="brut-grid-h"></div>
+      <div class="brut-grid-v"></div>
+      <div class="brut-grid-v"></div>
+      <div class="brut-grid-v"></div>
+      <div class="brut-grid-v"></div>
+    </div>
+    <!-- Heavy Borders -->
+    <div class="brut-border brut-border-t"></div>
+    <div class="brut-border brut-border-b"></div>
+    <div class="brut-border brut-border-l"></div>
+    <div class="brut-border brut-border-r"></div>
+    <!-- Raw Blocks -->
+    <div class="brut-blocks">
+      <div class="brut-block brut-blk-1"></div>
+      <div class="brut-block brut-blk-2"></div>
+      <div class="brut-block brut-blk-3"></div>
+      <div class="brut-block brut-blk-4"></div>
+      <div class="brut-block brut-blk-5"></div>
+    </div>
+    <!-- Exposed Bolts -->
+    <div class="brut-bolt brut-bolt-tl">●</div>
+    <div class="brut-bolt brut-bolt-tr">●</div>
+    <div class="brut-bolt brut-bolt-bl">●</div>
+    <div class="brut-bolt brut-bolt-br">●</div>
+    <!-- Corner Brackets -->
+    <div class="brut-bracket brut-br-tl"></div>
+    <div class="brut-bracket brut-br-tr"></div>
+    <div class="brut-bracket brut-br-bl"></div>
+    <div class="brut-bracket brut-br-br"></div>
+    <!-- Hazard Stripes -->
+    <div class="brut-stripe brut-stripe-top"></div>
+    <div class="brut-stripe brut-stripe-bottom"></div>
+    <!-- Industrial Text -->
+    <div class="brut-label brut-label-1">DOC</div>
+    <div class="brut-label brut-label-2">FLOW</div>
+    <div class="brut-label brut-label-3">PDF</div>
+    <div class="brut-label brut-label-4">CONVERT</div>
+    <!-- Measurement Ticks -->
+    <div class="brut-ticks">
+      <div class="brut-tick"></div>
+      <div class="brut-tick"></div>
+      <div class="brut-tick"></div>
+      <div class="brut-tick"></div>
+      <div class="brut-tick"></div>
+      <div class="brut-tick"></div>
+    </div>
+    <!-- Title — Hard Slam -->
+    <div class="brut-title"><span>D</span><span>o</span><span>c</span><span>F</span><span>l</span><span>o</span><span>w</span></div>
+    <div class="brut-subtitle">DOC/DOCX/PDF 多格式文档转换</div>
+    <!-- Block Progress Bar -->
+    <div class="brut-progress">
+      <div class="brut-pbar"></div>
+      <div class="brut-pbar"></div>
+      <div class="brut-pbar"></div>
+      <div class="brut-pbar"></div>
+      <div class="brut-pbar"></div>
+      <div class="brut-pbar"></div>
+      <div class="brut-pbar"></div>
+    </div>
+    <!-- Status -->
+    <div class="brut-status">loading</div>
+    <!-- Hard Flash -->
+    <div class="brut-flash"></div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════
+     Loading Overlay — Bauhaus
+     ═══════════════════════════════════════════════════════════════ -->
+<div class="loading-overlay-bau" id="loadingOverlayBau">
+  <div class="bau-inner">
+    <!-- Geometric Composition -->
+    <div class="bau-geo">
+      <div class="bau-circle bau-c1"></div>
+      <div class="bau-circle bau-c2"></div>
+      <div class="bau-circle bau-c3"></div>
+      <div class="bau-triangle bau-t1"></div>
+      <div class="bau-triangle bau-t2"></div>
+      <div class="bau-square bau-s1"></div>
+      <div class="bau-square bau-s2"></div>
+      <div class="bau-square bau-s3"></div>
+    </div>
+    <!-- Structural Lines -->
+    <div class="bau-line bau-line-h1"></div>
+    <div class="bau-line bau-line-h2"></div>
+    <div class="bau-line bau-line-v1"></div>
+    <div class="bau-line bau-line-v2"></div>
+    <div class="bau-line bau-line-v3"></div>
+    <!-- Asymmetric Bars -->
+    <div class="bau-bar bau-bar-1"></div>
+    <div class="bau-bar bau-bar-2"></div>
+    <div class="bau-bar bau-bar-3"></div>
+    <!-- Corner Squares -->
+    <div class="bau-corner bau-corner-tl"></div>
+    <div class="bau-corner bau-corner-tr"></div>
+    <div class="bau-corner bau-corner-bl"></div>
+    <div class="bau-corner bau-corner-br"></div>
+    <!-- Diagonal Accent -->
+    <div class="bau-diag"></div>
+    <!-- Title -->
+    <div class="bau-title"><span>D</span><span>o</span><span>c</span><span>F</span><span>l</span><span>o</span><span>w</span></div>
+    <div class="bau-subtitle">DOC/DOCX/PDF 多格式文档转换</div>
+    <!-- Geometric Progress -->
+    <div class="bau-progress">
+      <div class="bau-pbar"></div>
+      <div class="bau-pbar"></div>
+      <div class="bau-pbar"></div>
+      <div class="bau-pbar"></div>
+      <div class="bau-pbar"></div>
+    </div>
+    <!-- Status -->
+    <div class="bau-status">loading</div>
+  </div>
+</div>
+
+<div class="app">
+  <!-- Topbar -->
+  <header class="topbar">
+    <div class="topbar-brand">
+      <!-- Deconstructivist mark -->
+      <div class="brand-mark">
+        <div class="brand-doc"></div>
+        <div class="brand-fold"></div>
+        <div class="brand-frag brand-frag-1"></div>
+        <div class="brand-frag brand-frag-2"></div>
+        <div class="brand-dot"></div>
+      </div>
+      <!-- Corner brackets -->
+      <div class="brand-corners"></div>
+      <!-- Text -->
+      <span class="brand-text">DocFlow</span>
+      <!-- Annotation -->
+      <span class="brand-anno">V3.1</span>
+      <!-- Fragment bar -->
+      <div class="brand-bar"></div>
+      <!-- Help button — absolutely positioned, outside flex flow -->
+      <button class="help-btn" onclick="openHelp()" title="帮助">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+      </button>
+      <button class="settings-btn" id="settingsBtn" title="设置">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+      </button>
+    </div>
+    <div class="topbar-center">
+      <div class="mode-switcher" id="modeSwitcher" data-mode="doc_to_pdf">
+        <button class="mode-btn active" data-mode="doc_to_pdf" onclick="switchMode('doc_to_pdf')">DOC → PDF</button>
+        <button class="mode-btn" data-mode="pdf_to_docx" onclick="switchMode('pdf_to_docx')">PDF → DOCX</button>
+        <button class="mode-btn" data-mode="to_markdown" onclick="switchMode('to_markdown')">→ Markdown</button>
+        <div class="mode-slider"></div>
+      </div>
+      <!-- Music Player -->
+      <div class="music-player" id="musicPlayer">
+      <button class="music-toggle" id="musicToggle" title="音乐播放器">
+        <span class="mu-tl"></span><span class="mu-tr"></span><span class="mu-bl"></span><span class="mu-br"></span>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+      </button>
+      <div class="music-mini" id="musicMini">
+        <span class="mu-corner mu-corner-tl"></span><span class="mu-corner mu-corner-tr"></span>
+        <span class="mu-corner mu-corner-bl"></span><span class="mu-corner mu-corner-br"></span>
+        <span class="music-track-name" id="musicTrackName"></span>
+        <div class="music-progress-wrap" id="musicProgressWrap">
+          <div class="music-progress-bar"><div class="music-progress-fill" id="musicProgressFill"></div></div>
+        </div>
+        <span class="music-time" id="musicTime">0:00</span>
+        <button class="music-ctrl-btn" id="musicPrev" title="上一首">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="19 20 9 12 19 4 19 20"/><line x1="5" y1="19" x2="5" y2="5" stroke="currentColor" stroke-width="2"/></svg>
+        </button>
+        <button class="music-ctrl-btn music-play-btn" id="musicPlayPause" title="播放/暂停">
+          <svg class="music-play-icon" width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><polygon points="6 3 20 12 6 21 6 3"/></svg>
+          <svg class="music-pause-icon" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="display:none"><rect x="5" y="3" width="4" height="18"/><rect x="15" y="3" width="4" height="18"/></svg>
+        </button>
+        <button class="music-ctrl-btn" id="musicNext" title="下一首">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 4 15 12 5 20 5 4"/><line x1="19" y1="5" x2="19" y2="19" stroke="currentColor" stroke-width="2"/></svg>
+        </button>
+        <button class="music-ctrl-btn music-mode-btn" id="musicModeBtn" title="列表循环">
+          <svg class="music-mode-loop" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>
+          <svg class="music-mode-shuffle" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/><line x1="4" y1="4" x2="9" y2="9"/></svg>
+          <svg class="music-mode-single" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/><text x="12" y="14" text-anchor="middle" font-size="8" fill="currentColor" stroke="none" font-weight="bold">1</text></svg>
+        </button>
+        <button class="music-ctrl-btn music-expand-btn" id="musicExpand" title="展开播放列表">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="6 9 12 15 18 9"/></svg>
+        </button>
+      </div>
+      <div class="music-playlist" id="musicPlaylist">
+        <div class="music-playlist-header">
+          <span class="music-playlist-accent"></span>
+          <span class="music-playlist-ornament-l"></span>
+          <span class="music-playlist-ornament-r"></span>
+          <span class="music-playlist-title">播放列表</span>
+          <span class="music-playlist-count" id="musicPlaylistCount">0 首</span>
+        </div>
+        <div class="music-playlist-list" id="musicPlaylistList"></div>
+      </div>
+    </div>
+    </div>
+    <nav class="topbar-nav" id="topbarNav">
+      <button class="active" data-view="convert">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+        转换
+      </button>
+      <button data-view="history">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+        历史
+      </button>
+      <div class="nav-refraction" id="navRefraction"></div>
+    </nav>
+  </header>
+
+  <!-- Sidebar -->
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <div class="deco-label deco-label-left" style="opacity:0.06">HIST</div>
+      <h3>历史记录</h3>
+      <div style="display:flex;gap:8px;align-items:center">
+        <button class="btn-ghost sidebar-clear-btn" onclick="clearAllHistory()">清除全部</button>
+        <span class="count" id="historyCount">0</span>
+      </div>
+    </div>
+    <div class="sidebar-search">
+      <input type="text" placeholder="搜索文件..." id="historySearch">
+    </div>
+    <div class="sidebar-list" id="historyList">
+      <!-- Populated by JS -->
+    </div>
+  </aside>
+
+  <!-- Main -->
+  <main class="main">
+    <!-- Convert View -->
+    <div class="view-container" id="convertView">
+      <!-- Upload Zone (shown when no files in queue) -->
+      <div class="upload-zone" id="uploadZone">
+        <div class="upload-area" id="uploadArea" onclick="document.getElementById('fileInput').click()">
+          <div class="upload-deco-corners"></div>
+          <div class="upload-deco-line-top"></div>
+          <div class="upload-deco-label">UPLOAD</div>
+          <div class="upload-icon">
+            <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+              <polyline points="14 2 14 8 20 8"/>
+              <line x1="12" y1="18" x2="12" y2="12"/>
+              <polyline points="9 15 12 12 15 15"/>
+            </svg>
+          </div>
+          <h2 class="upload-title">拖放 DOC/DOCX 文件到此处</h2>
+          <p class="upload-subtitle">转换为 PDF — 支持批量转换</p>
+          <button class="upload-btn" onclick="event.stopPropagation();document.getElementById('fileInput').click()">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+            选择文件
+          </button>
+          <div class="upload-formats" id="uploadFormats" style="display:none"></div>
+        </div>
+      </div>
+
+      <!-- File Queue (shown when files are added) -->
+      <div class="file-queue" id="fileQueue">
+        <div class="queue-header" style="position:relative">
+          <h3>转换队列 <span id="queueCount" style="color:var(--muted);font-weight:400;font-size:12px"></span></h3>
+          <div class="deco-frag deco-frag-sm" style="position:absolute;top:50%;right:12px;transform:translateY(-50%) rotate(-5deg)"></div>
+          <div class="queue-actions">
+            <button class="btn-ghost" onclick="document.getElementById('fileInput').click()">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+              添加文件
+            </button>
+            <button class="btn-ghost" onclick="clearQueue()">全部清除</button>
+            <button class="btn-ghost" id="downloadAllBtn" onclick="downloadAll()" style="display:none">全部下载</button>
+            <button class="btn-primary" id="convertAllBtn" onclick="convertAll()">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+              全部转换
+            </button>
+          </div>
+        </div>
+        <div class="queue-list" id="queueList">
+          <!-- Populated by JS -->
+        </div>
+        <div class="stats-bar">
+          <div class="stat-item">
+            <div class="stat-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+            </div>
+            <div>
+              <div class="stat-label">文件</div>
+              <span class="stat-value" id="statFiles">0</span>
+            </div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            </div>
+            <div>
+              <div class="stat-label">总计</div>
+              <span class="stat-value" id="statSize">0 KB</span>
+            </div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+            </div>
+            <div>
+              <div class="stat-label">已转换</div>
+              <span class="stat-value" id="statConverted">0</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- History View -->
+    <div class="view-container hidden" id="historyView">
+      <div class="history-toolbar">
+        <div class="deco-label" style="top:4px;right:auto;left:24px;font-size:7px;letter-spacing:2px">TRANSFORM</div>
+        <h2>转换历史 <span class="ht-count" id="historyTitleCount">0</span></h2>
+        <div class="history-toolbar-right">
+          <div class="history-search">
+            <input type="text" placeholder="搜索文件名..." id="historyPageSearch">
+            <button class="search-clear" id="historySearchClear" onclick="clearHistorySearch()">
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            </button>
+          </div>
+          <button class="btn-ghost" id="stackToggleBtn" onclick="toggleHistoryStack()" style="font-size:12.5px;font-weight:500;display:flex;align-items:center;gap:6px">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="6" rx="2"/><rect x="2" y="15" width="20" height="6" rx="2"/></svg>
+            <span id="stackToggleText">堆叠</span>
+          </button>
+          <button class="btn-ghost" id="historyPageClearBtn" onclick="clearAllHistory()" style="font-size:12.5px;font-weight:500">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+            清除全部
+          </button>
+          <button class="btn-primary toolbar-download-btn hidden" id="historyToolbarDownloadBtn" style="display:none;font-size:12px;padding:5px 12px;gap:5px">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            下载
+          </button>
+        </div>
+      </div>
+      <div class="history-filters" id="historyFilters">
+        <button class="history-filter-btn active" data-filter="all" onclick="filterHistory('all')">
+          全部 <span class="filter-count" id="filterCountAll">0</span>
+        </button>
+        <button class="history-filter-btn" data-filter="done" onclick="filterHistory('done')">
+          已完成 <span class="filter-count" id="filterCountDone">0</span>
+        </button>
+        <button class="history-filter-btn" data-filter="error" onclick="filterHistory('error')">
+          失败 <span class="filter-count" id="filterCountError">0</span>
+        </button>
+      </div>
+
+      <div class="history-list" id="historyPageList">
+        <!-- Populated by JS -->
+      </div>
+    </div>
+
+    <!-- Center Preview View -->
+    <div class="view-container hidden" id="previewView">
+      <div class="preview-view-toolbar">
+        <button class="btn-ghost" onclick="goBackFromPreview()" style="display:flex;align-items:center;gap:4px;font-size:13px">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+          返回
+        </button>
+        <button class="btn-ghost preview-nav-btn" id="previewNavPrev" onclick="previewNavPrev()" disabled style="display:flex;align-items:center;padding:4px 6px">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+        </button>
+        <span id="previewViewName" style="font-weight:600;font-size:14px"></span>
+        <span class="badge" id="previewViewBadge">PDF</span>
+        <button class="btn-ghost preview-nav-btn" id="previewNavNext" onclick="previewNavNext()" disabled style="display:flex;align-items:center;padding:4px 6px">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+        </button>
+        <div class="toolbar-spacer"></div>
+        <button class="btn-primary toolbar-download-btn hidden" id="toolbarDownloadBtn" style="display:none;font-size:12px;padding:5px 12px;gap:5px">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          下载
+        </button>
+      </div>
+      <div class="preview-view-body">
+        <div class="preview-view-content" id="previewViewThumb"></div>
+        <div class="preview-view-sidebar" id="previewViewSidebar">
+          <div class="sidebar-inner">
+            <div id="previewViewMeta"></div>
+            <div id="previewViewActions"></div>
+          </div>
+          <button class="sidebar-collapse-btn" id="sidebarCollapseBtn" onclick="toggleSidebarCollapse()" title="收起信息栏">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+          </button>
+        </div>
+        <button class="sidebar-expand-btn hidden" id="sidebarExpandBtn" onclick="toggleSidebarCollapse()" title="展开信息栏">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+        </button>
+      </div>
+    </div>
+  </main>
+
+  <!-- Right Panel -->
+  <aside class="panel" id="rightPanel">
+    <div class="panel-content" id="panelContent">
+      <!-- History Detail (shown when in history view) -->
+      <div id="historyDetailPanel" style="display:none">
+        <div class="history-detail" id="historyDetailContent">
+          <!-- Populated by JS -->
+        </div>
+      </div>
+      <!-- History placeholder (shown when no history item selected) -->
+      <div id="historyPlaceholder" style="display:none">
+        <div class="history-empty">
+          <div class="empty-icon">
+            <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><line x1="9" y1="3" x2="9" y2="21"/></svg>
+          </div>
+          <h4>选择一条记录查看详情</h4>
+          <p>点击左侧历史列表中的文件，查看转换结果与预览</p>
+        </div>
+      </div>
+      <!-- Settings (shown in convert view) -->
+      <div id="settingsPanel"></div>
+    </div>
+  </aside>
+</div>
+
+<!-- Drag overlay -->
+<div class="drag-overlay" id="dragOverlay">
+  <div class="deco-overlay-corners"></div>
+  <div class="drop-icon">
+    <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
+    </svg>
+  </div>
+  <h3>释放以转换</h3>
+  <p>释放文件以添加到队列</p>
+</div>
+
+<!-- Help Modal - Neo-Expressionist Design -->
+<div class="help-modal-overlay" id="helpModalOverlay" onclick="closeHelp(event)" aria-hidden="true">
+  <div class="help-modal" onclick="event.stopPropagation()" role="dialog" aria-modal="true" aria-labelledby="helpModalTitle">
+    <!-- Neo-Expressionist Background Layers -->
+    <div class="hm-neo-bg">
+      <div class="hm-neo-layer hm-neo-layer-1"></div>
+      <div class="hm-neo-layer hm-neo-layer-2"></div>
+      <div class="hm-neo-layer hm-neo-layer-3"></div>
+    </div>
+    <!-- Raw brush stroke borders -->
+    <div class="hm-stroke hm-stroke-top"></div>
+    <div class="hm-stroke hm-stroke-bottom"></div>
+    <div class="hm-stroke hm-stroke-left"></div>
+    <div class="hm-stroke hm-stroke-right"></div>
+    <!-- Chaotic geometric fragments -->
+    <div class="hm-fragment hm-frag-1"></div>
+    <div class="hm-fragment hm-frag-2"></div>
+    <div class="hm-fragment hm-frag-3"></div>
+    <div class="hm-fragment hm-frag-4"></div>
+    <div class="hm-fragment hm-frag-5"></div>
+    <!-- Aggressive diagonal slashes -->
+    <div class="hm-slash hm-slash-1"></div>
+    <div class="hm-slash hm-slash-2"></div>
+    <!-- Paint splatters -->
+    <div class="hm-splat hm-splat-1"></div>
+    <div class="hm-splat hm-splat-2"></div>
+    <div class="hm-splat hm-splat-3"></div>
+    <!-- Raw text labels -->
+    <span class="hm-raw-label hm-raw-label-tl">HELP</span>
+    <span class="hm-raw-label hm-raw-label-tr">DOC</span>
+    <span class="hm-raw-label hm-raw-label-bl">V3.1</span>
+    <span class="hm-raw-label hm-raw-label-br">INFO</span>
+    <!-- Main content container -->
+    <div class="hm-container">
+      <h2 id="helpModalTitle" class="sr-only">DocFlow 帮助</h2>
+      <!-- Header with mode tabs -->
+      <div class="hm-header-neo">
+        <div class="hm-tabs">
+          <button class="hm-tab active" data-mode="doc_to_pdf" onclick="switchHelpMode('doc_to_pdf')">
+            <span class="hm-tab-icon">DOC→PDF</span>
+          </button>
+          <button class="hm-tab" data-mode="pdf_to_docx" onclick="switchHelpMode('pdf_to_docx')">
+            <span class="hm-tab-icon">PDF→DOCX</span>
+          </button>
+          <button class="hm-tab" data-mode="to_markdown" onclick="switchHelpMode('to_markdown')">
+            <span class="hm-tab-icon">转MD</span>
+          </button>
+        </div>
+        <div class="hm-actions">
+          <button class="hm-tab" data-mode="changelog" onclick="switchHelpMode('changelog')">
+            <span class="hm-tab-icon">更新日志</span>
+          </button>
+          <button class="hm-demo-toggle" onclick="toggleDemoMode()" title="切换演示模式">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polygon points="5 3 19 12 5 21 5 3"></polygon>
+            </svg>
+            <span class="hm-demo-toggle-text">演示</span>
+          </button>
+          <button class="hm-close-neo" onclick="closeHelp()">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="square">
+            <line x1="18" y1="6" x2="6" y2="18"/>
+            <line x1="6" y1="6" x2="18" y2="18"/>
+          </svg>
+        </button>
+        </div>
+      </div>
+      <!-- Content body with markdown -->
+      <div class="hm-body-neo" id="hmBodyNeo">
+        <div class="hm-content-scroll-container">
+          <div class="hm-content" id="helpContent">
+            <!-- Content loaded dynamically -->
+          </div>
+        </div>
+      </div>
+
+      <!-- Demo view (hidden by default) -->
+      <div class="hm-demo-view" id="hmDemoView" role="region" aria-label="DocFlow 使用演示">
+        <div class="hm-demo-layout">
+          <!-- Left: Animation panel with realistic mockups -->
+          <div class="hm-demo-visual-panel" aria-hidden="true">
+            <!-- Animated cursor guide -->
+            <div class="mock-cursor" id="mockCursor">
+              <svg width="20" height="24" viewBox="0 0 20 24" fill="none">
+                <path d="M2 1L18 12.5L10.5 13.5L7 22L2 1Z" fill="var(--fg)" stroke="var(--surface)" stroke-width="1.5" stroke-linejoin="round"/>
+              </svg>
+              <div class="mock-cursor-ring"></div>
+              <div class="mock-cursor-click"></div>
+              <div class="mock-cursor-label"></div>
+            </div>
+            <!-- Step 1: File Upload Mockup -->
+            <div class="demo-stage demo-step-visual demo-step-file active">
+              <div class="mock-upload-area">
+                <div class="mock-deco-corner mock-deco-tl"></div>
+                <div class="mock-deco-corner mock-deco-tr"></div>
+                <div class="mock-deco-corner mock-deco-bl"></div>
+                <div class="mock-deco-corner mock-deco-br"></div>
+                <div class="mock-upload-icon">
+                  <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                    <polyline points="14 2 14 8 20 8"></polyline>
+                    <line x1="16" y1="13" x2="8" y2="13"></line>
+                    <line x1="16" y1="17" x2="8" y2="17"></line>
+                    <polyline points="10 9 9 9 8 9"></polyline>
+                  </svg>
+                </div>
+                <div class="mock-upload-text">拖放 DOC/DOCX 文件到此处</div>
+                <div class="mock-upload-sub">转换为 PDF — 支持批量转换</div>
+                <div class="mock-upload-btn">选择文件</div>
+                <!-- Animated file card dropping in -->
+                <div class="mock-file-card">
+                  <div class="mock-file-card-icon">DOC</div>
+                  <div class="mock-file-card-info">
+                    <div class="mock-file-card-name">年度报告.docx</div>
+                    <div class="mock-file-card-size">2.4 MB</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <!-- Step 2: Settings Panel Mockup -->
+            <div class="demo-stage demo-step-visual demo-step-settings">
+              <div class="mock-settings-panel">
+                <div class="mock-settings-section">
+                  <div class="mock-settings-title">输出</div>
+                  <div class="mock-setting-row">
+                    <div class="mock-setting-label">页面大小</div>
+                    <div class="mock-select">
+                      <span class="mock-select-val">A4</span>
+                      <span class="mock-select-arrow"></span>
+                    </div>
+                  </div>
+                  <div class="mock-setting-row">
+                    <div class="mock-setting-label">方向</div>
+                    <div class="mock-select">
+                      <span class="mock-select-val">纵向</span>
+                      <span class="mock-select-arrow"></span>
+                    </div>
+                  </div>
+                </div>
+                <div class="mock-settings-section">
+                  <div class="mock-settings-title">质量</div>
+                  <div class="mock-setting-row">
+                    <div class="mock-setting-label">图像 DPI</div>
+                    <div class="mock-select mock-select-dpi">
+                      <span class="mock-select-val">300</span>
+                      <span class="mock-select-arrow"></span>
+                      <div class="mock-select-dropdown">
+                        <div class="mock-select-option">150</div>
+                        <div class="mock-select-option mock-option-highlight">300</div>
+                        <div class="mock-select-option">600</div>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="mock-setting-row">
+                    <div class="mock-setting-label">嵌入字体</div>
+                    <div class="mock-toggle">
+                      <div class="mock-toggle-track">
+                        <div class="mock-toggle-knob"></div>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="mock-setting-row">
+                    <div class="mock-setting-label">无损图像</div>
+                    <div class="mock-toggle on">
+                      <div class="mock-toggle-track">
+                        <div class="mock-toggle-knob"></div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <div class="mock-settings-section">
+                  <div class="mock-settings-title">安全</div>
+                  <div class="mock-setting-row">
+                    <div class="mock-setting-label">密码保护</div>
+                    <div class="mock-toggle">
+                      <div class="mock-toggle-track">
+                        <div class="mock-toggle-knob"></div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <!-- Step 3: Conversion Progress Mockup -->
+            <div class="demo-stage demo-step-visual demo-step-convert">
+              <div class="mock-queue-item">
+                <div class="mock-qi-icon">DOC</div>
+                <div class="mock-qi-info">
+                  <div class="mock-qi-name">季度总结.docx</div>
+                  <div class="mock-qi-meta">1.8 MB · DOC → PDF</div>
+                </div>
+                <div class="mock-qi-progress">
+                  <div class="mock-progress-bar">
+                    <div class="mock-progress-seg" style="width:10px;height:5px"></div>
+                    <div class="mock-progress-seg" style="width:14px;height:7px"></div>
+                    <div class="mock-progress-seg" style="width:8px;height:4px"></div>
+                    <div class="mock-progress-seg" style="width:16px;height:6px"></div>
+                    <div class="mock-progress-seg" style="width:12px;height:8px"></div>
+                    <div class="mock-progress-seg" style="width:18px;height:5px"></div>
+                    <div class="mock-progress-seg" style="width:10px;height:7px"></div>
+                    <div class="mock-progress-seg" style="width:14px;height:4px"></div>
+                    <div class="mock-progress-seg" style="width:12px;height:6px"></div>
+                  </div>
+                  <div class="mock-progress-label">
+                    <span class="mock-pct" id="mockPct">0</span><span class="mock-pct-sign">%</span>
+                  </div>
+                </div>
+                <div class="mock-qi-status processing">处理中</div>
+              </div>
+              <div class="mock-queue-item mock-qi-secondary">
+                <div class="mock-qi-icon">DOC</div>
+                <div class="mock-qi-info">
+                  <div class="mock-qi-name">项目计划.docx</div>
+                  <div class="mock-qi-meta">856 KB · DOC → PDF</div>
+                </div>
+                <div class="mock-qi-status pending">等待中</div>
+              </div>
+            </div>
+            <!-- Step 4: Completion Mockup -->
+            <div class="demo-stage demo-step-visual demo-step-complete">
+              <div class="mock-queue-item mock-done">
+                <div class="mock-qi-icon done-icon">PDF</div>
+                <div class="mock-qi-info">
+                  <div class="mock-qi-name">年度报告.pdf</div>
+                  <div class="mock-qi-meta">3.1 MB · 已完成</div>
+                </div>
+                <div class="mock-qi-actions">
+                  <div class="mock-btn-action mock-btn-preview">预览</div>
+                  <div class="mock-btn-action mock-btn-download">下载</div>
+                </div>
+              </div>
+              <div class="mock-done-ripple"></div>
+              <div class="mock-done-check">
+                <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                  <polyline points="20 6 9 17 4 12"></polyline>
+                </svg>
+              </div>
+            </div>
+          </div>
+          <!-- Right: Info panel -->
+          <div class="hm-demo-info-panel">
+            <div class="demo-steps-indicator" role="tablist" aria-label="演示步骤">
+              <button class="demo-step-dot active" role="tab" aria-selected="true" aria-current="step" aria-label="步骤 1: 选择文件" tabindex="0" id="demoTab1"></button>
+              <button class="demo-step-dot" role="tab" aria-selected="false" aria-label="步骤 2: 配置设置" tabindex="-1" id="demoTab2"></button>
+              <button class="demo-step-dot" role="tab" aria-selected="false" aria-label="步骤 3: 开始转换" tabindex="-1" id="demoTab3"></button>
+              <button class="demo-step-dot" role="tab" aria-selected="false" aria-label="步骤 4: 下载完成" tabindex="-1" id="demoTab4"></button>
+              <button class="demo-pause-btn" aria-label="暂停自动播放" aria-pressed="false" title="暂停/继续自动播放">⏸</button>
+            </div>
+            <!-- Step 1 content -->
+            <div class="demo-step-content active" role="tabpanel" aria-labelledby="demoTab1" id="demoPanel1">
+              <h4 class="demo-step-title" id="stepTitle1">1. 选择文件</h4>
+              <p class="demo-step-desc">点击上传区域或拖拽文件到虚线框内，支持批量选择多个文件。</p>
+            </div>
+            <!-- Step 2 content -->
+            <div class="demo-step-content" role="tabpanel" aria-labelledby="demoTab2" id="demoPanel2" aria-hidden="true">
+              <h4 class="demo-step-title" id="stepTitle2">2. 配置设置</h4>
+              <p class="demo-step-desc">根据需求调整页面设置、图像质量和输出选项。</p>
+            </div>
+            <!-- Step 3 content -->
+            <div class="demo-step-content" role="tabpanel" aria-labelledby="demoTab3" id="demoPanel3" aria-hidden="true">
+              <h4 class="demo-step-title" id="stepTitle3">3. 开始转换</h4>
+              <p class="demo-step-desc">点击转换按钮，系统将自动处理文件，实时显示进度。</p>
+            </div>
+            <!-- Step 4 content -->
+            <div class="demo-step-content" role="tabpanel" aria-labelledby="demoTab4" id="demoPanel4" aria-hidden="true">
+              <h4 class="demo-step-title" id="stepTitle4">4. 下载完成</h4>
+              <p class="demo-step-desc">转换完成后自动下载文件，或在历史记录中重新下载。</p>
+            </div>
+            <!-- Live region for screen reader announcements -->
+            <div class="sr-only" aria-live="polite" aria-atomic="true" id="demoStepAnnouncer"></div>
+            <div class="demo-tip">
+              <div class="demo-tip-title">💡 提示</div>
+              <p class="demo-tip-text">支持直接拖拽文件到上传区域，快速开始转换</p>
+            </div>
+            <div class="demo-nav">
+              <button class="demo-btn demo-btn-prev" aria-label="上一步">上一步</button>
+              <button class="demo-btn demo-btn-next primary" aria-label="下一步">下一步</button>
+            </div>
+          </div>
+        </div>
+      </div>
+      <!-- Footer with raw aesthetic -->
+      <div class="hm-footer-neo">
+        <div class="hm-footer-line"></div>
+        <span class="hm-footer-text">DOCUMENTATION</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Settings Panel -->
+<div class="settings-overlay" id="settingsOverlay">
+  <div class="settings-panel" id="settingsPopup">
+    <div class="sp-header">
+      <span class="sp-title">设 置</span>
+      <button class="sp-close" id="settingsClose">×</button>
+    </div>
+    <div class="sp-body" id="settingsBody"></div>
+  </div>
+</div>
+
+<!-- Preset Modal -->
+<div class="preset-modal-overlay" id="presetModalOverlay" style="display:none">
+  <div class="preset-modal" role="dialog" aria-modal="true" aria-labelledby="presetModalTitle">
+    <!-- Constructivist decorative elements -->
+    <div class="pm-diagonal-slash"></div>
+    <div class="pm-struct-tick pm-struct-tick-1"></div>
+    <div class="pm-struct-tick pm-struct-tick-2"></div>
+    <div class="pm-hatch-accent"></div>
+
+    <!-- Header -->
+    <div class="preset-modal-header">
+      <div class="preset-modal-title-row">
+        <h3 id="presetModalTitle">输出预设</h3>
+        <span class="preset-modal-mode-badge" id="presetModalModeBadge"></span>
+      </div>
+      <button class="preset-modal-close" id="presetModalClose">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </div>
+
+    <!-- Body -->
+    <div class="preset-modal-body" id="presetModalBody"></div>
+
+    <!-- Custom confirm/input panel (hidden by default) -->
+    <div class="pm-panel" id="pmPanel" style="display:none">
+      <div class="pm-panel-inner" id="pmPanelInner"></div>
+    </div>
+
+    <!-- Footer -->
+    <div class="preset-modal-footer">
+      <div class="preset-modal-footer-left">
+        <button class="preset-footer-btn" id="presetExportBtn" title="导出所有预设">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7,10 12,15 17,10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          <span>导出</span>
+        </button>
+        <button class="preset-footer-btn" id="presetImportBtn" title="导入预设">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17,8 12,3 7,8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+          <span>导入</span>
+        </button>
+        <input type="file" id="presetImportFile" accept=".json" style="display:none">
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Toast container -->
+<div class="toast-container" id="toastContainer"></div>
+
+<!-- Hidden file input -->
+<input type="file" id="fileInput" name="files" accept=".doc,.docx" multiple>
+<input type="file" id="bgFileInput" accept="image/*" style="display:none">
+<input type="file" id="fontFileInput" accept=".ttf,.otf,.woff,.woff2" style="display:none">
+
+<script src="/pdf.min.js"></script>
+<script>pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.js';</script>
+<script src="/app.js"></script>
+</body>
+</html>

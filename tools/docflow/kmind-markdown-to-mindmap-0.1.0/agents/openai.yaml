@@ -1,0 +1,7 @@
+interface:
+  display_name: "KMind Markdown To Mind Map"
+  short_description: "Turn Markdown or text into SVG/PNG mind maps with theme, layout, edge route, dark mode, and rainbow options."
+  default_prompt: "Use $kmind-markdown-to-mindmap to turn this Markdown outline into a KMind SVG or PNG mind map, and choose an appropriate theme, layout, edge route, appearance, and rainbow style."
+
+policy:
+  allow_implicit_invocation: true

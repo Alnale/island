@@ -24,6 +24,7 @@ export type MdInline =
   | { t: 's'; c: MdInline[] }
   | { t: 'code'; s: string }
   | { t: 'a'; h: string; c: MdInline[] }
+  | { t: 'img'; s: string; a?: string }
 
 /** 列表项:主体行内内容 + 后续子块(嵌套列表/段落) */
 export type MdListItem = { c: MdInline[]; sub: MdBlock[] }
@@ -138,8 +139,14 @@ export function parseInlines(text: string): MdInline[] {
       }
     } else if (m[7] !== undefined) out.push({ t: 's', c: parseInlines(m[7]) })
     else if (m[8] !== undefined) {
-      // 图片 → 链接(岛内不加载远程图片,只给可点击文本)
-      out.push({ t: 'a', h: cleanUrl(m[9]), c: [{ t: 'text', s: m[8] || m[9] }] })
+      // 图片:data: 内嵌图片(工具生成的二维码等,可信)渲染为 <img>;
+      // 远程 http(s) 不加载(岛内不加载远程图片策略),仍给可点击链接
+      const imgUrl = cleanUrl(m[9])
+      if (imgUrl.startsWith('data:image/')) {
+        out.push({ t: 'img', s: imgUrl, a: m[8] || undefined })
+      } else {
+        out.push({ t: 'a', h: imgUrl, c: [{ t: 'text', s: m[8] || m[9] }] })
+      }
     } else if (m[10] !== undefined) out.push({ t: 'a', h: cleanUrl(m[11]), c: parseInlines(m[10]) })
     else if (m[12] !== undefined) {
       const url = cleanUrl(m[12])

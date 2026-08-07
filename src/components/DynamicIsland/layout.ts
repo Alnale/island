@@ -16,6 +16,12 @@ export const MAX_WIDTH_PX = 500 // 与 CSS max-width 保持一致
 // 岛体固定内容宽度(不含文字):边框 2 + 内边距 56 + 图标 28 + 单段 gap 14(进度条已绝对定位)
 export const ISLAND_BASE_PX = 100
 // 文字元素左偏移:边框 1 + 内边距 28 + 图标 28 + gap 14(相对岛 border-box 左缘)
+/** 文字是否与进度条冲突(悬停展开时完整文字 + 进度条放不下的判断;
+ * 原内联 ×4 收敛,审计 P2) */
+export function conflictsWithBar(fullTextWidth: number): boolean {
+  return fullTextWidth + PROGRESS_WIDTH_PX + PROGRESS_RIGHT_MARGIN_PX + TEXT_LEFT_PX > MAX_WIDTH_PX
+}
+
 export const TEXT_LEFT_PX = 71
 // 进度条:宽度 130 + 距岛右缘 30(内边距 28 + 边框 2)
 export const PROGRESS_WIDTH_PX = 130
@@ -46,6 +52,14 @@ export const EXPANDED_WIDTH_PX = 400
 export const EXPANDED_VIEWPORT_MARGIN_PX = 80
 // 展开最小宽度(px),小屏兜底
 export const EXPANDED_MIN_WIDTH_PX = 240
+/** 展开宽度钳制(长按展开/外部请求共用,原内联 ×3 收敛):
+ * viewport 余量内取标准展开宽,小屏取最小宽 */
+export function clampExpandedWidth(): number {
+  return Math.max(
+    EXPANDED_MIN_WIDTH_PX,
+    Math.min(EXPANDED_WIDTH_PX, window.innerWidth - EXPANDED_VIEWPORT_MARGIN_PX),
+  )
+}
 // 收起后隐藏悬停进度条的时长(ms),等岛收缩完成再淡入(1.5 倍速)
 export const COLLAPSE_HIDE_MS = 320
 // suppressClick 标记的有效期(ms):长按松手后的 click 在此窗口内被吞,
@@ -95,8 +109,20 @@ export function clamp01(v: number): number {
 export const AGENT_PANEL_FIXED_H = 116
 export const AGENT_PANEL_MIN_H = 200
 export const AGENT_PANEL_MAX_H = 600
-/** 展开首帧骨架屏时长(ms):形变动画期间先渲染轻量占位,之后挂载真实内容 */
-export const AGENT_PHASE_IN_MS = 120
+/** 展开首帧骨架屏时长(ms):形变动画期间先渲染轻量占位,之后挂载真实内容。
+ *  120ms:形变(0.3s)进行到约 1/3 时挂载内容并测量——高度从该点以 CSS
+ *  过渡并入宽度动画(并行动画;若等形变结束才测,就变成"先宽后高"顺序) */
+export const AGENT_PHASE_IN_MS = 340
+/** 紧凑态岛体高度(px,与 CSS .island-demo 的 height 一致):
+ *  Agent 面板高度动画从紧凑高度起步,展开/重进时平滑滑升 */
+export const ISLAND_COMPACT_H = 56
+/** 展开面板固定高度(px,与 CSS .island-demo.expanded 的 height 一致):
+ *  Agent 设置视图入口动画的起点下限——settings 视图显示高度即此值 */
+export const ISLAND_PANEL_H = 244
+/** Agent 设置视图岛体高度(px,与 CSS .island-agent-settings-view 的
+ *  height 一致):从设置视图切入时,高度动画从当前显示高度滑升到此值
+ *  (参考 Agent 展开的"先变宽再变长"形变,窗口逐帧跟随) */
+export const AGENT_SETTINGS_H = 540
 
 // 背景裁切参考尺寸:展开态 400×244、紧凑态 280×56(挂件典型宽度)。
 // 岛体根部背景图 CSS 变量与 BackgroundView 视口共用同一套计算

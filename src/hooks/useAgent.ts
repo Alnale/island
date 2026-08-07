@@ -11,23 +11,29 @@
  * 中止:丢弃未落定的流式消息(引擎不会再发 message 事件)。
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type {
   AgentConfig,
   AgentEvent,
   AgentMessage,
-  AgentPart,
   AgentSession,
   AgentStatus,
   AgentToolCallState,
   AgentToolInfo,
 } from '../agent/types'
 
+/** 按码元截断(后台标签结果清洗:引擎已截,这里兜底;跨 emoji 安全) */
+function truncateCodepoints(value: string | null | undefined, max: number): string {
+  return Array.from((value ?? '').trim()).slice(0, max).join('')
+}
+
 const HISTORY_KEY = 'widget-agent-messages'
 /** 历史会话列表存储键(多对话存档) */
 const SESSIONS_KEY = 'widget-agent-sessions'
 /** 当前对话实时总结标题存储键 */
 const TITLE_KEY = 'widget-agent-title'
+/** 心理揣测存储键(最近一次回复的心理;重启保留,文字区不落空) */
+const MIND_KEY = 'widget-agent-mind'
 /** 历史会话数量上限(超出丢弃最旧) */
 const MAX_SESSIONS = 20
 
@@ -97,8 +103,14 @@ export interface AgentController {
   tools: AgentToolInfo[]
   /** 当前对话实时总结标题(每轮回复后静默更新;null = 尚无总结) */
   currentTitle: string | null
+  /** 心理揣测(独立 Sub Agent 每轮回复后静默更新;紧凑态文字区优先展示) */
+  mindGuess: string | null
   send(text: string): void
   abort(): void
+  /** exec_command 确认门:回传用户选择(引擎在等待 tool-confirm-request) */
+  confirmTool(approved: boolean): void
+  /** 待确认的命令(引擎请求,等待用户允许/拒绝;null = 无) */
+  pendingConfirm: { command: string } | null
   clear(): void
   loadSession(id: string): void
   deleteSession(id: string): void
@@ -107,18 +119,19 @@ export interface AgentController {
   refreshConfig(): void
 }
 
-export function useAgent(): AgentController {
+export function useAgent(opts?: { allowProactive?: boolean }): AgentController {
   const [messages, setMessages] = useState<AgentMessage[]>(loadHistory)
   const [status, setStatus] = useState<AgentStatus>('idle')
   const [streaming, setStreaming] = useState<PendingAssistant | null>(null)
   const [lastError, setLastError] = useState<string | null>(null)
+  // exec_command 确认门:引擎发 tool-confirm-request 等待用户选择
+  const [pendingConfirm, setPendingConfirm] = useState<{ command: string } | null>(null)
   const [config, setConfig] = useState<AgentConfig | null>(null)
   // 历史会话列表(新对话时自动存档当前对话)
   const [sessions, setSessions] = useState<AgentSession[]>(loadSessions)
   // 工具清单(引擎 → 主进程 IPC,UI 展示用)
   const [tools, setTools] = useState<AgentToolInfo[]>([])
-  // 当前对话实时总结标题(每轮回复完成后静默总结;显示在文字区,
-  // 入历史时作为标题)
+  // 当前对话实时总结标题(每轮回复完成后静默总结;入历史时作为标题)
   const [currentTitle, setCurrentTitle] = useState<string | null>(() => {
     try {
       return localStorage.getItem(TITLE_KEY)
@@ -126,18 +139,28 @@ export function useAgent(): AgentController {
       return null
     }
   })
+  // 当前回复的心理揣测(独立 Sub Agent 每轮回复完成后静默生成;
+  // 紧凑态文字区优先展示)
+  const [mindGuess, setMindGuess] = useState<string | null>(() => {
+    try {
+      return localStorage.getItem(MIND_KEY)
+    } catch {
+      return null
+    }
+  })
   // 会话版本号:仅在 clear/loadSession(会话真正切换)时递增;
-  // 总结完成时校验,旧会话的总结不覆盖新会话。
+  // 后台标签(总结标题/心理揣测)完成时校验,旧会话的结果不覆盖新会话。
   // 注意:send 不递增——连续对话时每轮总结基于最新消息,旧总结结果
   // 主题一致仍有效,递增会把总结全部作废(文字区永远等不到标题)
   const sessionVersionRef = useRef(0)
-  // 总结进行中标记 + 排队标记:进行中新一轮回复落定时不跳过,
-  // 标记 pending,完成后补跑一次(追平连续对话——跳过会让标题
-  // 永远等不到,是"显示回复开头"的常见原因)
-  const summarizeInFlightRef = useRef(false)
-  const summarizePendingRef = useRef(false)
-  // 加载历史后跳过下一次总结(历史已有标题,无需重新总结)
-  const skipNextSummaryRef = useRef(false)
+  // 加载历史后跳过下一次后台标签生成(历史已有标题/心理,无需重新生成)
+  const skipNextLabelRef = useRef(false)
+  // 主动陪伴(2026-08-07):上次"有操作"时刻(用户发送/清空/切换会话/
+  // 主动回复落定都会重置)——调度器据此判断"无操作满 N 分钟"
+  const lastUserSendRef = useRef(Date.now())
+  // 主动陪伴 tick in-flight 守卫(覆盖 judge 全程:IPC 在 judge 完成后
+  // 才 resolve,期间不重发;judge 阶段用户 send 天然优先)
+  const proactiveInFlightRef = useRef(false)
 
   // 订阅/发送需要引用最新的 messages(事件回调里不要依赖闭包里的 state)
   const messagesRef = useRef(messages)
@@ -148,6 +171,42 @@ export function useAgent(): AgentController {
   currentTitleRef.current = currentTitle
   const statusRef = useRef(status)
   statusRef.current = status
+  // 流式状态镜像 + rAF 合批:高频增量事件(text/reasoning/tool)直写镜像,
+  // requestAnimationFrame 帧内一次性 setStreaming 提交——渲染/解析/测量
+  // 频率压到帧率上限(跨 IPC 消息的多次 setState 不自动批处理)
+  const streamingRef = useRef<PendingAssistant>({ text: '', reasoning: '', tools: [] })
+  const streamingRafRef = useRef(0)
+  const resetStreaming = useCallback(() => {
+    if (streamingRafRef.current) cancelAnimationFrame(streamingRafRef.current)
+    streamingRafRef.current = 0
+    streamingRef.current = { text: '', reasoning: '', tools: [] }
+    setStreaming(null)
+  }, [])
+  const scheduleStreamingCommit = useCallback(() => {
+    if (streamingRafRef.current) return
+    streamingRafRef.current = requestAnimationFrame(() => {
+      streamingRafRef.current = 0
+      setStreaming({ ...streamingRef.current })
+    })
+  }, [])
+  // 工具镜像 upsert(新数组引用:提交后 React.memo 才能识别变化)。
+  // 已存在条目**合并**(tool-result 只带 ok/result/durationMs,保留
+  // 之前 tool-call 累积的 args/argsRaw;tool-call 的 name/args 覆盖旧值)
+  const upsertTool = useCallback(
+    (tool: Partial<AgentToolCallState> & { id: string; name: string }) => {
+      const list = streamingRef.current.tools
+      const idx = list.findIndex((t) => t.id === tool.id)
+      streamingRef.current = {
+        ...streamingRef.current,
+        tools:
+          idx === -1
+            ? [...list, { ...tool, args: tool.args ?? {} }]
+            : [...list.slice(0, idx), { ...list[idx], ...tool }, ...list.slice(idx + 1)],
+      }
+      scheduleStreamingCommit()
+    },
+    [scheduleStreamingCommit],
+  )
 
   // 事件订阅(一次性)
   useEffect(() => {
@@ -160,70 +219,49 @@ export function useAgent(): AgentController {
           setStatus(event.status)
           break
         case 'text-delta':
-          setStreaming((prev) => ({ text: (prev?.text ?? '') + event.text, reasoning: prev?.reasoning ?? '', tools: prev?.tools ?? [] }))
+          // 中止竞态:abort 后迟到的流式事件(status 已 idle)丢弃,
+          // 防幽灵流式文本残留(parseSse 缓冲帧在 abort 后仍可能 yield 一次)
+          if (statusRef.current === 'idle') break
+          streamingRef.current.text += event.text
+          scheduleStreamingCommit()
           break
         case 'reasoning-delta':
-          setStreaming((prev) => ({ text: prev?.text ?? '', reasoning: (prev?.reasoning ?? '') + event.text, tools: prev?.tools ?? [] }))
+          if (statusRef.current === 'idle') break
+          streamingRef.current.reasoning += event.text
+          scheduleStreamingCommit()
           break
-        case 'tool-partial-call': {
-          setStreaming((prev) => {
-            const tools = prev?.tools ?? []
-            const idx = tools.findIndex((t) => t.id === event.id)
-            const entry: AgentToolCallState = { id: event.id, name: event.name, args: parseArgs(event.args), argsRaw: event.args }
-            if (idx === -1) tools.push(entry)
-            else tools[idx] = entry
-            return { text: prev?.text ?? '', reasoning: prev?.reasoning ?? '', tools: [...tools] }
+        case 'tool-partial-call':
+        case 'tool-call':
+          upsertTool({ id: event.id, name: event.name, args: parseArgs(event.args), argsRaw: event.args })
+          break
+        case 'tool-result':
+          upsertTool({
+            id: event.id,
+            name: event.name,
+            ok: event.ok,
+            result: event.result,
+            durationMs: event.durationMs,
           })
           break
-        }
-        case 'tool-call': {
-          setStreaming((prev) => {
-            const tools = prev?.tools ?? []
-            const idx = tools.findIndex((t) => t.id === event.id)
-            const entry: AgentToolCallState = { id: event.id, name: event.name, args: parseArgs(event.args), argsRaw: event.args }
-            if (idx === -1) tools.push(entry)
-            else tools[idx] = entry
-            return { text: prev?.text ?? '', reasoning: prev?.reasoning ?? '', tools: [...tools] }
-          })
-          break
-        }
-        case 'tool-result': {
-          setStreaming((prev) => {
-            const tools = prev?.tools ?? []
-            const idx = tools.findIndex((t) => t.id === event.id)
-            if (idx === -1) {
-              tools.push({
-                id: event.id,
-                name: event.name,
-                args: {},
-                ok: event.ok,
-                result: event.result,
-                durationMs: event.durationMs,
-              })
-            } else {
-              tools[idx] = {
-                ...tools[idx],
-                ok: event.ok,
-                result: event.result,
-                durationMs: event.durationMs,
-              }
-            }
-            return { text: prev?.text ?? '', reasoning: prev?.reasoning ?? '', tools: [...tools] }
-          })
-          break
-        }
         case 'message': {
           // 权威落定:以引擎回传的 parts 替换流式累积(附 token 用量);
           // 静默总结由下方 effect 在 status idle 后统一触发
-          setStreaming(null)
+          resetStreaming()
           setMessages((prev) => [...prev, { ...event.message, usage: event.usage }])
           setLastError(null)
+          // 主动陪伴:主动回复落定 = 一次"有操作"(重置 idle 时钟——
+          // 否则每分钟重发 tick、judge 连续 yes → 每 N 分钟一条主动
+          // 回复不断循环;judge 判 no 兜底不可依赖,关键坑)
+          if (event.message.proactive) lastUserSendRef.current = Date.now()
           break
         }
         case 'error':
-          setStreaming(null)
+          resetStreaming()
           setLastError(event.message)
           setStatus('idle')
+          break
+        case 'tool-confirm-request':
+          setPendingConfirm({ command: event.command })
           break
         case 'background-done': {
           // 后台长任务完成(如 bili 下载):自动触发一轮对话——LLM 基于
@@ -233,6 +271,16 @@ export function useAgent(): AgentController {
           // send 引用稳定(useCallback []),事件订阅闭包安全
           const text = `【系统通知】${event.title}:${event.message}。请根据当前任务状态,用一两句话主动告知用户结果。`
           send(text)
+          break
+        }
+        case 'mind-proactive': {
+          // 主动陪伴:主进程对主动回复的心理揣测(与 Windows 系统通知
+          // 同一句)——更新紧凑态文字区,两处一致。messageId 校验:
+          // clear/loadSession 后迟到的旧揣测丢弃(不污染新会话)
+          const { messageId, guess } = event
+          if (!guess) break
+          if (!messagesRef.current.some((m) => m.id === messageId)) break
+          setMindGuess(guess)
           break
         }
         default:
@@ -278,104 +326,227 @@ export function useAgent(): AgentController {
       // 存储失败忽略
     }
   }, [currentTitle])
-  // 每轮回复完成后静默总结(messages 落定 + status idle 触发)。
-  // 排队追平:总结进行中新一轮回复落定 → 标记 pending,完成后补跑
-  // 最新一轮;结果带会话版本校验(clear/loadSession 作废),旧快照结果
-  // 主题一致直接生效(总比空标题好,新总结后覆盖)。
-  // 失败重试:网络抖动 1.5s 后重试同一快照(retryLeft 预算递减);
-  // 预算耗尽 → 10s 后补跑一次**最新**消息(仅此一次,不连锁重试)—
-  // 会话静止时标题也能补上,文字区不会一直停留在回复开头预览。
-  // 入口守卫:任何路径不并发总结(in-flight 期间新触发只排队)
-  const runSummary = useCallback((snapshot: AgentMessage[], retryLeft = 1) => {
-    if (summarizeInFlightRef.current) return
-    summarizeInFlightRef.current = true
-    const version = sessionVersionRef.current
-    // 总结落定后追平:期间新一轮回复落定(pending)→ 补跑最新一轮
-    const catchUpIfNeeded = () => {
-      if (!summarizePendingRef.current) return
-      summarizePendingRef.current = false
-      if (statusRef.current === 'idle' && messagesRef.current.length > 0) {
-        void runSummary(messagesRef.current, 0)
-      }
+  // 心理揣测持久化(重启保留最近一次回复的心理,文字区不落空)
+  useEffect(() => {
+    try {
+      if (mindGuess) localStorage.setItem(MIND_KEY, mindGuess)
+      else localStorage.removeItem(MIND_KEY)
+    } catch {
+      // 存储失败忽略
     }
-    window.desktop
-      ?.agentSummarize?.(snapshot)
-      .then((title) => {
-        summarizeInFlightRef.current = false
-        // 双保险:引擎已清洗并截断到岛体文字区容量,这里再按码元
-        // 兜底(标题过长在紧凑态会被截成"开头几字",观感等同失败)
-        const t = Array.from((title ?? '').trim()).slice(0, 12).join('')
-        if (t && sessionVersionRef.current === version) setCurrentTitle(t)
-        catchUpIfNeeded()
-      })
-      .catch(() => {
-        summarizeInFlightRef.current = false
-        if (retryLeft > 0) {
-          // 网络抖动:1.5s 后重试同一快照;期间新消息落定(排队中)
-          // 则改补跑最新一轮,不再重试陈旧快照
-          window.setTimeout(() => {
-            if (summarizePendingRef.current) {
-              summarizePendingRef.current = false
-              if (statusRef.current === 'idle' && messagesRef.current.length > 0) {
-                void runSummary(messagesRef.current, 0)
-              }
-            } else {
-              void runSummary(snapshot, retryLeft - 1)
-            }
-          }, 1500)
-        } else {
-          // 全部重试都失败:延迟补跑一次最新消息(仅此一次,
-          // 不再走重试链——避免对同一对话无限循环请求)
-          window.setTimeout(() => {
-            if (summarizeInFlightRef.current) return
-            if (statusRef.current !== 'idle' || messagesRef.current.length === 0) return
-            if (summarizePendingRef.current) summarizePendingRef.current = false
-            summarizeInFlightRef.current = true
-            const latest = messagesRef.current
-            const v = sessionVersionRef.current
-            window.desktop
-              ?.agentSummarize?.(latest)
-              .then((title) => {
-                summarizeInFlightRef.current = false
-                const t = Array.from((title ?? '').trim()).slice(0, 12).join('')
-                if (t && sessionVersionRef.current === v) setCurrentTitle(t)
-              })
-              .catch(() => {
-                summarizeInFlightRef.current = false
-                // 补跑失败不再重试
-              })
-          }, 10000)
+  }, [mindGuess])
+  // 卸载时取消未提交的流式合批帧(避免卸载后 setState)
+  useEffect(
+    () => () => {
+      if (streamingRafRef.current) cancelAnimationFrame(streamingRafRef.current)
+    },
+    [],
+  )
+  // 后台标签 Sub Agent 调用器(总结标题 / 心理揣测共用),行为语义:
+  // - 入口守卫:进行中不并发,新一轮回复落定(进行中)只标记 pending,
+  //   完成后补跑最新一轮(追平连续对话——跳过会让标签永远等不到,
+  //   是"文字区一直显示回复开头"的常见原因);
+  // - 结果带会话版本校验(clear/loadSession 作废),旧快照结果主题一致
+  //   直接生效(总比空好,新结果后覆盖);
+  // - 失败重试:1.5s 后重试同一快照(retryLeft 预算递减);
+  //   预算耗尽 → 10s 后补跑一次**最新**消息(仅此一次,不连锁重试)—
+  //   会话静止时标签也能补上,文字区不会一直停留在回复开头预览。
+  // 每个标签独立 in-flight/排队状态(互不阻塞)
+  const createLabelRunner = useCallback(
+    (
+      task: (snapshot: AgentMessage[]) => Promise<string>,
+      apply: (value: string) => void,
+      maxLen: number,
+    ): ((snapshot: AgentMessage[]) => void) => {
+      const st = { inflight: false, pending: false }
+      const run = (snapshot: AgentMessage[], retryLeft = 1) => {
+        if (st.inflight) return
+        st.inflight = true
+        const version = sessionVersionRef.current
+        // 标签落定后追平:期间新一轮回复落定(pending)→ 补跑最新一轮
+        const catchUp = () => {
+          if (!st.pending) return
+          st.pending = false
+          if (statusRef.current === 'idle' && messagesRef.current.length > 0) {
+            run(messagesRef.current, 0)
+          }
         }
-      })
-  }, [])
+        task(snapshot)
+          .then((value) => {
+            st.inflight = false
+            // 双保险:引擎已清洗并截断到岛体文字区容量,这里再按码元
+            // 兜底(标签过长在紧凑态会被截成"开头几字",观感等同失败)
+            // 上限按标签类型:标题 20(2026-08-07 放宽:推荐 10 字左右
+            // 严格不超过 20)/ 心理揣测 16(15 字左右最多 16)
+            const v = truncateCodepoints(value, maxLen)
+            if (v && sessionVersionRef.current === version) apply(v)
+            catchUp()
+          })
+          .catch(() => {
+            st.inflight = false
+            if (retryLeft > 0) {
+              // 网络抖动:1.5s 后重试同一快照;期间新消息落定(排队中)
+              // 则改补跑最新一轮,不再重试陈旧快照
+              window.setTimeout(() => {
+                if (st.pending) {
+                  st.pending = false
+                  if (statusRef.current === 'idle' && messagesRef.current.length > 0) {
+                    run(messagesRef.current, 0)
+                  }
+                } else {
+                  run(snapshot, retryLeft - 1)
+                }
+              }, 1500)
+            } else {
+              // 全部重试都失败:延迟补跑一次最新消息(仅此一次,
+              // 不再走重试链——避免对同一对话无限循环请求)
+              window.setTimeout(() => {
+                if (st.inflight) return
+                if (statusRef.current !== 'idle' || messagesRef.current.length === 0) return
+                if (st.pending) st.pending = false
+                st.inflight = true
+                const latest = messagesRef.current
+                const v = sessionVersionRef.current
+                task(latest)
+                  .then((value) => {
+                    st.inflight = false
+                    // 兜底同主路径(maxLen 按标签类型:标题 20 / 揣测 16)
+                    const t = truncateCodepoints(value, maxLen)
+                    if (t && sessionVersionRef.current === v) apply(t)
+                  })
+                  .catch(() => {
+                    st.inflight = false
+                    // 补跑失败不再重试
+                  })
+              }, 10000)
+            }
+          })
+      }
+      // 触发入口:进行中 → 标记排队(完成时由 catchUp 追平),否则立即执行
+      return (snapshot) => {
+        if (st.inflight) {
+          st.pending = true
+          return
+        }
+        run(snapshot)
+      }
+    },
+    [],
+  )
+  // 总结标题 runner(每轮回复完成后静默生成;入历史作会话标题)
+  const summaryRunner = useMemo(
+    () =>
+      createLabelRunner(
+        (snapshot) => window.desktop?.agentSummarize?.(snapshot) ?? Promise.resolve(''),
+        (t) => setCurrentTitle(t),
+        // 标题上限 20 码元(2026-08-07 用户要求放宽:推荐 10 字左右,
+        // 严格不超过 20;紧凑态文字区随字数扩展岛宽)
+        20,
+      ),
+    [createLabelRunner],
+  )
+  // 心理揣测 runner(独立 Sub Agent,每轮回复完成后静默生成;
+  // 紧凑态文字区优先展示)
+  const mindRunner = useMemo(
+    () =>
+      createLabelRunner(
+        (snapshot) => window.desktop?.agentMindGuess?.(snapshot) ?? Promise.resolve(''),
+        (g) => setMindGuess(g),
+        // 心理揣测上限 16 码元(15 字左右最多 16)
+        16,
+      ),
+    [createLabelRunner],
+  )
 
   useEffect(() => {
     if (status !== 'idle' || messages.length === 0) return
-    if (skipNextSummaryRef.current) {
-      skipNextSummaryRef.current = false
+    if (skipNextLabelRef.current) {
+      skipNextLabelRef.current = false
+      // 只跳过总结标题(加载的历史会话已有标题语义,避免重复 LLM 调用);
+      // **心理揣测照跑**(Bug 修复 2026-08-07):loadSession 清了 mindGuess
+      // 又跳过生成 → 紧凑态文字区回退到"最后回复预览"(LLM 回复开头
+      // 几个字),用户实测反馈;重新生成揣测后文字区恢复揣测优先
+      mindRunner(messages)
       return
     }
-    if (summarizeInFlightRef.current) {
-      // 进行中:排队,完成时补跑
-      summarizePendingRef.current = true
+    // 主动消息跳过心理揣测 runner:揣测由主进程统一提供(主动回合落定
+    // 后 getMindAgent 跑一次 → 系统通知 + mind-proactive 事件 → 这里
+    // setMindGuess,与通知同一句)——再跑 mindRunner 会重复调用 LLM 且
+    // 两处措辞不一致;标题照常跟随(主动回复是真实内容)
+    if (messages[messages.length - 1]?.proactive) {
+      summaryRunner(messages)
       return
     }
-    void runSummary(messages)
-  }, [messages, status, runSummary])
+    // 两个后台标签 runner 各自守卫并发(进行中 → 内部标记排队,完成追平)
+    summaryRunner(messages)
+    mindRunner(messages)
+  }, [messages, status, summaryRunner, mindRunner])
 
-  // 启动时读取配置(API Key / 模型等,主进程 settings.json)与工具清单
-  useEffect(() => {
+  /**
+   * 拉取配置与工具清单(主进程),挂载与"打开设置视图前刷新"共用。
+   * 场景:LLM 对话中 mcp_config/skills_config 工具改了配置(写 settings.json)
+   * 或创建了技能(写技能目录)——而 config/tools 都只在挂载时读一次 →
+   * 设置界面显示旧快照(实测 bug:对话里添加的 MCP 服务设置里为空;
+   * LLM 创建的技能不出现在设置技能列表)。打开 Agent 设置视图时调用;
+   * tools 刷新 = agentGetTools(listAllTools 实时扫描,新技能立即可见)
+   */
+  const loadConfigAndTools = useCallback(() => {
     window.desktop?.agentGetConfig?.().then(setConfig).catch(() => {})
     window.desktop
       ?.agentGetTools?.()
-      .then((list) => setTools(list as AgentToolInfo[]))
+      .then((list) => setTools(list))
       .catch(() => {})
   }, [])
+
+  // 启动时读取配置(API Key / 模型等,主进程 settings.json)与工具清单
+  useEffect(() => {
+    loadConfigAndTools()
+  }, [loadConfigAndTools])
+
+  // 主动陪伴调度器(2026-08-07):每 60s 检查触发条件——① Agent 模式
+  // (WidgetApp 经 allowProactive 传入)② 配置开启 ③ status idle ④ 有
+  // 对话历史 ⑤ 距上次"有操作"(发送/清空/切换会话/主动回复落定)≥ N
+  // 分钟 ⑥ 非 in-flight。满足则发 tick(带完整历史与空闲分钟数)→
+  // 主进程:总结 Sub Agent 判断语境 → should 则主 Agent 完整回合主动
+  // 回复(思考/流式/工具照常,消息正常落定)。judge-no 回退 idle 时钟
+  // (下次判断在 N 分钟后——不静默变每分钟一次 LLM 判断调用,1440 次/
+  // 天);busy/mode/disabled 各自自愈(用户操作已重置时钟 / 模式切换
+  // 停 effect / 配置变更重装 effect),不回退
+  useEffect(() => {
+    if (!window.desktop?.agentProactiveTick || !opts?.allowProactive) return
+    if (!config?.proactiveEnabled) return
+    // 间隔 = 数值 × 单位换算(2026-08-07 单位选择:s=秒 / m=分钟 / h=小时)
+    const unitSecs =
+      config.proactiveIntervalUnit === 's' ? 1 : config.proactiveIntervalUnit === 'h' ? 3600 : 60
+    const intervalMs = Math.max(1, config.proactiveInterval ?? 60) * unitSecs * 1000
+    const timer = window.setInterval(() => {
+      if (proactiveInFlightRef.current) return
+      if (statusRef.current !== 'idle') return
+      if (messagesRef.current.length === 0) return
+      const idleMs = Date.now() - lastUserSendRef.current
+      if (idleMs < intervalMs) return
+      proactiveInFlightRef.current = true
+      const snapshot = messagesRef.current
+      window.desktop
+        ?.agentProactiveTick?.(snapshot, Math.floor(idleMs / 60_000))
+        .then((r) => {
+          if (r?.reason === 'judge-no') lastUserSendRef.current = Date.now()
+        })
+        .catch(() => {})
+        .finally(() => {
+          proactiveInFlightRef.current = false
+        })
+    }, 60_000)
+    return () => window.clearInterval(timer)
+  }, [config?.proactiveEnabled, config?.proactiveInterval, config?.proactiveIntervalUnit, opts?.allowProactive])
 
   const send = useCallback((text: string) => {
     const trimmed = text.trim()
     if (!trimmed) return
     if (statusRef.current === 'thinking' || statusRef.current === 'running') return
+    // 主动陪伴:任何一轮对话 = 有操作(重置 idle 时钟,含 background-done
+    // 的系统通知自动轮——有对话在发生就不该主动打扰)
+    lastUserSendRef.current = Date.now()
     const prev = messagesRef.current
     const last = prev[prev.length - 1]
     // 上一轮被中止/失败(未落定助手消息,历史以 user 消息结尾):把新输入
@@ -413,11 +584,22 @@ export function useAgent(): AgentController {
     window.desktop?.agentSend?.(trimmed, next)
   }, [])
 
+  const confirmTool = useCallback((approved: boolean) => {
+    window.desktop?.agentConfirmTool?.(approved)
+    setPendingConfirm(null)
+  }, [])
+  // 轮次结束(status idle)时清掉残留确认请求(用户未答时引擎 120s
+  // 超时拒绝并继续,这里兜底 UI 状态)
+  useEffect(() => {
+    if (status === 'idle') setPendingConfirm(null)
+  }, [status])
+
   const abort = useCallback(() => {
     window.desktop?.agentAbort?.()
-    // 丢弃未落定的流式消息(引擎中止后不会再发 message 事件)
-    setStreaming(null)
-  }, [])
+    // 丢弃未落定的流式消息(引擎中止后不会再发 message 事件;
+    // 镜像同步清空 + 取消未提交的合批帧)
+    resetStreaming()
+  }, [resetStreaming])
 
   const clear = useCallback(() => {
     // 新对话:当前对话(非空)存档到历史,再清空。
@@ -435,23 +617,29 @@ export function useAgent(): AgentController {
       setSessions((prev) => [session, ...prev].slice(0, MAX_SESSIONS))
     }
     setMessages([])
-    setStreaming(null)
+    resetStreaming()
     setLastError(null)
     setCurrentTitle(null)
-  }, [])
+    setMindGuess(null)
+    // 主动陪伴:切换会话 = 有操作(新会话从零计时)
+    lastUserSendRef.current = Date.now()
+  }, [resetStreaming])
 
   const loadSession = useCallback((id: string) => {
     const target = sessionsRef.current.find((s) => s.id === id)
     if (!target) return
     // 加载 = 替换当前对话;从历史移除(当前会话继续由 HISTORY_KEY 持久化);
-    // 标题重置并跳过下一次自动总结(历史消息不该被重新总结)
+    // 标题/心理重置并跳过下一次自动生成(历史消息不该被重新总结)
     sessionVersionRef.current += 1
-    skipNextSummaryRef.current = true
+    skipNextLabelRef.current = true
     setMessages(target.messages)
     setSessions((prev) => prev.filter((s) => s.id !== id))
     setStreaming(null)
     setLastError(null)
     setCurrentTitle(null)
+    setMindGuess(null)
+    // 主动陪伴:加载历史会话 = 有操作(从零计时)
+    lastUserSendRef.current = Date.now()
   }, [])
 
   const deleteSession = useCallback((id: string) => {
@@ -460,34 +648,23 @@ export function useAgent(): AgentController {
 
   const saveConfig = useCallback(async (patch: Partial<AgentConfig>) => {
     const next = await window.desktop?.agentSetConfig?.(patch)
-    if (next) setConfig(next as AgentConfig)
+    if (next) setConfig(next)
   }, [])
 
-  /**
-   * 重新拉取配置与工具清单(主进程)。
-   * 场景:LLM 对话中 mcp_config/skills_config 工具改了配置(写 settings.json)
-   * 或创建了技能(写技能目录)——而 config/tools 都只在挂载时读一次 →
-   * 设置界面显示旧快照(实测 bug:对话里添加的 MCP 服务设置里为空;
-   * LLM 创建的技能不出现在设置技能列表)。打开 Agent 设置视图时调用;
-   * tools 刷新 = agentGetTools(listAllTools 实时扫描,新技能立即可见)
-   */
-  const refreshConfig = useCallback(() => {
-    window.desktop?.agentGetConfig?.().then(setConfig).catch(() => {})
-    window.desktop
-      ?.agentGetTools?.()
-      .then((list) => setTools(list as AgentToolInfo[]))
-      .catch(() => {})
-  }, [])
+  const refreshConfig = loadConfigAndTools
 
   return {
     status,
     messages,
     streaming,
     lastError,
+    pendingConfirm,
+    confirmTool,
     config,
     sessions,
     tools,
     currentTitle,
+    mindGuess,
     send,
     abort,
     clear,
@@ -496,12 +673,4 @@ export function useAgent(): AgentController {
     saveConfig,
     refreshConfig,
   }
-}
-
-/** 把消息 parts 里的文本拼出来(助手回复预览/落定展示用) */
-export function textFromMessage(message: AgentMessage): string {
-  return message.parts
-    .filter((p): p is Extract<AgentPart, { type: 'text' }> => p.type === 'text')
-    .map((p) => p.text)
-    .join('\n')
 }

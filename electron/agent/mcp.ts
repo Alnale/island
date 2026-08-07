@@ -16,6 +16,7 @@
  */
 
 import { spawn, type ChildProcess } from 'node:child_process'
+import { MCP_SERVICE_LABEL_PREFIX } from './constants'
 import type { AgentTool, McpServerConfig } from './types'
 
 /** 握手初始化超时(ms):npx 首次运行 / 服务器启动慢 */
@@ -665,7 +666,8 @@ export function createMCPManager() {
         const desc = String(t.description ?? '').trim().replace(/\s+/g, ' ').slice(0, DESC_MAX)
         tools.push({
           name: full,
-          description: `[MCP 服务:${cfg.name}] ${desc || '(无描述)'}。调用参数按 JSON Schema 填写,结果由服务端返回。`,
+          // 描述前缀与渲染端剥除共用常量(垂直解耦:格式变更只改 constants)
+          description: `${MCP_SERVICE_LABEL_PREFIX}${cfg.name}] ${desc || '(无描述)'}。调用参数按 JSON Schema 填写,结果由服务端返回。`,
           parameters: toToolParameters(t.inputSchema),
           async execute(params) {
             // 每次调用前确保连接(崩溃自动重启;sse 断流自动重连)

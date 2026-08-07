@@ -1,0 +1,55 @@
+Business Source License 1.1
+
+Licensor: DocFlow Contributors
+Licensed Work: DocFlow — Bidirectional document converter (DOC/DOCX ↔ PDF)
+Change Date: 2030-05-06
+Change License: MIT License
+
+Copyright (c) 2026 DocFlow Contributors
+
+Terms and Conditions
+
+1. Grant of Rights. Subject to the terms and conditions of this License, Licensor hereby grants You a perpetual, worldwide, non-exclusive, no-charge, royalty-free, irrevocable copyright license to use, reproduce, modify, display, distribute, and otherwise exploit the Licensed Work for any non-commercial purpose, including but not limited to internal business use, personal use, academic research, and self-deployment.
+
+2. Additional Use Grant. You may use the Licensed Work to provide services to Your own employees, contractors, and affiliates, provided that You do not offer the Licensed Work or any derivative thereof as a managed, hosted, or commercial SaaS (Software as a Service) product or service to third parties.
+
+3. Restrictions. You may NOT:
+   a. Offer the Licensed Work or any derivative thereof as a commercial SaaS, PaaS, or managed service product
+   b. Remove or alter any copyright, patent, trademark, or attribution notices
+   c. Use the Licensor's name, logo, or trademarks to endorse or promote products derived from the Licensed Work without prior written permission
+
+4. Attribution. If You distribute or publicly display the Licensed Work or any derivative thereof, You must retain all copyright, patent, trademark, and attribution notices from the original source.
+
+5. Trademarks. This License does not grant permission to use the trade names, trademarks, service marks, or product names of the Licensor.
+
+6. Disclaimer of Warranty. The Licensed Work is provided "as is" without warranty of any kind, express or implied, including but not limited to warranties of merchantability, fitness for a particular purpose, and noninfringement.
+
+7. Limitation of Liability. In no event shall the Licensor be liable for any claim, damages, or other liability, whether in an action of contract, tort, or otherwise, arising from, out of or in connection with the Licensed Work or the use or other dealings in the Licensed Work.
+
+8. Grant of Patent License. Subject to the terms of this License, each Contributor hereby grants to You a perpetual, worldwide, non-exclusive, no-charge, royalty-free, irrevocable patent license to make, have made, use, offer to sell, sell, import, and otherwise transfer the Licensed Work, where such license applies only to those patent claims, both currently owned or controlled by the Contributor and acquired in the future, licensable by such Contributor that are necessarily infringed by the Licensed Work.
+
+9. Termination. This License will automatically terminate if You breach any of its terms. Upon termination, You must cease all use of the Licensed Work and destroy all copies.
+
+10. Conversion to MIT. On the Change Date, the Licensed Work and all derivatives thereof shall automatically be licensed under the MIT License, without any of the restrictions set forth in Sections 2 and 3 above. The MIT License text is as follows:
+
+    MIT License
+
+    Copyright (c) 2026 DocFlow Contributors
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in all
+    copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE.

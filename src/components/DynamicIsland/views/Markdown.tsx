@@ -88,16 +88,57 @@ export function CopyButton({ text }: { text: string }) {
   )
 }
 
-/** 挂件(desktop.preload)里用系统浏览器打开;Web 演示版回退新标签页 */
+/** 挂件(desktop.preload)里用系统浏览器打开;Web 演示版回退新标签页
+ * (desktop.d.ts 已补 openExternal,2026-08-07 审计 P1-2 删局部类型 hack) */
 function openExternalUrl(url: string) {
-  const api = (window as unknown as {
-    desktop?: { openExternal?: (url: string) => void }
-  }).desktop
-  if (api?.openExternal) {
-    api.openExternal(url)
+  if (window.desktop?.openExternal) {
+    window.desktop.openExternal(url)
     return
   }
   window.open(url, '_blank', 'noopener,noreferrer')
+}
+
+/**
+ * 消息内嵌图片(2026-08-07,工具二维码等 data URL):
+ * **按比例展示** —— 显示宽度 = 原图宽 × 界面缩放系数(--agent-s,
+ * 岛体根变量,100% = 1) × **1/4**(2026-08-07 用户实测二维码仍太大,
+ * 缩小为四分之一),面板放大时图片等比放大;超宽图由 CSS
+ * max-width: 100% 兜底压缩(保持比例 height: auto)。
+ * 缩放变化会触发窗口 resize → 监听重算;原图尺寸加载后读 naturalWidth
+ */
+export function AgentImage({ src, alt }: { src: string; alt?: string }) {
+  const [natural, setNatural] = useState<number | null>(null)
+  const [, force] = useState(0)
+  useEffect(() => {
+    const img = new Image()
+    img.onload = () => setNatural(img.naturalWidth || null)
+    img.src = src
+    return () => {
+      img.onload = null
+    }
+  }, [src])
+  // 缩放变化 → 窗口 resize → 重渲染重读 --agent-s
+  useEffect(() => {
+    const read = () => force((v) => v + 1)
+    window.addEventListener('resize', read)
+    return () => window.removeEventListener('resize', read)
+  }, [])
+  const root = document.querySelector('.island-demo.expanded')
+  const raw = root ? getComputedStyle(root).getPropertyValue('--agent-s') : ''
+  const scale = Number.parseFloat(raw)
+  const s = Number.isFinite(scale) && scale > 0 ? scale : 1
+  const width = natural != null && natural > 0 ? Math.round(natural * s * 0.25) : undefined
+  return (
+    <img
+      src={src}
+      alt={alt ?? ''}
+      className="island-agent-md-img"
+      style={width ? { width, height: 'auto' } : undefined}
+      onPointerDown={(event) => {
+        if (event.button === 0) event.stopPropagation()
+      }}
+    />
+  )
 }
 
 /** 链接:仅 http(s) 渲染为可点击锚点,其余原样文本(防协议注入) */
@@ -141,6 +182,9 @@ function renderInlines(inl: MdInline[]): ReactNode[] {
         return <code key={i}>{node.s}</code>
       case 'a':
         return <LinkNode key={i} h={node.h} c={node.c} />
+      case 'img':
+        // data URL 内嵌图片(工具生成的二维码等;解析器已限定 data:image/)
+        return <AgentImage key={i} src={node.s} alt={node.a} />
     }
   })
 }

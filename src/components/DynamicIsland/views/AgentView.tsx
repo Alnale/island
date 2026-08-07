@@ -22,12 +22,13 @@ import {
   type MouseEvent,
   type ReactNode,
   type RefObject,
-  type WheelEvent,
 } from 'react'
-import type { AgentMessage, AgentPanelProps, AgentPart, AgentToolInfo } from '../../../agent/types'
-import { useWheelSteps } from '../../../hooks/useWheelSteps'
-import { WheelSwap } from './WheelSwap'
-import { CopyButton, Markdown } from './Markdown'
+import type { AgentPanelProps, AgentToolInfo } from '../../../agent/types'
+import { stripMcpServiceLabel } from '../../../../electron/agent/constants'
+import { useLeavingList } from '../../../hooks/useLeavingList'
+import { QuickMenu } from './QuickMenu'
+import { Markdown } from './Markdown'
+import { AssistantBlock, ToolSummary, UserBubble } from './AgentMessages'
 import {
   AGENT_PANEL_FIXED_H,
   AGENT_PANEL_MAX_H,
@@ -189,6 +190,21 @@ function smoothScrollTo(el: HTMLElement, target: number, durationMs = 800, blur 
   requestAnimationFrame(step)
 }
 
+/** 滚动消息列表到底部:桌面挂件直接跳底(软件渲染逐帧 scrollTop + 全幅
+ * 重绘 ≈5-15ms/帧,动画太贵),Web 演示版保留平滑滚动(GPU);
+ * blur = 启用动态高斯模糊(长列表滚动动画的性能优化,对话中跳转的
+ * 短列表不需要,实测观感不佳);审计 P2 #9 收敛两处重复 */
+function scrollMessagesToBottom(
+  el: HTMLElement,
+  opts: { durationMs?: number; blur?: boolean } = {},
+) {
+  if (window.desktop) {
+    el.scrollTop = el.scrollHeight
+  } else {
+    smoothScrollTo(el, el.scrollHeight, opts.durationMs ?? 800, opts.blur ?? false)
+  }
+}
+
 /** 历史会话时间显示:今天 → HH:MM;昨天 → 昨天;更早 → M月D日 */
 function formatSessionTime(ts: number): string {
   const d = new Date(ts)
@@ -212,232 +228,6 @@ export interface AgentViewProps extends AgentPanelProps {
   onHeightChange?: (height: number) => void
 }
 
-/** 用户消息气泡:右侧强调色,Markdown 文本(plainMermaid:用户贴的
- * mermaid 源码按普通代码块显示,图表深色主题进浅色气泡不可读) + 复制按钮 */
-function UserBubble({ m }: { m: AgentMessage }) {
-  const text = m.parts
-    .filter((p): p is Extract<AgentPart, { type: 'text' }> => p.type === 'text')
-    .map((p) => p.text)
-    .join('\n')
-  return (
-    <div className="island-agent-msg-user">
-      <div className="island-agent-msg-user-text">
-        <Markdown text={text} plainMermaid />
-      </div>
-      <CopyButton text={text} />
-    </div>
-  )
-}
-
-/** 单个工具调用的数据(模块内卡片 / 流式卡片共用) */
-interface ToolCallData {
-  id: string
-  name: string
-  args: Record<string, unknown>
-  ok?: boolean
-  result?: string
-  durationMs?: number
-}
-
-/** 工具卡片:头部(状态 + 名称 + 耗时)+ 可展开参数/结果(过程可知)。
-    展开/收起 = 高度经 grid-template-rows 0fr↔1fr 动画(无需测量高度;
-    无过冲缓动——弹簧曲线插值到负 fr 会被钳制,收起时会抖动) */
-function ToolCard({ call }: { call: ToolCallData }) {
-  const [open, setOpen] = useState(false)
-  return (
-    <div className={`island-agent-tool${open ? ' open' : ''}`}>
-      {/* 卡片是交互元素:拦截左键,长按卡片不触发岛体收回 */}
-      <button
-        type="button"
-        className="island-agent-tool-head"
-        aria-expanded={open}
-        onClick={(event) => {
-          event.stopPropagation()
-          setOpen((v) => !v)
-        }}
-        onPointerDown={(event) => {
-          if (event.button === 0) event.stopPropagation()
-        }}
-      >
-        <span className={`island-agent-tool-state ${call.ok === false ? 'err' : call.ok ? 'ok' : 'run'}`} aria-hidden="true">
-          {call.ok === false ? '✕' : call.ok ? '✓' : '●'}
-        </span>
-        <span className="island-agent-tool-name">{call.name}</span>
-        {call.durationMs !== undefined && (
-          <span className="island-agent-tool-time">{call.durationMs}ms</span>
-        )}
-        <span className="island-agent-tool-toggle" aria-hidden="true">
-          ▸
-        </span>
-      </button>
-      <div className="island-agent-tool-body-wrap">
-        <div className="island-agent-tool-body">
-          <div className="island-agent-tool-sec">
-            <span className="island-agent-tool-sec-title">参数</span>
-            <pre className="island-agent-tool-code">{JSON.stringify(call.args ?? {}, null, 2)}</pre>
-          </div>
-          {call.result !== undefined && (
-            <div className="island-agent-tool-sec">
-              <span className="island-agent-tool-sec-title">{call.ok === false ? '错误' : '结果'}</span>
-              <pre className="island-agent-tool-code">{call.result}</pre>
-            </div>
-          )}
-        </div>
-      </div>
-    </div>
-  )
-}
-
-/** 工具模块:同一回复中**连续**的工具调用收纳成一个模块(信息密度优化——
-    逐个工具卡片平铺时,一轮回复 5~6 个工具占用大半面板高度)。
-    默认收纳:只有头部一行(图标 + 名称/计数 + 状态汇总 + 总耗时 + 箭头);
-    点击展开/收起,高度动画同卡片(0fr↔1fr 无过冲)。头部实时汇总:
-    执行中脉冲点 / 成功失败计数,收纳态也能一眼看到执行概况 */
-function ToolModule({ items }: { items: ToolCallData[] }) {
-  const [open, setOpen] = useState(false)
-  const running = items.some((i) => i.ok === undefined)
-  const okCount = items.filter((i) => i.ok === true).length
-  const errCount = items.filter((i) => i.ok === false).length
-  const totalMs = items.reduce((sum, i) => sum + (i.durationMs ?? 0), 0)
-  return (
-    <div className={`island-agent-tool-module${open ? ' open' : ''}`}>
-      {/* 模块头部:交互元素,拦截左键(长按不触发岛体收回) */}
-      <button
-        type="button"
-        className="island-agent-tool-module-head"
-        aria-expanded={open}
-        onClick={(event) => {
-          event.stopPropagation()
-          setOpen((v) => !v)
-        }}
-        onPointerDown={(event) => {
-          if (event.button === 0) event.stopPropagation()
-        }}
-      >
-        <svg
-          className="island-ctl-svg"
-          width="11"
-          height="11"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth={2}
-          strokeLinecap="round"
-          aria-hidden="true"
-        >
-          <line x1="4" y1="6" x2="20" y2="6" />
-          <circle cx="14" cy="6" r="2" />
-          <line x1="4" y1="12" x2="20" y2="12" />
-          <circle cx="8" cy="12" r="2" />
-          <line x1="4" y1="18" x2="20" y2="18" />
-          <circle cx="16" cy="18" r="2" />
-        </svg>
-        <span className="island-agent-tool-module-title">
-          {items.length === 1 ? items[0].name : `工具调用 ×${items.length}`}
-        </span>
-        {running ? (
-          <span className="island-agent-tool-module-state run">● 执行中</span>
-        ) : (
-          <>
-            {okCount > 0 && <span className="island-agent-tool-module-state ok">✓ {okCount}</span>}
-            {errCount > 0 && <span className="island-agent-tool-module-state err">✕ {errCount}</span>}
-          </>
-        )}
-        {totalMs > 0 && <span className="island-agent-tool-time">{totalMs}ms</span>}
-        <span className="island-agent-tool-toggle" aria-hidden="true">
-          ▸
-        </span>
-      </button>
-      <div className="island-agent-tool-module-body">
-        <div className="island-agent-tool-module-inner">
-          {items.map((call) => (
-            <ToolCard key={call.id} call={call} />
-          ))}
-        </div>
-      </div>
-    </div>
-  )
-}
-
-/** 助手消息块:parts 按顺序渲染(文本段 + 工具调用),尾部附 token 用量。
-    工具调用按**连续序列**分组:单次调用 = 一张卡片(点击直开参数/结果);
-    连续多次 = 收纳成工具模块(头部一行汇总,点击展开看各卡,再点卡片
-    展开参数)——一轮回复的工具再多也只占一行,信息密度优化 */
-function AssistantBlock({
-  parts,
-  usage,
-}: {
-  parts: AgentMessage['parts']
-  usage?: AgentMessage['usage']
-}) {
-  // 归并节点序列:文本段与连续工具组交替;工具组内的卡片按执行顺序
-  // 排列(调用 + 结果配对;顺序即执行顺序,过程可知)
-  const nodes: Array<
-    | { kind: 'text'; text: string }
-    | { kind: 'tools'; items: ToolCallData[] }
-  > = []
-  let group: ToolCallData[] = []
-  const flushGroup = () => {
-    if (group.length > 0) {
-      nodes.push({ kind: 'tools', items: group })
-      group = []
-    }
-  }
-  parts.forEach((part) => {
-    if (part.type === 'text') {
-      flushGroup()
-      nodes.push({ kind: 'text', text: part.text })
-    } else if (part.type === 'tool-call') {
-      const result = parts.find(
-        (p): p is Extract<AgentMessage['parts'][number], { type: 'tool-result' }> =>
-          p.type === 'tool-result' && p.id === part.id,
-      )
-      group.push({
-        id: part.id,
-        name: part.name,
-        args: part.args,
-        ok: result?.ok,
-        result: result?.result,
-        durationMs: result?.durationMs,
-      })
-    }
-  })
-  flushGroup()
-  return (
-    <div className="island-agent-msg-assistant">
-      {nodes.map((node, i) => {
-        if (node.kind === 'text') {
-          return (
-            <div key={`t-${i}`} className="island-agent-text">
-              <Markdown text={node.text} />
-            </div>
-          )
-        }
-        // 单次调用 = 卡片直开参数;连续多次 = 工具模块(收纳,点击展开)
-        if (node.items.length === 1) {
-          return <ToolCard key={node.items[0].id} call={node.items[0]} />
-        }
-        return <ToolModule key={node.items[0].id} items={node.items} />
-      })}
-      {/* 气泡脚注:复制按钮(复制本条回复文本)+ token 用量 */}
-      <div className="island-agent-msg-foot">
-        <CopyButton
-          text={parts
-            .filter((p): p is Extract<AgentPart, { type: 'text' }> => p.type === 'text')
-            .map((p) => p.text)
-            .join('\n')}
-        />
-        {usage && (
-          <span className="island-agent-usage">
-            输入 {usage.input.toLocaleString()} · 输出 {usage.output.toLocaleString()}
-            {usage.cached ? ` · 缓存命中 ${usage.cached.toLocaleString()}` : ''}
-          </span>
-        )}
-      </div>
-    </div>
-  )
-}
-
 export function AgentView({
   status,
   messages,
@@ -453,6 +243,8 @@ export function AgentView({
   onOpenSettings,
   onExcludedToolsChange,
   excludedTools,
+  pendingConfirm,
+  onConfirmTool,
   onCollapse,
   onHeightChange,
 }: AgentViewProps) {
@@ -485,13 +277,14 @@ export function AgentView({
       240 + n * 30,
     )
   }, [])
-  // 删除中的会话 id(离场动画中;播完才真正删除)
-  const [leavingSessionIds, setLeavingSessionIds] = useState<string[]>([])
-  const leavingSessionTimersRef = useRef<number[]>([])
+  // 删除中的会话 id(离场动画中;播完才真正删除;useLeavingList 收敛
+  // 定时器模式,审计 P2)
+  const sessionsLeave = useLeavingList()
   // 工具列表视图:搜索词 / 禁用·恢复的离场与入场动画(leaving = 从当前
-  // 区离场,entering = 移入另一区时回弹入场;动画计时器统一收集清理)
+  // 区离场,entering = 移入另一区时回弹入场;离场定时器 useLeavingList
+  // 自清,入场计时器统一收集清理)
   const [toolQuery, setToolQuery] = useState('')
-  const [leavingTools, setLeavingTools] = useState<string[]>([])
+  const toolsLeave = useLeavingList()
   const [enteringTools, setEnteringTools] = useState<string[]>([])
   const toolAnimTimersRef = useRef<number[]>([])
   // 面板子视图:聊天 / 对话历史 / 工具列表
@@ -506,19 +299,16 @@ export function AgentView({
     const timer = window.setTimeout(() => setPhase('content'), AGENT_PHASE_IN_MS)
     return () => window.clearTimeout(timer)
   }, [])
-  // 右上角下拉菜单(⋯):停止生成 / 新对话 / 对话历史 / 工具列表 / 收起面板
-  const [menuOpen, setMenuOpen] = useState(false)
   // 卸载时清理候选收起计时器(动画未完成即卸载不残留)
   useEffect(() => () => window.clearTimeout(suggestCloseTimerRef.current), [])
   // 输入框引用:LLM 回复完成后自动聚焦,直接可输入
   const inputRef = useRef<HTMLTextAreaElement>(null)
-  const menuRef = useRef<HTMLDivElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const atBottomRef = useRef(true)
   const busy = status === 'thinking' || status === 'running'
-  // 下拉菜单项:⋯ 弹出菜单与快捷切换按钮共用;条件项随状态
-  // (停止生成仅运行中、新对话仅非空历史)。收起面板恒为末项
-  // (快捷按钮的默认显示项)
+  // 快捷菜单项(2026-08-07 重构:通用 QuickMenu 取代 ⋯ 弹出菜单):
+  // 条件项随状态(停止生成仅运行中、新对话仅非空历史)。**默认选中
+  // "新对话"**(用户要求);收起面板恒为末项(历史为空时的回退默认)
   const menuItems: Array<{ id: AgentMenuItemId; label: string; danger?: boolean }> = []
   if (busy) menuItems.push({ id: 'stop', label: '停止生成', danger: true })
   if (messages.length > 0) menuItems.push({ id: 'clear', label: '新对话' })
@@ -537,27 +327,36 @@ export function AgentView({
     wasBusyRef.current = busy
   }, [busy, view])
 
-  // 菜单打开时:点击菜单外任意位置关闭(菜单内点击由按钮自身处理)
-  useEffect(() => {
-    if (!menuOpen) return
-    const onDocPointerDown = (event: globalThis.PointerEvent) => {
-      if (menuRef.current && !menuRef.current.contains(event.target as Node)) setMenuOpen(false)
-    }
-    document.addEventListener('pointerdown', onDocPointerDown)
-    return () => document.removeEventListener('pointerdown', onDocPointerDown)
-  }, [menuOpen])
-
   // 岛体高度自适应:目标高度 = 固定部分 + 消息列表内容自然高。
   // 内容自然高 = 子元素高度求和(含列表 gap):scrollHeight 在内容
   // 不足时 = 可视高(flex 拉伸的盒高,自收敛)——岛体高度只长不缩,
   // 上一轮对话拉伸后,新对话不会缩回初始小空间(实测 bug);
   // 子元素高度不受 flex 拉伸影响,始终反映真实内容。
   // clamp 到 [200, 600];超高时岛体封顶 600,列表滚动不自锁。
-  // 流式回复中:80ms trailing 节流(逐字增长时高度瞬跳 + 低频重排,防卡)
+  // 流式回复中:**测量与上报一起按 80ms 节拍**(测量本身是强制 reflow——
+  // offsetHeight 循环 + getComputedStyle,每帧跑 = reflow 频率≈帧率;
+  // 节拍点排队期间跳过的调用不再测量,只保留最后一次)
   const measureTimerRef = useRef(0)
   const streamingRef = useRef(streaming)
   streamingRef.current = streaming
   const measureHeight = useCallback(() => {
+    const doMeasure = (el: HTMLElement) => {
+      let contentH = 0
+      const children = el.children
+      for (let i = 0; i < children.length; i++) {
+        contentH += (children[i] as HTMLElement).offsetHeight
+      }
+      if (children.length > 1) {
+        // 列表 gap 从运行时样式读取(聊天 10px / 历史、工具 8px,自动跟随)
+        const gap = parseFloat(getComputedStyle(el).rowGap)
+        if (Number.isFinite(gap) && gap > 0) contentH += (children.length - 1) * gap
+      }
+      const next = Math.min(
+        AGENT_PANEL_MAX_H,
+        Math.max(AGENT_PANEL_MIN_H, AGENT_PANEL_FIXED_H + contentH),
+      )
+      onHeightChange?.(next)
+    }
     // 骨架期不测量(消息区未挂载,保持岛体下限;内容期才测量长高)
     if (phase !== 'content') return
     // 工具列表/对话历史视图:高度由聊天视图决定(岛体保持进入前的聊天
@@ -567,26 +366,16 @@ export function AgentView({
     if (viewRef.current === 'tools' || viewRef.current === 'history') return
     const el = scrollRef.current
     if (!el) return
-    let contentH = 0
-    const children = el.children
-    for (let i = 0; i < children.length; i++) {
-      contentH += (children[i] as HTMLElement).offsetHeight
-    }
-    if (children.length > 1) {
-      // 列表 gap 从运行时样式读取(聊天 10px / 历史、工具 8px,自动跟随)
-      const gap = parseFloat(getComputedStyle(el).rowGap)
-      if (Number.isFinite(gap) && gap > 0) contentH += (children.length - 1) * gap
-    }
-    const next = Math.min(
-      AGENT_PANEL_MAX_H,
-      Math.max(AGENT_PANEL_MIN_H, AGENT_PANEL_FIXED_H + contentH),
-    )
     if (streamingRef.current) {
-      window.clearTimeout(measureTimerRef.current)
-      measureTimerRef.current = window.setTimeout(() => onHeightChange?.(next), 80)
-    } else {
-      onHeightChange?.(next)
+      if (measureTimerRef.current) return // 已有节拍点排队,本帧跳过测量
+      measureTimerRef.current = window.setTimeout(() => {
+        measureTimerRef.current = 0
+        // 视图切换等可能已卸载,离屏节点高度失真,跳过
+        if (el.isConnected) doMeasure(el)
+      }, 80)
+      return
     }
+    doMeasure(el)
   }, [onHeightChange, phase])
 
   // 视图切换(chat ↔ 对话历史/工具列表):立即换主实例(新视图进场
@@ -623,21 +412,13 @@ export function AgentView({
   // gap,行消失过程列表平滑上移,无跳变;多个行可同时离场(各自定时)
   const handleDeleteSession = (event: MouseEvent<HTMLButtonElement>, id: string) => {
     event.stopPropagation()
-    if (leavingSessionIds.includes(id)) return
     const row = event.currentTarget.closest('.island-agent-history-item') as HTMLElement | null
     row?.style.setProperty('height', `${row.offsetHeight}px`)
-    setLeavingSessionIds((prev) => [...prev, id])
-    leavingSessionTimersRef.current.push(
-      window.setTimeout(() => {
-        setLeavingSessionIds((prev) => prev.filter((x) => x !== id))
-        onDeleteSession(id)
-      }, 260),
-    )
+    sessionsLeave.beginLeave(id, () => onDeleteSession(id))
   }
-  // 卸载时清理离场定时器(动画未完成即卸载不残留)
+  // 卸载时清理未完成动画定时器(useLeavingList 已自清,这里只剩工具区)
   useEffect(
     () => () => {
-      leavingSessionTimersRef.current.forEach((t) => window.clearTimeout(t))
       toolAnimTimersRef.current.forEach((t) => window.clearTimeout(t))
     },
     [],
@@ -650,43 +431,39 @@ export function AgentView({
     const current = excludedTools ?? []
     // 仅离场中拦截:入场动画期间允许再次操作(行还在原区,离场动画
     // 会覆盖入场动画,无冲突)
-    if (leavingTools.includes(name)) return
+    if (toolsLeave.leavingIds.includes(name)) return
     const next = disable
       ? [...new Set([...current, name])]
       : current.filter((n) => n !== name)
     if (next.length === current.length) return
-    setLeavingTools((prev) => [...prev, name])
-    toolAnimTimersRef.current.push(
-      window.setTimeout(() => {
-        setLeavingTools((prev) => prev.filter((n) => n !== name))
-        onExcludedToolsChange?.(next)
-        // 行移入目标区(禁用区 / 可用区):回弹入场动画
-        setEnteringTools((prev) => [...prev, name])
-        toolAnimTimersRef.current.push(
-          window.setTimeout(() => {
-            setEnteringTools((prev) => prev.filter((n) => n !== name))
-          }, 460),
-        )
-      }, 260),
-    )
+    toolsLeave.beginLeave(name, () => {
+      onExcludedToolsChange?.(next)
+      // 行移入目标区(禁用区 / 可用区):回弹入场动画
+      setEnteringTools((prev) => [...prev, name])
+      toolAnimTimersRef.current.push(
+        window.setTimeout(() => {
+          setEnteringTools((prev) => prev.filter((n) => n !== name))
+        }, 460),
+      )
+    })
   }
 
-  // ===== 快捷切换按钮(悬浮 ⋯ 时在左侧浮现;滚轮逐格切换、单击跳转) =====
-  // 默认显示"收起面板"(末项);滚轮可切换到菜单的各个入口;单击执行当前项。
+  // ===== 右上角快捷菜单(2026-08-07 重构:通用 QuickMenu——整合按钮 +
+  // 同行联通展开 + 滚轮逐格切换 + 高亮滑块,取代原 ⋯ 弹出菜单与
+  // 悬浮快捷按钮) =====
+  // **默认选中的类型是新对话**(用户要求);历史为空时无"新对话"项 → 回退末项。
   // 菜单项随 busy/messages 变化:索引经 ref 跨渲染同步,渲染时钳制有效范围
-  const [quickIndex, setQuickIndex] = useState(() => menuItems.length - 1)
-  const [quickTick, setQuickTick] = useState(0)
-  // 切换前的内容与方向(WheelSwap 旧内容滑出/新内容回弹滑入)
-  const [quickPrev, setQuickPrev] = useState<{ id: AgentMenuItemId; label: string } | null>(null)
-  const [quickDir, setQuickDir] = useState<1 | -1>(1)
+  const [quickIndex, setQuickIndex] = useState(() => {
+    const i = menuItems.findIndex((m) => m.id === 'clear')
+    return i >= 0 ? i : menuItems.length - 1
+  })
   const quickIndexRef = useRef(quickIndex)
   quickIndexRef.current = quickIndex
   const quickItem = menuItems[Math.min(quickIndex, menuItems.length - 1)]
 
-  // 执行菜单项动作(⋯ 弹出菜单与快捷按钮共用)
+  // 执行菜单项动作(⋯ 快捷菜单共用)
   const runItem = useCallback(
     (id: AgentMenuItemId) => {
-      setMenuOpen(false)
       switch (id) {
         case 'stop':
           onAbort()
@@ -711,44 +488,19 @@ export function AgentView({
     [onAbort, onClear, onCollapse, onOpenSettings, switchView],
   )
 
-  // 滚轮推进一格(dir = 1 向下滚 = 列表下移 = 下一项;-1 向上滚 = 上一项,
-  // 循环)。每格重挂载按钮重放内容交换动画(旧内容滑出/新内容回弹滑入)
-  const stepQuick = (dir: 1 | -1) => {
-    const n = menuItems.length
-    const cur = Math.min(quickIndexRef.current, n - 1)
-    setQuickPrev(menuItems[cur])
-    setQuickDir(dir)
-    quickIndexRef.current = (cur + dir + n) % n
-    setQuickIndex(quickIndexRef.current)
-    setQuickTick((t) => t + 1)
-  }
-
-  // 滚轮逐格步进(共享 useWheelSteps:每 60px 一步、步间 ≥100ms、
-  // 350ms 无滚动重置——与记忆类型按钮手感一致)
-  const wheelSteps = useWheelSteps()
-  const handleQuickWheel = (event: WheelEvent<HTMLDivElement>) => {
-    const dir = wheelSteps(event)
-    if (dir) stepQuick(dir)
-  }
-
-  // 单击快捷按钮:执行当前项并复位默认(收起面板)
-  const handleQuickClick = (event: MouseEvent<HTMLDivElement>) => {
-    event.stopPropagation()
-    runItem(quickItem.id)
-    setQuickPrev(quickItem)
-    setQuickDir(1)
-    quickIndexRef.current = menuItems.length - 1
-    setQuickIndex(quickIndexRef.current)
-    setQuickTick((t) => t + 1)
-  }
-
-  // 快捷按钮内容(图标 + 标签):WheelSwap 的旧/新两层共用
-  const quickItemNode = (item: { id: AgentMenuItemId; label: string }) => (
+  // 菜单项内容(图标 + 标签):QuickMenu 的按钮 WheelSwap 与菜单项共用
+  const quickItemNode = (item: { id: AgentMenuItemId; label: string; danger?: boolean }) => (
     <>
       {QUICK_MENU_ICONS[item.id]}
-      <span className="island-agent-quick-label">{item.label}</span>
+      <span className={`island-agent-quick-label${item.danger ? ' danger' : ''}`}>{item.label}</span>
     </>
   )
+  // 执行后复位默认(新对话;新对话后历史为空 → clear 项消失,回退末项)
+  const resetQuickToDefault = () => {
+    const i = menuItems.findIndex((m) => m.id === 'clear')
+    quickIndexRef.current = i >= 0 ? i : menuItems.length - 1
+    setQuickIndex(quickIndexRef.current)
+  }
 
   // 内容变化(消息/流式/状态)时重测(rAF 延迟一帧:面板首帧挂载不阻塞
   // 展开动画布局,测量结果下一帧生效,展开更顺)
@@ -763,6 +515,19 @@ export function AgentView({
     if (!el || !onHeightChange) return
     const observer = new ResizeObserver(measureHeight)
     observer.observe(el)
+    return () => observer.disconnect()
+  }, [measureHeight, onHeightChange])
+
+  // 工具卡片折叠/展开**实时收缩**(2026-08-07 用户要求):ToolSummary/
+  // ToolCard 的 open 是内部状态,折叠后内容变矮——但消息列表 overflow
+  // 滚动,列表容器高度不变,ResizeObserver 不触发 → 岛体高度不收缩,
+  // 直到下一条消息/工具调用才重测(实测 bug)。MutationObserver 监听
+  // 子树 class 变化(卡片 open 类切换)→ rAF 重测,实时跟随
+  useLayoutEffect(() => {
+    const el = scrollRef.current
+    if (!el || !onHeightChange) return
+    const observer = new MutationObserver(() => requestAnimationFrame(measureHeight))
+    observer.observe(el, { subtree: true, attributes: true, attributeFilter: ['class'] })
     return () => observer.disconnect()
   }, [measureHeight, onHeightChange])
 
@@ -795,7 +560,10 @@ export function AgentView({
     const el = scrollRef.current
     if (el) {
       atBottomRef.current = true
-      smoothScrollTo(el, el.scrollHeight, 800, messagesLenRef.current > 0)
+      // 桌面挂件:滚动动画逐帧 scrollTop + 软件渲染全幅重绘仍然贵
+      // (750×500 文本区 ≈ 5-15ms/帧),直接跳底零动画成本;
+      // Web 演示版保留平滑滚动(GPU,长列表模糊是性能优化)
+      scrollMessagesToBottom(el, { blur: messagesLenRef.current > 0 })
     }
   }, [view, phase])
 
@@ -812,7 +580,8 @@ export function AgentView({
       const el = scrollRef.current
       if (el) {
         atBottomRef.current = true
-        smoothScrollTo(el, el.scrollHeight, 650, false)
+        // 桌面挂件:直接跳底(同上);Web 演示版保留平滑滚动
+        scrollMessagesToBottom(el, { durationMs: 650 })
       }
     })
   }
@@ -944,7 +713,7 @@ export function AgentView({
             {sessions.map((s) => (
               <div
                 key={s.id}
-                className={`island-agent-history-item${leavingSessionIds.includes(s.id) ? ' leaving' : ''}`}
+                className={`island-agent-history-item${sessionsLeave.leavingIds.includes(s.id) ? ' leaving' : ''}`}
               >
                 <button
                   type="button"
@@ -1007,7 +776,7 @@ export function AgentView({
         .map((name) => ({ name, info: tools.find((t) => t.name === name) }))
       // 离场 / 入场动画类(禁用点击与恢复点击共用:先离场再移区入场)
       const rowAnimClass = (name: string) =>
-        `${leavingTools.includes(name) ? ' island-ui-leave' : ''}${
+        `${toolsLeave.leavingIds.includes(name) ? ' island-ui-leave' : ''}${
           enteringTools.includes(name) ? ' island-ui-enter' : ''
         }`
       return (
@@ -1160,70 +929,28 @@ export function AgentView({
             Agent
           </span>
           <span className="island-agent-status">{statusText}</span>
-          <div className={`island-agent-menu${menuOpen ? ' open' : ''}`} ref={menuRef}>
-            {/* 快捷切换按钮:悬浮 ⋯ 时在左侧浮现,默认显示"收起面板"。
-                滚轮在菜单各入口间逐格切换(顿挫 tick)、单击执行当前项。
-                透明命中区自 ⋯ 左缘向左延伸(覆盖间隙与按钮本身)——鼠标
-                从 ⋯ 横移到按钮的过程悬停不中断,按钮不会中途消失。
-                菜单打开时(.open)隐藏(弹出面板已展开,快捷按钮冗余) */}
-            <div
-              className="island-agent-quick"
-              onPointerDown={(event) => {
-                if (event.button === 0) event.stopPropagation()
-              }}
-              onClick={handleQuickClick}
-              onWheel={handleQuickWheel}
-            >
-              <button
-                key={quickTick}
-                type="button"
-                className={`island-agent-quick-btn${quickItem.danger ? ' danger' : ''}`}
-                title={quickItem.label}
-              >
-                <WheelSwap tick={quickTick} dir={quickDir} prev={quickPrev ? quickItemNode(quickPrev) : null}>
-                  {quickItemNode(quickItem)}
-                </WheelSwap>
-              </button>
-            </div>
-            <button
-              type="button"
-              className={`island-agent-ctl${menuOpen ? ' on' : ''}`}
-              title="更多操作"
-              onClick={(event) => {
-                event.stopPropagation()
-                setMenuOpen((v) => !v)
-              }}
-            >
-              <svg
-                className="island-ctl-svg"
-                width="13"
-                height="13"
-                viewBox="0 0 24 24"
-                fill="currentColor"
-              >
-                <circle cx="12" cy="5" r="1.9" />
-                <circle cx="12" cy="12" r="1.9" />
-                <circle cx="12" cy="19" r="1.9" />
-              </svg>
-            </button>
-            {menuOpen && (
-              <div className="island-agent-menu-pop">
-                {menuItems.map((item) => (
-                  <button
-                    key={item.id}
-                    type="button"
-                    className={`island-agent-menu-item${item.danger ? ' danger' : ''}`}
-                    onClick={(event) => {
-                      event.stopPropagation()
-                      runItem(item.id)
-                    }}
-                  >
-                    {item.label}
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
+          {/* 右上角快捷菜单(2026-08-07 重构:通用 QuickMenu,默认"新对话";
+              左侧展开,悬浮/滚轮/点击切换,单击菜单项执行) */}
+          <QuickMenu
+            items={menuItems}
+            value={quickItem}
+            onChange={(item) => {
+              const i = menuItems.indexOf(item)
+              if (i >= 0) {
+                quickIndexRef.current = i
+                setQuickIndex(i)
+              }
+            }}
+            onSelect={(item) => {
+              runItem(item.id)
+              resetQuickToDefault()
+            }}
+            getLabel={quickItemNode}
+            direction="left"
+            title="滚轮切换,单击执行"
+            wheelWhenOpen
+            buttonAction="run"
+          />
         </div>
 
         {/* 消息列表:展开首帧先渲染骨架占位(形变动画期间 DOM 轻量),
@@ -1250,7 +977,9 @@ export function AgentView({
                 <AssistantBlock key={m.id} parts={m.parts} usage={m.usage} />
               ),
             )}
-            {/* 流式中的助手回复 */}
+            {/* 流式中的助手回复:工具实时并入同一汇总列表(收纳态只有
+                一行,执行中脉冲/成功失败计数实时更新;展开可看各卡
+                状态,卡片 key 稳定 → open 状态跨事件保留) */}
             {streaming && (streaming.text || streaming.tools.length > 0) && (
               <div className="island-agent-msg-assistant">
                 {streaming.text && (
@@ -1258,19 +987,18 @@ export function AgentView({
                     <Markdown text={streaming.text} caret />
                   </div>
                 )}
-                {streaming.tools.map((tool) => (
-                  <ToolCard
-                    key={tool.id}
-                    call={{
+                {streaming.tools.length > 0 && (
+                  <ToolSummary
+                    items={streaming.tools.map((tool) => ({
                       id: tool.id,
                       name: tool.name,
                       args: tool.args,
                       ok: tool.ok,
                       result: tool.result,
                       durationMs: tool.durationMs,
-                    }}
+                    }))}
                   />
-                ))}
+                )}
               </div>
             )}
             {/* 思考中(无文本输出时) */}
@@ -1296,6 +1024,34 @@ export function AgentView({
             if (event.button === 0) event.stopPropagation()
           }}
         >
+          {pendingConfirm && (
+            <div className="island-agent-confirm">
+              <span className="island-agent-confirm-title">允许执行命令?</span>
+              <code className="island-agent-confirm-cmd">{pendingConfirm.command}</code>
+              <div className="island-agent-confirm-actions">
+                <button
+                  type="button"
+                  className="island-agent-confirm-allow"
+                  onClick={(event) => {
+                    event.stopPropagation()
+                    onConfirmTool(true)
+                  }}
+                >
+                  允许
+                </button>
+                <button
+                  type="button"
+                  className="island-agent-confirm-deny"
+                  onClick={(event) => {
+                    event.stopPropagation()
+                    onConfirmTool(false)
+                  }}
+                >
+                  拒绝
+                </button>
+              </div>
+            </div>
+          )}
           {suggestions.length > 0 && (
             <div className={`island-agent-suggest${suggestClosing ? ' closing' : ''}`}>
               {suggestions.map((t, i) => (
@@ -1321,7 +1077,7 @@ export function AgentView({
                     {t.name}
                   </span>
                   <span className="island-agent-suggest-desc">
-                    {t.description.replace(/^\[MCP 服务:[^\]]+\]\s*/, '').slice(0, 28)}
+                    {stripMcpServiceLabel(t.description).slice(0, 28)}
                   </span>
                 </button>
               ))}

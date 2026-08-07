@@ -8,10 +8,14 @@
  * 保存经 onSave 走主进程 settings.json(agent 段),记忆与进化走独立 IPC。
  */
 
-import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type WheelEvent } from 'react'
+import { useCallback, useEffect, useRef, useState, type WheelEvent } from 'react'
 import type { AgentConfig, AgentToolInfo, McpServerConfig, MemoryEntry } from '../../../agent/types'
+import { MIND_PERSONAS, SUMMARY_STYLES, providerLabel } from '../../../../electron/agent/constants'
+import { useLeavingList } from '../../../hooks/useLeavingList'
 import { useWheelSteps } from '../../../hooks/useWheelSteps'
+import { useWheelSwap } from '../../../hooks/useWheelSwap'
 import { BackFoot, PanelHead } from './shared'
+import { QuickMenu } from './QuickMenu'
 import { WheelSwap } from './WheelSwap'
 
 export interface AgentSettingsViewProps {
@@ -24,6 +28,12 @@ export interface AgentSettingsViewProps {
   onScaleChange: (scale: number) => void
   onBack: () => void
 }
+
+/** Agent 设置分组菜单(2026-08-07 布局重构:相似功能收进分组菜单,
+ * 由整合按钮悬浮展开切换;保存脚全局共用。第 5 组「Sub Agent」=
+ * 总结标题文风 + 心理揣测人格设置)。渲染用通用 QuickMenu 组件
+ * (整合按钮 + 同行联通展开 + 滚轮 + 高亮滑块 + 宽度过渡,同款设计) */
+const SETTINGS_TABS = ['连接', '行为与界面', '工具与能力', '记忆与进化', 'Sub Agent'] as const
 
 /** MCP 服务表单行(参数/环境变量以逐行文本编辑,保存时转换) */
 interface McpServerForm {
@@ -40,6 +50,159 @@ interface McpServerForm {
   headers: string[]
 }
 
+/** MCP 服务卡片(表单编辑:名称/传输类型/命令或端点/参数与头;
+ * 拆分自设置视图主组件,审计 P1 #7——原 ~123 行 JSX 嵌在分组 map 里
+ * 4 层缩进,props 化后自包含可独立测试) */
+function McpServerCard({
+  idx,
+  server,
+  testing,
+  testResult,
+  leaving,
+  onTest,
+  onRemove,
+  onPatch,
+}: {
+  idx: number
+  server: McpServerForm
+  /** 正在测试连通(按钮显示"测试中…") */
+  testing: boolean
+  /** 测试结果(仅显示本卡 idx 的) */
+  testResult: { idx: number; ok: boolean; text: string } | null
+  /** 离场动画中(挂 island-ui-leave) */
+  leaving: boolean
+  onTest(idx: number): void
+  onRemove(idx: number): void
+  onPatch(idx: number, patch: Partial<McpServerForm>): void
+}) {
+  const patch = (p: Partial<McpServerForm>) => onPatch(idx, p)
+  return (
+    <div
+      className={`island-mcp-card${leaving ? ' island-ui-leave' : ''}`}
+>
+  <div className="island-mcp-head">
+    <span className="island-mcp-name">服务 {idx + 1}</span>
+    <div className="island-mcp-actions">
+      <button
+        type="button"
+        className="island-agent-scale-btn"
+        disabled={testing || !server.name.trim()}
+        onClick={(event) => {
+          event.stopPropagation()
+          onTest(idx)
+        }}
+      >
+        {testing ? '测试中…' : '测试'}
+      </button>
+      <button
+        type="button"
+        className="island-agent-scale-btn island-mcp-remove"
+        onClick={(event) => {
+          event.stopPropagation()
+          onRemove(idx)
+        }}
+      >
+        删除
+      </button>
+    </div>
+  </div>
+  <div className="island-mcp-type-row">
+    <button
+      type="button"
+      className={`island-agent-scale-btn${server.type === 'stdio' ? ' on' : ''}`}
+      onClick={(event) => {
+        event.stopPropagation()
+        patch({ type: 'stdio' })
+      }}
+    >
+      本地进程(stdio)
+    </button>
+    <button
+      type="button"
+      className={`island-agent-scale-btn${server.type === 'sse' ? ' on' : ''}`}
+      onClick={(event) => {
+        event.stopPropagation()
+        patch({ type: 'sse' })
+      }}
+    >
+      远程端点(sse)
+    </button>
+  </div>
+  <label className="island-agent-field">
+    <span>服务名(工具名前缀)</span>
+    <input
+      type="text"
+      value={server.name}
+      placeholder="如 filesystem"
+      spellCheck={false}
+      onChange={(event) => patch({ name: event.target.value })}
+    />
+  </label>
+  {server.type === 'sse' ? (
+    <>
+      <label className="island-agent-field">
+        <span>端点 URL</span>
+        <input
+          type="text"
+          value={server.url}
+          placeholder="如 https://example.com/mcp/sse"
+          spellCheck={false}
+          onChange={(event) => patch({ url: event.target.value, command: event.target.value })}
+        />
+      </label>
+      <label className="island-agent-field">
+        <span>请求头(每行 KEY=VALUE,可选)</span>
+        <textarea
+          rows={1}
+          value={server.headers.join('\n')}
+          placeholder="如 Authorization=Bearer xxx"
+          onChange={(event) => patch({ headers: event.target.value.split('\n') })}
+        />
+      </label>
+    </>
+  ) : (
+    <>
+      <label className="island-agent-field">
+        <span>启动命令</span>
+        <input
+          type="text"
+          value={server.command}
+          placeholder="如 npx -y @modelcontextprotocol/server-filesystem"
+          spellCheck={false}
+          onChange={(event) => patch({ command: event.target.value })}
+        />
+      </label>
+      <label className="island-agent-field">
+        <span>参数(每行一个;含空格路径按整行传)</span>
+        <textarea
+          rows={2}
+          value={server.args.join('\n')}
+          placeholder={'如\nC:/Users/asus/Documents'}
+          onChange={(event) => patch({ args: event.target.value.split('\n') })}
+        />
+      </label>
+      <label className="island-agent-field">
+        <span>环境变量(每行 KEY=VALUE,可选)</span>
+        <textarea
+          rows={1}
+          value={server.env.join('\n')}
+          placeholder="如 GITHUB_TOKEN=ghp_xxx"
+          onChange={(event) => patch({ env: event.target.value.split('\n') })}
+        />
+      </label>
+    </>
+  )}
+  {testResult && testResult.idx === idx ? (
+    <span className={`island-mcp-test-result ${testResult.ok ? 'ok' : 'fail'}`}>
+      {testResult.ok ? '✓ ' : '✗ '}
+      {testResult.text}
+    </span>
+  ) : null}
+</div>
+  )
+}
+
+
 const MEMORY_TYPES: Array<[MemoryEntry['type'], string]> = [
   ['preference', '偏好'],
   ['fact', '事实'],
@@ -47,7 +210,13 @@ const MEMORY_TYPES: Array<[MemoryEntry['type'], string]> = [
   ['lesson', '教训'],
 ]
 
-/** 记忆类型下拉(定制 UI:展开/收起动画,精致缓动;替代原生 select) */
+/**
+ * 记忆类型下拉(2026-08-07 重构:复用通用 QuickMenu——整合按钮 + 同行
+ * 联通展开 + 滚轮逐格切换 + 高亮滑块 + 宽度过渡,与 Agent 设置菜单
+ * 同款设计;替代原生 select)。**默认选中的类型是偏好**(用户要求)。
+ * 输入框宽度联动:QuickMenu 展开时菜单占位,添加行是 flex 容器,
+ * 输入框 flex:1 + min-width:0 自动实时收缩(无需 JS)
+ */
 function MemoryTypeSelect({
   value,
   onChange,
@@ -55,101 +224,232 @@ function MemoryTypeSelect({
   value: MemoryEntry['type']
   onChange: (v: MemoryEntry['type']) => void
 }) {
-  const [open, setOpen] = useState(false)
-  const [closing, setClosing] = useState(false)
-  // 滚轮每格 +1:重挂载按钮重放内容交换动画(与快捷按钮同款)
-  const [tick, setTick] = useState(0)
-  // 切换前的类型与方向(WheelSwap 旧徽标滑出/新徽标回弹滑入)
-  const [prevType, setPrevType] = useState<MemoryEntry['type'] | null>(null)
-  const [dir, setDir] = useState<1 | -1>(1)
-  const ref = useRef<HTMLDivElement>(null)
-  // 收起:先播动画再卸载(与候选列表同模式)
-  const closeWithAnim = () => {
-    setClosing(true)
-    window.setTimeout(() => {
-      setOpen(false)
-      setClosing(false)
-    }, 260)
-  }
-  // 点击外部关闭
-  useEffect(() => {
-    if (!open) return
-    const onDoc = (event: PointerEvent) => {
-      if (!ref.current?.contains(event.target as Node)) closeWithAnim()
-    }
-    document.addEventListener('pointerdown', onDoc)
-    return () => document.removeEventListener('pointerdown', onDoc)
-  }, [open])
-  // 原生非 passive 滚轮监听:悬浮在类型按钮上滚轮切换时,吞掉滚轮的
-  // 默认滚动行为(设置页是滚动容器;React onWheel 为 passive 监听,
-  // preventDefault 无效)——否则切换类型的同时整页跟着滚。下拉展开时
-  // 放行(滚轮属于选项浮层的交互面,不切换类型)
-  const openRef = useRef(open)
-  openRef.current = open
-  useEffect(() => {
-    const el = ref.current
-    if (!el) return
-    const onNativeWheel = (event: globalThis.WheelEvent) => {
-      if (!openRef.current) event.preventDefault()
-    }
-    el.addEventListener('wheel', onNativeWheel, { passive: false })
-    return () => el.removeEventListener('wheel', onNativeWheel)
-  }, [])
-  // 滚轮切换:直接在本体按钮上滚动,逐格循环切换类型(与快捷按钮共用
-  // useWheelSteps,手感一致);下拉展开时不响应(选项浮层是当时的交互面)
-  const wheelSteps = useWheelSteps()
-  const handleTypeWheel = (event: WheelEvent<HTMLButtonElement>) => {
-    const step = wheelSteps(event)
-    if (!step || open) return
-    const idx = MEMORY_TYPES.findIndex(([v]) => v === value)
-    const next = MEMORY_TYPES[(idx + step + MEMORY_TYPES.length) % MEMORY_TYPES.length]
-    setPrevType(value)
-    setDir(step)
-    onChange(next[0])
-    setTick((t) => t + 1)
-  }
-  // 类型徽标(WheelSwap 旧/新两层共用;标签按类型查表)
+  // 类型徽标(按钮 WheelSwap 与菜单项共用;标签按类型查表)
   const typeBadgeNode = (v: MemoryEntry['type']) => (
     <span className={`island-memory-type t-${v}`}>{MEMORY_TYPES.find(([t]) => t === v)?.[1] ?? v}</span>
   )
   return (
-    <div className="island-memory-type-wrap" ref={ref}>
-      <button
-        key={tick}
-        type="button"
-        className={`island-memory-type-btn${tick > 0 ? ' tick' : ''}`}
-        onWheel={handleTypeWheel}
-        onClick={(event) => {
-          event.stopPropagation()
-          if (open) closeWithAnim()
-          else setOpen(true)
-        }}
-      >
-        <WheelSwap tick={tick} dir={dir} prev={prevType ? typeBadgeNode(prevType) : null}>
-          {typeBadgeNode(value)}
-        </WheelSwap>
-        <span className={`island-memory-type-arrow${open ? ' open' : ''}`} aria-hidden="true">
-          ▾
-        </span>
-      </button>
-      {open && (
-        <div className={`island-memory-type-pop${closing ? ' closing' : ''}`}>
-          {MEMORY_TYPES.map(([v, label]) => (
-            <button
-              key={v}
-              type="button"
-              className={`island-memory-type-opt${v === value ? ' on' : ''}`}
-              onClick={(event) => {
-                event.stopPropagation()
-                onChange(v)
-                closeWithAnim()
-              }}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
+    <QuickMenu
+      items={MEMORY_TYPES.map(([v]) => v)}
+      value={value}
+      onChange={onChange}
+      getLabel={typeBadgeNode}
+      title="记忆类型(滚轮切换)"
+      wheelWhenOpen
+    />
+  )
+}
+
+/**
+ * 定制步进器(替代原生 number 输入的上下箭头——系统 spinners 无法定制
+ * 样式,与岛体风格不搭):值徽标 + 上下箭头,步进/滚轮切换**复用
+ * WheelSwap 内容交换动画**(与记忆类型按钮同款:旧值滑出淡出、新值回弹
+ * 滑入,方向随切换方向);按住箭头连续步进(首步播动画,连步直接换值
+ * 不重播——持续重挂载动画会闪);点击值徽标进入内联编辑(Enter/失焦
+ * 提交并钳制 min–max,Esc 取消)。2026-08-07 参数化:界面放大
+ * (100–300 步 1)与主动陪伴间隔(5–480 步 5)共用
+ */
+function ScaleStepper({
+  value,
+  onChange,
+  min = 100,
+  max = 300,
+  stepSize = 1,
+  upLabel = '增加',
+  downLabel = '减少',
+}: {
+  value: number
+  onChange: (v: number) => void
+  /** 最小值(默认 100) */
+  min?: number
+  /** 最大值(默认 300) */
+  max?: number
+  /** 步进量(默认 1;注意与内部 step 函数区分,故命名 stepSize) */
+  stepSize?: number
+  /** 上箭头提示文案(缩放用「放大」,间隔用「增加」) */
+  upLabel?: string
+  /** 下箭头提示文案(缩放用「缩小」,间隔用「减少」) */
+  downLabel?: string
+}) {
+  const MIN = min
+  const MAX = max
+  // 步进动画状态(审计 P1:useWheelSwap 收敛 tick/prev/dir 舞蹈)
+  const swap = useWheelSwap<number>()
+  // 内联编辑:点击值徽标进入;Enter/失焦提交,Esc 取消
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState(String(value))
+  // 按住连步:interval 闭包读 ref 拿最新值(避免过期 prop 导致连步卡死)
+  const valueRef = useRef(value)
+  useEffect(() => {
+    valueRef.current = value
+  }, [value])
+  const holdRef = useRef<{ delay: number; interval: number } | null>(null)
+  // 卸载时清理连步定时器
+  useEffect(
+    () => () => {
+      if (holdRef.current) {
+        if (holdRef.current.delay) window.clearTimeout(holdRef.current.delay)
+        if (holdRef.current.interval) window.clearInterval(holdRef.current.interval)
+      }
+    },
+    [],
+  )
+  const stopHold = () => {
+    if (!holdRef.current) return
+    if (holdRef.current.delay) window.clearTimeout(holdRef.current.delay)
+    if (holdRef.current.interval) window.clearInterval(holdRef.current.interval)
+    holdRef.current = null
+  }
+  const step = (d: 1 | -1, animate: boolean): boolean => {
+    const old = valueRef.current
+    const next = Math.min(MAX, Math.max(MIN, old + d * stepSize))
+    if (next === old) return false
+    valueRef.current = next
+    onChange(next)
+    if (animate) swap.step(old, d)
+    return true
+  }
+  // 按住连步:380ms 长按判定后每 110ms 一步;边界自动停止
+  const startHold = (d: 1 | -1) => {
+    // 编辑中点击箭头:先提交草稿再步进(pointerdown preventDefault
+    // 后 blur 不会触发,草稿若不提交会被丢弃)
+    if (editing) commitEdit()
+    stopHold()
+    if (!step(d, true)) return
+    const delay = window.setTimeout(() => {
+      holdRef.current = {
+        delay: 0,
+        interval: window.setInterval(() => {
+          if (!step(d, false)) stopHold()
+        }, 110),
+      }
+    }, 380)
+    holdRef.current = { delay, interval: 0 }
+  }
+  const commitEdit = () => {
+    const v = Number(draft)
+    const clamped = Number.isFinite(v) ? Math.min(MAX, Math.max(MIN, Math.round(v))) : value
+    valueRef.current = clamped
+    setDraft(String(clamped))
+    setEditing(false)
+    onChange(clamped)
+  }
+  const cancelEdit = () => {
+    setDraft(String(value))
+    setEditing(false)
+  }
+  // 内联编辑输入自动聚焦并全选
+  const editRef = useRef<HTMLInputElement>(null)
+  useEffect(() => {
+    if (editing) {
+      editRef.current?.focus()
+      editRef.current?.select()
+    }
+  }, [editing])
+  // 原生非 passive 滚轮监听:悬浮在步进器上滚轮时吞掉默认滚动行为
+  // (React onWheel 为 passive 监听,preventDefault 无效;设置页是滚动
+  // 容器,不吞会整页跟着滚);编辑态放行(滚轮属于输入交互面)
+  const wrapRef = useRef<HTMLDivElement>(null)
+  const editingRef = useRef(editing)
+  editingRef.current = editing
+  useEffect(() => {
+    const el = wrapRef.current
+    if (!el) return
+    const onNativeWheel = (event: globalThis.WheelEvent) => {
+      if (!editingRef.current) event.preventDefault()
+    }
+    el.addEventListener('wheel', onNativeWheel, { passive: false })
+    return () => el.removeEventListener('wheel', onNativeWheel)
+  }, [])
+  // 滚轮切换:值徽标上滚动逐格 ±1(与箭头一致;与记忆类型按钮共用
+  // useWheelSteps,手感一致)
+  const wheelSteps = useWheelSteps()
+  const handleValueWheel = (event: WheelEvent<HTMLButtonElement>) => {
+    const s = wheelSteps(event)
+    if (!s) return
+    step(s, true)
+  }
+  const chevron = (up: boolean) => (
+    <svg
+      width="10"
+      height="10"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2.5}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <polyline points={up ? '6 15 12 9 18 15' : '6 9 12 15 18 9'} />
+    </svg>
+  )
+  return (
+    <div className="island-scale-stepper" ref={wrapRef}>
+      {editing ? (
+        <input
+          ref={editRef}
+          type="text"
+          inputMode="numeric"
+          value={draft}
+          spellCheck={false}
+          onChange={(event) => setDraft(event.target.value)}
+          onBlur={commitEdit}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter') commitEdit()
+            if (event.key === 'Escape') cancelEdit()
+          }}
+        />
+      ) : (
+        <button
+          key={swap.tick}
+          type="button"
+          className={`island-scale-stepper-value${swap.tick > 0 ? ' tick' : ''}`}
+          onWheel={handleValueWheel}
+          title="点击输入自定义值"
+          onClick={(event) => {
+            event.stopPropagation()
+            setDraft(String(value))
+            setEditing(true)
+          }}
+        >
+          <WheelSwap tick={swap.tick} dir={swap.dir} prev={swap.prev != null ? String(swap.prev) : null}>
+            {String(value)}
+          </WheelSwap>
+        </button>
       )}
+      <span className="island-scale-stepper-arrows">
+        <button
+          type="button"
+          aria-label={`${upLabel}(+${stepSize})`}
+          title={`${upLabel}(+${stepSize})`}
+          onPointerDown={(event) => {
+            event.preventDefault()
+            event.stopPropagation()
+            startHold(1)
+          }}
+          onPointerUp={stopHold}
+          onPointerLeave={stopHold}
+          onPointerCancel={stopHold}
+        >
+          {chevron(true)}
+        </button>
+        <button
+          type="button"
+          aria-label={`${downLabel}(-${stepSize})`}
+          title={`${downLabel}(-${stepSize})`}
+          onPointerDown={(event) => {
+            event.preventDefault()
+            event.stopPropagation()
+            startHold(-1)
+          }}
+          onPointerUp={stopHold}
+          onPointerLeave={stopHold}
+          onPointerCancel={stopHold}
+        >
+          {chevron(false)}
+        </button>
+      </span>
     </div>
   )
 }
@@ -181,6 +481,37 @@ function SkillRow({
         移除
       </button>
     </div>
+  )
+}
+
+/** 技能注册区(灵动岛创建 / 手动导入 / 扫描到的三区共用;审计 P1 #7:
+ * 原同一区块复制 3 遍,仅标签与条目谓词不同) */
+function SkillsSection({
+  label,
+  skills,
+  leavingIds,
+  onExclude,
+}: {
+  label: string
+  skills: AgentToolInfo[]
+  leavingIds: readonly string[]
+  onExclude: (slug: string) => void
+}) {
+  if (skills.length === 0) return null
+  return (
+    <>
+      <span className="island-skills-reg-count">
+        {label}({skills.length})
+      </span>
+      {skills.map((t) => (
+        <SkillRow
+          key={t.name}
+          t={t}
+          leaving={leavingIds.includes(t.name.replace(/^skill_/, ''))}
+          onExclude={onExclude}
+        />
+      ))}
+    </>
   )
 }
 
@@ -254,23 +585,47 @@ export function AgentSettingsView({ config, onSave, tools, scale, onScaleChange,
     model: 'deepseek-v4-flash',
     systemPrompt: '',
     reasoningEffort: 'high',
+    // 主对话输出预算(2026-08-08):缺省 8192(与 main 默认一致;
+    // 预算只是上限,LLM 任务巨大时经 set_output_budget 按需调大)
+    maxOutputTokens: 8192,
+    // 主动陪伴(2026-08-07):默认开启、间隔 60、单位分钟(与 main 默认
+    // 一致;单位选择:数值不变仅换单位;exec_command 确认门设置已移除)
+    proactiveEnabled: true,
+    proactiveInterval: 60,
+    proactiveIntervalUnit: 'm' as 's' | 'm' | 'h',
+    // Sub Agent 设置(2026-08-07):文风/人格预设 id 或自定义 ≤100 字
+    summaryStyle: '',
+    mindPersona: '',
     mcpServers: [] as McpServerForm[],
     skillsDirs: [] as string[],
   })
+  // 分组菜单(2026-08-07 布局重构):连接 / 行为与界面 / 工具与能力 /
+  // 记忆与进化 / Sub Agent;切换只重挂载内容区,表单状态共享不丢失
+  const [tab, setTab] = useState(0)
+  // 菜单切换动画(2026-08-07 二次优化):**交叉切换**——离场动画(0.2s)
+  // 播 60%(0.12s)即挂载新内容,入场(0.32s)与离场尾部重叠:旧内容上移
+  // 淡出中,新内容下移淡入,无"慢一拍"停顿感(用户要求动画对齐);
+  // leaving 期间忽略重复切换
+  const [leaving, setLeaving] = useState(false)
+  const [animSeq, setAnimSeq] = useState(0)
+  const leavingRef = useRef(false)
+  const switchTab = useCallback((next: number) => {
+    if (next === tabRef.current || leavingRef.current) return
+    leavingRef.current = true
+    setLeaving(true)
+    window.setTimeout(() => {
+      leavingRef.current = false
+      setLeaving(false)
+      setTab(next)
+      setAnimSeq((s) => s + 1)
+    }, 120)
+  }, [])
+  const tabRef = useRef(0)
+  useEffect(() => {
+    tabRef.current = tab
+  }, [tab])
   const [saved, setSaved] = useState(false)
   const savedTimerRef = useRef(0)
-  // 自定义缩放输入草稿(失焦/回车提交,避免输入过程中被钳制打断)
-  const [draftScale, setDraftScale] = useState(String(scale))
-  useEffect(() => setDraftScale(String(scale)), [scale])
-  const commitScale = () => {
-    const v = Number(draftScale)
-    const clamped = Number.isFinite(v) ? Math.min(300, Math.max(100, Math.round(v))) : scale
-    setDraftScale(String(clamped))
-    onScaleChange(clamped)
-  }
-  const handleScaleKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
-    if (event.key === 'Enter') commitScale()
-  }
   // MCP 服务测试状态:正在测试的索引 / 最近一次结果
   const [testingIdx, setTestingIdx] = useState<number | null>(null)
   const [testResult, setTestResult] = useState<{ idx: number; ok: boolean; text: string } | null>(null)
@@ -281,16 +636,19 @@ export function AgentSettingsView({ config, onSave, tools, scale, onScaleChange,
   // 记忆系统:条目列表 + 添加表单 + 编辑中条目
   const [memory, setMemory] = useState<MemoryEntry[]>([])
   const [memoryError, setMemoryError] = useState('')
-  const [memoryDraft, setMemoryDraft] = useState({ type: 'fact' as MemoryEntry['type'], content: '' })
+  // 添加行默认类型 = 偏好(2026-08-07 用户要求:快捷菜单默认选中的类型是偏好)
+  const [memoryDraft, setMemoryDraft] = useState({ type: 'preference' as MemoryEntry['type'], content: '' })
   const [editingMemory, setEditingMemory] = useState<{ id: string; content: string } | null>(null)
   // 导出状态(成功显示路径/取消/失败)
   const [exportMsg, setExportMsg] = useState('')
   // 导入状态(成功显示导入/跳过计数;失败显示错误)
   const [importMsg, setImportMsg] = useState('')
   // 离场动画中的条目 id(先播完收起动画,再真正移除)
-  const [leavingMemory, setLeavingMemory] = useState<string[]>([])
-  const [leavingSkills, setLeavingSkills] = useState<string[]>([])
-  const [leavingMcp, setLeavingMcp] = useState<number[]>([])
+  // 离场动画列表(记忆/技能/MCP 卡片;useLeavingList 收敛定时器模式,
+  // 审计 P2;mcp 下标数字转字符串作 id)
+  const memoryLeave = useLeavingList()
+  const skillsLeave = useLeavingList()
+  const mcpLeave = useLeavingList()
   // 导入技能/清除版本结果提示
   const [skillImportMsg, setSkillImportMsg] = useState('')
   // 导入后本地工具快照(Bug 修复:导入的技能立即显示,无需重进设置;
@@ -325,6 +683,14 @@ export function AgentSettingsView({ config, onSave, tools, scale, onScaleChange,
         model: config.model,
         systemPrompt: config.systemPrompt,
         reasoningEffort: config.reasoningEffort || 'high',
+        maxOutputTokens: config.maxOutputTokens ?? 8192,
+        // 主动陪伴:旧 settings.json 无字段时按默认(true/60/分钟)兜底
+        proactiveEnabled: config.proactiveEnabled !== false,
+        proactiveInterval: config.proactiveInterval ?? 60,
+        proactiveIntervalUnit: config.proactiveIntervalUnit ?? 'm',
+        // Sub Agent 设置:旧配置无字段 → 空(默认文风/人格)
+        summaryStyle: config.summaryStyle ?? '',
+        mindPersona: config.mindPersona ?? '',
         mcpServers: (config.mcpServers ?? []).map(fromConfigServer),
         skillsDirs: config.skillsDirs ?? [],
       })
@@ -341,14 +707,20 @@ export function AgentSettingsView({ config, onSave, tools, scale, onScaleChange,
       })
       .catch(() => {})
   }, [])
-  useEffect(() => {
+  /** 拉取记忆列表(挂载/导入/回滚/进化完成共用;审计 P1 #7:
+   * 原 4 处「agentMemoryGet().then(setMemory)」逐字重复) */
+  const loadMemoryList = useCallback(() => {
     window.desktop?.agentMemoryGet?.()
       .then((list) => {
         if (Array.isArray(list)) setMemory(list as MemoryEntry[])
       })
       .catch(() => {})
+  }, [])
+
+  useEffect(() => {
+    loadMemoryList()
     refreshEvolutionLog()
-  }, [refreshEvolutionLog])
+  }, [loadMemoryList, refreshEvolutionLog])
   // 进化进度事件订阅(evolution-progress / done,渲染端原本忽略):
   // 后台进化期间实时更新按钮状态(进化中…)、阶段消息与日志——
   // 停留在视图也能看到每轮评审/应用结果;done 任何路径都会发出
@@ -391,6 +763,12 @@ export function AgentSettingsView({ config, onSave, tools, scale, onScaleChange,
       model: form.model,
       systemPrompt: form.systemPrompt,
       reasoningEffort: form.reasoningEffort,
+      maxOutputTokens: form.maxOutputTokens,
+      proactiveEnabled: form.proactiveEnabled,
+      proactiveInterval: form.proactiveInterval,
+      proactiveIntervalUnit: form.proactiveIntervalUnit,
+      summaryStyle: form.summaryStyle,
+      mindPersona: form.mindPersona,
       mcpServers: form.mcpServers.map(toConfigServer),
       skillsDirs: form.skillsDirs.map((d) => d.trim()).filter(Boolean),
     })
@@ -431,13 +809,11 @@ export function AgentSettingsView({ config, onSave, tools, scale, onScaleChange,
   }
   const removeServer = (idx: number) => {
     // 删除 MCP 服务:先播卡片离场动画,再真正从表单移除(精致缓动)
-    if (leavingMcp.includes(idx)) return
-    setLeavingMcp((prev) => [...prev, idx])
-    window.setTimeout(() => {
+    if (mcpLeave.leavingIds.includes(String(idx))) return
+    mcpLeave.beginLeave(String(idx), () => {
       setForm((f) => ({ ...f, mcpServers: f.mcpServers.filter((_, i) => i !== idx) }))
-      setLeavingMcp((prev) => prev.filter((i) => i !== idx))
       setTestResult(null)
-    }, 260)
+    })
   }
   // 逐条测试连通(独立连接 → 列工具 → 销毁,不进常驻缓存)
   const testServer = async (idx: number) => {
@@ -470,18 +846,14 @@ export function AgentSettingsView({ config, onSave, tools, scale, onScaleChange,
   // 移除技能(加入排除列表,即时生效):扫描跳过,候选/工具列表不再出现;
   // 先播离场动画再提交(精致缓动);恢复 = 从排除列表移除
   const excludeSkill = (slug: string) => {
-    if (leavingSkills.includes(slug) || excludedSkills.includes(slug)) return
-    setLeavingSkills((prev) => [...prev, slug])
-    window.setTimeout(() => {
-      if (excludedSkills.includes(slug)) {
-        setLeavingSkills((prev) => prev.filter((s) => s !== slug))
-        return
-      }
+    if (skillsLeave.leavingIds.includes(slug) || excludedSkills.includes(slug)) return
+    skillsLeave.beginLeave(slug, () => {
+      // 动画期间可能已被恢复(include):跳过提交
+      if (excludedSkills.includes(slug)) return
       const next = [...excludedSkills, slug]
       setExcludedSkills(next)
-      setLeavingSkills((prev) => prev.filter((s) => s !== slug))
       window.desktop?.agentSetConfig?.({ excludedSkills: next }).catch(() => {})
-    }, 260)
+    })
   }
   const includeSkill = (slug: string) => {
     const next = excludedSkills.filter((s) => s !== slug)
@@ -510,17 +882,12 @@ export function AgentSettingsView({ config, onSave, tools, scale, onScaleChange,
   }
   const removeMemory = (id: string) => {
     // 先播离场动画,再真正删除(精致缓动:收起后再移除)
-    if (leavingMemory.includes(id)) return
-    setLeavingMemory((prev) => [...prev, id])
-    window.setTimeout(() => {
+    memoryLeave.beginLeave(id, () => {
       window.desktop
         ?.agentMemorySet?.({ remove: id })
-        .then((result) => {
-          setLeavingMemory((prev) => prev.filter((x) => x !== id))
-          refreshMemory(result)
-        })
-        .catch(() => setLeavingMemory((prev) => prev.filter((x) => x !== id)))
-    }, 260)
+        .then(refreshMemory)
+        .catch(() => {})
+    })
   }
   const commitMemoryEdit = () => {
     if (!editingMemory || editSaving) return
@@ -563,12 +930,7 @@ export function AgentSettingsView({ config, onSave, tools, scale, onScaleChange,
       return
     }
     setImportMsg(`已导入 ${res.imported} 条${res.skipped ? `,跳过 ${res.skipped} 条(已存在)` : ''}`)
-    window.desktop
-      ?.agentMemoryGet?.()
-      .then((list) => {
-        if (Array.isArray(list)) setMemory(list as MemoryEntry[])
-      })
-      .catch(() => {})
+    loadMemoryList()
   }
 
   // ---- 自我进化 ----
@@ -587,18 +949,24 @@ export function AgentSettingsView({ config, onSave, tools, scale, onScaleChange,
     }
   }
   const rollbackEvolution = async () => {
-    const msg = await window.desktop?.agentEvolutionRollback?.()
-    setEvolutionMsg(msg ?? '')
-    window.desktop?.agentMemoryGet?.()
-      .then((list) => {
-        if (Array.isArray(list)) setMemory(list as MemoryEntry[])
-      })
-      .catch(() => {})
+    // 失败返回 {error}(主进程 safeHandle 统一,审计 P1-1):展示错误,
+    // 不再走 unhandled rejection
+    try {
+      const res = await window.desktop?.agentEvolutionRollback?.()
+      setEvolutionMsg(typeof res === 'string' ? res : (res?.error ?? ''))
+    } catch {
+      setEvolutionMsg('回滚失败')
+    }
+    loadMemoryList()
   }
   // 清除全部版本(回到初始状态):清空日志与快照,展示初始化状态
   const resetEvolution = async () => {
-    const msg = await window.desktop?.agentEvolutionReset?.()
-    setEvolutionMsg(msg ?? '')
+    try {
+      const res = await window.desktop?.agentEvolutionReset?.()
+      setEvolutionMsg(typeof res === 'string' ? res : (res?.error ?? ''))
+    } catch {
+      setEvolutionMsg('清除失败')
+    }
     setEvolutionLog([])
   }
   // 导入技能(文件夹技能包或单个 md):成功后**立即刷新工具清单**——
@@ -621,70 +989,72 @@ export function AgentSettingsView({ config, onSave, tools, scale, onScaleChange,
     if (imported.length > 0) {
       try {
         const list = await window.desktop?.agentGetTools?.()
-        if (Array.isArray(list)) setLocalTools(list as AgentToolInfo[])
+        if (Array.isArray(list)) setLocalTools(list)
       } catch {
         // 刷新失败:重进设置可见
       }
     }
   }
 
-  // Provider 自动判定(与引擎 detectProvider 同规则):地址含 anthropic
-  // → Anthropic Messages;含 chat → DeepSeek Chat Completions;
-  // 否则(默认)→ DeepSeek Responses
-  const base = form.baseURL.toLowerCase()
-  const protocol = base.includes('anthropic')
-    ? 'Anthropic Messages'
-    : base.includes('chat')
-      ? 'DeepSeek Chat'
-      : 'DeepSeek Responses'
+  // Provider 判定与引擎共用(垂直解耦:规则只存 constants.ts 一处)
+  const protocol = providerLabel(form.baseURL)
 
   return (
     <div className="island-panel-list island-agent-settings">
       <PanelHead title="Agent 设置" count={protocol} />
-      <div className="island-agent-protocol">
-        {protocol === 'Anthropic Messages'
-          ? 'Anthropic 协议:填写含 anthropic 的地址自动切换(如 https://api.deepseek.com/anthropic,模型填 deepseek-chat 等)'
-          : protocol === 'DeepSeek Chat'
-            ? 'Chat 协议:地址含 chat 自动切换(模型 deepseek-v4-flash 或 deepseek-v4-pro)'
-            : 'Responses 协议(默认):DeepSeek 官方端点,模型 deepseek-v4-flash'}
-      </div>
-      <div className="island-agent-form">
-        <label className="island-agent-field">
-          <span>API Key</span>
-          <input
-            type="text"
-            value={form.apiKey}
-            placeholder="sk-…(DeepSeek 平台创建)"
-            spellCheck={false}
-            onChange={(event) => setForm((f) => ({ ...f, apiKey: event.target.value }))}
-          />
-        </label>
-        <label className="island-agent-field">
-          <span>Base URL</span>
-          <input
-            type="text"
-            value={form.baseURL}
-            spellCheck={false}
-            onChange={(event) => setForm((f) => ({ ...f, baseURL: event.target.value }))}
-          />
-        </label>
-        <label className="island-agent-field">
-          <span>模型</span>
-          <input
-            type="text"
-            value={form.model}
-            spellCheck={false}
-            onChange={(event) => setForm((f) => ({ ...f, model: event.target.value }))}
-          />
-        </label>
-        <label className="island-agent-field island-agent-field--grow">
-          <span>自定义提示词(与长期记忆一起构成系统提示)</span>
-          <textarea
-            value={form.systemPrompt}
-            rows={3}
-            onChange={(event) => setForm((f) => ({ ...f, systemPrompt: event.target.value }))}
-          />
-        </label>
+      {/* 分组菜单(2026-08-07 布局重构,通用 QuickMenu):整合按钮 + 同行
+          联通展开 + 滚轮逐格切换 + 高亮滑块;五组 = 连接 / 行为与界面 /
+          工具与能力 / 记忆与进化 / Sub Agent */}
+      <QuickMenu
+        items={SETTINGS_TABS.map((_, i) => i)}
+        value={tab}
+        onChange={switchTab}
+        getLabel={(i) => SETTINGS_TABS[i]}
+        title="滚轮切换菜单"
+        wheelWhenOpen
+      />
+      {/* 内容区切换动画(2026-08-07 二次优化):入场/离场走专用 keyframes
+          (views-agent.css .island-agent-settings .island-agent-form),
+          交叉时序由 switchTab 控制;表单状态共享不丢 */}
+      <div className={`island-agent-form${leaving ? ' island-ui-out' : ''}`} key={animSeq}>
+        {tab === 0 && (
+          <>
+            {/* 连接:协议提示 + API Key / Base URL / 模型 / 思考强度 */}
+            <div className="island-agent-protocol">
+              {protocol === 'Anthropic Messages'
+                ? 'Anthropic 协议:填写含 anthropic 的地址自动切换(如 https://api.deepseek.com/anthropic,模型填 deepseek-chat 等)'
+                : protocol === 'DeepSeek Chat'
+                  ? 'Chat 协议:地址含 chat 自动切换(模型 deepseek-v4-flash 或 deepseek-v4-pro)'
+                  : 'Responses 协议(默认):DeepSeek 官方端点,模型 deepseek-v4-flash'}
+            </div>
+            <label className="island-agent-field">
+              <span>API Key</span>
+              <input
+                type="text"
+                value={form.apiKey}
+                placeholder="sk-…(DeepSeek 平台创建)"
+                spellCheck={false}
+                onChange={(event) => setForm((f) => ({ ...f, apiKey: event.target.value }))}
+              />
+            </label>
+            <label className="island-agent-field">
+              <span>Base URL</span>
+              <input
+                type="text"
+                value={form.baseURL}
+                spellCheck={false}
+                onChange={(event) => setForm((f) => ({ ...f, baseURL: event.target.value }))}
+              />
+            </label>
+            <label className="island-agent-field">
+              <span>模型</span>
+              <input
+                type="text"
+                value={form.model}
+                spellCheck={false}
+                onChange={(event) => setForm((f) => ({ ...f, model: event.target.value }))}
+              />
+            </label>
         <div className="island-agent-field">
           <span>思考强度(深度思考 vs 速度)</span>
           <div className="island-agent-scale-row">
@@ -710,6 +1080,118 @@ export function AgentSettingsView({ config, onSave, tools, scale, onScaleChange,
             ))}
           </div>
         </div>
+        {/* 输出预算(2026-08-08):主对话 max_output_tokens,含思维链;
+            LLM 对话中也可经 set_output_budget 工具自主调整 */}
+        <label className="island-agent-field">
+          <span>输出预算(含思维链,4096-262144)</span>
+          <input
+            type="number"
+            min={4096}
+            max={262144}
+            step={1024}
+            value={form.maxOutputTokens}
+            onChange={(e) => {
+              const v = Number(e.target.value)
+              if (Number.isFinite(v)) setForm((f) => ({ ...f, maxOutputTokens: v }))
+            }}
+            placeholder="8192"
+          />
+        </label>
+          </>
+        )}
+        {tab === 1 && (
+          <>
+            {/* 行为与界面:自定义提示词 / 主动陪伴 / 界面放大
+                (exec_command 确认门设置已移除,2026-08-07 用户要求) */}
+            <label className="island-agent-field island-agent-field--grow">
+              <span>自定义提示词(与长期记忆一起构成系统提示)</span>
+              <textarea
+                value={form.systemPrompt}
+                rows={3}
+                onChange={(event) => setForm((f) => ({ ...f, systemPrompt: event.target.value }))}
+              />
+            </label>
+        {/* 主动陪伴(2026-08-07):用户无操作满 N 后,由总结 Sub Agent
+            独立判断语境是否需要主动开口(它有总结上下文的能力),是则
+            主 Agent 完整回合主动回复;回复落定后以系统通知展示心理揣测。
+            **关闭时折叠隐藏间隔设置**(2026-08-07 用户要求,折叠动画) */}
+        <label className="island-agent-field island-agent-field--toggle">
+          <span>主动陪伴(无操作满 N 后主动开口)</span>
+          <button
+            type="button"
+            className={`island-toggle${form.proactiveEnabled ? ' on' : ''}`}
+            aria-checked={form.proactiveEnabled}
+            onClick={(event) => {
+              event.stopPropagation()
+              setForm((f) => ({ ...f, proactiveEnabled: !f.proactiveEnabled }))
+            }}
+          >
+            <span className="island-toggle-track" aria-hidden="true">
+              <span className="island-toggle-knob" />
+            </span>
+          </button>
+        </label>
+        <div className={`island-proactive-config${form.proactiveEnabled ? ' open' : ''}`}>
+          <div className="island-proactive-config-inner">
+          <div className="island-agent-field">
+          <span>触发间隔(Agent 判断是否需要主动开口)</span>
+          {/* 单位选择(2026-08-07):秒/分钟/小时,**数值不变仅换单位**;
+              切换只改单位状态,保存时按当前数值 × 单位换算落盘 */}
+          <div className="island-agent-scale-row">
+            {(
+              [
+                ['s', '秒'],
+                ['m', '分钟'],
+                ['h', '小时'],
+              ] as const
+            ).map(([u, label]) => (
+              <button
+                key={u}
+                type="button"
+                className={`island-agent-scale-btn${form.proactiveIntervalUnit === u ? ' on' : ''}`}
+                onClick={(event) => {
+                  event.stopPropagation()
+                  setForm((f) => ({ ...f, proactiveIntervalUnit: u }))
+                }}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          <div className="island-agent-scale-row">
+            {[15, 30, 60, 120].map((v) => (
+              <button
+                key={v}
+                type="button"
+                className={`island-agent-scale-btn${form.proactiveInterval === v ? ' on' : ''}`}
+                onClick={(event) => {
+                  event.stopPropagation()
+                  setForm((f) => ({ ...f, proactiveInterval: v }))
+                }}
+              >
+                {v}
+              </button>
+            ))}
+            <ScaleStepper
+              value={form.proactiveInterval}
+              onChange={(v) => setForm((f) => ({ ...f, proactiveInterval: v }))}
+              min={5}
+              max={480}
+              stepSize={form.proactiveIntervalUnit === 'h' ? 1 : 5}
+              upLabel="增加"
+              downLabel="减少"
+            />
+            <span className="island-agent-scale-hint">
+              {form.proactiveIntervalUnit === 's'
+                ? '秒'
+                : form.proactiveIntervalUnit === 'h'
+                  ? '小时'
+                  : '分钟'}
+            </span>
+          </div>
+          </div>
+          </div>
+        </div>
         <div className="island-agent-field">
           <span>界面放大(仅面板尺寸,文字按钮不变)</span>
           <div className="island-agent-scale-row">
@@ -726,20 +1208,15 @@ export function AgentSettingsView({ config, onSave, tools, scale, onScaleChange,
                 {v}%
               </button>
             ))}
-            <input
-              type="number"
-              min={100}
-              max={300}
-              value={draftScale}
-              spellCheck={false}
-              onChange={(event) => setDraftScale(event.target.value)}
-              onBlur={commitScale}
-              onKeyDown={handleScaleKeyDown}
-            />
+            <ScaleStepper value={scale} onChange={onScaleChange} upLabel="放大" downLabel="缩小" />
             <span className="island-agent-scale-hint">%</span>
           </div>
         </div>
-
+          </>
+        )}
+        {tab === 2 && (
+          <>
+            {/* 工具与能力:MCP 服务 / 技能目录 */}
         {/* MCP 服务:stdio 进程 / sse 远程端点,每个服务暴露 mcp_<服务>_<工具> 工具 */}
         <div className="island-agent-section">
           <span className="island-agent-section-title">MCP 服务(MCP 服务端工具接入)</span>
@@ -762,134 +1239,19 @@ export function AgentSettingsView({ config, onSave, tools, scale, onScaleChange,
                 <span className={`island-mcp-group-arrow${mcpCollapsed[group] ? '' : ' open'}`}>▾</span>
               </button>
               <div className={`island-mcp-group-body${mcpCollapsed[group] ? ' collapsed' : ''}`}>
-                {indices.map((idx) => {
-                  const server = form.mcpServers[idx]
-                  return (
-            <div
-              key={idx}
-              className={`island-mcp-card${leavingMcp.includes(idx) ? ' island-ui-leave' : ''}`}
-            >
-              <div className="island-mcp-head">
-                <span className="island-mcp-name">服务 {idx + 1}</span>
-                <div className="island-mcp-actions">
-                  <button
-                    type="button"
-                    className="island-agent-scale-btn"
-                    disabled={testingIdx === idx || !server.name.trim()}
-                    onClick={(event) => {
-                      event.stopPropagation()
-                      void testServer(idx)
-                    }}
-                  >
-                    {testingIdx === idx ? '测试中…' : '测试'}
-                  </button>
-                  <button
-                    type="button"
-                    className="island-agent-scale-btn island-mcp-remove"
-                    onClick={(event) => {
-                      event.stopPropagation()
-                      removeServer(idx)
-                    }}
-                  >
-                    删除
-                  </button>
-                </div>
-              </div>
-              <div className="island-mcp-type-row">
-                <button
-                  type="button"
-                  className={`island-agent-scale-btn${server.type === 'stdio' ? ' on' : ''}`}
-                  onClick={(event) => {
-                    event.stopPropagation()
-                    patchServer(idx, { type: 'stdio' })
-                  }}
-                >
-                  本地进程(stdio)
-                </button>
-                <button
-                  type="button"
-                  className={`island-agent-scale-btn${server.type === 'sse' ? ' on' : ''}`}
-                  onClick={(event) => {
-                    event.stopPropagation()
-                    patchServer(idx, { type: 'sse' })
-                  }}
-                >
-                  远程端点(sse)
-                </button>
-              </div>
-              <label className="island-agent-field">
-                <span>服务名(工具名前缀)</span>
-                <input
-                  type="text"
-                  value={server.name}
-                  placeholder="如 filesystem"
-                  spellCheck={false}
-                  onChange={(event) => patchServer(idx, { name: event.target.value })}
-                />
-              </label>
-              {server.type === 'sse' ? (
-                <>
-                  <label className="island-agent-field">
-                    <span>端点 URL</span>
-                    <input
-                      type="text"
-                      value={server.url}
-                      placeholder="如 https://example.com/mcp/sse"
-                      spellCheck={false}
-                      onChange={(event) => patchServer(idx, { url: event.target.value, command: event.target.value })}
-                    />
-                  </label>
-                  <label className="island-agent-field">
-                    <span>请求头(每行 KEY=VALUE,可选)</span>
-                    <textarea
-                      rows={1}
-                      value={server.headers.join('\n')}
-                      placeholder="如 Authorization=Bearer xxx"
-                      onChange={(event) => patchServer(idx, { headers: event.target.value.split('\n') })}
-                    />
-                  </label>
-                </>
-              ) : (
-                <>
-                  <label className="island-agent-field">
-                    <span>启动命令</span>
-                    <input
-                      type="text"
-                      value={server.command}
-                      placeholder="如 npx -y @modelcontextprotocol/server-filesystem"
-                      spellCheck={false}
-                      onChange={(event) => patchServer(idx, { command: event.target.value })}
-                    />
-                  </label>
-                  <label className="island-agent-field">
-                    <span>参数(每行一个;含空格路径按整行传)</span>
-                    <textarea
-                      rows={2}
-                      value={server.args.join('\n')}
-                      placeholder={'如\nC:/Users/asus/Documents'}
-                      onChange={(event) => patchServer(idx, { args: event.target.value.split('\n') })}
-                    />
-                  </label>
-                  <label className="island-agent-field">
-                    <span>环境变量(每行 KEY=VALUE,可选)</span>
-                    <textarea
-                      rows={1}
-                      value={server.env.join('\n')}
-                      placeholder="如 GITHUB_TOKEN=ghp_xxx"
-                      onChange={(event) => patchServer(idx, { env: event.target.value.split('\n') })}
-                    />
-                  </label>
-                </>
-              )}
-              {testResult && testResult.idx === idx ? (
-                <span className={`island-mcp-test-result ${testResult.ok ? 'ok' : 'fail'}`}>
-                  {testResult.ok ? '✓ ' : '✗ '}
-                  {testResult.text}
-                </span>
-              ) : null}
-            </div>
-                  )
-                })}
+                {indices.map((idx) => (
+                  <McpServerCard
+                    key={idx}
+                    idx={idx}
+                    server={form.mcpServers[idx]}
+                    testing={testingIdx === idx}
+                    testResult={testResult}
+                    leaving={mcpLeave.leavingIds.includes(String(idx))}
+                    onTest={(i) => void testServer(i)}
+                    onRemove={removeServer}
+                    onPatch={patchServer}
+                  />
+                ))}
               </div>
             </div>
           ))}
@@ -969,39 +1331,10 @@ export function AgentSettingsView({ config, onSave, tools, scale, onScaleChange,
               <span className="island-agent-section-hint">技能清单加载中…</span>
             ) : (
               <>
-                {/* 灵动岛创建(引擎 create / 自然语言,userData/skills 无导入标记) */}
-                {createdSkills.length > 0 ? (
-                  <>
-                    <span className="island-skills-reg-count">
-                      灵动岛创建({createdSkills.length})
-                    </span>
-                    {createdSkills.map((t) => (
-                      <SkillRow key={t.name} t={t} leaving={leavingSkills.includes(t.name.replace(/^skill_/, ''))} onExclude={excludeSkill} />
-                    ))}
-                  </>
-                ) : null}
-                {/* 手动导入(agent:skill-import,技能目录有 .island-imported 标记) */}
-                {importedSkills.length > 0 ? (
-                  <>
-                    <span className="island-skills-reg-count">
-                      手动导入({importedSkills.length})
-                    </span>
-                    {importedSkills.map((t) => (
-                      <SkillRow key={t.name} t={t} leaving={leavingSkills.includes(t.name.replace(/^skill_/, ''))} onExclude={excludeSkill} />
-                    ))}
-                  </>
-                ) : null}
-                {/* 扫描到的外部技能(Claude Code/Codex/opencode 等目录) */}
-                {scannedSkills.length > 0 ? (
-                  <>
-                    <span className="island-skills-reg-count">
-                      扫描到的({scannedSkills.length})
-                    </span>
-                    {scannedSkills.map((t) => (
-                      <SkillRow key={t.name} t={t} leaving={leavingSkills.includes(t.name.replace(/^skill_/, ''))} onExclude={excludeSkill} />
-                    ))}
-                  </>
-                ) : null}
+                {/* 三区共用 SkillsSection(审计 P1 #7:原同一区块复制 3 遍) */}
+                <SkillsSection label="灵动岛创建" skills={createdSkills} leavingIds={skillsLeave.leavingIds} onExclude={excludeSkill} />
+                <SkillsSection label="手动导入" skills={importedSkills} leavingIds={skillsLeave.leavingIds} onExclude={excludeSkill} />
+                <SkillsSection label="扫描到的" skills={scannedSkills} leavingIds={skillsLeave.leavingIds} onExclude={excludeSkill} />
               </>
             )}
             {/* 已排除技能:可恢复 */}
@@ -1028,7 +1361,11 @@ export function AgentSettingsView({ config, onSave, tools, scale, onScaleChange,
             ) : null}
           </div>
         </div>
-
+          </>
+        )}
+        {tab === 3 && (
+          <>
+            {/* 记忆与进化:长期记忆 / 自我进化 */}
         {/* 记忆系统:长期记忆条目(偏好/事实/工作流/教训),对话中 LLM
             也会自动沉淀(remember 工具),此处人工增删改 */}
         <div className="island-agent-section">
@@ -1039,7 +1376,7 @@ export function AgentSettingsView({ config, onSave, tools, scale, onScaleChange,
           {memory.map((entry) => (
             <div
               key={entry.id}
-              className={`island-memory-row${leavingMemory.includes(entry.id) ? ' island-ui-leave' : ''}`}
+              className={`island-memory-row${memoryLeave.leavingIds.includes(entry.id) ? ' island-ui-leave' : ''}`}
             >
               {editingMemory?.id === entry.id ? (
                 // 编辑态:进入回弹动画;保存 = ✓ 反馈 → 离场动画 → 提交退出
@@ -1195,11 +1532,109 @@ export function AgentSettingsView({ config, onSave, tools, scale, onScaleChange,
             <span className="island-agent-section-hint island-ui-enter">暂无进化记录,点击"运行记忆进化"开始</span>
           )}
         </div>
+          </>
+        )}
+        {tab === 4 && (
+          <>
+            {/* Sub Agent(2026-08-07):总结标题文风 / 心理揣测人格。
+                预设(各 4 种,共 8)存 id;自定义 ≤100 字直接存文本;
+                引擎 resolveSubAgentStyle 解析注入系统提示。
+                输入框在预设选中时显示空(placeholder 提示自定义)——
+                输入即切换为自定义 */}
+            <div className="island-agent-section">
+              <span className="island-agent-section-title">总结标题文风(标题 Sub Agent 生成语气)</span>
+              <span className="island-agent-section-hint">
+                每轮回复后静默生成对话标题;文风影响标题的措辞风格
+              </span>
+              <div className="island-agent-scale-row">
+                <button
+                  type="button"
+                  className={`island-agent-scale-btn${!form.summaryStyle ? ' on' : ''}`}
+                  onClick={(event) => {
+                    event.stopPropagation()
+                    setForm((f) => ({ ...f, summaryStyle: '' }))
+                  }}
+                >
+                  默认
+                </button>
+                {SUMMARY_STYLES.map((s) => (
+                  <button
+                    key={s.id}
+                    type="button"
+                    className={`island-agent-scale-btn${form.summaryStyle === s.id ? ' on' : ''}`}
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      setForm((f) => ({ ...f, summaryStyle: s.id }))
+                    }}
+                  >
+                    {s.name}
+                  </button>
+                ))}
+              </div>
+              <label className="island-agent-field">
+                <span>自定义文风(≤100 字;留空 = 用预设/默认)</span>
+                <input
+                  type="text"
+                  value={SUMMARY_STYLES.some((s) => s.id === form.summaryStyle) ? '' : form.summaryStyle}
+                  maxLength={100}
+                  placeholder="如:用一句有画面感的话概括主题"
+                  spellCheck={false}
+                  onChange={(event) => setForm((f) => ({ ...f, summaryStyle: event.target.value }))}
+                />
+              </label>
+            </div>
+            <div className="island-agent-section">
+              <span className="island-agent-section-title">心理揣测人格(揣测 Sub Agent 的语气)</span>
+              <span className="island-agent-section-hint">
+                每轮回复后揣测助手心态,显示在紧凑态文字区与主动陪伴系统通知
+              </span>
+              <div className="island-agent-scale-row">
+                <button
+                  type="button"
+                  className={`island-agent-scale-btn${!form.mindPersona ? ' on' : ''}`}
+                  onClick={(event) => {
+                    event.stopPropagation()
+                    setForm((f) => ({ ...f, mindPersona: '' }))
+                  }}
+                >
+                  默认
+                </button>
+                {MIND_PERSONAS.map((p) => (
+                  <button
+                    key={p.id}
+                    type="button"
+                    className={`island-agent-scale-btn${form.mindPersona === p.id ? ' on' : ''}`}
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      setForm((f) => ({ ...f, mindPersona: p.id }))
+                    }}
+                  >
+                    {p.name}
+                  </button>
+                ))}
+              </div>
+              <label className="island-agent-field">
+                <span>自定义人格(≤100 字;留空 = 用预设/默认)</span>
+                <input
+                  type="text"
+                  value={MIND_PERSONAS.some((p) => p.id === form.mindPersona) ? '' : form.mindPersona}
+                  maxLength={100}
+                  placeholder="如:用深夜电台主播的语气揣测"
+                  spellCheck={false}
+                  onChange={(event) => setForm((f) => ({ ...f, mindPersona: event.target.value }))}
+                />
+              </label>
+            </div>
+          </>
+        )}
       </div>
       <div className="island-agent-form-foot">
+        {/* 保存配置(2026-08-07 用户要求:不再弹"已保存"绿勾气泡,改为
+            按钮内联展示"已保存"——无绿勾,回弹淡入 + 平滑恢复;key 变化
+            重挂载重放 island-ui-in 动画) */}
         <button
           type="button"
-          className="island-ctl island-ctl--upload"
+          className={`island-ctl island-ctl--upload island-save-btn${saved ? ' saved' : ''}`}
           onClick={(event) => {
             event.stopPropagation()
             save()
@@ -1220,9 +1655,10 @@ export function AgentSettingsView({ config, onSave, tools, scale, onScaleChange,
             <polyline points="17 21 17 13 7 13 7 21" />
             <polyline points="7 3 7 8 15 8" />
           </svg>
-          <span>保存配置</span>
+          <span key={saved ? 'saved' : 'save'} className={`island-save-label${saved ? ' saved' : ''}`}>
+            {saved ? '已保存' : '保存配置'}
+          </span>
         </button>
-        <span className="island-agent-saved">{saved ? '已保存 ✓' : ''}</span>
       </div>
       <BackFoot onBack={onBack} />
     </div>

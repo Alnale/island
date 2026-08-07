@@ -14,7 +14,9 @@
     "build:widget": "vite build --mode widget --config vite.widget.config.ts",
     "build:electron": "node scripts/build-electron.mjs",
     "make:icon": "electron scripts/make-icon.cjs",
-    "dev:widget": "vite build --mode widget --config vite.widget.config.ts && electron .",
+    "gen:installer-bg": "node scripts/gen-installer-bg.mjs",
+    "dev:widget": "pnpm build:electron && vite build --mode widget --config vite.widget.config.ts && electron .",
+  "watch:electron": "node scripts/watch-electron.mjs",
     "dist:win": "pnpm build:widget && pnpm build:electron && electron-builder --win"
   },
   "dependencies": {

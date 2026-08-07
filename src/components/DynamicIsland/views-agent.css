@@ -1,0 +1,2993 @@
+/* Agent 视图:聊天/工具卡与汇总/Markdown/Agent 设置/MCP 技能/历史/工具列表/骨架屏(2026-08-06 从单文件拆分) */
+/* ===== Agent 聊天视图(agent 模式展开):消息流 + 工具卡片 + 输入区 =====
+   高度自适应:由 --agent-h(逻辑值)驱动,React 状态按测量节拍更新,
+   **CSS 过渡动画**(与宽度同曲线同时程 = 并行动画,2026-08-06):
+   紧凑 56 → 面板下限(200)→ 测量值全程与宽度同步滑升;流式 80ms
+   测量节拍连续重定向 = 平滑跟追(测量已节流,不再逐事件重定向;
+   旧的"逐事件重定向过渡永不稳定"前提已随 rAF 合批 + 80ms 节流消失)。
+   界面缩放:岛体视觉尺寸 = 逻辑 × var(--agent-s)(100%=1),面板内层
+   反向回缩 + transform scale 放大,文字/间距/圆角等比缩放。
+   过渡:宽度/高度统一无过冲缓动(大跨度弹簧在透明窗口软件渲染下抖动);
+   蒙版由岛体层 .island-panel-mask 统一提供(panelView !== 'control') */
+.island-demo.expanded.island-agent-view {
+  /* 基础 .island-demo 有 max-width: 500px——缩放 150%/200% 时 JS 设的
+     宽度(600/800px)会被它钳制导致缩放不生效,必须放开。
+     缩放只放大面板尺寸(宽度 ×var(--agent-s) 由 JS 设置),UI 元素
+     (文字/按钮/气泡)不缩放;高度仍由内容驱动(--agent-h)。
+     宽度/高度用无过冲缓动:紧凑 100px → 展开 400px 的大跨度弹簧过冲
+     在透明窗口软件渲染下抖动感明显(用户反馈展开卡顿) */
+  max-width: none;
+  height: var(--agent-h, 200px);
+  /* 高度由 JS 动画循环驱动(dynamicIsland 内 rAF + easeOutCubic),CSS
+     不做高度过渡(并行动画方案在软件渲染下仍卡,2026-08-06 v1 回退);
+     宽度保留无过冲缓动,速率 0.3s → 0.24s(2026-08-06 用户要求稍快) */
+  transition:
+    width 0.24s cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 0.3s ease,
+    border-color 0.3s ease,
+    transform 0.35s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+/* Agent 面板进入动画:纯淡入(复用蒙版动画),不做位移/缩放——
+   大面板首帧挂载 + scale 动画在软件渲染下逐帧重光栅化,展开首帧卡 */
+.island-demo.expanded.island-agent-view .island-panel {
+  animation: maskPanelIn 0.3s ease backwards;
+}
+
+/* 视图根:覆盖面板,自带内边距(与 island-panel-list 同款布局)。
+   缩放只放大岛体/窗口尺寸(JS 设置宽度 ×s),视图本身不缩放,
+   UI 元素(文字/按钮/气泡)保持原尺寸 */
+.island-agent {
+  position: absolute;
+  inset: 0;
+  padding: 14px 24px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+}
+
+/* 头部:标题(状态点 + Agent)+ 状态文案 + 右侧动作 */
+.island-agent-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.island-agent-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.8rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  color: var(--text-color, #fff);
+}
+
+/* 状态点:待命常亮,忙碌呼吸脉冲 */
+.island-agent-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--state-color, #4d6bfe);
+  opacity: 0.9;
+}
+
+.island-agent-dot.thinking {
+  animation: agent-dot-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes agent-dot-pulse {
+  0%,
+  100% {
+    opacity: 0.3;
+    transform: scale(0.8);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.15);
+  }
+}
+
+.island-agent-status {
+  font-size: 0.66rem;
+  color: var(--text-dim, rgba(255, 255, 255, 0.5));
+}
+
+/* 右上角下拉菜单(⋯):定位锚点 + 弹出面板 */
+.island-agent-menu {
+  margin-left: auto;
+  position: relative;
+}
+
+/* 头部中性小胶囊按钮(菜单开关) */
+.island-agent-ctl {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: 1px solid rgba(255, 255, 255, 0.24);
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.09);
+  color: var(--text-color, #fff);
+  cursor: pointer;
+  transition:
+    background 0.15s ease,
+    border-color 0.15s ease;
+}
+
+.island-agent-ctl:hover,
+.island-agent-ctl.on {
+  background: rgba(255, 255, 255, 0.16);
+  border-color: rgba(255, 255, 255, 0.38);
+}
+
+.island-agent-menu-pop {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  /* 最高级浮层:高于候选列表(6)与离场副本(6)——候选列表弹出时
+     打开 ⋯ 菜单不能被盖住(实测 z-index 5 < 候选 6) */
+  z-index: 7;
+  min-width: 120px;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 10px;
+  background: rgba(13, 16, 23, 0.97);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  animation: agent-menu-in 0.15s ease backwards;
+}
+
+@keyframes agent-menu-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.island-agent-menu-item {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  padding: 7px 10px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-color, #fff);
+  font-size: 0.72rem;
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+
+.island-agent-menu-item:hover {
+  background: rgba(255, 255, 255, 0.09);
+}
+
+.island-agent-menu-item.danger {
+  color: #fca5a5;
+}
+
+.island-agent-menu-item.danger:hover {
+  background: rgba(248, 113, 113, 0.14);
+}
+
+/* 快捷切换按钮:悬浮 ⋯ 时在左侧浮现。
+   透明命中区自 ⋯ 左缘向左延伸(覆盖按钮与 ⋯ 之间的 8px 间隙)——鼠标
+   从 ⋯ 横移到按钮的过程始终处于容器悬停内,按钮不会中途消失;
+   入场:右→左滑入 + 微缩放回弹(轻微回弹曲线);离场:滑回 ⋯ 侧平滑
+   淡出;菜单打开时(.open)隐藏(弹出面板已展开,快捷按钮冗余)。
+   命中区为绝对定位,不参与头部布局(⋯ 按钮不位移) */
+.island-agent-quick {
+  position: absolute;
+  top: 0;
+  right: 100%;
+  width: 118px;
+  height: 26px;
+  display: flex;
+  justify-content: flex-end;
+  /* 视觉按钮与 ⋯ 之间留 8px 间隙(与头部 gap 一致) */
+  padding-right: 8px;
+  opacity: 0;
+  transform: translateX(10px) scale(0.9);
+  pointer-events: none;
+  /* 离场(目标 = 隐藏态,transition 取目标态):平滑淡出滑回 ⋯ 侧,无回弹 */
+  transition:
+    opacity 0.16s ease,
+    transform 0.18s ease;
+}
+
+.island-agent-menu:hover:not(.open) .island-agent-quick {
+  opacity: 1;
+  transform: translateX(0) scale(1);
+  pointer-events: auto;
+  /* 入场(目标 = 显示态):右→左滑入 + 微缩放回弹(轻微过冲) */
+  transition:
+    opacity 0.2s ease,
+    transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+/* 视觉按钮:中性胶囊(与头部 ctl 同款);每步重挂载重放 flash 动画 */
+.island-agent-quick-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 9px;
+  border: 1px solid rgba(255, 255, 255, 0.24);
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.09);
+  color: var(--text-color, #fff);
+  font-size: 0.72rem;
+  font-family: inherit;
+  white-space: nowrap;
+  cursor: pointer;
+  /* 悬停过渡(与 ctl 同款;flash 动画播放期间 border-color 以动画为准) */
+  transition:
+    background 0.15s ease,
+    border-color 0.15s ease;
+  animation: agent-quick-flash 0.3s ease;
+}
+
+.island-agent-quick-btn:hover {
+  background: rgba(255, 255, 255, 0.16);
+  border-color: rgba(255, 255, 255, 0.38);
+}
+
+.island-agent-quick-btn.danger {
+  color: #fca5a5;
+}
+
+/* 滚轮切换内容交换动画(快捷按钮与记忆类型按钮共用):
+   旧内容滑出淡出(0.2s 平滑)、新内容回弹滑入(0.3s 轻微过冲,
+   与设置视图 island-ui-in 同款精致缓动);方向:向前(滚轮向下)
+   新内容自下而上,向后自上而下。
+   `.swap` 仅在滚轮步进后加(tick > 0)——首帧挂载不播动画 */
+.island-wheel-swap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  overflow: hidden;
+}
+
+.island-wheel-swap-out {
+  position: absolute;
+  inset: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+
+.island-wheel-swap-in {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+
+.island-wheel-swap.swap .island-wheel-swap-out {
+  animation: agent-swap-out 0.2s ease both;
+}
+
+.island-wheel-swap.swap .island-wheel-swap-in {
+  animation: agent-swap-in 0.3s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+
+.island-wheel-swap.swap.back .island-wheel-swap-out {
+  animation-name: agent-swap-out-bwd;
+}
+
+.island-wheel-swap.swap.back .island-wheel-swap-in {
+  animation-name: agent-swap-in-bwd;
+}
+
+@keyframes agent-swap-in {
+  from {
+    transform: translateY(115%);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+@keyframes agent-swap-in-bwd {
+  from {
+    transform: translateY(-115%);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+@keyframes agent-swap-out {
+  from {
+    transform: translateY(0);
+    opacity: 1;
+  }
+  to {
+    transform: translateY(-65%);
+    opacity: 0;
+  }
+}
+
+@keyframes agent-swap-out-bwd {
+  from {
+    transform: translateY(0);
+    opacity: 1;
+  }
+  to {
+    transform: translateY(65%);
+    opacity: 0;
+  }
+}
+
+/* 切换瞬间边框柔和强调(0.3s 缓入缓出,不再硬闪)——基调色与
+   强调色混色,低对比优雅 */
+@keyframes agent-quick-flash {
+  0% {
+    border-color: rgba(255, 255, 255, 0.24);
+  }
+  40% {
+    border-color: color-mix(in srgb, var(--state-color, #4d6bfe) 45%, rgba(255, 255, 255, 0.24));
+  }
+  100% {
+    border-color: rgba(255, 255, 255, 0.24);
+  }
+}
+
+/* 消息列表:flex 拉伸填满剩余空间(内容不足时输入框贴底,欢迎语
+   margin auto 居中),内容超高时 max-height 封顶滚动。
+   max-height = 岛体高 - 固定部分(头部/输入/间距/内边距,与
+   AGENT_PANEL_FIXED_H 同源):内容超高时滚动,岛体封顶 600。
+   测量用 scrollHeight:内容不足时 = 可视高(自收敛不增长),
+   超高时 = 内容全高(不受压缩影响),高度自适应稳定 */
+.island-agent-messages {
+  flex: 1 1 auto;
+  min-height: 36px;
+  max-height: calc(var(--agent-h, 200px) - 116px);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-right: 4px;
+  user-select: text;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.15) transparent;
+  /* 骨架 → 内容切换的平滑淡入:骨架(120ms)替换为真实消息时,文字
+     直接突现会与面板 maskPanelIn 淡入重叠,表现为"展开到扩展高度
+     那一帧文字闪烁"(实测)——淡入后文字平滑出现,不再闪。
+     动画仅在挂载时播放(消息更新不重挂载,不影响流式渲染) */
+  animation: agent-content-in 0.26s ease both;
+}
+
+@keyframes agent-content-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* 欢迎语(空对话时) */
+.island-agent-welcome {
+  margin: auto;
+  text-align: center;
+  font-size: 0.72rem;
+  line-height: 1.8;
+  color: var(--text-dim, rgba(255, 255, 255, 0.45));
+}
+
+/* 用户消息:右侧强调色气泡,深字(文本 + 复制按钮) */
+.island-agent-msg-user {
+  align-self: flex-end;
+  max-width: 82%;
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+  padding: 8px 12px;
+  border-radius: 14px 14px 4px 14px;
+  background: var(--state-color, #4d6bfe);
+  color: #0b0b0f;
+}
+
+.island-agent-msg-user-text {
+  font-size: 0.75rem;
+  line-height: 1.5;
+  white-space: normal;
+  word-break: break-word;
+  user-select: text;
+  min-width: 0;
+}
+
+/* 复制按钮:气泡脚注小图标按钮,点击短暂显示 ✓ 反馈。
+   拦截左键 pointerdown(消息区内交互元素,长按不触发岛体收回) */
+.island-agent-copy {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--text-dim, rgba(255, 255, 255, 0.55));
+  font-size: 0.62rem;
+  font-family: inherit;
+  cursor: pointer;
+  transition:
+    background 0.12s ease,
+    border-color 0.12s ease,
+    color 0.12s ease;
+}
+
+.island-agent-copy:hover {
+  background: rgba(255, 255, 255, 0.14);
+  color: var(--text-color, #fff);
+}
+
+.island-agent-copy.copied {
+  border-color: rgba(74, 222, 128, 0.45);
+  background: rgba(74, 222, 128, 0.14);
+  color: #4ade80;
+}
+
+/* 用户气泡(强调色深底)内的复制按钮:深色系适配 */
+.island-agent-msg-user .island-agent-copy {
+  border-color: rgba(11, 11, 15, 0.18);
+  background: rgba(11, 11, 15, 0.1);
+  color: rgba(11, 11, 15, 0.55);
+}
+
+.island-agent-msg-user .island-agent-copy:hover {
+  background: rgba(11, 11, 15, 0.2);
+  color: #0b0b0f;
+}
+
+/* 助手消息块:左侧,文本气泡 + 工具卡片按执行顺序排列 */
+.island-agent-msg-assistant {
+  align-self: flex-start;
+  max-width: 96%;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+/* 助手文本气泡:与用户气泡(右上角)对称的左上角圆角;
+   流式文本同样走气泡(光标在气泡内) */
+.island-agent-msg-assistant .island-agent-text {
+  align-self: flex-start;
+  max-width: 100%;
+  padding: 8px 12px;
+  border-radius: 4px 14px 14px 14px;
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  font-size: 0.75rem;
+  line-height: 1.6;
+  color: var(--text-color, #fff);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* token 用量小字(输入/输出/缓存命中,消息落定时显示) */
+.island-agent-usage {
+  font-size: 0.6rem;
+  color: var(--text-dim, rgba(255, 255, 255, 0.35));
+}
+
+/* 气泡脚注:复制按钮 + token 用量(助手消息) */
+.island-agent-msg-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* ====================== 消息气泡 Markdown 渲染 ======================
+   全部文本经 React 转义(无 HTML 注入面);配色跟随 --text-color /
+   --text-dim / --state-color(自定义主题色与字体色均生效)。
+   流式渲染:增量重解析,未闭合结构自然退化为段落,补齐即成形 */
+.island-agent-md {
+  white-space: normal;
+  min-width: 0;
+  user-select: text;
+}
+
+.island-agent-md > * + * {
+  margin-top: 6px;
+}
+
+/* 消息内嵌图片(工具生成的二维码等 data URL;解析器已限定 data:image/):
+   **按比例展示**(2026-08-07 用户要求,配合界面缩放)——显示宽度 =
+   原图宽 × --agent-s(AgentImage 组件内联设置),面板缩放时图片等比
+   放大;max-width: 100% 只兜底超宽图压缩(保持比例 height: auto),
+   不再固定封顶(132px 二维码在 300% 缩放下显示 ~396px) */
+.island-agent-md-img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 4px 0;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+}
+
+.island-agent-md p {
+  margin: 0;
+}
+
+.island-agent-md h1,
+.island-agent-md h2,
+.island-agent-md h3,
+.island-agent-md h4,
+.island-agent-md h5,
+.island-agent-md h6 {
+  margin: 0;
+  line-height: 1.45;
+  font-weight: 650;
+  color: var(--text-color, #fff);
+}
+
+.island-agent-md h1 {
+  font-size: 1.02rem;
+}
+
+.island-agent-md h2 {
+  font-size: 0.92rem;
+}
+
+.island-agent-md h3 {
+  font-size: 0.86rem;
+}
+
+.island-agent-md h4,
+.island-agent-md h5,
+.island-agent-md h6 {
+  font-size: 0.78rem;
+}
+
+.island-agent-md ul,
+.island-agent-md ol {
+  margin: 0;
+  padding-left: 1.4em;
+}
+
+.island-agent-md li {
+  margin: 0;
+}
+
+.island-agent-md li + li {
+  margin-top: 2px;
+}
+
+/* 嵌套列表/续行子块 */
+.island-agent-md ul ul,
+.island-agent-md ul ol,
+.island-agent-md ol ul,
+.island-agent-md ol ol {
+  margin-top: 2px;
+}
+
+.island-agent-md li > p,
+.island-agent-md li > ul,
+.island-agent-md li > ol,
+.island-agent-md li > blockquote {
+  margin-top: 4px;
+}
+
+.island-agent-md blockquote {
+  margin: 0;
+  padding: 3px 10px;
+  border-left: 3px solid var(--state-color, #4d6bfe);
+  border-radius: 0 6px 6px 0;
+  background: rgba(255, 255, 255, 0.045);
+  color: var(--text-dim, rgba(255, 255, 255, 0.75));
+}
+
+.island-agent-md blockquote > * + * {
+  margin-top: 4px;
+}
+
+.island-agent-md hr {
+  margin: 2px 0;
+  border: 0;
+  border-top: 1px solid rgba(255, 255, 255, 0.14);
+}
+
+.island-agent-md code {
+  font-family: 'Cascadia Mono', 'JetBrains Mono', Consolas, monospace;
+  font-size: 0.9em;
+  padding: 0.5px 4px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.12);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+}
+
+.island-agent-md a {
+  color: var(--state-color, #4d6bfe);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+  word-break: break-all;
+}
+
+.island-agent-md a:hover {
+  opacity: 0.85;
+}
+
+/* 围栏代码块:头部(语言标签 + 复制)+ 代码(超出滚动,不撑岛体) */
+.island-agent-code {
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.32);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+
+.island-agent-code-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 3px 8px;
+  background: rgba(255, 255, 255, 0.05);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.island-agent-code-lang {
+  font-family: 'Cascadia Mono', 'JetBrains Mono', Consolas, monospace;
+  font-size: 0.6rem;
+  text-transform: lowercase;
+  color: var(--text-dim, rgba(255, 255, 255, 0.55));
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.island-agent-code-head .island-agent-copy {
+  flex: none;
+  margin: 0 -3px 0 auto;
+}
+
+.island-agent-code pre {
+  margin: 0;
+  padding: 8px 10px;
+  max-height: 240px;
+  overflow: auto;
+  white-space: pre;
+  font-family: 'Cascadia Mono', 'JetBrains Mono', Consolas, monospace;
+  font-size: 0.66rem;
+  line-height: 1.55;
+  color: var(--text-dim, rgba(255, 255, 255, 0.75));
+}
+
+.island-agent-code pre code {
+  background: none;
+  border: 0;
+  padding: 0;
+  font-size: inherit;
+  color: inherit;
+}
+
+/* GFM 表格:宽表格横向滚动;对齐来自分隔行 :---: 形态 */
+.island-agent-table-wrap {
+  max-width: 100%;
+  overflow-x: auto;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.island-agent-md table {
+  border-collapse: collapse;
+  min-width: 100%;
+  width: max-content;
+  font-size: 0.72rem;
+  line-height: 1.5;
+}
+
+.island-agent-md th,
+.island-agent-md td {
+  padding: 4px 9px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  text-align: left;
+  vertical-align: top;
+  word-break: break-word;
+}
+
+.island-agent-md th {
+  background: rgba(255, 255, 255, 0.07);
+  font-weight: 650;
+  color: var(--text-color, #fff);
+}
+
+.island-agent-md td {
+  color: var(--text-color, #fff);
+}
+
+/* Mermaid 图表:深色主题 SVG,宽图横向滚动 */
+.island-agent-mermaid {
+  background: rgba(0, 0, 0, 0.28);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  padding: 10px;
+  overflow-x: auto;
+}
+
+.island-agent-mermaid svg {
+  display: block;
+  margin: 0 auto;
+  max-width: 100%;
+  height: auto;
+}
+
+.island-agent-mermaid-loading {
+  padding: 6px 2px;
+  font-size: 0.64rem;
+  color: var(--text-dim, rgba(255, 255, 255, 0.55));
+}
+
+.island-agent-mermaid-err {
+  padding: 6px 2px;
+  font-size: 0.64rem;
+  color: #ff858f;
+}
+
+/* 用户气泡(浅色强调底):Markdown 元素换深色描边,可读性跟随 #0b0b0f */
+.island-agent-msg-user .island-agent-md a {
+  color: rgba(11, 11, 15, 0.85);
+}
+
+.island-agent-msg-user .island-agent-md code {
+  background: rgba(11, 11, 15, 0.1);
+  border-color: rgba(11, 11, 15, 0.15);
+  color: #0b0b0f;
+}
+
+.island-agent-msg-user .island-agent-md blockquote {
+  border-left-color: rgba(11, 11, 15, 0.45);
+  background: rgba(11, 11, 15, 0.06);
+  color: rgba(11, 11, 15, 0.7);
+}
+
+.island-agent-msg-user .island-agent-md hr {
+  border-top-color: rgba(11, 11, 15, 0.2);
+}
+
+.island-agent-msg-user .island-agent-code {
+  background: rgba(11, 11, 15, 0.12);
+  border-color: rgba(11, 11, 15, 0.18);
+}
+
+.island-agent-msg-user .island-agent-code-head {
+  background: rgba(11, 11, 15, 0.08);
+  border-bottom-color: rgba(11, 11, 15, 0.1);
+}
+
+.island-agent-msg-user .island-agent-code pre {
+  color: rgba(11, 11, 15, 0.8);
+}
+
+.island-agent-msg-user .island-agent-table-wrap {
+  border-color: rgba(11, 11, 15, 0.16);
+}
+
+.island-agent-msg-user .island-agent-md th,
+.island-agent-msg-user .island-agent-md td {
+  border-color: rgba(11, 11, 15, 0.16);
+  color: #0b0b0f;
+}
+
+.island-agent-msg-user .island-agent-md th {
+  background: rgba(11, 11, 15, 0.08);
+}
+
+.island-agent-msg-user .island-agent-md h1,
+.island-agent-msg-user .island-agent-md h2,
+.island-agent-msg-user .island-agent-md h3,
+.island-agent-msg-user .island-agent-md h4,
+.island-agent-msg-user .island-agent-md h5,
+.island-agent-msg-user .island-agent-md h6 {
+  color: #0b0b0f;
+}
+
+/* 流式光标 */
+.island-agent-caret {
+  display: inline-block;
+  width: 6px;
+  height: 0.95em;
+  margin-left: 2px;
+  vertical-align: -0.15em;
+  background: var(--state-color, #4d6bfe);
+  animation: agent-caret-blink 1s steps(2, start) infinite;
+}
+
+@keyframes agent-caret-blink {
+  0% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0;
+  }
+  100% {
+    opacity: 1;
+  }
+}
+
+/* 思考中(无文本输出时) */
+.island-agent-thinking {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 0.72rem;
+  color: var(--text-dim, rgba(255, 255, 255, 0.55));
+}
+
+.island-agent-dots span {
+  display: inline-block;
+  width: 3px;
+  height: 3px;
+  margin-right: 2px;
+  border-radius: 50%;
+  background: var(--text-dim, rgba(255, 255, 255, 0.55));
+  animation: agent-dots-bounce 1.2s ease-in-out infinite;
+}
+
+.island-agent-dots span:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.island-agent-dots span:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+@keyframes agent-dots-bounce {
+  0%,
+  100% {
+    opacity: 0.3;
+    transform: translateY(0);
+  }
+  50% {
+    opacity: 1;
+    transform: translateY(-2px);
+  }
+}
+
+/* 错误提示 */
+.island-agent-error {
+  align-self: flex-start;
+  max-width: 96%;
+  padding: 8px 12px;
+  border: 1px solid rgba(248, 113, 113, 0.35);
+  border-radius: 12px;
+  background: rgba(248, 113, 113, 0.1);
+  color: #fca5a5;
+  font-size: 0.72rem;
+  line-height: 1.5;
+  word-break: break-word;
+  user-select: text;
+}
+
+/* 工具卡片:名称 + 状态 + 可展开参数/结果(过程可知)。
+   展开/收起动画:grid-template-rows 0fr↔1fr 高度过渡(无过冲缓动——
+   弹簧曲线插值到负 fr 会被钳制,收起时抖动)+ 内容淡入/淡出。
+   头部为 button(原 details/summary 改受控状态,换取动画能力) */
+.island-agent-tool {
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.05);
+  overflow: hidden;
+}
+
+.island-agent-tool-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  padding: 7px 10px;
+  background: none;
+  border: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.12s ease;
+}
+
+.island-agent-tool-head:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+/* 工具状态:纯汉字标签(2026-08-07 用户要求:移除绿勾/红叉圆形徽标,
+   改"调用成功/调用失败/执行中"文字胶囊) */
+.island-agent-tool-state {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 7px;
+  border-radius: 8px;
+  font-size: 0.58rem;
+  font-weight: 600;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+.island-agent-tool-state.run {
+  background: rgba(77, 107, 254, 0.25);
+  color: #93a5ff;
+  animation: agent-dot-pulse 1.2s ease-in-out infinite;
+}
+
+.island-agent-tool-state.ok {
+  background: rgba(74, 222, 128, 0.16);
+  color: #4ade80;
+}
+
+.island-agent-tool-state.err {
+  background: rgba(248, 113, 113, 0.16);
+  color: #f87171;
+}
+
+.island-agent-tool-name {
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--text-color, #fff);
+  font-family: 'Cascadia Mono', 'JetBrains Mono', Consolas, monospace;
+}
+
+.island-agent-tool-time {
+  font-size: 0.62rem;
+  color: var(--text-dim, rgba(255, 255, 255, 0.4));
+}
+
+.island-agent-tool-toggle {
+  margin-left: auto;
+  font-size: 0.6rem;
+  color: var(--text-dim, rgba(255, 255, 255, 0.4));
+  transition: transform 0.28s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.island-agent-tool.open .island-agent-tool-toggle,
+.island-agent-tool-summary.open .island-agent-tool-toggle {
+  transform: rotate(90deg);
+}
+
+/* 高度动画载体:0fr 折叠 / 1fr 展开(内容高度自适应,无需 JS 测量);
+   overflow hidden 裁剪折叠时的剩余内边距(0fr 下 padding 仍撑出盒子) */
+.island-agent-tool-body-wrap {
+  display: grid;
+  grid-template-rows: 0fr;
+  overflow: hidden;
+  transition: grid-template-rows 0.28s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.island-agent-tool.open .island-agent-tool-body-wrap {
+  grid-template-rows: 1fr;
+}
+
+.island-agent-tool-body {
+  min-height: 0;
+  /* 折叠态底边距必须归零:0fr 轨道下 item 的 padding 仍贡献轨道高度
+     (Chromium 实测 9px),不归零收纳态会露出被截断的"参数"标题带;
+     展开态恢复 9px,与 grid-template-rows 同节奏过渡 */
+  padding: 0 10px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  transition: padding-bottom 0.28s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.island-agent-tool.open .island-agent-tool-body {
+  padding: 0 10px 9px;
+}
+
+/* ===== 工具汇总列表:一轮回复全部工具调用收纳成单行(信息密度优化 v2:
+   实时收纳——流式执行中也逐卡并入同一列表,默认折叠不撑开消息气泡) =====
+   头部:图标(强调色)+ 名称/计数 + 状态汇总 + 总耗时 + 箭头;
+   点击展开/收起 = 同卡片的 0fr↔1fr 高度动画。挂载走 island-ui-in
+   精致缓动(与设置区条目一致) */
+.island-agent-tool-summary {
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.05);
+  overflow: hidden;
+  animation: island-ui-in 0.3s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+
+.island-agent-tool-summary-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  padding: 7px 10px;
+  background: none;
+  border: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.12s ease;
+}
+
+.island-agent-tool-summary-head:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.island-agent-tool-summary-head .island-ctl-svg {
+  flex: none;
+  color: var(--state-color, #4d6bfe);
+}
+
+.island-agent-tool-summary-title {
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--text-color, #fff);
+  font-family: 'Cascadia Mono', 'JetBrains Mono', Consolas, monospace;
+}
+
+/* 状态汇总小字:执行中脉冲(纯透明度,不缩放文字) */
+.island-agent-tool-summary-state {
+  font-size: 0.62rem;
+  font-weight: 600;
+}
+
+.island-agent-tool-summary-state.run {
+  color: #93a5ff;
+  animation: agent-summary-pulse 1.2s ease-in-out infinite;
+}
+
+.island-agent-tool-summary-state.ok {
+  color: #4ade80;
+}
+
+.island-agent-tool-summary-state.err {
+  color: #f87171;
+}
+
+@keyframes agent-summary-pulse {
+  0%,
+  100% {
+    opacity: 0.45;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+.island-agent-tool-summary-body {
+  display: grid;
+  grid-template-rows: 0fr;
+  overflow: hidden;
+  transition: grid-template-rows 0.28s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.island-agent-tool-summary.open .island-agent-tool-summary-body {
+  grid-template-rows: 1fr;
+}
+
+/* 展开时各卡淡入微沉(与高度过渡叠加,两层动画不冲突);
+   收起时淡出由同一 transition 反向驱动。
+   内层底边距折叠态归零(0fr 轨道残留 item padding 高度,实测 8px),
+   展开恢复,与 grid-template-rows 同节奏过渡 */
+.island-agent-tool-summary-inner {
+  min-height: 0;
+  padding: 0 8px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  opacity: 0;
+  transform: translateY(-4px);
+  transition:
+    opacity 0.2s ease,
+    transform 0.2s ease,
+    padding-bottom 0.28s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.island-agent-tool-summary.open .island-agent-tool-summary-inner {
+  padding: 0 8px 8px;
+  opacity: 1;
+  transform: none;
+}
+
+.island-agent-tool-sec-title {
+  display: block;
+  margin-bottom: 3px;
+  font-size: 0.6rem;
+  color: var(--text-dim, rgba(255, 255, 255, 0.45));
+}
+
+.island-agent-tool-code {
+  margin: 0;
+  padding: 7px 9px;
+  border-radius: 7px;
+  background: rgba(0, 0, 0, 0.35);
+  color: var(--text-dim, rgba(255, 255, 255, 0.75));
+  font-size: 0.64rem;
+  line-height: 1.5;
+  font-family: 'Cascadia Mono', 'JetBrains Mono', Consolas, monospace;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 140px;
+  overflow-y: auto;
+  user-select: text;
+}
+
+/* 输入区:自动增高文本域 + 发送/停止 */
+.island-agent-input {
+  flex: none;
+  position: relative;
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+/* / 与 @ 手动调用候选列表:与输入框一体(紧贴其上,同底色描边),
+   从输入框"长出"——容器 scaleY(原点在底部)展开/收起,卡片逐个
+   stagger 折叠展开/收起(展开正向、收起倒序)。
+   高度跟随岛体:max-height = 岛体高(-agent-h) - 头部/输入区/边距,
+   按 200px 岛体 → 约 1.7 条候选(条目高约 32px)标定;超高滚动 */
+.island-agent-suggest {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 2px);
+  display: flex;
+  flex-direction: column;
+  max-height: calc(var(--agent-h, 200px) - 146px);
+  overflow-y: auto;
+  transform-origin: bottom;
+  transform: scaleY(0);
+  opacity: 0;
+  transition:
+    transform 0.24s cubic-bezier(0.2, 0.9, 0.25, 1),
+    opacity 0.18s ease;
+  background: rgba(16, 20, 28, 0.97);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 10px;
+  z-index: 6;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.15) transparent;
+}
+
+/* 展开态:挂载即从 scaleY(0) 弹开到 1(与输入框一体的"长出"感) */
+.island-agent-suggest:not(.closing) {
+  transform: scaleY(1);
+  opacity: 1;
+}
+
+/* 收起:与展开同曲线同量级时长(原 0.16s 过快显得仓促,用户要求参考
+   展开设计;scaleY 收缩回输入框,卡片倒序折叠) */
+.island-agent-suggest.closing {
+  transform: scaleY(0);
+  opacity: 0;
+  transition:
+    transform 0.24s cubic-bezier(0.2, 0.9, 0.25, 1),
+    opacity 0.2s ease;
+}
+
+/* 卡片逐卡滑入(animationDelay 由组件按索引正向 stagger) */
+.island-agent-suggest-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 10px;
+  background: transparent;
+  border: none;
+  color: var(--text-color, #fff);
+  font-family: inherit;
+  font-size: 0.66rem;
+  text-align: left;
+  cursor: pointer;
+  opacity: 0;
+  animation: suggest-item-in 0.22s cubic-bezier(0.2, 0.9, 0.3, 1.15) forwards;
+}
+
+/* 收起:逐卡折叠退场(animationDelay 倒序 stagger);与展开同等时长,
+   曲线平滑回落(原 ease-in 过快衰减) */
+.island-agent-suggest-item.out {
+  animation: suggest-item-out 0.2s cubic-bezier(0.3, 0, 0.7, 0.2) forwards;
+}
+
+@keyframes suggest-item-in {
+  from {
+    opacity: 0;
+    transform: translateY(-5px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes suggest-item-out {
+  from {
+    opacity: 1;
+    transform: none;
+  }
+  to {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.98);
+  }
+}
+
+.island-agent-suggest-item.on {
+  background: color-mix(in srgb, var(--state-color, #4d6bfe) 28%, transparent);
+}
+
+.island-agent-suggest-cmd {
+  flex: none;
+  font-weight: 600;
+  color: var(--state-color, #4d6bfe);
+}
+
+.island-agent-suggest-desc {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-dim, rgba(255, 255, 255, 0.55));
+}
+
+.island-agent-input textarea {
+  flex: 1;
+  min-height: 34px;
+  max-height: 96px;
+  resize: none;
+  padding: 8px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-color, #fff);
+  font-family: inherit;
+  font-size: 0.75rem;
+  line-height: 1.5;
+  outline: none;
+  user-select: text;
+  transition: border-color 0.15s ease;
+}
+
+.island-agent-input textarea::placeholder {
+  color: var(--text-dim, rgba(255, 255, 255, 0.4));
+}
+
+.island-agent-input textarea:focus {
+  border-color: color-mix(in srgb, var(--state-color, #4d6bfe) 65%, transparent);
+}
+
+.island-agent-send {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border: none;
+  border-radius: 12px;
+  background: var(--state-color, #4d6bfe);
+  color: #0b0b0f;
+  cursor: pointer;
+  transition:
+    opacity 0.15s ease,
+    transform 0.15s ease;
+}
+
+.island-agent-send:hover:not(:disabled) {
+  transform: scale(1.06);
+}
+
+.island-agent-send:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.island-agent-stop {
+  flex: none;
+  height: 34px;
+  padding: 0 14px;
+  border: 1px solid rgba(248, 113, 113, 0.4);
+  border-radius: 12px;
+  background: rgba(248, 113, 113, 0.14);
+  color: #fca5a5;
+  font-size: 0.72rem;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.island-agent-stop:hover {
+  background: rgba(248, 113, 113, 0.24);
+}
+
+/* ===== Agent 设置视图(设置视图"Agent 设置"入口,设置类视图) =====
+   岛体加高 540px(挂件窗口同步 580,VIEW_WINDOW_H 登记)容纳表单
+   (原 400 → 460 仍显扁:表单字段/分区内容挤在一起;用户要求继续增高)。
+   同样放开 max-width:500px(界面放大对 agent 模式所有视图生效,
+   否则在设置视图切 200% 看不到任何变化) */
+.island-demo.expanded.island-agent-settings-view {
+  max-width: none;
+  /* 高度由 JS 动画驱动(--agent-h,2026-08-07 用户要求"参考 Agent 展开的
+     先变宽再变长动画":从设置视图切入时,useAgentPanelLayout 从当前显示
+     高度滑升到 540,窗口经 onAgentPanelSize 逐帧跟随;CSS 不做高度过渡,
+     大跨度弹簧在软件渲染下抖动(agent 视图同款取舍)。AGENT_SETTINGS_H
+     常量与 layout.ts 同步 */
+  height: var(--agent-h, 540px);
+  /* 宽度无过冲缓动(与 agent 视图同款;基础 0.33s 弹簧跨 400→800
+     大跨度在软件渲染下抖动感明显) */
+  transition:
+    width 0.24s cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 0.3s ease,
+    border-color 0.3s ease,
+    transform 0.35s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+/* ===== 通用快捷菜单 QuickMenu(2026-08-07,参考 Agent 设置菜单条抽离) =====
+   整合按钮 + **同行联通展开**(open 时整个容器变成一个圆角胶囊,按钮融入
+   成为第一段,菜单项从按钮侧滑入,视觉连成一体像展开的子菜单,非独立
+   气泡);中性胶囊风格(半透明白底 + 细白描边);动画曲线统一无过冲缓动
+   cubic-bezier(0.22,1,0.36,1)。方向:right(默认,菜单在按钮右侧)/
+   left(.dir-left,flex 反转,菜单在按钮左侧——右上角菜单用,滑入方向反转)。
+   复用:Agent 设置菜单 / 记忆类型下拉 / Agent ⋯ 菜单 / 帮助手册模式按钮 */
+.island-quick-menu {
+  position: relative;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  max-width: 100%;
+  padding: 2px;
+  border: 1px solid transparent;
+  border-radius: 13px;
+  background: transparent;
+  transition:
+    background 0.22s ease,
+    border-color 0.22s ease;
+}
+
+.island-quick-menu.open {
+  background: rgba(255, 255, 255, 0.09);
+  border-color: rgba(255, 255, 255, 0.24);
+}
+
+/* 左侧展开(Bug 修复 2026-08-07):菜单项 **absolute 定位在按钮左缘之外**
+   (right: 100%)——flex 布局下 pop 展开会让容器向右变宽,按钮(最右端)
+   跟着右移,鼠标悬停位置落在子菜单上(用户实测)。absolute 后容器宽度
+   = 按钮宽(宽度测量已固定),按钮纹丝不动,pop 向左溢出展开 */
+.island-quick-menu.dir-left {
+  flex-direction: row-reverse;
+}
+
+.island-quick-menu.dir-left .island-quick-menu-pop {
+  align-items: center;
+}
+
+.island-quick-menu.dir-left .island-quick-menu-indicator {
+  /* absolute 容器内滑块定位不变(相对 pop) */
+  position: absolute;
+}
+
+.island-quick-menu-btn {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.24);
+  border-radius: 11px;
+  background: rgba(255, 255, 255, 0.09);
+  color: var(--text-color, #fff);
+  font-size: 0.7rem;
+  font-family: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+  transition:
+    width 0.28s cubic-bezier(0.22, 1, 0.36, 1),
+    background 0.15s ease,
+    border-color 0.15s ease;
+}
+
+.island-quick-menu-btn:hover {
+  background: rgba(255, 255, 255, 0.16);
+  border-color: rgba(255, 255, 255, 0.36);
+}
+
+/* open 时按钮融入容器胶囊(取消独立边框/底色,成为胶囊第一段) */
+.island-quick-menu.open .island-quick-menu-btn {
+  border-color: transparent;
+  background: transparent;
+}
+
+.island-quick-menu.open .island-quick-menu-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.island-quick-menu-arrow {
+  font-size: 0.55rem;
+  color: var(--text-dim, rgba(255, 255, 255, 0.55));
+  transition: transform 0.2s ease;
+}
+
+.island-quick-menu.open .island-quick-menu-arrow {
+  transform: rotate(180deg);
+}
+
+/* 菜单项:与按钮同一行滑入展开(容器后代联通一体,子菜单形态);
+   隐藏态 max-width 0 + 透明度 0,展开态无过冲缓动过渡 */
+.island-quick-menu-pop {
+  position: relative;
+  display: flex;
+  gap: 2px;
+  max-width: 0;
+  opacity: 0;
+  overflow: hidden;
+  /* 展开速率放慢(2026-08-07 用户要求:太快——0.42s 无过冲缓动) */
+  transition:
+    max-width 0.42s cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 0.26s ease;
+}
+
+.island-quick-menu.open .island-quick-menu-pop {
+  max-width: 520px;
+  opacity: 1;
+}
+
+/* 选中高亮滑块:绝对定位在菜单项之下,left/width 由 React 按当前选中项
+   测量写入,切换时平滑滑动(原 .on 背景瞬移) */
+.island-quick-menu-indicator {
+  position: absolute;
+  top: 1px;
+  bottom: 1px;
+  left: 0;
+  width: 0;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--state-color, #4d6bfe) 32%, transparent);
+  pointer-events: none;
+  transition:
+    left 0.32s cubic-bezier(0.22, 1, 0.36, 1),
+    width 0.32s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.island-quick-menu-item {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 10px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--text-dim, rgba(255, 255, 255, 0.55));
+  font-size: 0.66rem;
+  font-family: inherit;
+  white-space: nowrap;
+  cursor: pointer;
+  opacity: 0;
+  transform: translateX(-6px);
+  /* 滑入速率放慢(2026-08-07 用户要求:太快——0.36s 无过冲) */
+  transition:
+    opacity 0.26s ease,
+    transform 0.36s cubic-bezier(0.22, 1, 0.36, 1),
+    background 0.15s ease,
+    color 0.15s ease;
+}
+
+/* 左侧展开:菜单项从按钮方向(右)滑入(初始偏右 14px,归位 = 从右向左
+   进入)——pop 就位不整体移动(去"飞入感",用户要求逐个淡入),"从右
+   向左"的方向感由 item 自身位移提供 */
+.island-quick-menu.dir-left .island-quick-menu-item {
+  transform: translateX(14px);
+}
+
+/* 左侧展开动画(2026-08-07 用户要求,四次修复):**去掉整块 transform
+   平移**("飞入感"被用户否决)——pop 直接就位在按钮左缘(最终位置),
+   隐藏态 opacity 0 + **visibility hidden** 控制显隐:展开时菜单项在
+   最终位置**逐个淡入**(与右向 Agent 设置菜单同款观感:无整块移动,
+   项从按钮方向(右)滑入归位,方向感由 item 自身 translateX(14px)→0
+   提供);收起反向逐项淡出。visibility hidden 在隐藏态**不参与
+   hit-test**——pop 就位后若只 opacity 0,鼠标划过按钮左侧标题区会
+   误触发展开;visibility 延迟 0.26s(淡出结束后)才隐藏,期间不挡动画。
+   一体胶囊背景(2026-08-07 四次优化,用户要求"参考 Agent 设置菜单的
+   连通背景"):pop 在容器盒外(absolute right: 100%),容器 open 时的
+   背景/描边只盖住按钮区——pop 自画背景与容器背景"两段相接"在连接处
+   有亚像素接缝观感;改由 **独立 shell 背景层**(QuickMenu 渲染,宽度
+   经 JS 测量写入 --shell-pop-w)从按钮区延伸覆盖 pop 区域,同一元素
+   画背景+描边+全圆角——绝对无缝;容器/pop 自身不再画背景描边
+   (dir-left.open 容器透明,pop 透明)。背景区域恒定覆盖(pop 就位,
+   left 恒 -popW),open 只淡入背景 */
+.island-quick-menu.dir-left .island-quick-menu-pop {
+  position: absolute;
+  right: 100%;
+  top: 0;
+  bottom: 0;
+  max-width: none;
+  opacity: 0;
+  visibility: hidden;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  padding: 2px;
+  transition:
+    opacity 0.26s ease,
+    visibility 0s linear 0.26s;
+  pointer-events: none;
+}
+
+/* dir-left 一体胶囊背景层(2026-08-07 用户要求):absolute 覆盖
+   [pop 区域(左缘 -popW)+ 按钮] 整个胶囊;open 时画背景+描边+全圆角;
+   收起透明。z 序在按钮/pop 之下(JSX 首个子元素),pointer-events none。
+   pop 就位后背景区域恒定覆盖(pop 不再平移,left 恒 -popW),open 只
+   淡入/淡出背景——与 pop/item 的淡入淡出同步,无脱节 */
+.island-quick-menu-shell {
+  position: absolute;
+  inset: 0;
+  border-radius: 13px;
+  background: transparent;
+  border: 1px solid transparent;
+  pointer-events: none;
+  transition:
+    background 0.22s ease,
+    border-color 0.22s ease;
+}
+
+.island-quick-menu.dir-left .island-quick-menu-shell {
+  left: calc(-1 * var(--shell-pop-w, 0px));
+}
+
+.island-quick-menu.dir-left.open .island-quick-menu-shell {
+  background: rgba(255, 255, 255, 0.09);
+  border-color: rgba(255, 255, 255, 0.24);
+}
+
+/* shell 接管背景后容器自身不再画(防双重叠加变深) */
+.island-quick-menu.dir-left.open {
+  background: transparent;
+  border-color: transparent;
+}
+
+/* 对话 ⋯ 菜单按钮突出(2026-08-07 用户要求层次感):open 时按钮**保持
+   独立浅底 + 描边**,作为胶囊里的"主入口"突出,与子菜单项(透明文字)
+   形成主从层次——原按钮完全融入胶囊,与菜单项平级无层次(用户实测
+   "快捷按钮没有比子菜单有突出性") */
+.island-quick-menu.dir-left.open .island-quick-menu-btn {
+  border-color: rgba(255, 255, 255, 0.3);
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.island-quick-menu.dir-left.open .island-quick-menu-btn:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.island-quick-menu.dir-left.open .island-quick-menu-pop {
+  opacity: 1;
+  visibility: visible;
+  /* 展开立即可见(visibility 无延迟);收起时基础规则的 visibility
+     0s linear 0.26s 在淡出结束后才隐藏 */
+  transition:
+    opacity 0.26s ease,
+    visibility 0s;
+  pointer-events: auto;
+}
+
+/* 逐项错峰滑入(悬浮展开时;0.05s 间隔,悠缓)。
+   选择器必须用 nth-of-type:pop 首个子元素是高亮滑块 indicator
+   (span),nth-child 计数把它算进去 → 菜单项错峰整体后移一项
+   (第一项也等 0.05s、末项拖到 0.3s,观感滞后);nth-of-type 按
+   button 计数,精确对应菜单项序号(首项无 delay 立即滑入) */
+.island-quick-menu.open .island-quick-menu-item {
+  opacity: 1;
+  transform: none;
+}
+
+.island-quick-menu.open .island-quick-menu-item:nth-of-type(2) {
+  transition-delay: 0.05s;
+}
+
+.island-quick-menu.open .island-quick-menu-item:nth-of-type(3) {
+  transition-delay: 0.1s;
+}
+
+.island-quick-menu.open .island-quick-menu-item:nth-of-type(4) {
+  transition-delay: 0.15s;
+}
+
+.island-quick-menu.open .island-quick-menu-item:nth-of-type(5) {
+  transition-delay: 0.2s;
+}
+
+.island-quick-menu.open .island-quick-menu-item:nth-of-type(6) {
+  transition-delay: 0.25s;
+}
+
+.island-quick-menu-item:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--text-color, #fff);
+}
+
+/* 选中态:文字提亮——高亮遮罩由滑块指示器承担 */
+.island-quick-menu-item.on {
+  color: var(--text-color, #fff);
+}
+
+/* Agent 设置菜单容器:与内容区的间距(QuickMenu 泛化后保留) */
+.island-agent-settings .island-quick-menu {
+  margin-bottom: 8px;
+  align-self: flex-start;
+}
+
+/* 保存配置按钮内联"已保存"(2026-08-07 用户要求:不弹绿勾气泡,按钮内
+   展示;key 变化重挂载重放 island-ui-in 回弹淡入,消失平滑恢复白字) */
+.island-save-label {
+  animation: island-ui-in 0.3s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+
+.island-save-btn.saved .island-save-label {
+  color: #4ade80;
+}
+
+/* 主动陪伴间隔设置折叠(2026-08-07 用户要求:关闭开关时折叠隐藏,
+   折叠/展开动画 = grid-rows 0fr↔1fr + 透明度;内层 overflow hidden
+   防子内容在 0fr 轨道溢出;0fr 轨道残留 padding 的坑(Chromium 实测)
+   由内层 div 承担 padding,轨道自身无 padding) */
+.island-proactive-config {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  transition:
+    grid-template-rows 0.36s cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 0.26s ease;
+}
+
+.island-proactive-config.open {
+  grid-template-rows: 1fr;
+  opacity: 1;
+}
+
+.island-proactive-config-inner {
+  overflow: hidden;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+/* Agent ⋯ 快捷菜单:头部右上角(2026-08-07 用户要求:入口固定右上角,
+   margin-left auto 推最右——status 文字不定长,不推会被挤离右缘) */
+.island-agent-head .island-quick-menu {
+  margin-left: auto;
+}
+
+/* Agent ⋯ 快捷菜单项标签(图标 + 文字;danger = 停止生成) */
+.island-agent-quick-label {
+  font-size: 0.66rem;
+}
+
+.island-agent-quick-label.danger {
+  color: #fca5a5;
+}
+
+/* ===== Agent 设置内容区切换动画(2026-08-07 优化) =====
+   用户要求:进场 + 退场动画都要有,且与菜单切换**对齐**(不慢一拍)。
+   专用 keyframes(大块内容入场用无过冲曲线更优雅,不用 island-ui-in
+   的回弹);时序 = 离场播 ~60%(0.2s 中的 0.12s)即挂载新内容,入场
+   与离场尾部重叠——旧内容上移淡出中,新内容下移淡入,无停顿感 */
+@keyframes agent-settings-content-in {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes agent-settings-content-out {
+  from {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
+}
+
+.island-agent-settings .island-agent-form {
+  animation: agent-settings-content-in 0.32s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.island-agent-settings .island-agent-form.island-ui-out {
+  animation: agent-settings-content-out 0.2s cubic-bezier(0.4, 0, 0.2, 1) both;
+}
+
+/* 协议提示行(按 Base URL 自动检测当前 Provider) */
+.island-agent-protocol {
+  flex: none;
+  font-size: 0.62rem;
+  line-height: 1.5;
+  color: var(--text-dim, rgba(255, 255, 255, 0.5));
+}
+
+.island-agent-form {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  overflow-y: auto;
+  padding-right: 2px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.15) transparent;
+}
+
+.island-agent-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: none;
+}
+
+/* 系统提示词字段:不参与 flex 拉伸(拉伸 + 滚动容器冲突会把 textarea
+   与下方界面缩放行压叠),textarea 用 rows 自然高度,整表滚动 */
+.island-agent-field--grow {
+  flex: none;
+}
+
+.island-agent-field > span {
+  font-size: 0.64rem;
+  color: var(--text-dim, rgba(255, 255, 255, 0.5));
+}
+
+.island-agent-field input,
+.island-agent-field textarea {
+  width: 100%;
+  padding: 7px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--text-color, #fff);
+  font-family: inherit;
+  font-size: 0.72rem;
+  outline: none;
+  user-select: text;
+  transition: border-color 0.15s ease;
+}
+
+.island-agent-field textarea {
+  resize: none;
+  line-height: 1.5;
+  min-height: 52px;
+}
+
+.island-agent-field input:focus,
+.island-agent-field textarea:focus {
+  border-color: color-mix(in srgb, var(--state-color, #4d6bfe) 65%, transparent);
+}
+
+.island-agent-field input::placeholder,
+.island-agent-field textarea::placeholder {
+  color: var(--text-dim, rgba(255, 255, 255, 0.35));
+}
+
+/* 界面缩放挡位:预设按钮 + 自定义数值(100-300%,最低 100%) */
+.island-agent-scale-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.island-agent-scale-btn {
+  padding: 5px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--text-color, #fff);
+  font-size: 0.68rem;
+  font-family: inherit;
+  cursor: pointer;
+  transition:
+    background 0.12s ease,
+    border-color 0.12s ease;
+}
+
+.island-agent-scale-btn:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.island-agent-scale-btn.on {
+  border-color: var(--state-color, #4d6bfe);
+  color: var(--state-color, #4d6bfe);
+  background: color-mix(in srgb, var(--state-color, #4d6bfe) 15%, transparent);
+}
+
+/* 自定义缩放步进器(替代原生 number 上下箭头——系统 spinners 无法定制
+   样式):值徽标 + 上下箭头;步进/滚轮切换复用 WheelSwap 内容交换动画,
+   .tick 仅在步进后加(首帧挂载不闪),边框柔和强调(与记忆类型按钮同款) */
+.island-scale-stepper {
+  display: flex;
+  align-items: stretch;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.07);
+  overflow: hidden;
+}
+
+.island-scale-stepper:focus-within {
+  border-color: color-mix(in srgb, var(--state-color, #4d6bfe) 65%, transparent);
+}
+
+.island-scale-stepper-value {
+  width: 46px;
+  padding: 5px 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-color, #fff);
+  font-size: 0.68rem;
+  font-family: inherit;
+  cursor: pointer;
+  user-select: none;
+}
+
+.island-scale-stepper-value:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+/* 步进瞬间边框柔和强调(透明边框只在动画期间显色,不占布局) */
+.island-scale-stepper-value.tick {
+  animation: agent-quick-flash-dim 0.3s ease;
+}
+
+/* 内联编辑输入(替代值徽标;容器 focus-within 显示焦点) */
+.island-scale-stepper input {
+  width: 46px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--text-color, #fff);
+  font-size: 0.68rem;
+  font-family: inherit;
+  text-align: center;
+  outline: none;
+  user-select: text;
+}
+
+.island-scale-stepper-arrows {
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.island-scale-stepper-arrows button {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--text-dim, rgba(255, 255, 255, 0.5));
+  cursor: pointer;
+  transition:
+    background 0.12s ease,
+    color 0.12s ease;
+}
+
+.island-scale-stepper-arrows button:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--text-color, #fff);
+}
+
+.island-scale-stepper-arrows button:active {
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.island-scale-stepper-arrows button + button {
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.island-agent-scale-hint {
+  font-size: 0.66rem;
+  color: var(--text-dim, rgba(255, 255, 255, 0.5));
+}
+
+/* 保存行:强调色按钮 + 已保存提示 */
+.island-agent-form-foot {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* ===== MCP 服务 + 技能目录区(Agent 设置视图) ===== */
+.island-agent-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: none;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  padding-top: 10px;
+  margin-top: 2px;
+}
+
+.island-agent-section-title {
+  font-size: 0.64rem;
+  color: var(--state-color, #4d6bfe);
+  font-weight: 600;
+}
+
+.island-agent-section-hint {
+  font-size: 0.58rem;
+  line-height: 1.5;
+  color: var(--text-dim, rgba(255, 255, 255, 0.45));
+}
+
+/* MCP 服务卡片:描边 + 半透明底,与整表其他输入同风格;
+   添加服务时挂载动画(已存在的卡不重触发——动画仅在挂载时播放) */
+.island-mcp-card {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 9px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+  animation: island-ui-in 0.34s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+
+.island-mcp-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.island-mcp-name {
+  font-size: 0.64rem;
+  color: var(--text-dim, rgba(255, 255, 255, 0.65));
+}
+
+.island-mcp-actions {
+  display: flex;
+  gap: 6px;
+}
+
+/* 删除按钮:危险色描边,不喧宾夺主 */
+.island-mcp-remove {
+  border-color: rgba(244, 63, 94, 0.45);
+  color: rgba(244, 63, 94, 0.9);
+}
+
+.island-mcp-remove:hover {
+  background: rgba(244, 63, 94, 0.12);
+}
+
+.island-agent-scale-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.island-agent-scale-btn:disabled:hover {
+  background: rgba(255, 255, 255, 0.07);
+}
+
+/* 测试结果行:成功绿色 / 失败红色 */
+.island-mcp-test-result {
+  font-size: 0.6rem;
+  line-height: 1.4;
+  word-break: break-all;
+}
+
+.island-mcp-test-result.ok {
+  color: rgba(74, 222, 128, 0.9);
+}
+
+.island-mcp-test-result.fail {
+  color: rgba(248, 113, 113, 0.9);
+}
+
+/* 技能目录行:路径可省略 + 删除按钮 */
+.island-skills-dir-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.island-skills-dir-path {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.62rem;
+  color: var(--text-color, #fff);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  user-select: text;
+}
+
+/* 已注册技能预览(设置视图技能区):数量徽标 + 名称/描述行,超高滚动。
+   scrollbar-gutter: stable —— 移除/恢复技能时行数跨过 150px 阈值,
+   滚动条出现/消失会让内容宽度变化,表现为**左右抖动**(实测) */
+.island-skills-registered {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 150px;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.15) transparent;
+}
+
+.island-skills-reg-count {
+  font-size: 0.58rem;
+  color: var(--text-dim, rgba(255, 255, 255, 0.5));
+}
+
+.island-skills-reg-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+/* 技能行"移除"按钮:危险色小按钮,不喧宾夺主 */
+.island-skills-reg-rm {
+  flex: none;
+  padding: 2px 8px;
+  font-size: 0.58rem;
+  border-color: rgba(244, 63, 94, 0.45);
+  color: rgba(244, 63, 94, 0.9);
+}
+
+/* 技能行挂载/移除动画(与记忆条目同套缓动) */
+.island-skills-reg-row {
+  animation: island-ui-in 0.34s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+
+.island-skills-reg-row.island-ui-leave {
+  animation: island-ui-out 0.24s ease-in both;
+}
+
+.island-skills-reg-rm:hover {
+  background: rgba(244, 63, 94, 0.12);
+}
+
+/* 已排除技能区:分隔线 + 恢复操作 */
+.island-skills-excluded {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 2px;
+  padding-top: 6px;
+  border-top: 1px dashed rgba(255, 255, 255, 0.12);
+}
+
+.island-skills-reg-name {
+  flex: none;
+  font-size: 0.62rem;
+  font-weight: 600;
+  color: var(--state-color, #4d6bfe);
+}
+
+.island-skills-reg-desc {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.58rem;
+  line-height: 1.4;
+  color: var(--text-dim, rgba(255, 255, 255, 0.55));
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  user-select: text;
+}
+
+/* 技能目录添加行:文本输入弹性占位(区别于缩放行的固定宽数字输入) */
+.island-agent-section .island-agent-scale-row input[type='text'] {
+  flex: 1;
+  min-width: 0;
+  width: auto;
+  padding: 5px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--text-color, #fff);
+  font-size: 0.68rem;
+  font-family: inherit;
+  outline: none;
+  user-select: text;
+}
+
+.island-agent-section .island-agent-scale-row input[type='text']:focus {
+  border-color: color-mix(in srgb, var(--state-color, #4d6bfe) 65%, transparent);
+}
+
+/* MCP 传输类型切换(本地进程 stdio / 远程端点 sse) */
+.island-mcp-type-row {
+  display: flex;
+  gap: 6px;
+}
+
+/* 记忆条目行:类型徽标 + 内容省略 + 操作按钮;
+   添加挂载动画;leaving = 删除/移除时离场动画(先播完再真正移除) */
+.island-memory-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  animation: island-ui-in 0.34s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+
+.island-memory-row.island-ui-leave {
+  animation: island-ui-out 0.24s ease-in both;
+}
+
+.island-memory-type {
+  flex: none;
+  padding: 2px 6px;
+  border-radius: 6px;
+  font-size: 0.56rem;
+  line-height: 1.4;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  color: var(--text-dim, rgba(255, 255, 255, 0.6));
+}
+
+.island-memory-type.t-preference {
+  border-color: rgba(244, 114, 182, 0.5);
+  color: rgba(244, 114, 182, 0.9);
+}
+
+.island-memory-type.t-fact {
+  border-color: rgba(96, 165, 250, 0.5);
+  color: rgba(96, 165, 250, 0.9);
+}
+
+.island-memory-type.t-workflow {
+  border-color: rgba(74, 222, 128, 0.5);
+  color: rgba(74, 222, 128, 0.9);
+}
+
+.island-memory-type.t-lesson {
+  border-color: rgba(251, 191, 36, 0.5);
+  color: rgba(251, 191, 36, 0.9);
+}
+
+.island-memory-content {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.62rem;
+  line-height: 1.4;
+  color: var(--text-color, #fff);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  user-select: text;
+}
+
+.island-memory-row input[type='text'] {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--text-color, #fff);
+  font-size: 0.66rem;
+  font-family: inherit;
+  outline: none;
+  user-select: text;
+}
+
+/* 记忆类型下拉(定制 UI:展开/收起动画,替代原生 select) */
+.island-memory-type-wrap {
+  position: relative;
+  flex: none;
+}
+
+.island-memory-type-btn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 6px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.07);
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.island-memory-type-arrow {
+  font-size: 0.55rem;
+  color: var(--text-dim, rgba(255, 255, 255, 0.5));
+  transition: transform 0.22s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+/* 滚轮切换边框柔和强调(与快捷按钮同款);.tick 类仅在滚轮触发后才加
+   ——首帧挂载不加类,设置视图进入时不播放闪动 */
+.island-memory-type-btn.tick {
+  animation: agent-quick-flash-dim 0.3s ease;
+}
+
+@keyframes agent-quick-flash-dim {
+  0% {
+    border-color: rgba(255, 255, 255, 0.14);
+  }
+  40% {
+    border-color: color-mix(in srgb, var(--state-color, #4d6bfe) 45%, rgba(255, 255, 255, 0.14));
+  }
+  100% {
+    border-color: rgba(255, 255, 255, 0.14);
+  }
+}
+
+.island-memory-type-arrow.open {
+  transform: rotate(180deg);
+}
+
+/* 选项浮层:展开回弹滑入 / 收起平滑退场 */
+.island-memory-type-pop {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 7;
+  min-width: 100px;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 9px;
+  background: rgba(13, 16, 23, 0.97);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  animation: island-ui-in 0.28s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+
+.island-memory-type-pop.closing {
+  animation: island-ui-out 0.24s ease-in both;
+}
+
+.island-memory-type-opt {
+  padding: 5px 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-color, #fff);
+  font-size: 0.64rem;
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.island-memory-type-opt:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.island-memory-type-opt.on {
+  color: var(--state-color, #4d6bfe);
+  background: color-mix(in srgb, var(--state-color, #4d6bfe) 15%, transparent);
+}
+
+/* 记忆编辑态容器(进入动画) */
+.island-memory-edit {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+}
+
+/* MCP 服务分组:组头 + 折叠容器(高度过渡,精致缓动) */
+.island-mcp-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.island-mcp-group-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-color, #fff);
+  font-family: inherit;
+  font-size: 0.66rem;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.island-mcp-group-head:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.island-mcp-group-name {
+  font-weight: 700;
+  color: var(--state-color, #4d6bfe);
+}
+
+.island-mcp-group-count {
+  font-size: 0.58rem;
+  color: var(--text-dim, rgba(255, 255, 255, 0.5));
+}
+
+.island-mcp-group-arrow {
+  margin-left: auto;
+  font-size: 0.6rem;
+  color: var(--text-dim, rgba(255, 255, 255, 0.5));
+  transition: transform 0.26s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.island-mcp-group-arrow.open {
+  transform: rotate(180deg);
+}
+
+/* 组内卡片容器:折叠时高度收起(过渡平滑,不突兀) */
+.island-mcp-group-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 2000px;
+  overflow: hidden;
+  transition: max-height 0.32s cubic-bezier(0.2, 0.9, 0.25, 1);
+}
+
+.island-mcp-group-body.collapsed {
+  max-height: 0;
+}
+
+/* MCP 卡片离场动画(删除服务) */
+.island-mcp-card.island-ui-leave {
+  animation: island-ui-out 0.24s ease-in both;
+}
+
+/* 自我进化日志:徽标 + 摘要 */
+.island-evolution-log {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.island-evolution-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.island-evolution-badge {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: 6px;
+  font-size: 0.56rem;
+  line-height: 1.5;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+}
+
+.island-evolution-badge.ok {
+  border-color: rgba(74, 222, 128, 0.5);
+  color: rgba(74, 222, 128, 0.9);
+}
+
+.island-evolution-badge.fail {
+  border-color: rgba(244, 63, 94, 0.5);
+  color: rgba(244, 63, 94, 0.9);
+}
+
+.island-evolution-summary {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.6rem;
+  line-height: 1.4;
+  color: var(--text-dim, rgba(255, 255, 255, 0.6));
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  user-select: text;
+}
+
+/* 已保存提示徽标(保存配置 / 保存歌词 API 共用):绿色对勾 + 文字,
+   显示时回弹淡入 + 对勾描线动画,隐藏时平滑退场。
+   绝对定位在占位包裹右侧(不挤动保存行布局) */
+.island-agent-save-pos {
+  position: relative;
+  display: inline-flex;
+}
+
+.island-agent-saved {
+  position: absolute;
+  left: calc(100% + 10px);
+  top: 50%;
+  transform: translateY(-50%) scale(0.92);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  font-size: 0.66rem;
+  white-space: nowrap;
+  color: #4ade80;
+  background: rgba(74, 222, 128, 0.12);
+  opacity: 0;
+  transition:
+    opacity 0.2s ease,
+    transform 0.2s ease;
+  pointer-events: none;
+}
+
+.island-agent-saved.show {
+  opacity: 1;
+  transform: translateY(-50%);
+  animation: island-saved-pop 0.34s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.island-agent-saved-check {
+  width: 12px;
+  height: 12px;
+  flex: none;
+}
+
+/* 对勾描线动画(显示后延迟起笔,画完即停) */
+.island-agent-saved.show .island-agent-saved-check {
+  stroke-dasharray: 26;
+  stroke-dashoffset: 26;
+  animation: island-saved-draw 0.25s ease-out 0.06s forwards;
+}
+
+@keyframes island-saved-pop {
+  from {
+    opacity: 0;
+    transform: translateY(calc(-50% + 3px)) scale(0.92);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(-50%);
+  }
+}
+
+@keyframes island-saved-draw {
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+/* ===== 视图切换过渡(chat ↔ 对话历史/工具列表) =====
+   切换 = 新视图先进场淡入,旧视图副本盖在上层离场淡出,结束后卸载
+   —— 交叉过渡,无硬切。**纯 opacity,不做位移**:位移/scale 动画在
+   软件渲染下逐帧重光栅化会闪(与面板进入动画 maskPanelIn 同策略);
+   卸载由 AgentView 的 VIEW_LEAVE_MS(200ms > 0.15s 动画)兜底,
+   提前卸载会在动画中途突然消失(闪烁)。
+   副本背景 rgba(8,10,14,0.94)(岛体深底近不透明):淡出时平滑
+   揭示下层(有自定义背景图时也不突兀) */
+.island-agent-view {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.island-agent-view.enter-fwd,
+.island-agent-view.enter-back {
+  animation: agent-view-in 0.16s ease backwards;
+}
+
+@keyframes agent-view-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* 离场副本:盖在新视图上淡出(不接收交互;不挂滚动 ref ——
+   副本只是视觉残留,结束后卸载) */
+.island-agent-leave {
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  padding: 14px 24px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  background: rgba(8, 10, 14, 0.94);
+  pointer-events: none;
+}
+
+.island-agent-leave.fwd,
+.island-agent-leave.back {
+  animation: agent-view-out 0.15s ease forwards;
+}
+
+@keyframes agent-view-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+/* ===== 对话历史视图(下拉菜单"对话历史"入口) ===== */
+.island-agent-history {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.island-agent-history-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.island-agent-history-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--text-color, #fff);
+  font-size: 0.7rem;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+
+.island-agent-history-back:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.island-agent-history-title {
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: var(--text-color, #fff);
+}
+
+.island-agent-history-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-right: 4px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.15) transparent;
+}
+
+.island-agent-history-item {
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+  flex: none;
+  /* 删除离场:高度折叠过渡期间内容不外溢 */
+  overflow: hidden;
+  transition:
+    height 0.24s ease-in,
+    margin 0.24s ease-in,
+    opacity 0.24s ease-in,
+    transform 0.24s ease-in;
+}
+
+/* 删除离场:高度折叠到 0 + 淡出上移;负 margin 抵消列表 gap(与
+   .island-agent-history-list 的 gap 同值)——行消失过程列表平滑上移,
+   无跳变;离场中不可点击 */
+.island-agent-history-item.leaving {
+  height: 0 !important;
+  margin-bottom: -8px;
+  opacity: 0;
+  transform: translateY(-6px);
+  pointer-events: none;
+}
+
+.island-agent-history-open {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 9px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-color, #fff);
+  font-size: 0.72rem;
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background 0.12s ease,
+    border-color 0.12s ease;
+}
+
+.island-agent-history-open:hover {
+  background: rgba(255, 255, 255, 0.09);
+  border-color: color-mix(in srgb, var(--state-color, #4d6bfe) 45%, transparent);
+}
+
+.island-agent-history-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.island-agent-history-time {
+  flex: none;
+  font-size: 0.62rem;
+  color: var(--text-dim, rgba(255, 255, 255, 0.4));
+}
+
+.island-agent-history-del {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-dim, rgba(255, 255, 255, 0.55));
+  cursor: pointer;
+  transition:
+    background 0.12s ease,
+    color 0.12s ease;
+}
+
+.island-agent-history-del:hover {
+  background: rgba(248, 113, 113, 0.14);
+  color: #f87171;
+}
+
+/* ===== 工具列表视图(下拉菜单"工具列表"入口) ===== */
+.island-agent-tools-item {
+  flex: none;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.05);
+  overflow: hidden;
+}
+
+.island-agent-tools-item summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 12px;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+
+.island-agent-tools-item summary::-webkit-details-marker {
+  display: none;
+}
+
+.island-agent-tools-name {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--text-color, #fff);
+  font-family: 'Cascadia Mono', 'JetBrains Mono', Consolas, monospace;
+}
+
+.island-agent-tools-toggle {
+  margin-left: auto;
+  font-size: 0.6rem;
+  color: var(--text-dim, rgba(255, 255, 255, 0.4));
+  transition: transform 0.2s ease;
+}
+
+.island-agent-tools-item[open] .island-agent-tools-toggle {
+  transform: rotate(90deg);
+}
+
+.island-agent-tools-body {
+  padding: 0 12px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.island-agent-tools-desc {
+  margin: 0;
+  font-size: 0.68rem;
+  line-height: 1.6;
+  color: var(--text-dim, rgba(255, 255, 255, 0.7));
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* 工具搜索框:名称 / 说明过滤,清空按钮 */
+.island-tools-search {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  height: 30px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-dim, rgba(255, 255, 255, 0.45));
+}
+
+.island-tools-search input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--text-color, #fff);
+  font-size: 0.68rem;
+  font-family: inherit;
+}
+
+.island-tools-search input::placeholder {
+  color: var(--text-dim, rgba(255, 255, 255, 0.35));
+}
+
+.island-tools-search-clear {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border: none;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-dim, rgba(255, 255, 255, 0.6));
+  font-size: 0.58rem;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.island-tools-search-clear:hover {
+  background: rgba(255, 255, 255, 0.16);
+  color: var(--text-color, #fff);
+}
+
+/* 禁用按钮(工具行内):中性小胶囊,悬停变红提示 */
+.island-tools-disable {
+  flex: none;
+  padding: 2px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-dim, rgba(255, 255, 255, 0.55));
+  font-size: 0.58rem;
+  font-family: inherit;
+  cursor: pointer;
+  transition:
+    background 0.15s ease,
+    border-color 0.15s ease,
+    color 0.15s ease;
+}
+
+.island-tools-disable:hover {
+  background: rgba(248, 113, 113, 0.14);
+  border-color: rgba(248, 113, 113, 0.4);
+  color: #fca5a5;
+}
+
+/* 禁用区:被禁用的工具集中展示(可恢复) */
+.island-tools-excluded {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 2px;
+  padding: 8px 10px;
+  border: 1px dashed rgba(255, 255, 255, 0.14);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.island-tools-excluded-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.62rem;
+  color: var(--text-dim, rgba(255, 255, 255, 0.55));
+}
+
+.island-tools-excluded-hint {
+  margin-left: auto;
+  font-size: 0.56rem;
+  color: var(--text-dim, rgba(255, 255, 255, 0.32));
+}
+
+.island-tools-excluded-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  opacity: 0.75;
+}
+
+.island-tools-excluded-name {
+  flex: none;
+  font-size: 0.68rem;
+  font-weight: 600;
+  color: var(--text-dim, rgba(255, 255, 255, 0.6));
+  font-family: 'Cascadia Mono', 'JetBrains Mono', Consolas, monospace;
+  text-decoration: line-through;
+  text-decoration-color: rgba(255, 255, 255, 0.25);
+}
+
+.island-tools-excluded-desc {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.6rem;
+  color: var(--text-dim, rgba(255, 255, 255, 0.35));
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 恢复按钮:中性胶囊,悬停变绿提示 */
+.island-tools-restore {
+  flex: none;
+  padding: 2px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-dim, rgba(255, 255, 255, 0.55));
+  font-size: 0.58rem;
+  font-family: inherit;
+  cursor: pointer;
+  transition:
+    background 0.15s ease,
+    border-color 0.15s ease,
+    color 0.15s ease;
+}
+
+.island-tools-restore:hover {
+  background: rgba(74, 222, 128, 0.14);
+  border-color: rgba(74, 222, 128, 0.4);
+  color: #86efac;
+}
+
+/* ===== 展开首帧骨架屏(形变动画期间轻量占位,延迟后真实内容替换) ===== */
+.island-agent-skeleton {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-right: 4px;
+}
+
+.island-agent-skeleton-item {
+  flex: none;
+  height: 34px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.07);
+  animation: agent-skeleton-pulse 1.2s ease-in-out infinite;
+}
+
+.island-agent-skeleton-item.assistant {
+  align-self: flex-start;
+  width: 72%;
+  border-radius: 4px 14px 14px 14px;
+}
+
+.island-agent-skeleton-item.assistant.short {
+  width: 52%;
+}
+
+.island-agent-skeleton-item.user {
+  align-self: flex-end;
+  width: 42%;
+  border-radius: 14px 14px 4px 14px;
+}
+
+@keyframes agent-skeleton-pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 0.85;
+  }
+}
+
+/* ===== exec_command 确认门(confirmExec 开启,输入区上方) ===== */
+.island-agent-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.05);
+  animation: island-ui-in 0.3s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+
+.island-agent-confirm-title {
+  font-size: 0.64rem;
+  color: var(--text-dim, rgba(255, 255, 255, 0.6));
+}
+
+.island-agent-confirm-cmd {
+  display: block;
+  padding: 6px 8px;
+  border-radius: 7px;
+  background: rgba(0, 0, 0, 0.35);
+  color: var(--text-color, #fff);
+  font-size: 0.64rem;
+  line-height: 1.5;
+  font-family: 'Cascadia Mono', 'JetBrains Mono', Consolas, monospace;
+  word-break: break-all;
+  user-select: text;
+}
+
+.island-agent-confirm-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.island-agent-confirm-actions button {
+  flex: 1;
+  padding: 5px 0;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--text-color, #fff);
+  font-size: 0.66rem;
+  font-family: inherit;
+  cursor: pointer;
+  transition:
+    background 0.12s ease,
+    border-color 0.12s ease;
+}
+
+.island-agent-confirm-allow {
+  color: #4ade80 !important;
+  border-color: rgba(74, 222, 128, 0.4) !important;
+  background: rgba(74, 222, 128, 0.1) !important;
+}
+
+.island-agent-confirm-allow:hover {
+  background: rgba(74, 222, 128, 0.18) !important;
+}
+
+.island-agent-confirm-deny {
+  color: #f87171 !important;
+  border-color: rgba(248, 113, 113, 0.4) !important;
+  background: rgba(248, 113, 113, 0.08) !important;
+}
+
+.island-agent-confirm-deny:hover {
+  background: rgba(248, 113, 113, 0.16) !important;
+}

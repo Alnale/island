@@ -1,36 +1,19 @@
-import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react'
+import { useEffect, useRef, useState, type CSSProperties } from 'react'
 import {
   DynamicIsland,
   type DynamicIslandHandle,
   type IslandSnapshot,
 } from './components/DynamicIsland'
-import { ISLAND_STATES, type IslandState, type TrackInfo } from './data/islandStates'
-import { useLyrics } from './hooks/useLyrics'
-import { useSystemMedia, type SystemControlAction } from './hooks/useSystemMedia'
+import { ISLAND_STATES } from './data/islandStates'
+import { useIslandMedia } from './hooks/useIslandMedia'
 import {
-  clearBackgroundImage,
-  DEFAULT_BG_CROP,
-  downscaleBackgroundImage,
-  deleteImageItem,
-  genImageId,
-  loadBackgroundImage,
-  loadImageItems,
-  migrateLegacyBackground,
-  saveBackgroundImage,
-  saveImageItem,
-  type BackgroundState,
-  type ImageLibraryItem,
-} from './media/backgroundStore'
-import {
-  deleteFontItem,
-  loadFontItems,
-  loadFontSettings,
-  saveFontItem,
-  saveFontSettings,
-  type FontColorMode,
-  type FontLibraryItem,
-} from './media/fontStore'
-import { MODE_ORDER, PLAY_MODES, type PlaybackMode } from './media/playbackModes'
+  useBackgroundStore,
+  useCustomTheme,
+  useFontStore,
+  useHint,
+} from './hooks/useIslandCustomizations'
+import { useSystemMedia } from './hooks/useSystemMedia'
+import { MODE_ORDER, PLAY_MODES } from './media/playbackModes'
 import { SYSTEM_PLATFORMS } from './media/systemPlatforms'
 import { useMediaPlayer } from './media/useMediaPlayer'
 import { formatTime } from './utils/format'
@@ -94,330 +77,43 @@ export default function App() {
   const [snapLog, setSnapLog] = useState<Array<{ time: string; text: string }>>([])
   const player = useMediaPlayer()
   const system = useSystemMedia()
-  // 数据源开关:默认外部监听优先,点击灵动岛音乐图标在"本地播放器 ↔ 系统监听"间切换;
-  // 切换时双向暂停(切走的一方自动暂停,避免双声齐响)
-  const [useExternalSource, setUseExternalSource] = useState(true)
-  const handleToggleSource = () => {
-    const next = !useExternalSource
-    setUseExternalSource(next)
-    if (next) player.pause()
-    else void system.control('pause')
-  }
-  // 外部平台播放模式:以系统真实状态为数据源(轮询校准,与挂件一致)
-  const [externalMode, setExternalMode] = useState<PlaybackMode>('sequence')
-  // 自定义主题色(null = 跟随播放模式/状态色),localStorage 持久化(与挂件一致)
-  const [customTheme, setCustomTheme] = useState<string | null>(() => {
-    try {
-      return localStorage.getItem('widget-theme-color')
-    } catch {
-      return null
-    }
-  })
-  const applyCustomTheme = useCallback((color: string | null) => {
-    setCustomTheme(color)
-    try {
-      if (color) localStorage.setItem('widget-theme-color', color)
-      else localStorage.removeItem('widget-theme-color')
-    } catch {
-      // 忽略存储失败
-    }
-  }, [])
-  // 操作不支持提示(模式/跳转被客户端拒绝时,与挂件一致):
-  // 经 hint prop 在岛内显示(紧凑态 = 左侧文字区,展开态 = 播放键下方)
-  const [hint, setHint] = useState<string | null>(null)
-  const hintTimerRef = useRef(0)
-  const showHint = useCallback((text: string) => {
-    setHint(text)
-    window.clearTimeout(hintTimerRef.current)
-    hintTimerRef.current = window.setTimeout(() => setHint(null), 2600)
-  }, [])
-  // 自定义背景(与桌面挂件一致:双形态图片 + 裁切,持久化同键;
-  // Web 演示入口 = 设置视图,桌面端 = 托盘"设置"菜单)
-  const [background, setBackground] = useState<BackgroundState>(() => {
-    // 不透明度按形态独立(旧版单一数值自动迁移为双槽位)
-    let opacity: { expanded: number; compact: number } = { expanded: 0.4, compact: 0.4 }
-    const expanded = { ...DEFAULT_BG_CROP }
-    const compact = { ...DEFAULT_BG_CROP }
-    const readCrop = (
-      c: Partial<{ zoom: number; posX: number; posY: number }> | null | undefined,
-    ): { zoom: number; posX: number; posY: number } => ({
-      zoom: typeof c?.zoom === 'number' && c.zoom >= 1 && c.zoom <= 4 ? c.zoom : DEFAULT_BG_CROP.zoom,
-      posX:
-        typeof c?.posX === 'number' && c.posX >= 0 && c.posX <= 100 ? c.posX : DEFAULT_BG_CROP.posX,
-      posY:
-        typeof c?.posY === 'number' && c.posY >= 0 && c.posY <= 100 ? c.posY : DEFAULT_BG_CROP.posY,
-    })
-    try {
-      const raw = localStorage.getItem('widget-background')
-      if (raw) {
-        const parsed = JSON.parse(raw) as {
-          opacity?: unknown
-          expanded?: Partial<{ zoom: number; posX: number; posY: number }>
-          compact?: Partial<{ zoom: number; posX: number; posY: number }>
-          zoom?: unknown
-          posX?: unknown
-          posY?: unknown
-        }
-        if (parsed && typeof parsed === 'object') {
-          if (typeof parsed.opacity === 'number' && parsed.opacity >= 0 && parsed.opacity <= 1) {
-            // 旧版单一数值:迁移为双槽位(两形态同值,保持旧外观)
-            opacity = { expanded: parsed.opacity, compact: parsed.opacity }
-          } else if (parsed.opacity && typeof parsed.opacity === 'object') {
-            const o = parsed.opacity as { expanded?: unknown; compact?: unknown }
-            opacity = {
-              expanded:
-                typeof o.expanded === 'number' && o.expanded >= 0 && o.expanded <= 1
-                  ? o.expanded
-                  : 0.4,
-              compact:
-                typeof o.compact === 'number' && o.compact >= 0 && o.compact <= 1
-                  ? o.compact
-                  : 0.4,
-            }
-          }
-          if (parsed.expanded && typeof parsed.expanded === 'object') {
-            Object.assign(expanded, readCrop(parsed.expanded))
-          } else if (
-            typeof parsed.zoom === 'number' ||
-            typeof parsed.posX === 'number' ||
-            typeof parsed.posY === 'number'
-          ) {
-            Object.assign(
-              expanded,
-              readCrop({
-                zoom: typeof parsed.zoom === 'number' ? parsed.zoom : undefined,
-                posX: typeof parsed.posX === 'number' ? parsed.posX : undefined,
-                posY: typeof parsed.posY === 'number' ? parsed.posY : undefined,
-              }),
-            )
-          }
-          if (parsed.compact && typeof parsed.compact === 'object') {
-            Object.assign(compact, readCrop(parsed.compact))
-          }
-        }
-      }
-    } catch {
-      // 忽略存储失败
-    }
-    return { expandedImage: null, compactImage: null, opacity, expanded, compact }
-  })
-  useEffect(() => {
-    void migrateLegacyBackground().then(() => {
-      loadBackgroundImage('expanded').then((img) => {
-        if (!img) return
-        downscaleBackgroundImage(img).then((small) => {
-          if (small !== img) saveBackgroundImage(small, 'expanded').catch(() => {})
-          setBackground((prev) => ({ ...prev, expandedImage: small }))
-        })
-      })
-      loadBackgroundImage('compact').then((img) => {
-        if (!img) return
-        downscaleBackgroundImage(img).then((small) => {
-          if (small !== img) saveBackgroundImage(small, 'compact').catch(() => {})
-          setBackground((prev) => ({ ...prev, compactImage: small }))
-        })
-      })
-    })
-  }, [])
-  const handleBackgroundChange = useCallback((bg: BackgroundState) => {
-    setBackground(bg)
-    try {
-      localStorage.setItem(
-        'widget-background',
-        JSON.stringify({ opacity: bg.opacity, expanded: bg.expanded, compact: bg.compact }),
-      )
-    } catch {
-      // 忽略存储失败
-    }
-    if (bg.expandedImage) saveBackgroundImage(bg.expandedImage, 'expanded').catch(() => {})
-    else clearBackgroundImage('expanded').catch(() => {})
-    if (bg.compactImage) saveBackgroundImage(bg.compactImage, 'compact').catch(() => {})
-    else clearBackgroundImage('compact').catch(() => {})
-    // 自动入库:新出现的背景图(上传/图片库选择)加入图片库,同名同图不重复
-    for (const dataUrl of [bg.expandedImage, bg.compactImage]) {
-      if (!dataUrl) continue
-      if (imageLibraryRef.current.some((img) => img.dataUrl === dataUrl)) continue
-      const item: ImageLibraryItem = {
-        id: genImageId(),
-        name: `背景图 ${imageLibraryRef.current.length + 1}`,
-        dataUrl,
-        createdAt: Date.now(),
-      }
-      imageLibraryRef.current = [...imageLibraryRef.current, item]
-      setImageLibrary(imageLibraryRef.current)
-      void saveImageItem(item).catch(() => {})
-    }
-  }, [])
-  // 自定义字体库(设置视图"字体"入口):库条目 IndexedDB,当前字体 id 与颜色 localStorage
-  const [font, setFont] = useState<{
-    currentFontId: string | null
-    colorMode: FontColorMode
-    colorValue: string | null
-    weight: number
-  }>(() => {
-    const s = loadFontSettings()
-    return {
-      currentFontId: s.currentFontId,
-      colorMode: s.colorMode,
-      colorValue: s.colorValue,
-      weight: s.weight,
-    }
-  })
-  const [fontLibrary, setFontLibrary] = useState<FontLibraryItem[]>([])
-  const fontLibraryRef = useRef<FontLibraryItem[]>([])
-  const fontRef = useRef(font)
-  fontRef.current = font
-  useEffect(() => {
-    void loadFontItems().then((items) => {
-      fontLibraryRef.current = items
-      setFontLibrary(items)
-    })
-  }, [])
-  // 全量同步字体库(增/删/改名):新数组逐条写入,不在新数组的旧条目删除;
-  // 若当前应用字体被删,回退系统默认
-  const handleFontLibraryChange = useCallback((items: FontLibraryItem[]) => {
-    const newIds = new Set(items.map((f) => f.id))
-    for (const item of items) void saveFontItem(item).catch(() => {})
-    for (const item of fontLibraryRef.current) {
-      if (!newIds.has(item.id)) void deleteFontItem(item.id).catch(() => {})
-    }
-    fontLibraryRef.current = items
-    setFontLibrary(items)
-    if (fontRef.current.currentFontId && !newIds.has(fontRef.current.currentFontId)) {
-      setFont((prev) => ({ ...prev, currentFontId: null }))
-      saveFontSettings({ ...fontRef.current, currentFontId: null })
-    }
-  }, [])
-  const handleFontAdd = useCallback((item: FontLibraryItem) => {
-    void saveFontItem(item).catch(() => {})
-    fontLibraryRef.current = [...fontLibraryRef.current, item]
-    setFontLibrary(fontLibraryRef.current)
-    setFont((prev) => ({ ...prev, currentFontId: item.id }))
-    saveFontSettings({ ...fontRef.current, currentFontId: item.id })
-  }, [])
-  const handleFontSelect = useCallback((id: string | null) => {
-    setFont((prev) => ({ ...prev, currentFontId: id }))
-    saveFontSettings({ ...fontRef.current, currentFontId: id })
-  }, [])
-  const handleFontColorChange = useCallback(
-    (colorMode: FontColorMode, colorValue: string | null) => {
-      // auto 模式保留自定义色值(值为 null 时不覆盖),切回 custom 不丢失
-      setFont((prev) => {
-        const next = { ...prev, colorMode }
-        if (colorValue !== null) next.colorValue = colorValue
-        return next
-      })
-      saveFontSettings({
-        ...fontRef.current,
-        colorMode,
-        colorValue: colorValue !== null ? colorValue : fontRef.current.colorValue,
-      })
-    },
-    [],
-  )
-  const handleFontWeightChange = useCallback((weight: number) => {
-    setFont((prev) => ({ ...prev, weight }))
-    saveFontSettings({ ...fontRef.current, weight })
-  }, [])
-  // 图片库(背景视图"图片库"入口):条目 IndexedDB
-  const [imageLibrary, setImageLibrary] = useState<ImageLibraryItem[]>([])
-  const imageLibraryRef = useRef<ImageLibraryItem[]>([])
-  useEffect(() => {
-    void loadImageItems().then((items) => {
-      imageLibraryRef.current = items
-      setImageLibrary(items)
-    })
-  }, [])
-  const handleImageLibraryChange = useCallback((items: ImageLibraryItem[]) => {
-    const newIds = new Set(items.map((img) => img.id))
-    for (const item of items) void saveImageItem(item).catch(() => {})
-    for (const item of imageLibraryRef.current) {
-      if (!newIds.has(item.id)) void deleteImageItem(item.id).catch(() => {})
-    }
-    imageLibraryRef.current = items
-    setImageLibrary(items)
-  }, [])
-  // 系统媒体监听激活(外部平台正在播放):数据与控制优先走系统,本地播放器让位
-  const externalActive = system.active && system.track != null && useExternalSource
-  // 外部平台播放模式跟随系统真实状态(客户端写入 SMTC 时自动同步,与挂件一致)
-  useEffect(() => {
-    if (!externalActive) return
-    setExternalMode((current) => {
-      const real = system.mode
-      return real === current ? current : real
-    })
-  }, [system.mode, externalActive])
-  // 歌词字幕:按当前曲目(外部平台或本地)自动查询,播放位置驱动高亮。
-  // 歌词用 lyricPosition(跟随平台上报,与歌词对齐);进度条仍用 position
-  const lyricsData = useLyrics(
-    externalActive ? system.track?.title ?? null : player.track?.title ?? null,
-    externalActive ? system.track?.artist ?? null : player.track?.artist ?? null,
-    externalActive ? system.lyricPosition : player.position,
-    true,
-  )
-
-  const externalTrack: TrackInfo | null = externalActive
-    ? {
-        title: system.track?.title ?? '',
-        artist: system.track?.artist ?? '',
-        duration: system.duration,
-        source: 'system',
-      }
-    : null
-
-  // 灵动岛媒体数据源:外部平台优先,否则本地播放器
-  const islandState: IslandState = externalActive
-    ? system.isPlaying
-      ? 'playing'
-      : 'idle'
-    : player.phase === 'loading'
-      ? 'loading'
-      : player.phase === 'playing'
-        ? 'playing'
-        : 'idle'
-  const islandTrack = externalActive ? externalTrack : player.track
-  const islandPosition = externalActive ? system.position : player.position
-  const islandDuration = externalActive ? system.duration : player.duration
-  const islandPrev = externalActive ? () => system.control('previous') : player.previous
-  const islandNext = externalActive ? () => system.control('next') : player.next
-  // 外部平台:播放/暂停按用户意图(isPlaying 为用户点击意图)发送明确
-  // play/pause 指令——QQ音乐不支持 toggle,但支持 play/pause
-  const islandToggle = externalActive
-    ? () => system.control(system.isPlaying ? 'pause' : 'play')
-    : player.toggle
-  // 播放模式循环:外部监听作用于外部平台(重复/随机,按客户端接受与否回退),
-  // 本地作用于本地歌单;外部操作 1.2s 后检测真实状态,未生效则提示并回退
-  const handleCycleMode = () => {
-    if (externalActive) {
-      const prev = externalMode
-      const next = prev === 'sequence' ? 'repeat-one' : prev === 'repeat-one' ? 'shuffle' : 'sequence'
-      setExternalMode(next)
-      const action =
-        next === 'repeat-one' ? 'repeat-one' : next === 'shuffle' ? 'shuffle' : 'repeat-all'
-      void system.control(action as SystemControlAction).then((accepted) => {
-        // 客户端拒绝(如 QQ音乐不支持 SMTC 模式控制):回退到原模式
-        if (accepted === false) setExternalMode(prev)
-      })
-      window.setTimeout(() => {
-        if (system.mode !== next) {
-          showHint('当前平台不支持播放模式同步')
-          setExternalMode(system.mode)
-        }
-      }, 1200)
-    } else {
-      player.cycleMode()
-    }
-  }
-  // 外部平台进度条拖动:跳转系统媒体进度(需客户端支持 TryChangePlaybackPosition)。
-  // seek 是否生效由 useSystemMedia 内部验证(对照系统真实位置,超时回退),
-  // 返回 false 即平台不支持跳转,给出提示
-  const islandSeek = externalActive
-    ? (seconds: number) => {
-        void system.control('seek', seconds).then((accepted) => {
-          if (accepted === false) showHint('当前平台不支持进度跳转')
-        })
-      }
-    : undefined
+  // 定制状态(主题色/提示/背景图+图片库/字体库)与媒体数据源派生统一走
+  // 双宿主共享 hook(与桌面挂件同一实现;原 ~400 行逐字重复已收敛,
+  // 2026-08-06 架构优化)
+  const { hint, showHint } = useHint()
+  const { customTheme, applyCustomTheme } = useCustomTheme()
+  const {
+    background,
+    backgroundCropProp,
+    handleBackgroundChange,
+    imageLibrary,
+    handleImageLibraryChange,
+  } = useBackgroundStore()
+  const {
+    font,
+    fontLibrary,
+    fontColorProp,
+    handleFontLibraryChange,
+    handleFontAdd,
+    handleFontSelect,
+    handleFontColorChange,
+    handleFontWeightChange,
+  } = useFontStore()
+  const {
+    handleToggleSource,
+    externalActive,
+    externalMode,
+    lyricsData,
+    islandState,
+    islandTrack,
+    islandPosition,
+    islandDuration,
+    islandPrev,
+    islandNext,
+    islandToggle,
+    handleCycleMode,
+    islandSeek,
+  } = useIslandMedia({ player, system, showHint })
 
   // 灵动岛 API 订阅快照,驱动监控面板(监听功能)
   useEffect(() => {
@@ -518,12 +214,12 @@ export default function App() {
             backgroundExpandedImage={background.expandedImage}
             backgroundCompactImage={background.compactImage}
             backgroundOpacity={background.opacity}
-            backgroundCrop={{ expanded: background.expanded, compact: background.compact }}
+            backgroundCrop={backgroundCropProp}
             onBackgroundChange={handleBackgroundChange}
             settingsButton
             fontLibrary={fontLibrary}
             currentFontId={font.currentFontId}
-            fontColor={{ mode: font.colorMode, value: font.colorValue }}
+            fontColor={fontColorProp}
             onFontAdd={handleFontAdd}
             onFontLibraryChange={handleFontLibraryChange}
             onFontSelect={handleFontSelect}

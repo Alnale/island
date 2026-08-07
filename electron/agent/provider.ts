@@ -13,14 +13,12 @@
 import { streamResponse } from './deepseek'
 import { streamChatCompletion } from './chat'
 import { streamAnthropic } from './anthropic'
+import { detectProvider } from './constants'
 import type { AgentConfig, AgentEvent, AgentMessage, AgentTool, ProviderOutcome } from './types'
 
-function detectProvider(baseURL: string): 'anthropic' | 'chat' | 'responses' {
-  const url = baseURL.toLowerCase()
-  if (url.includes('anthropic')) return 'anthropic'
-  if (url.includes('chat')) return 'chat'
-  return 'responses'
-}
+// detectProvider 定义在 constants.ts(渲染端设置界面共用,垂直解耦);
+// 测试导入路径保持 from './provider'
+export { detectProvider } from './constants'
 
 /** 按配置发起流式请求(三个 provider 同构返回 ProviderOutcome;
  * jsonMode/noThinking 仅 DeepSeek 两个 provider 使用(官方 JSON 输出 /
@@ -35,6 +33,8 @@ export function streamByConfig(params: {
   onEvent: (event: AgentEvent) => void
   jsonMode?: boolean
   noThinking?: boolean
+  /** 输出上限覆盖(主对话循环 8192 防工具参数被截断,2026-08-08) */
+  maxOutputTokens?: number
 }): Promise<ProviderOutcome> {
   switch (detectProvider(params.config.baseURL)) {
     case 'anthropic':

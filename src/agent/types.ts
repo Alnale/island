@@ -1,64 +1,37 @@
 /**
  * Agent 模式 —— 渲染端共享类型
  *
- * 消息模型与引擎(electron/agent/types.ts)对齐:消息由有序 parts 组成
- * (文本 / 推理 / 工具调用 / 工具结果),工具调用与结果成对配对。
- * 引擎事件经 preload 订阅,本文件是渲染端唯一事实来源。
+ * **唯一事实来源 = 引擎侧 electron/agent/types.ts**(2026-08-07 审计
+ * 收敛:此前两份同构类型手动维护,已实测漂移 4 处——message usage 缺
+ * cached、AgentConfig excludedTools/excludedSkills 可选性不一致、
+ * 引擎 AgentEvent 缺 tool-confirm-request)。本文件只做 re-export +
+ * 渲染端扩展。全部 `import type` 编译期擦除,不把 electron 侧代码
+ * 打进渲染包(引擎 types.ts 零 node 运行时依赖,已核实)。
  */
+
+import type {
+  AgentEvent as EngineAgentEvent,
+  AgentMessage as EngineAgentMessage,
+  AgentConfig as EngineAgentConfig,
+  AgentTool as EngineAgentTool,
+  McpServerConfig,
+  MemoryEntry,
+} from '../../electron/agent/types'
 
 /** 引擎状态 → 渲染端状态机 */
 export type AgentStatus = 'idle' | 'thinking' | 'running' | 'error'
 
 /** 已落定的消息 part(与引擎类型同构) */
-export type AgentPart =
-  | { type: 'text'; text: string }
-  | { type: 'reasoning'; text: string }
-  | { type: 'tool-call'; id: string; name: string; args: Record<string, unknown> }
-  | {
-      type: 'tool-result'
-      id: string
-      name: string
-      ok: boolean
-      result: string
-      durationMs: number
-    }
+export type { AgentPart } from '../../electron/agent/types'
 
-/** 一条消息:user(整条文本)或 assistant(parts 序列) */
-export interface AgentMessage {
-  id: string
-  role: 'user' | 'assistant'
-  parts: AgentPart[]
+/** 一条消息:渲染端扩展 usage(token 用量,cached = 上下文缓存命中) */
+export interface AgentMessage extends EngineAgentMessage {
   /** token 用量(assistant 消息落定时附上;cached = 缓存命中 token 数) */
   usage?: { input: number; output: number; cached?: number }
 }
 
-/** 引擎事件流(与 electron/agent/types.ts 的 AgentEvent 同构) */
-export type AgentEvent =
-  | { type: 'status'; status: 'thinking' | 'running' | 'idle' }
-  | { type: 'text-delta'; text: string }
-  | { type: 'reasoning-delta'; text: string }
-  | { type: 'tool-partial-call'; id: string; name: string; args: string }
-  | { type: 'tool-call'; id: string; name: string; args: string }
-  | {
-      type: 'tool-result'
-      id: string
-      name: string
-      ok: boolean
-      result: string
-      durationMs: number
-    }
-  /** 一轮回复完整落定(权威 parts + token 用量,cached = 缓存命中) */
-  | {
-      type: 'message'
-      message: AgentMessage
-      usage?: { input: number; output: number; cached?: number }
-    }
-  | { type: 'error'; message: string }
-  /** 记忆自我进化后台任务进度(渲染端忽略,状态机不受影响) */
-  | { type: 'evolution-progress'; phase: string }
-  | { type: 'evolution-done' }
-  /** 后台长任务完成(如 bili 下载):自动触发一轮对话,LLM 主动回复 */
-  | { type: 'background-done'; title: string; message: string }
+/** 引擎事件流(含确认门/进化/后台完成事件) */
+export type AgentEvent = EngineAgentEvent
 
 /** 流式中的工具调用状态(参数收齐后解析为对象) */
 export interface AgentToolCallState {
@@ -82,18 +55,9 @@ export interface AgentSession {
   messages: AgentMessage[]
 }
 
-/** 工具信息(列表展示:名称/描述/参数 schema) */
-export interface AgentToolInfo {
-  name: string
-  description: string
-  parameters: {
-    type: 'object'
-    properties: Record<string, unknown>
-    required?: string[]
-  }
-  /** 技能来源分区:created = 灵动岛创建 / imported = 手动导入 / scanned = 扫描到的 */
-  sourceKind?: 'created' | 'imported' | 'scanned'
-}
+/** 工具信息(列表展示:名称/描述/参数 schema;引擎 listAllTools 返回,
+ * 不含 execute——渲染端不执行工具) */
+export type AgentToolInfo = Omit<EngineAgentTool, 'execute'>
 
 /** 面板 props:DynamicIsland 的 agent prop 与 AgentView 共用 */
 export interface AgentPanelProps {
@@ -110,8 +74,10 @@ export interface AgentPanelProps {
   onDeleteSession(id: string): void
   /** 工具清单(名称/描述/参数 schema,引擎提供) */
   tools: AgentToolInfo[]
-  /** 当前对话实时总结标题(每轮回复后静默更新;紧凑态文字区展示) */
+  /** 当前对话实时总结标题(每轮回复后静默更新;入历史作会话标题) */
   currentTitle: string | null
+  /** 心理揣测(独立 Sub Agent 每轮回复后静默更新;紧凑态文字区优先展示) */
+  mindGuess: string | null
   onSend(text: string): void
   onAbort(): void
   /** 新对话:当前对话存档到历史后清空 */
@@ -122,54 +88,32 @@ export interface AgentPanelProps {
   excludedTools?: string[]
   /** 更新禁用工具列表(工具列表视图禁用 / 恢复) */
   onExcludedToolsChange?(names: string[]): void
+  /** exec_command 确认请求(confirmExec 开启,引擎等待用户选择) */
+  pendingConfirm: { command: string } | null
+  /** 回传确认结果(允许 / 拒绝) */
+  onConfirmTool(approved: boolean): void
 }
 
-/**
- * MCP 服务端配置(settings.json 的 agent.mcpServers 段)。
- * type = stdio(默认):本地进程,command/args/env;type = sse:远程端点,url + headers
- */
-export interface McpServerConfig {
-  /** 服务名(工具名前缀 mcp_<name>_;仅展示用,可中文) */
-  name: string
-  /** 传输类型:stdio(本地进程,默认)/ sse(远程端点) */
-  type?: 'stdio' | 'sse'
-  /** stdio:启动命令(npx / node / 绝对路径可执行文件等) */
-  command: string
-  /** stdio:启动参数(数组) */
-  args?: string[]
-  /** stdio:注入子进程的环境变量(KEY=值;如服务器需要的 API Key) */
-  env?: Record<string, string>
-  /** sse:服务端端点 URL */
-  url?: string
-  /** sse:请求头(如 Authorization) */
-  headers?: Record<string, string>
-}
+/** MCP 服务端配置(与引擎同构,re-export) */
+export type { McpServerConfig }
 
 /** 记忆条目(记忆系统;类型 = 偏好/事实/工作流/教训) */
-export interface MemoryEntry {
-  id: string
-  type: 'preference' | 'fact' | 'workflow' | 'lesson'
-  content: string
-  tags?: string[]
-  source?: 'manual' | 'agent' | 'evolution'
-  createdAt: number
-  updatedAt: number
-}
+export type { MemoryEntry }
 
-/** Agent 配置(settings.json 的 agent 段镜像) */
-export interface AgentConfig {
-  apiKey: string
-  baseURL: string
-  model: string
-  systemPrompt: string
-  /** 思考强度(low/medium/high,默认 high) */
-  reasoningEffort: string
-  /** MCP 服务端列表(每个服务暴露 mcp_<服务>_<工具> 工具) */
-  mcpServers: McpServerConfig[]
-  /** 技能目录列表(扫描 SKILL.md,每个技能暴露 skill_<名字> 工具) */
-  skillsDirs: string[]
-  /** 已排除技能(扫描跳过;LLM 对话 / 设置界面移除) */
-  excludedSkills: string[]
-  /** 已禁用工具名(工具列表视图禁用;内置/MCP/技能一律生效) */
+/** Agent 配置:渲染端要求 excludedTools/excludedSkills 与主动陪伴两
+ * 字段必填(引擎侧可选——主进程 AGENT_CONFIG_DEFAULTS 总是补齐,
+ * 渲染端按必填使用) */
+export interface AgentConfig extends EngineAgentConfig {
   excludedTools: string[]
+  excludedSkills: string[]
+  /** 主动陪伴开关(默认 true;用户无操作满 N 分钟后判断是否主动开口) */
+  proactiveEnabled: boolean
+  /** 主动陪伴间隔数值(默认 60,钳制 5–480;配合 proactiveIntervalUnit) */
+  proactiveInterval: number
+  /** 主动陪伴间隔单位(s=秒 / m=分钟 / h=小时) */
+  proactiveIntervalUnit: 's' | 'm' | 'h'
+  /** 总结标题文风(Sub Agent 设置:预设 id 或自定义 ≤100 字) */
+  summaryStyle: string
+  /** 心理揣测人格(Sub Agent 设置:预设 id 或自定义 ≤100 字) */
+  mindPersona: string
 }

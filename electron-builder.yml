@@ -7,12 +7,17 @@ directories:
   buildResources: electron
 
 # 打包内容:挂件页面 + Electron 侧脚本(不含演示页面与源码)
+# 注意:main.cjs 顶层 require 的每个 .cjs 都要列进来——漏一个打包版
+# 启动就报 "Cannot find module"(2026-08-07 实测:settings-store.cjs /
+# screenshot-tests.cjs 曾漏列,安装版启动即崩)
 files:
   - dist-widget/**/*
   - electron/main.cjs
   - electron/preload.cjs
   - electron/bridge.cjs
   - electron/agent.cjs
+  - electron/settings-store.cjs
+  - electron/screenshot-tests.cjs
   - electron/icon.png
   - package.json
 
@@ -23,6 +28,13 @@ extraResources:
     to: bridge/smtc-reader.ps1
   - from: electron/smtc-bridge.cs
     to: bridge/smtc-bridge.cs
+  # 内置工具(2026-08-07 随包发行):**仅 bili-tool 打进安装包**(用户要求;
+  # xxt/DocFlow 不随包,引擎在打包版缺失时回退 dev 源码 + 系统 Python)。
+  # bili 是纯 Rust 单二进制零依赖,放 asar 外——引擎 spawn 可执行文件,
+  # asar 内无法直接执行;登录态/下载落点经 BILI_BASE_DIR / cwd 指向
+  # userData(安装目录只读,base_dir 已支持环境变量覆盖)
+  - from: tools/bili
+    to: tools/bili
 
 # 直接复用本地已解压的 Electron(跳过 zip 下载/解压;
 # 安全软件实时监控会锁住新解压的 electron.exe 导致目录重命名失败)
@@ -54,10 +66,16 @@ nsis:
   # + customUnInstall 条件删除接管(%APPDATA%\dynamic-island:
   # settings.json / localStorage / 长期记忆 / 技能 / 上传音乐·背景·字体)
   deleteAppDataOnUninstall: false
-  # 自定义 NSIS 脚本:在开始菜单补「卸载 灵动岛挂件」快捷方式 +
-  # 卸载数据保留选择页面(需 UTF-8 BOM——NSIS include 按 BOM 检测
-  # 编码,无 BOM 的 UTF-8 中文在 GBK 系统报 "Bad text encoding")
+  # 自定义 NSIS 脚本:安装向导视觉定制(整窗背景图/透明化标签/欢迎页
+  # 文案/卸载数据保留选择页面)+ 开始菜单「卸载」快捷方式(需 UTF-8
+  # BOM——NSIS include 按 BOM 检测编码,无 BOM 的 UTF-8 中文在 GBK
+  # 系统报 "Bad text encoding")
   include: electron/nsis-custom.nsi
+  # 安装向导整窗背景图:electron/installer-bg.bmp(800×533 24bit BMP,
+  # 由 scripts/gen-installer-bg.mjs 从项目根 bg.png 生成,更换背景图后
+  # 重跑 pnpm gen:installer-bg)——NSIS 侧 onGUIInit 经 LoadImage 按
+  # 客户区尺寸拉伸铺满全部向导页面,标签/头部/品牌条全透明
+  # (MUI_BGCOLOR transparent + MUI_TEXTCOLOR 深色文字,图偏浅)
 
 portable:
   artifactName: 灵动岛挂件-便携版-${version}.${ext}

@@ -46,6 +46,28 @@ public static class SmtcBridge
         return _manager;
     }
 
+    /// 选择目标会话:优先播放中的,否则列表第一个(State/Control 共用;
+    /// 原循环逐字重复两处,审计 P2 #7 收敛)
+    private static GlobalSystemMediaTransportControlsSession PickSession(
+        System.Collections.Generic.IReadOnlyList<GlobalSystemMediaTransportControlsSession> sessions)
+    {
+        var session = sessions[0];
+        for (int i = 0; i < sessions.Count; i++)
+        {
+            try
+            {
+                if (sessions[i].GetPlaybackInfo().PlaybackStatus ==
+                    GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing)
+                {
+                    session = sessions[i];
+                    break;
+                }
+            }
+            catch { /* 单个会话读取失败,继续尝试 */ }
+        }
+        return session;
+    }
+
     /// 播放状态 → 匿名对象(PS 侧 ConvertTo-Json 序列化);无会话或失败返回 null
     public static object State()
     {
@@ -54,21 +76,7 @@ public static class SmtcBridge
             var mgr = GetManager();
             var sessions = mgr.GetSessions();
             if (sessions == null || sessions.Count == 0) return null;
-            var session = sessions[0];
-            // 优先播放中的会话(否则取列表第一个,通常即最近活跃)
-            for (int i = 0; i < sessions.Count; i++)
-            {
-                try
-                {
-                    if (sessions[i].GetPlaybackInfo().PlaybackStatus ==
-                        GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing)
-                    {
-                        session = sessions[i];
-                        break;
-                    }
-                }
-                catch { /* 单个会话读取失败,继续尝试 */ }
-            }
+            var session = PickSession(sessions);
             var props = AwaitOp(session.TryGetMediaPropertiesAsync());
             var info = session.GetPlaybackInfo();
             var timeline = session.GetTimelineProperties();
@@ -126,20 +134,7 @@ public static class SmtcBridge
             var mgr = GetManager();
             var sessions = mgr.GetSessions();
             if (sessions == null || sessions.Count == 0) return false;
-            var session = sessions[0];
-            for (int i = 0; i < sessions.Count; i++)
-            {
-                try
-                {
-                    if (sessions[i].GetPlaybackInfo().PlaybackStatus ==
-                        GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing)
-                    {
-                        session = sessions[i];
-                        break;
-                    }
-                }
-                catch { }
-            }
+            var session = PickSession(sessions);
             switch (action)
             {
                 case "play": return AwaitOp(session.TryPlayAsync());

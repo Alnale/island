@@ -1,0 +1,28 @@
+[package]
+name = "bili-tool"
+version = "1.0.0"
+edition = "2021"
+description = "B站爬取工具：UP视频批量下载/弹幕/字幕/评论/搜索/订阅/登录（纯Rust，无python依赖）"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "time", "signal"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip", "stream", "cookies"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4", features = ["derive"] }
+chrono = { version = "0.4", features = ["clock"] }
+regex = "1"
+md-5 = "0.10"
+percent-encoding = "2"
+qrcode = "0.14"
+image = "0.25"  # 二维码 PNG 输出(对话内扫码登录,2026-08-07)
+futures = "0.3"
+windows-sys = { version = "0.59", features = ["Win32_System_Console", "Win32_UI_WindowsAndMessaging"] }
+axum = "0.8.9"
+tokio-util = "0.7.19"
+rust-embed = "8.12.0"
+url = "2.5.8"
+
+[profile.release]
+opt-level = 2
+lto = "thin"

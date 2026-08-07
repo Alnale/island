@@ -1,4 +1,4 @@
-import { useRef, type ChangeEvent } from 'react'
+import { useRef, type ChangeEvent, type ReactNode } from 'react'
 import {
   MAX_FONT_BYTES,
   genFontId,
@@ -6,8 +6,9 @@ import {
   type FontLibraryItem,
 } from '../../../media/fontStore'
 
-/** 列表类视图头部:状态圆点 + 标题 + 右侧计数/说明 */
-export function PanelHead({ title, count }: { title: string; count?: string }) {
+/** 列表类视图头部:状态圆点 + 标题 + 右侧计数/说明
+    (count 可为 ReactNode —— 帮助手册传 WheelSwap 做切换动画) */
+export function PanelHead({ title, count }: { title: string; count?: ReactNode }) {
   return (
     <div className="island-panel-list-head">
       <span className="island-panel-state">
@@ -16,6 +17,52 @@ export function PanelHead({ title, count }: { title: string; count?: string }) {
       </span>
       {count !== undefined && <span className="island-panel-list-count">{count}</span>}
     </div>
+  )
+}
+
+/** 已保存提示徽标(保存配置 / 保存歌词 API 共用):绿色对勾图标 + 文字。
+    show 时回弹淡入(对勾描线动画),隐藏时平滑退场;绝对定位在按钮
+    右侧的占位包裹内,不挤动保存行布局 */
+export function SavedBadge({ show }: { show: boolean }) {
+  return (
+    <span className="island-agent-save-pos" aria-hidden={!show}>
+      <span className={`island-agent-saved${show ? ' show' : ''}`}>
+        <svg
+          className="island-agent-saved-check"
+          width="12"
+          height="12"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth={3}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        >
+          <polyline points="20 6 9 17 4 12" />
+        </svg>
+        <span>已保存</span>
+      </span>
+    </span>
+  )
+}
+
+/** 返回箭头图标(BackButton 与 AgentView 子视图返回共用;审计 P2 #9:
+ * 原 SVG 三份逐字重复) */
+export function BackArrowIcon({ size = 15 }: { size?: number }) {
+  return (
+    <svg
+      className="island-ctl-svg"
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <polyline points="15 18 9 12 15 6" />
+    </svg>
   )
 }
 
@@ -30,19 +77,7 @@ export function BackButton({ onClick }: { onClick: () => void }) {
         onClick()
       }}
     >
-      <svg
-        className="island-ctl-svg"
-        width="15"
-        height="15"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth={2}
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      >
-        <polyline points="15 18 9 12 15 6" />
-      </svg>
+      <BackArrowIcon size={15} />
       <span>返回</span>
     </button>
   )

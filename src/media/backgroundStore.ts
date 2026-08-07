@@ -44,6 +44,105 @@ function run(mode: IDBTransactionMode, fn: (store: IDBObjectStore) => IDBRequest
 /** 默认裁切(cover 居中) */
 export const DEFAULT_BG_CROP = { zoom: 1, posX: 50, posY: 50 }
 
+/** 背景参数持久化键(不透明度/裁切;图片本体走 IndexedDB) */
+export const BACKGROUND_PARAMS_KEY = 'widget-background'
+/** 旧版单独存储的不透明度键(兼容读取) */
+export const LEGACY_BACKGROUND_OPACITY_KEY = 'widget-background-opacity'
+/** 默认不透明度(双槽位) */
+export const DEFAULT_BG_OPACITY = { expanded: 0.4, compact: 0.4 }
+
+/**
+ * 读取背景参数(不透明度/裁切;图片本体走 IndexedDB)。
+ * 挂件初始状态与设置桥事件重读共用——localStorage 损坏时回退默认;
+ * 旧版单一数值 opacity / 单独键 widget-background-opacity 自动迁移为双槽位。
+ * (设置桥与 WidgetApp 共用同一实现,避免旧数据下 LLM 读到 0.4 而 UI 显示真实值)
+ */
+export function readBackgroundParams(): Pick<BackgroundState, 'opacity' | 'expanded' | 'compact'> {
+  let opacity: { expanded: number; compact: number } = { ...DEFAULT_BG_OPACITY }
+  const expanded = { ...DEFAULT_BG_CROP }
+  const compact = { ...DEFAULT_BG_CROP }
+  const readCrop = (
+    c: Partial<{ zoom: number; posX: number; posY: number }> | null | undefined,
+  ): { zoom: number; posX: number; posY: number } => ({
+    zoom: typeof c?.zoom === 'number' && c.zoom >= 1 && c.zoom <= 4 ? c.zoom : DEFAULT_BG_CROP.zoom,
+    posX:
+      typeof c?.posX === 'number' && c.posX >= 0 && c.posX <= 100 ? c.posX : DEFAULT_BG_CROP.posX,
+    posY:
+      typeof c?.posY === 'number' && c.posY >= 0 && c.posY <= 100 ? c.posY : DEFAULT_BG_CROP.posY,
+  })
+  try {
+    const raw = localStorage.getItem(BACKGROUND_PARAMS_KEY)
+    if (raw) {
+      const parsed = JSON.parse(raw) as {
+        opacity?: unknown
+        expanded?: Partial<{ zoom: number; posX: number; posY: number }>
+        compact?: Partial<{ zoom: number; posX: number; posY: number }>
+        // 旧版单形态字段(迁移:旧裁切归展开态,紧凑态保持默认)
+        zoom?: unknown
+        posX?: unknown
+        posY?: unknown
+      }
+      if (parsed && typeof parsed === 'object') {
+        if (typeof parsed.opacity === 'number' && parsed.opacity >= 0 && parsed.opacity <= 1) {
+          // 旧版单一数值:迁移为双槽位(两形态同值,保持旧外观)
+          opacity = { expanded: parsed.opacity, compact: parsed.opacity }
+        } else if (parsed.opacity && typeof parsed.opacity === 'object') {
+          const o = parsed.opacity as { expanded?: unknown; compact?: unknown }
+          opacity = {
+            expanded:
+              typeof o.expanded === 'number' && o.expanded >= 0 && o.expanded <= 1
+                ? o.expanded
+                : 0.4,
+            compact:
+              typeof o.compact === 'number' && o.compact >= 0 && o.compact <= 1
+                ? o.compact
+                : 0.4,
+          }
+        }
+        if (parsed.expanded && typeof parsed.expanded === 'object') {
+          Object.assign(expanded, readCrop(parsed.expanded))
+        } else if (
+          typeof parsed.zoom === 'number' ||
+          typeof parsed.posX === 'number' ||
+          typeof parsed.posY === 'number'
+        ) {
+          Object.assign(
+            expanded,
+            readCrop({
+              zoom: typeof parsed.zoom === 'number' ? parsed.zoom : undefined,
+              posX: typeof parsed.posX === 'number' ? parsed.posX : undefined,
+              posY: typeof parsed.posY === 'number' ? parsed.posY : undefined,
+            }),
+          )
+        }
+        if (parsed.compact && typeof parsed.compact === 'object') {
+          Object.assign(compact, readCrop(parsed.compact))
+        }
+      }
+    } else {
+      // 兼容旧版:单独存储的不透明度(迁移为双槽位)
+      const old = Number(localStorage.getItem(LEGACY_BACKGROUND_OPACITY_KEY))
+      if (Number.isFinite(old) && old >= 0 && old <= 1) {
+        opacity = { expanded: old, compact: old }
+      }
+    }
+  } catch {
+    // 忽略存储失败
+  }
+  return { opacity, expanded, compact }
+}
+
+/** 保存背景参数(不透明度/裁切;图片本体走 IndexedDB) */
+export function saveBackgroundParams(
+  params: Pick<BackgroundState, 'opacity' | 'expanded' | 'compact'>,
+): void {
+  try {
+    localStorage.setItem(BACKGROUND_PARAMS_KEY, JSON.stringify(params))
+  } catch {
+    // 忽略存储失败
+  }
+}
+
 /** 自定义背景完整状态:展开态 / 紧凑态各自独立的图片、不透明度与裁切参数 */
 export interface BackgroundState {
   expandedImage: string | null

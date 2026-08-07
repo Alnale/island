@@ -18,6 +18,7 @@ import type { AgentTool, ToolParams } from './types'
 
 /** 渲染端设置桥操作名(settingsBridge.ts 的 window.__islandSettings 方法) */
 export type IslandSettingsOp =
+  | 'getSettings'
   | 'setThemeColor'
   | 'setAgentScale'
   | 'importFont'
@@ -26,6 +27,10 @@ export type IslandSettingsOp =
   | 'importBackground'
   | 'listLibraryImages'
   | 'renameLibraryImage'
+  | 'setFontColor'
+  | 'setBackgroundOpacity'
+  | 'deleteFontItem'
+  | 'deleteLibraryImage'
 
 export interface SettingsToolsDeps {
   /** 调渲染端设置桥(主进程注入;未注入则不注册设置工具) */
@@ -100,17 +105,52 @@ function parseItemName(name: unknown): string {
   return t
 }
 
+/** 设置快照 → 人类可读文本(LLM 回复依据;缺失字段回退默认) */
+function formatSettings(s: unknown): string {
+  const d = (s ?? {}) as {
+    themeColor?: string | null
+    agentScale?: number
+    fontColorMode?: string
+    fontColorValue?: string | null
+    currentFontName?: string | null
+    backgroundOpacity?: { expanded?: number; compact?: number }
+  }
+  const opacity = d.backgroundOpacity ?? {}
+  return [
+    '当前灵动岛设置:',
+    `- 主题色:${d.themeColor ? ` ${d.themeColor}` : ' 未设置(默认)'}`,
+    `- 界面缩放:${typeof d.agentScale === 'number' ? ` ${d.agentScale}%` : ' 未设置(默认 200%)'}`,
+    `- 文字颜色:${d.fontColorMode === 'custom' && d.fontColorValue ? ` 自定义 ${d.fontColorValue}` : ' 自动(按背景亮度黑白)'}`,
+    `- 背景不透明度:展开 ${opacity.expanded ?? 0.4} / 紧凑 ${opacity.compact ?? 0.4}(0-1,1 = 完全不透明)`,
+    `- 当前字体:${d.currentFontName ? `「${d.currentFontName}」` : ' 无(系统默认)'}`,
+  ].join('\n')
+}
+
 /** 灵动岛设置工具清单(LLM 可调用;deps 无桥时返回空 = 不注册) */
 export function createSettingsTools(deps: SettingsToolsDeps): AgentTool[] {
   const run = deps.runIslandSettings
   if (!run) return []
   return [
     {
+      name: 'get_island_settings',
+      description:
+        '读取灵动岛**当前**的界面设置快照(主题色 / 界面缩放百分比 / 文字颜色模式与值 / ' +
+        '背景不透明度(展开/紧凑)/ 当前字体)。**修改任何设置前先调用本工具确认当前值**——' +
+        '用户说「调到 200%」「换个颜色」时,先知道现在是 300% 还是 100%、当前色是什么,才能' +
+        '准确执行并回复「从 300% 调整为 200%」;若当前已是目标值则无需修改,直接告知用户。',
+      parameters: { type: 'object', properties: {} },
+      async execute() {
+        const s = await run('getSettings', [])
+        return formatSettings(s)
+      },
+    },
+    {
       name: 'set_theme_color',
       description:
-        '设置灵动岛主题色(强调色:按钮/气泡/进度条等 UI 的主色),立即生效。' +
-        '颜色为 6 位十六进制(如 #4d6bfe 蓝色、#f87171 红色)。' +
-        '适合:用户要求换主题色、根据场景配色等。',
+        '设置灵动岛**主题色**(强调色:按钮/气泡/进度条/开关等控件的颜色,影响整个 UI),' +
+        '立即生效。颜色为 6 位十六进制(如 #4d6bfe 蓝色、#f87171 红色)。' +
+        '**只改主题色,不改文字颜色**——用户说「字体/文字/字颜色」时改用 set_font_color。' +
+        '适合:用户要求换主题色、自定义 UI 主色等。',
       parameters: {
         type: 'object',
         properties: {
@@ -120,8 +160,16 @@ export function createSettingsTools(deps: SettingsToolsDeps): AgentTool[] {
       },
       async execute(params: ToolParams) {
         const hex = parseHexColor(params.color)
-        await run('setThemeColor', [hex])
-        return `已将主题色设置为 ${hex}`
+        const res = (await run('setThemeColor', [hex])) as {
+          ok?: boolean
+          color?: string
+          previous?: string | null
+        }
+        const prev = typeof res?.previous === 'string' ? res.previous : null
+        if (prev === hex) return `主题色当前已是 ${hex},无需修改`
+        return prev !== null
+          ? `已将主题色从 ${prev} 调整为 ${hex}`
+          : `已将主题色设置为 ${hex}`
       },
     },
     {
@@ -139,8 +187,16 @@ export function createSettingsTools(deps: SettingsToolsDeps): AgentTool[] {
       },
       async execute(params: ToolParams) {
         const scale = parseScale(params.percent)
-        await run('setAgentScale', [scale])
-        return `已将 Agent 界面缩放设置为 ${scale}%`
+        const res = (await run('setAgentScale', [scale])) as {
+          ok?: boolean
+          scale?: number
+          previous?: number
+        }
+        const prev = typeof res?.previous === 'number' ? res.previous : null
+        if (prev === scale) return `界面缩放当前已是 ${scale}%,无需修改`
+        return prev !== null
+          ? `已将界面缩放从 ${prev}% 调整为 ${scale}%`
+          : `已将界面缩放设置为 ${scale}%`
       },
     },
     {
@@ -221,6 +277,94 @@ export function createSettingsTools(deps: SettingsToolsDeps): AgentTool[] {
         const display = String(params.name ?? '').trim() || name
         await run('importBackground', [dataUrl, parseItemName(display)])
         return `已导入图片「${display}」作为背景并加入图片库`
+      },
+    },
+    {
+      name: 'set_font_color',
+      description:
+        '设置灵动岛**文字颜色**(岛内文字的显示颜色,立即生效),**不是主题色**——' +
+        '用户说「字体颜色/文字颜色/字颜色/字体的颜色」时用本工具;说「主题色/按钮/强调色」' +
+        '时改用 set_theme_color。mode=custom 用自定义颜色(6 位十六进制,如 #ffffff 白、' +
+        '#0b0b0f 黑);mode=auto 恢复自动(按背景亮度自动黑白)。' +
+        '颜色名词(如「奶油杏」「暖白」)需换算成 hex 填入。' +
+        '适合:用户要求改文字颜色、深色背景上文字看不清时调亮等。',
+      parameters: {
+        type: 'object',
+        properties: {
+          color: { type: 'string', description: '自定义颜色 hex,如 #ffffff(custom 模式必填)' },
+          mode: {
+            type: 'string',
+            enum: ['custom', 'auto'],
+            description: 'custom = 自定义颜色;auto = 自动亮度(默认 custom)',
+          },
+        },
+        required: [],
+      },
+      async execute(params: ToolParams) {
+        const mode = String(params.mode ?? 'custom')
+        if (mode !== 'custom' && mode !== 'auto') throw new Error('mode 只能是 custom 或 auto')
+        // 校验先于桥调用(坏 hex 不落存储)
+        const hex = mode === 'custom' ? parseHexColor(params.color) : ''
+        const res = (await run('setFontColor', [hex, mode])) as {
+          ok?: boolean
+          previousMode?: string
+          previousValue?: string | null
+        }
+        const prevLabel =
+          res?.previousMode === 'custom' && res.previousValue ? `自定义 ${res.previousValue}` : '自动'
+        if (mode === 'custom') {
+          if (res?.previousMode === 'custom' && res.previousValue === hex) {
+            return `文字颜色当前已是 ${hex}(自定义模式),无需修改`
+          }
+          return `已将文字颜色从 ${prevLabel} 调整为 ${hex}(自定义模式)`
+        }
+        if (res?.previousMode === 'auto') return '文字颜色当前已是自动(按背景亮度黑白),无需修改'
+        return `已恢复文字颜色为自动(原为 ${prevLabel})`
+      },
+    },
+    {
+      name: 'set_background_opacity',
+      description:
+        '设置自定义背景图的不透明度(0-1 小数,如 0.3 = 30% 不透明,1 = 完全不透明;' +
+        '数值越透明背景越淡)。expanded/compact 分别对应展开态与紧凑态,' +
+        '只传一个就只改对应形态(另一个不变)。适合:背景图太抢眼看不清文字时' +
+        '调低、太淡时调高。',
+      parameters: {
+        type: 'object',
+        properties: {
+          expanded: { type: 'number', description: '展开态不透明度 0-1,如 0.4(可选)' },
+          compact: { type: 'number', description: '紧凑态不透明度 0-1,如 0.4(可选)' },
+        },
+        required: [],
+      },
+      async execute(params: ToolParams) {
+        const hasExpanded = params.expanded !== undefined
+        const hasCompact = params.compact !== undefined
+        if (!hasExpanded && !hasCompact) throw new Error('需要至少提供 expanded 或 compact 之一')
+        const parseOpacity = (v: unknown): number => {
+          const n = Number(v)
+          if (!Number.isFinite(n)) throw new Error('不透明度需要是数字(0-1)')
+          return Math.min(1, Math.max(0, n))
+        }
+        const patches: { expanded?: number; compact?: number } = {}
+        if (hasExpanded) patches.expanded = parseOpacity(params.expanded)
+        if (hasCompact) patches.compact = parseOpacity(params.compact)
+        const res = (await run('setBackgroundOpacity', [patches])) as {
+          ok?: boolean
+          opacity?: { expanded?: number; compact?: number }
+          previous?: { expanded?: number; compact?: number }
+        }
+        const next = res?.opacity
+        const prev = res?.previous
+        if (prev && next && prev.expanded === next.expanded && prev.compact === next.compact) {
+          return '背景不透明度已是该值,无需修改'
+        }
+        const prevLabel = (v?: number) => (typeof v === 'number' ? String(v) : '?')
+        const parts = [
+          hasExpanded ? `展开 ${next?.expanded ?? patches.expanded}` : '',
+          hasCompact ? `紧凑 ${next?.compact ?? patches.compact}` : '',
+        ].filter(Boolean)
+        return `已将背景不透明度调整为:${parts.join(' / ')}(原为:展开 ${prevLabel(prev?.expanded)} / 紧凑 ${prevLabel(prev?.compact)})`
       },
     },
     {

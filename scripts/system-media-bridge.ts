@@ -352,6 +352,35 @@ let ps: ChildProcessWithoutNullStreams
 let psBuffer = ''
 /** 等待响应的回调队列(FIFO) */
 const pending: Array<{ resolve: (line: string) => void; timer: NodeJS.Timeout }> = []
+// smtc-reader 重启上限:10 秒内连续退出达到 3 次则放弃(脚本缺失/环境
+// 不可用),避免每 2s 无限 respawn 刷日志;窗口滑动重置(与主进程对桥的
+// 重启策略同款——主进程的 3 次上限只管桥进程本身,管不到桥内部循环)
+const READER_RESTART_WINDOW_MS = 10_000
+const READER_MAX_RESTARTS = 3
+let readerRestartCount = 0
+let readerFirstCrashAt = 0
+let readerRespawnScheduled = false
+
+function scheduleReaderRespawn(): void {
+  // error 与 exit 可能双发,防重复调度
+  if (readerRespawnScheduled) return
+  readerRespawnScheduled = true
+  const now = Date.now()
+  if (now - readerFirstCrashAt > READER_RESTART_WINDOW_MS) {
+    readerFirstCrashAt = now
+    readerRestartCount = 0
+  }
+  readerRestartCount += 1
+  if (readerRestartCount > READER_MAX_RESTARTS) {
+    console.error('[smtc-reader] respawn limit reached, giving up (restart the widget to retry)')
+    readerRespawnScheduled = false
+    return
+  }
+  setTimeout(() => {
+    readerRespawnScheduled = false
+    spawnReader()
+  }, 2000)
+}
 
 function spawnReader(): void {
   ps = spawn(
@@ -380,6 +409,12 @@ function spawnReader(): void {
   ps.stderr.on('data', (chunk: Buffer) => {
     console.error('[smtc-reader]', chunk.toString().trim())
   })
+  // 脚本缺失等启动失败:spawn 只发 error 不发 exit——不处理会"桥活着但
+  // SMTC 永久死"(请求 8s 超时),按崩溃走同一重启判定
+  ps.on('error', (err) => {
+    console.error('[smtc-reader] spawn failed:', err.message)
+    scheduleReaderRespawn()
+  })
   ps.on('exit', (code) => {
     console.error(`[smtc-reader] exited with code ${code}, respawning...`)
     // 排队中的请求全部失败
@@ -388,8 +423,12 @@ function spawnReader(): void {
       clearTimeout(waiter.timer)
       waiter.resolve('{"error":"reader exited"}')
     }
-    setTimeout(spawnReader, 2000)
+    scheduleReaderRespawn()
   })
+  // 管道写入错误兜底(审计 P2-6):崩溃重启间隙的 write 触发 EPIPE 等,
+  // 吞掉避免未捕获异常杀死桥进程(重启流程自会处理;requestPS 写前也已
+  // 判进程存活)
+  ps.stdin.on('error', () => {})
 }
 
 /** 向 PS reader 发指令并等待一行 JSON 响应 */
@@ -402,6 +441,16 @@ function requestPS(command: string): Promise<string> {
     }, PS_TIMEOUT_MS)
     const onLine = (line: string) => resolve(line)
     pending.push({ resolve: onLine, timer })
+    // 审计 P2-6:reader 崩溃后 2s 重启间隙收到 HTTP 请求 → 向已关闭管道
+    // write 触发无监听的 error 事件,桥进程被未捕获异常杀死(可达 3 次
+    // 重启上限后 SMTC 永久失联)——写前判进程存活 + 注册 error 兜底
+    if (ps.stdin.destroyed || ps.exitCode !== null || ps.signalCode !== null) {
+      const idx = pending.findIndex((p) => p.resolve === onLine)
+      if (idx >= 0) pending.splice(idx, 1)
+      clearTimeout(timer)
+      resolve('{"error":"reader not ready"}')
+      return
+    }
     ps.stdin.write(`${command}\n`)
   })
 }
