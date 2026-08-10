@@ -480,6 +480,12 @@ function VideoPlayer({
   useEffect(() => {
     const v = videoRef.current
     if (!v) return
+    // 续播媒体跳过封面抓帧(2026-08-10 修复"视频岛切回面板进度没同步"):
+    // 缓存位置 > 0 = 续播场景——抓帧 seek(0.05) 与续播 seek(缓存位置)
+    // 竞态,抓帧 seeked 回调的 restore 会把进度重置回 0(实测);续播
+    // seek 后显示的即是真实画面,不需要封面
+    const pos = cacheKey ? readAgentMediaPosition(cacheKey) : undefined
+    if (pos && pos > 0) return
     const capture = () => {
       if (posterTriedRef.current || v.readyState < 2 || !v.paused) return
       posterTriedRef.current = true
@@ -526,19 +532,25 @@ function VideoPlayer({
   // 挂载续播(2026-08-09 双向同步):小窗播放/seek 的进度经
   // readAgentMediaPosition 读回,面板重新挂载(收起后再展开)时从该
   // 位置继续,不再从头;仅同 src、仅挂载时一次
+  // **播放中续播(2026-08-10 修复"视频岛切回对话窗口暂停")**:
+  // lastPlayingVideoSrc === cacheKey = 另一端(视频岛)播放中——seek 到
+  // 缓存位置后**继续播放**(原实现只 seek 不播放:autoPlay 标记已被首次
+  // 播放消费,切回永远暂停;播放状态经模块级跟踪,不经 props 传递)
   useEffect(() => {
     const v = videoRef.current
     const pos = cacheKey ? readAgentMediaPosition(cacheKey) : undefined
     if (!v || !pos || pos <= 0) return
-    const seek = () => {
+    const resume = lastPlayingVideoSrc === cacheKey
+    const start = () => {
       try {
         v.currentTime = pos
       } catch {
         // seek 失败忽略
       }
+      if (resume) void v.play().catch(() => {})
     }
-    if (v.readyState >= 1) seek()
-    else v.addEventListener('loadedmetadata', seek, { once: true })
+    if (v.readyState >= 1) start()
+    else v.addEventListener('loadedmetadata', start, { once: true })
     // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅挂载续播
   }, [])
   // 应用共享偏好(2026-08-10 双向同步:音量/倍速/循环与视频岛/多媒体
@@ -572,9 +584,13 @@ function VideoPlayer({
     // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅挂载一次
   }, [])
   // 全屏状态跟踪 + 退出动画
+  // **监听挂 document(2026-08-10 修复"全屏后按钮无 UI 变化")**:
+  // fullscreenchange 事件派发在**全屏元素**(playerRef 容器,requestFullscreen
+  // 的调用对象)上并冒泡到 document——原监听挂在 video 上,video 是容器
+  // 的子元素,不在冒泡路径上,永远收不到事件(实测:全屏后按钮图标不变、
+  // 容器 .fullscreen 类不加);与视频岛(AgentMediaMini)/图片全屏同款
+  // document 级监听
   useEffect(() => {
-    const v = videoRef.current
-    if (!v) return
     const onChange = () => {
       const fs = document.fullscreenElement === playerRef.current
       setFullscreen(fs)
@@ -585,8 +601,8 @@ function VideoPlayer({
         fsLeaveTimerRef.current = window.setTimeout(() => setLeavingFs(false), 220)
       }
     }
-    v.addEventListener('fullscreenchange', onChange)
-    return () => v.removeEventListener('fullscreenchange', onChange)
+    document.addEventListener('fullscreenchange', onChange)
+    return () => document.removeEventListener('fullscreenchange', onChange)
   }, [])
   const scrubbingRef = useRef(false)
   const toggle = () => {
@@ -595,6 +611,21 @@ function VideoPlayer({
     if (v.paused) void v.play().catch(() => {})
     else v.pause()
   }
+  // 控件自动隐藏(2026-08-10 用户要求"鼠标移开播放器后过几秒自动
+  // 隐藏"):播放中鼠标移出播放器区域 2.5s 后控件层淡出(纯视频画面,
+  // CSS opacity + pointer-events none);鼠标移回/暂停/拖拽进度恢复
+  // 显示。暂停不隐藏——用户要看进度条/状态
+  const [uiHidden, setUiHidden] = useState(false)
+  const uiHideTimerRef = useRef(0)
+  useEffect(() => () => window.clearTimeout(uiHideTimerRef.current), [])
+  const showUi = () => {
+    setUiHidden(false)
+    window.clearTimeout(uiHideTimerRef.current)
+  }
+  useEffect(() => {
+    if (!playing) showUi()
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 暂停恢复显示
+  }, [playing])
   const seekFromPointer = (event: ReactPointerEvent<HTMLDivElement>) => {
     const bar = barRef.current
     const v = videoRef.current
@@ -617,6 +648,19 @@ function VideoPlayer({
       className={`island-video-player${fullscreen ? ' fullscreen' : ''}${leavingFs ? ' leaving-fullscreen' : ''}`}
       onPointerDown={(event) => {
         if (event.button === 0) event.stopPropagation()
+      }}
+      onMouseEnter={showUi}
+      onMouseLeave={() => {
+        // 播放中移出 → 2.5s 后隐藏;拖拽进度中不隐藏(scrubbing 结束
+        // 自然显示);暂停不进入隐藏(playing effect 保持显示)
+        if (playing && !scrubbingRef.current) {
+          window.clearTimeout(uiHideTimerRef.current)
+          uiHideTimerRef.current = window.setTimeout(() => setUiHidden(true), 2500)
+        }
+      }}
+      onPointerMove={() => {
+        // 隐藏状态下移动指针即恢复显示(重置计时由 mouseenter 兜底)
+        if (uiHidden) showUi()
       }}
     >
       <video
@@ -671,8 +715,12 @@ function VideoPlayer({
           aria-hidden="true"
         />
       ) : null}
-      {/* 自定义控件层(底部渐变遮罩;全屏时随容器进入全屏层) */}
-      <div className="island-video-controls" onPointerDown={(event) => event.stopPropagation()}>
+      {/* 自定义控件层(底部渐变遮罩;全屏时随容器进入全屏层;
+          鼠标移开自动隐藏,见 uiHidden 逻辑) */}
+      <div
+        className={`island-video-controls${uiHidden ? ' ui-hidden' : ''}`}
+        onPointerDown={(event) => event.stopPropagation()}
+      >
         <button
           type="button"
           className="island-video-play"
@@ -1046,9 +1094,19 @@ const agentMediaPositions = new Map<string, number>()
 export function readAgentMediaPosition(src: string): number | undefined {
   return agentMediaPositions.get(src)
 }
+// 最后播放中的视频 src(2026-08-10 双向同步增强):dispatch('play'
+// playing:true) 记录、playing:false(仅同 src)清除——播放中的媒体在
+// 另一端挂载后**继续播放**(seek 到缓存位置 + play),而不只是暂停态
+// 显示。修复"视频岛切回对话窗口暂停":面板 MediaFrame 重挂载时
+// autoPlay 标记已被首次播放消费,原实现永远不自动播
+let lastPlayingVideoSrc: string | null = null
 export function dispatchAgentMedia(type: 'mount' | 'play' | 'unmount', media: AgentMediaReport) {
   if (type === 'play' && Number.isFinite(media.position)) {
     agentMediaPositions.set(media.src, media.position as number)
+  }
+  if (type === 'play' && media.kind === 'video') {
+    if (media.playing) lastPlayingVideoSrc = media.src
+    else if (lastPlayingVideoSrc === media.src) lastPlayingVideoSrc = null
   }
   document.dispatchEvent(new CustomEvent(AGENT_MEDIA_EVENT, { detail: { type, media } }))
 }

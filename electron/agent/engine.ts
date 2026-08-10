@@ -52,6 +52,10 @@ export {
   buildMindSystem,
   buildJudgeSystem,
   parseJudgeJson,
+  parseMemoriesJson,
+  parseStyleJson,
+  buildMemoryExtractSystem,
+  buildUserStyleSystem,
   createSummaryAgent,
   createMindAgent,
   SUMMARY_STYLES,
@@ -1116,7 +1120,7 @@ export function createAgentEngine(deps: EngineDeps): AgentEngine {
     },
     dispose() {
       mcpManager.dispose()
-      // 关闭自动拉起的 DocFlow 服务(2026-08-07 随包发行:服务由
+      // 关闭自动拉起的 DocFlow 服务(2026-08-07:服务由
       // doc_convert 首次调用自动启动,挂件退出时清理防残留)
       disposeTools()
     },

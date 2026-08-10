@@ -567,7 +567,7 @@ function bridgeModulePath() {
   return path.join(__dirname, 'bridge.cjs')
 }
 
-/** SMTC 读取脚本:打包后放在 resources/bridge/,开发时在 electron/ 下 */
+/** SMTC 读取脚本:electron/ 目录下 */
 function readerScriptPath() {
   if (app.isPackaged) return path.join(process.resourcesPath, 'bridge', 'smtc-reader.ps1')
   return path.join(__dirname, 'smtc-reader.ps1')
@@ -1167,10 +1167,27 @@ ipcMain.handle('agent:proactive-tick', async (_event, messages, idleMinutes) => 
       if (list.length === 0) result = { started: false, reason: 'empty' }
       else {
         const minutes = Math.min(480, Math.max(1, Math.round(Number(idleMinutes) || 60)))
-        const verdict = await getSummaryAgent().judgeProactive(list, minutes)
+        // 并行:判断语境 + 分析用户风格(2026-08-10 用户要求"主动回复有时
+        // 模仿用户的嘴癖和风格")——两者独立,任一方失败静默降级(judge
+        // 失败 → 不开口;风格分析失败 → 不注入风格指令)
+        const [verdict, style] = await Promise.all([
+          getSummaryAgent().judgeProactive(list, minutes),
+          getMindAgent().analyzeUserStyle(list),
+        ])
         if (!verdict.should) result = { started: false, reason: 'judge-no' }
         else {
-          getAgentEngine().proactiveTurn(list, { hint: verdict.hint })
+          // 风格描述拼进 hint 内部指令(引擎把 hint 作为 role:'system'
+          // 请求项追加在 input 末尾,不进渲染端历史);措辞引导"偶尔"——
+          // 模仿是自然融入,不是每次、不是刻意(用户明确:有时模仿)
+          const hint = [
+            verdict.hint,
+            style
+              ? `回复时可以偶尔模仿用户的说话风格(自然融入,不要刻意、不要每次回复都模仿):${style}`
+              : '',
+          ]
+            .filter(Boolean)
+            .join(' ')
+          getAgentEngine().proactiveTurn(list, { hint })
           result = { started: true }
         }
       }
@@ -1616,9 +1633,29 @@ ipcMain.handle('agent:mcp-test', async (_event, server) => {
 
 // 静默总结对话标题(新对话入历史时后台生成,不打扰用户);
 // 走独立的总结 Sub Agent(与主对话引擎隔离)
-ipcMain.handle('agent:summarize', (_event, messages) =>
-  getSummaryAgent().summarize(asArray(messages)),
-)
+// **顺带静默记忆提取(2026-08-10 用户要求)**:主动陪伴开启时,总结 Sub
+// Agent 从对话全上下文提取值得记住的内容入长期记忆——后台异步(不阻塞
+// IPC 返回),失败/无内容静默跳过;消息数守卫:对话没有新内容不重复调
+// LLM(提取每轮总结都触发,白花 token)
+let lastMemoryExtractCount = -1
+ipcMain.handle('agent:summarize', async (_event, messages) => {
+  const list = asArray(messages)
+  const summaryPromise = getSummaryAgent().summarize(list)
+  if (currentAgentConfig().proactiveEnabled && list.length > 0 && list.length !== lastMemoryExtractCount) {
+    lastMemoryExtractCount = list.length
+    void getSummaryAgent()
+      .extractMemories(list)
+      .then(async (entries) => {
+        if (!entries.length) return
+        const store = getMemoryStore()
+        for (const e of entries) await store.add({ content: e.content, type: e.type, source: 'agent' })
+      })
+      .catch(() => {
+        // 记忆提取失败静默(不打扰用户;下次总结消息数变化再试)
+      })
+  }
+  return summaryPromise
+})
 
 // 心理揣测(紧凑态文字区展示):独立 Sub Agent 根据当前对话揣测
 // LLM 回复时的心态(≤10 汉字俏皮话);与总结/主对话引擎均隔离,
@@ -1739,8 +1776,7 @@ if (!gotLock) {
   app.whenReady().then(() => {
     // Windows 通知 AppUserModelID(Bug 修复 2026-08-07):不设置的话
     // new Notification().show() 静默失败——右下角不弹(实测:主动陪伴
-    // 心理嘀咕从未出现;evolution/notify 的通知同样受影响)。必须与
-    // 打包后 electron-builder 的 appId 一致(无 build.appId 配置时用固定值)
+    // 心理嘀咕从未出现;evolution/notify 的通知同样受影响)。
     app.setAppUserModelId('com.dynamic-island.widget')
     // 本地媒体流式播放协议(特权注册在 ready 前,handler 在此挂载)
     registerIslandMediaProtocol()

@@ -716,6 +716,14 @@
   gap: 8px;
   padding: 18px 12px 7px 10px;
   background: linear-gradient(to top, rgba(0, 0, 0, 0.7), transparent);
+  /* 鼠标移开自动隐藏(2026-08-10 用户要求):淡出 + 不参与命中
+     (隐藏的按钮不可点,防误触);淡出 0.3s 与渐变层一体 */
+  transition: opacity 0.3s ease;
+}
+
+.island-video-controls.ui-hidden {
+  opacity: 0;
+  pointer-events: none;
 }
 
 .island-video-play,
@@ -1104,6 +1112,14 @@
   background: linear-gradient(to top, rgba(0, 0, 0, 0.72), transparent);
   cursor: pointer;
   touch-action: none;
+  /* 鼠标移开自动隐藏(2026-08-10 用户要求):淡出 + 不参与命中,
+     与消息气泡控件层同款 */
+  transition: opacity 0.3s ease;
+}
+
+.island-agent-mini-bar.ui-hidden {
+  opacity: 0;
+  pointer-events: none;
 }
 
 .island-agent-mini-track {

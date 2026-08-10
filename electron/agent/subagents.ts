@@ -13,7 +13,7 @@ import { streamByConfig } from './provider'
 import { formatMemoryBlock } from './memory'
 import { getTasksStatusBlock } from './tasks'
 import { MIND_PERSONAS, SUMMARY_STYLES } from './constants'
-import type { AgentConfig, AgentMessage, AgentPart, EvolutionLike, MemoryStoreLike } from './types'
+import type { AgentConfig, AgentMessage, AgentPart, EvolutionLike, MemoryEntry, MemoryStoreLike } from './types'
 
 /**
  * 工具调用参数压缩(测试用导出):递归截断字符串值(大参数如
@@ -250,6 +250,79 @@ export function parseJudgeJson(raw: string): { should: boolean; hint?: string } 
 }
 
 /**
+ * 记忆提取 JSON 解析(测试用导出):必须解析出合法 {memories: [...]} 数组,
+ * 逐条校验(只收 content/type,非法条目丢弃),单次最多 10 条;解析失败/
+ * 垃圾输出返回空数组(安全侧:不污染记忆)
+ */
+export function parseMemoriesJson(
+  raw: string,
+): { content: string; type: MemoryEntry['type'] }[] {
+  const obj = extractJsonObject(raw)
+  if (!obj || !Array.isArray(obj.memories)) return []
+  const out: { content: string; type: MemoryEntry['type'] }[] = []
+  for (const m of obj.memories) {
+    if (!m || typeof m !== 'object') continue
+    const item = m as Record<string, unknown>
+    const content = typeof item.content === 'string' ? item.content.trim().slice(0, 200) : ''
+    const type = item.type
+    if (!content) continue
+    out.push({
+      content,
+      type: type === 'preference' || type === 'workflow' || type === 'lesson' ? type : 'fact',
+    })
+  }
+  return out.slice(0, 10)
+}
+
+/** 用户风格 JSON 解析(测试用导出):解析出合法 {style: string} 才采信,
+ * 空/垃圾输出返回 ''(调用方不注入风格指令,安全侧) */
+export function parseStyleJson(raw: string): string {
+  const obj = extractJsonObject(raw)
+  if (!obj) return ''
+  return typeof obj.style === 'string' ? obj.style.trim().slice(0, 120) : ''
+}
+
+/** 记忆提取系统提示(2026-08-10 用户要求"总结 Sub Agent 自动从对话提取
+ * 值得记住的内容入长期记忆,静默,仅主动陪伴开启时"):适合沉淀的类别
+ * 明确列举(preference/fact/workflow/lesson),不适合的类别也列举(一次性
+ * 细节/临时状态/已有记忆),避免把对话噪声写进长期记忆 */
+const MEMORY_EXTRACT_PROMPT = (memoryBlock: string) =>
+  '你是灵动岛的「记忆沉淀师」。从对话中提取**值得长期记住**的信息,写入助手的长期记忆。' +
+  '适合沉淀:① 用户偏好(喜欢的风格/称呼/习惯/雷点);② 稳定事实(用户身份/环境/常用工具/平台);' +
+  '③ 工作流(用户常做的操作流程、工具组合);④ 教训(踩过的坑、用户纠正过的事,未来不再犯)。' +
+  '不适合:一次性请求的细节、本次对话的临时状态、与现有记忆重复的内容。' +
+  (memoryBlock ? `现有记忆(不要重复,只提取新增):\n${memoryBlock}` : '') +
+  '每条 content 不超过 200 字,独立可理解(不依赖对话上下文)。' +
+  '只输出 JSON 对象:{"memories": [{"content": "<记忆内容>", "type": "preference|fact|workflow|lesson"}]}。' +
+  '没有值得记的输出 {"memories": []}。不要解释,不要照抄示例文字。'
+
+/** 记忆提取系统提示拼装(测试用导出):与主引擎同源上下文(自定义提示词 +
+ * 现有记忆块)——提取必须知道助手已记得什么,否则重复沉淀;块为空静默跳过 */
+export function buildMemoryExtractSystem(context: string[]): string {
+  const memoryBlock = context[1] ?? ''
+  const blocks = [context.filter(Boolean).join('\n\n'), MEMORY_EXTRACT_PROMPT(memoryBlock)]
+  return blocks.filter(Boolean).join('\n\n')
+}
+
+/** 用户风格分析系统提示(2026-08-10 用户要求"主动回复有时模仿用户嘴癖"):
+ * 只描述可模仿的表达特征(口头禅/语气词/句式/标点/称呼/emoji),不评价
+ * 内容;无明显风格或语境不适合(正式/严肃)时输出空 style——"有时"由
+ * 调用方措辞引导,分析本身只做客观描述 */
+const USER_STYLE_PROMPT =
+  '你是灵动岛的「风格观察师」。分析用户在这段对话中的**说话风格与习惯**:' +
+  '口头禅/语气词、句式长短、标点与表情习惯、对助手的称呼、emoji 使用等,' +
+  '输出简短的可模仿特征描述(不超过 120 字,只描述表达方式,不要评价对话内容)。' +
+  '如果用户没有明显个人风格,或对话语境严肃正式不适合模仿,输出 {"style": ""}。' +
+  '只输出 JSON 对象:{"style": "<风格描述>"}。不要解释。'
+
+/** 用户风格分析系统提示拼装(测试用导出):接自定义提示词(助手"是谁"),
+ * 分析只依赖对话文本本身 */
+export function buildUserStyleSystem(context: string[]): string {
+  const blocks = [context.filter(Boolean).join('\n\n'), USER_STYLE_PROMPT]
+  return blocks.filter(Boolean).join('\n\n')
+}
+
+/**
  * 独立的总结后台 Sub Agent:与主对话引擎**零共享**——独立实例、
  * 独立 AbortController、每次调用独立读取配置。主对话的任何操作
  * (发送/中止/模式切换/清空)都无法打断它;它失败/超时也绝不
@@ -274,6 +347,14 @@ export function createSummaryAgent(deps: {
    * 零 LLM 调用);should:true 时 hint 为建议话题(≤200 字)
    */
   judgeProactive(messages: AgentMessage[], idleMinutes: number): Promise<{ should: boolean; hint?: string }>
+  /**
+   * 静默记忆提取(2026-08-10 用户要求"自动根据对话全上下文提取值得记住
+   * 的内容入长期记忆,静默,仅主动陪伴开启时"):从对话中提取偏好/事实/
+   * 工作流/教训,JSON 输出 {memories:[...]}。输入为**完整历史**(记忆
+   * 提取需要全文语境,与总结的"最近 12 条"不同);失败/未配置返回 []
+   * (安全侧,零 LLM 调用,绝不外溢)
+   */
+  extractMemories(messages: AgentMessage[]): Promise<{ content: string; type: MemoryEntry['type'] }[]>
 } {
   return {
     async summarize(messages: AgentMessage[]) {
@@ -430,6 +511,60 @@ export function createSummaryAgent(deps: {
         return { should: false }
       }
     },
+    async extractMemories(messages: AgentMessage[]) {
+      const config = deps.getConfig()
+      if (!config.apiKey.trim() || messages.length === 0) return []
+      try {
+        // 输入:完整历史(最多 40 条),reasoning/工具结果/工具参数压缩
+        // ——记忆提取需要全文语境,但细节(长思维链/大参数)无用
+        const history = messages
+          .slice(-40)
+          .map((m) => ({
+            ...m,
+            parts: m.parts.map((p) => {
+              if (p.type === 'reasoning') return { ...p, text: p.text.slice(0, 500) }
+              if (p.type === 'tool-result') return { ...p, result: p.result.slice(0, 800) }
+              if (p.type === 'tool-call') return { ...p, args: compressArgs(p.args) as Record<string, unknown> }
+              return p
+            }),
+          }))
+        // 与主引擎同源上下文:自定义提示词 + **现有记忆块**(提取必须知道
+        // 已记得什么,否则重复沉淀)。块读取失败静默跳过,不杀提取
+        let memoryBlock = ''
+        try {
+          const entries = (await deps.getMemoryStore?.()?.list()) ?? []
+          memoryBlock = formatMemoryBlock(entries)
+        } catch {
+          // 记忆读取失败:省略记忆块,继续提取
+        }
+        const system = buildMemoryExtractSystem([config.systemPrompt, memoryBlock])
+        // 单措辞 + 一次重试;60s 超时,noThinking 低强度——静默后台任务,
+        // 失败返回 [] 不打扰(不写错记忆是安全侧)
+        for (let retry = 0; retry < 2; retry++) {
+          try {
+            const result = await streamByConfig({
+              config: { ...config, reasoningEffort: 'low' },
+              system,
+              history,
+              tools: [],
+              signal: AbortSignal.timeout(60000),
+              onEvent: () => {},
+              jsonMode: true,
+              noThinking: true,
+            })
+            const memories = parseMemoriesJson(result.text)
+            if (memories.length > 0) return memories
+            // 空数组/垃圾输出:重试一次
+          } catch {
+            if (retry === 0) continue
+            break
+          }
+        }
+        return []
+      } catch {
+        return []
+      }
+    },
   }
 }
 
@@ -508,6 +643,13 @@ export function createMindAgent(deps: {
 }): {
   /** 静默揣测(无工具单轮,事件不转发 UI);失败/未配置返回空串 */
   guess(messages: AgentMessage[]): Promise<string>
+  /**
+   * 用户风格分析(2026-08-10 用户要求"主动回复有时模仿用户嘴癖"):
+   * 从对话中提炼用户可模仿的说话风格特征(口头禅/句式/称呼/emoji 等),
+   * 供主动回复的 hint 内部指令注入。无明显风格/语境不适合返回 ''(安全侧,
+   * 零 LLM 调用);失败同样返回 ''
+   */
+  analyzeUserStyle(messages: AgentMessage[]): Promise<string>
 } {
   return {
     async guess(messages: AgentMessage[]) {
@@ -569,6 +711,39 @@ export function createMindAgent(deps: {
             // 超长/空/垃圾:重试(重新组织)
           } catch {
             if (retry < MIND_MAX_RETRIES - 1) continue
+            break
+          }
+        }
+        return ''
+      } catch {
+        return ''
+      }
+    },
+    async analyzeUserStyle(messages: AgentMessage[]) {
+      const config = deps.getConfig()
+      if (!config.apiKey.trim() || messages.length === 0) return ''
+      try {
+        const recent = recentMessages(messages)
+        const system = buildUserStyleSystem([config.systemPrompt])
+        // 单措辞 + 一次重试;60s 超时,noThinking——风格分析是廉价决策,
+        // 失败返回 ''(不注入风格指令,主动回复照常,安全侧)
+        for (let retry = 0; retry < 2; retry++) {
+          try {
+            const result = await streamByConfig({
+              config: { ...config, reasoningEffort: 'low' },
+              system,
+              history: recent,
+              tools: [],
+              signal: AbortSignal.timeout(60000),
+              onEvent: () => {},
+              jsonMode: true,
+              noThinking: true,
+            })
+            const style = parseStyleJson(result.text)
+            if (style) return style
+            // 空 style/垃圾输出:重试一次
+          } catch {
+            if (retry === 0) continue
             break
           }
         }

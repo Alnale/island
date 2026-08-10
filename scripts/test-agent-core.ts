@@ -18,7 +18,22 @@ import path from 'node:path'
 import { createMemoryStore, formatMemoryBlock } from '../electron/agent/memory'
 import { createMCPManager } from '../electron/agent/mcp'
 import { createSkillLoader } from '../electron/agent/skills'
-import { createAgentEngine, createConfigTools, parseManualCall, findManualTool, compressArgs, parseTitleJson, extractJsonTitle, validateRequiredArgs } from '../electron/agent/engine'
+import {
+  createAgentEngine,
+  createConfigTools,
+  parseManualCall,
+  findManualTool,
+  compressArgs,
+  parseTitleJson,
+  extractJsonTitle,
+  validateRequiredArgs,
+  parseMemoriesJson,
+  parseStyleJson,
+  buildMemoryExtractSystem,
+  buildUserStyleSystem,
+  createSummaryAgent,
+  createMindAgent,
+} from '../electron/agent/engine'
 import { createTools } from '../electron/agent/tools'
 import { streamResponse } from '../electron/agent/deepseek'
 import {
@@ -1079,6 +1094,60 @@ await test('extractJsonTitle:严格解析,垃圾输出拒绝(回归 "[\'data\']"
   assert(extractJsonTitle('["data"]') === '', '双引号列表字面量应拒绝')
   assert(extractJsonTitle('不是JSON文本') === '', '非法文本应拒绝(不兜底原文)')
   assert(extractJsonTitle('') === '', '空串返回空')
+})
+
+// ---------------------------------------------------------------------------
+// 7.5 记忆提取 + 用户风格分析(2026-08-10 新增 Sub Agent 职能)
+// ---------------------------------------------------------------------------
+
+console.log('\n=== 记忆提取 + 用户风格分析 ===')
+
+await test('parseMemoriesJson:合法数组逐条校验,垃圾拒绝', () => {
+  const ok = parseMemoriesJson('{"memories": [{"content": "用户喜欢简洁回答", "type": "preference"}, {"content": "项目在 D:/work", "type": "fact"}]}')
+  assert(ok.length === 2, `应解析 2 条,实际 ${ok.length}`)
+  assert(ok[0].content === '用户喜欢简洁回答' && ok[0].type === 'preference', '首条内容/类型正确')
+  assert(ok[1].type === 'fact', 'fact 类型正确')
+  // 类型非法 → 回退 fact;content 缺失/空 → 丢弃
+  const bad = parseMemoriesJson('{"memories": [{"content": "xx", "type": "nonsense"}, {"type": "fact"}, {"content": "  "}]}')
+  assert(bad.length === 1 && bad[0].type === 'fact', `非法类型回退 fact、空内容丢弃,实际 ${JSON.stringify(bad)}`)
+  // 垃圾输出 → 空数组(安全侧:不污染记忆)
+  assert(parseMemoriesJson('不是JSON').length === 0, '非法文本返回空数组')
+  assert(parseMemoriesJson('{"other": 1}').length === 0, '无 memories 字段返回空数组')
+  assert(parseMemoriesJson('{"memories": "not-array"}').length === 0, 'memories 非数组返回空数组')
+  // Python 风格单引号 dict 可解析
+  const py = parseMemoriesJson("{'memories': [{'content': '单引号内容', 'type': 'workflow'}]}")
+  assert(py.length === 1 && py[0].type === 'workflow', 'Python 风格 dict 应解析')
+  // 超过 10 条截断
+  const many = parseMemoriesJson(`{"memories": ${JSON.stringify(Array.from({ length: 15 }, (_, i) => ({ content: `记忆${i}`, type: 'fact' })))}}`)
+  assert(many.length === 10, `单次最多 10 条,实际 ${many.length}`)
+})
+
+await test('parseStyleJson:合法 style 采信,空/垃圾拒绝', () => {
+  assert(parseStyleJson('{"style": "喜欢用「嗯嗯」开头,句尾常带~"}') === '喜欢用「嗯嗯」开头,句尾常带~', '标准 JSON 取 style')
+  assert(parseStyleJson("{'style': '单引号风格'}") === '单引号风格', 'Python 风格 dict 应解析')
+  assert(parseStyleJson('{"style": ""}') === '', '空 style 返回空')
+  assert(parseStyleJson('不是JSON') === '', '非法文本返回空')
+  assert(parseStyleJson('{"other": 1}') === '', '无 style 字段返回空')
+  assert(parseStyleJson('{"style": 123}') === '', 'style 非字符串返回空')
+})
+
+await test('buildMemoryExtractSystem / buildUserStyleSystem:拼装含指令,不炸', () => {
+  const mem = buildMemoryExtractSystem(['自定义提示词', '记忆块内容'])
+  assert(mem.includes('记忆沉淀师') && mem.includes('现有记忆') && mem.includes('记忆块内容'), '记忆提取系统提示应含指令与现有记忆块')
+  assert(buildMemoryExtractSystem(['提示词', '']).includes('记忆沉淀师'), '无记忆块不炸')
+  const style = buildUserStyleSystem(['自定义提示词'])
+  assert(style.includes('风格观察师'), '风格分析系统提示应含指令')
+})
+
+await test('extractMemories / analyzeUserStyle:无 Key 优雅失败(零 LLM 调用)', async () => {
+  const noKey = { apiKey: '', baseURL: '', model: '', systemPrompt: '', reasoningEffort: 'high' as const, mcpServers: [], skillsDirs: [] }
+  const summaryAgent = createSummaryAgent({ getConfig: () => noKey })
+  const mindAgent = createMindAgent({ getConfig: () => noKey })
+  const history = [{ id: 'u1', role: 'user' as const, parts: [{ type: 'text' as const, text: '你好' }] }]
+  assert((await summaryAgent.extractMemories(history)).length === 0, '无 Key 返回空数组')
+  assert((await summaryAgent.extractMemories([])).length === 0, '空历史返回空数组')
+  assert((await mindAgent.analyzeUserStyle(history)) === '', '无 Key 返回空串')
+  assert((await mindAgent.analyzeUserStyle([])) === '', '空历史返回空串')
 })
 
 // ---------------------------------------------------------------------------

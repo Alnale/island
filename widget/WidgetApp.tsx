@@ -572,12 +572,19 @@ export default function WidgetApp() {
     // 拖拽中不关闭穿透:鼠标可能已移出岛体(如窗口被屏幕边缘钳制),
     // 窗口仍需接收指针事件(依赖指针捕获持续送达)
     if (dragRef.current?.dragging) return
+    // 全屏中不关闭穿透(2026-08-10 修复"全屏视频部分按钮失灵"):
+    // 全屏层 = 100% viewport,交互面是整个窗口——岛体 rect 保持全屏前
+    // 尺寸,鼠标可能在全屏层上岛体 rect 之外的区域(底部控件条);
+    // leave 误开穿透后事件被吞,mouseenter 永不触发 = 点击全丢。
+    // 退出全屏后事件流恢复,leave 照常管理
+    if (fullscreenRef.current) return
     lastPointerPollRef.current = false
     window.desktop?.pointer(false)
   }, [])
   // 兜底:鼠标移出窗口(forward 模式下 leave 可能丢失)
   const handleRootMouseLeave = useCallback(() => {
     if (dragRef.current?.dragging) return
+    if (fullscreenRef.current) return
     lastPointerPollRef.current = false
     window.desktop?.pointer(false)
   }, [])
@@ -614,11 +621,22 @@ export default function WidgetApp() {
             const r = island.getBoundingClientRect()
             const sx = info.bounds.x + r.left
             const sy = info.bounds.y + r.top
-            const inside =
-              info.cursor.x >= sx &&
-              info.cursor.x <= sx + r.width &&
-              info.cursor.y >= sy &&
-              info.cursor.y <= sy + r.height
+            // 全屏时按窗口 bounds 判定(2026-08-10 修复"全屏视频部分按钮
+            // 失灵"):全屏层 = 100% viewport,交互面是整个窗口,而岛体
+            // rect 保持全屏前尺寸——鼠标移到全屏层上岛体 rect 之外的
+            // 区域(底部控件条)会被误判 inside=false 校正开穿透,点击被
+            // 吞(实测:全屏控件按钮失灵,拖拽后才恢复);全屏期间鼠标在
+            // 窗口内即视为在交互面上(全屏层必在窗口内,含媒体岛全屏
+            // 放大到显示器工作区的场景)
+            const inside = fullscreenRef.current
+              ? info.cursor.x >= info.bounds.x &&
+                info.cursor.x <= info.bounds.x + info.bounds.width &&
+                info.cursor.y >= info.bounds.y &&
+                info.cursor.y <= info.bounds.y + info.bounds.height
+              : info.cursor.x >= sx &&
+                info.cursor.x <= sx + r.width &&
+                info.cursor.y >= sy &&
+                info.cursor.y <= sy + r.height
             // 以主进程**实际**穿透状态为准校正(2026-08-10 二轮修复:事件/
             // 轮询竞态可能让渲染端意图与主进程脱节——直接比对
             // info.ignoreMouseEvents,不一致即校正,不再依赖 last 记忆);

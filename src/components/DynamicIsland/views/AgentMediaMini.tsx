@@ -145,11 +145,33 @@ export function AgentMediaMini({
       dispatchAgentMedia('play', { kind: 'video', src: media.src, playing: true, position })
     }
   }
+  // 进度条自动隐藏(2026-08-10 用户要求"鼠标移开视频岛后过几秒自动
+  // 隐藏"):播放中鼠标移出岛体 2.5s 后进度条行淡出(纯视频画面);
+  // 移回/暂停/拖拽进度恢复显示。暂停不隐藏(要看进度条/时间)
+  const [barHidden, setBarHidden] = useState(false)
+  const barHideTimerRef = useRef(0)
+  useEffect(() => () => window.clearTimeout(barHideTimerRef.current), [])
+  const showBar = () => {
+    setBarHidden(false)
+    window.clearTimeout(barHideTimerRef.current)
+  }
+  useEffect(() => {
+    if (!playing) showBar()
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 暂停恢复显示
+  }, [playing])
   const pct = duration > 0 && Number.isFinite(duration) ? Math.min(100, (current / duration) * 100) : 0
   return (
     <div
       ref={wrapRef}
       className={`island-agent-mini${fullscreen ? ' fullscreen' : ''}${leavingFs ? ' leaving-fullscreen' : ''}`}
+      onMouseEnter={showBar}
+      onMouseLeave={() => {
+        // 播放中移出 → 2.5s 后隐藏;拖拽进度中不隐藏;暂停不进入隐藏
+        if (playing && !scrubbingRef.current) {
+          window.clearTimeout(barHideTimerRef.current)
+          barHideTimerRef.current = window.setTimeout(() => setBarHidden(true), 2500)
+        }
+      }}
     >
       {media.kind === 'img' ? (
         <>
@@ -230,9 +252,10 @@ export function AgentMediaMini({
             </button>
           )}
           {/* 进度条 + 时间(2026-08-09 用户要求):底部渐变遮罩条,
-              padding-right 预留全屏按钮角位(参照消息气泡控件层) */}
+              padding-right 预留全屏按钮角位(参照消息气泡控件层);
+              鼠标移开自动隐藏,见 barHidden 逻辑 */}
           <div
-            className="island-agent-mini-bar"
+            className={`island-agent-mini-bar${barHidden ? ' ui-hidden' : ''}`}
             onPointerDown={(event) => {
               if (event.button !== 0) return
               event.preventDefault()
