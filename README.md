@@ -15,7 +15,8 @@
   (docs/TECH.md)按你的兴趣介绍和引导使用。
 
 技术栈:**Electron 43 + React 19 + TypeScript + Vite**,通过 Windows 系统媒体
-会话(SMTC)与系统媒体交互,打包为免安装的便携版与 NSIS 安装版。
+会话(SMTC)与系统媒体交互。项目当前处于**源码运行/开发阶段**(不提供安装
+发行版),运行方式见[快速开始](#快速开始)与[开发与构建](#开发与构建)。
 
 > 开发者与详细技术说明见 [docs/TECH.md](docs/TECH.md)(约 3000 行技术文档)
 > 与 [WIDGET-README.md](WIDGET-README.md)(挂件部署/调试说明)。
@@ -40,13 +41,13 @@
 
 ## 快速开始
 
-### 获取
+### 获取与运行
 
-打包产物在 `release/` 目录(或从 GitHub Releases 下载),二选一:
+项目以**源码方式运行**(当前不提供安装发行版),需要 Node.js 环境:
 
-- **便携版**:解压即用,无需安装(绿色版);
-- **安装版**:NSIS 安装向导,可选创建开始菜单/桌面快捷方式;卸载时
-  **默认保留个人数据**(可勾选一并删除,数据删除不可恢复)。
+1. 安装依赖:`pnpm install`;
+2. 启动挂件:`pnpm dev:widget`(构建挂件页面 + 启动 Electron,灵动岛出现在
+   屏幕顶部居中)。
 
 ### 启动与退出
 
@@ -306,9 +307,8 @@ A: 检查设置开关、间隔(默认 15 分钟)、是否 Agent 模式、是否�
 A: 缩放只放大面板/窗口尺寸,UI 元素(文字/按钮)不缩放——用户明确要求
 (让程序大一点、眼睛不累)。
 
-**Q: 打包版启动即崩 / 改了引擎没生效?**
-A: 前者见技术文档 2.3(files 漏列 .cjs);后者重跑 build:electron
-(dev:widget 已前置)。
+**Q: 改了引擎没生效?**
+A: 重跑 build:electron(dev:widget 已前置)。
 
 **Q: 视频"无法播放"?**
 A: 格式限制:窗口内只支持 H.264 mp4 / webm(vp8-vp9)/ ogg;HEVC(H.265)
@@ -327,7 +327,6 @@ pnpm dev:widget      # 构建挂件页面并启动 Electron(日常调试主入�
 pnpm build           # tsc -b 类型检查 + Web 版构建
 pnpm build:widget    # 仅构建挂件页面
 pnpm build:electron  # esbuild 打包 Agent 引擎 + SMTC 桥
-pnpm dist:win        # 完整打包(便携版 + NSIS 安装版 → release/)
 pnpm lint            # oxlint
 pnpm bridge          # 独立运行系统媒体桥接脚本(单独调试 SMTC)
 pnpm watch:electron  # 热重建 Agent 引擎/桥
@@ -348,7 +347,7 @@ pnpm test:markdown    # Markdown 解析器测试(39 断言)
 src/                        # Web 演示版 + 共享岛体组件
 widget/                     # 桌面挂件入口(挂件宿主/样式/类型)
 electron/                   # 主进程 + Agent 引擎源码与产物
-tools/                      # 外部工具(bili 随包;xxt/docflow dev 回退)
+tools/                      # 外部工具(bili / xxt / docflow,源码与脚本)
 scripts/                    # 构建/测试脚本 + mock MCP 服务器
 docs/TECH.md                # ★ 技术文档(约 3000 行,LLM 功能引导知识库)
 ```

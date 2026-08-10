@@ -24,10 +24,9 @@ import { registerTask, setTaskDoneHandler, updateTask } from './tasks'
 import type { AgentTool, ToolParams } from './types'
 
 /**
- * 内置工具根目录(2026-08-07 三个外部工具移植进 tools/,随安装包发行):
- * - 打包版:extraResources → resources/tools(process.resourcesPath)
- * - dev / 测试:项目根 tools/(cwd = 项目根;不用 __dirname —— agent.cjs
- *   是 CJS 而测试 bundle 是 ESM,__dirname 在 ESM 下不可用(实测报错))
+ * 内置工具根目录(2026-08-07 三个外部工具移植进 tools/):
+ * 项目根 tools/(cwd = 项目根;不用 __dirname —— agent.cjs
+ * 是 CJS 而测试 bundle 是 ESM,__dirname 在 ESM 下不可用(实测报错))
  */
 function toolsRoot(): string {
   const res = process.resourcesPath ? path.join(process.resourcesPath, 'tools') : ''
@@ -35,7 +34,7 @@ function toolsRoot(): string {
 }
 
 /** 用户数据目录(可写;bili 下载落点 / xxt 登录态 / docflow 运行时产物;
- * 打包后 = %APPDATA%/dynamic-island;测试回退临时路径) */
+ * = %APPDATA%/dynamic-island;测试回退临时路径) */
 function userDataDir(): string {
   try {
     return app.getPath('userData')
@@ -44,25 +43,22 @@ function userDataDir(): string {
   }
 }
 
-/** xxt 打包产物(随包 exe,playwright 内置,pyinstaller onedir 在
- * dist/xxt/ 下;不存在时回退系统 python + 源码脚本) */
+/** xxt 可执行产物(本地构建的 pyinstaller onedir 在 dist/xxt/ 下;
+ * 不存在时回退系统 python + 源码脚本) */
 const XXT_EXE = path.join(toolsRoot(), 'xxt', 'dist', 'xxt', 'xxt.exe')
-/** xxt 源码脚本(dev 模式回退用) */
+/** xxt 源码脚本(python 模式) */
 const XXT_SCRIPT = path.join(toolsRoot(), 'xxt', 'auto_answer.py')
-/** bili-tool 二进制(纯 Rust 单二进制,随包;查询命令 --json 输出到 stdout) */
+/** bili-tool 二进制(纯 Rust 单二进制;查询命令 --json 输出到 stdout) */
 const BILI_BIN = path.join(toolsRoot(), 'bili', 'bili-tool.exe')
 /**
  * bili-tool 工作目录(**必须显式固定**):config 的 outdir=downloads 是相对
- * 路径,不指定 cwd 时下载会落在 Electron 的启动目录(打包版可能是
- * System32/exe 目录,用户和 LLM 都找不到);固定到 userData/bili
- * (安装目录只读,下载落点必须可写)——下载落在 userData/bili/downloads/
+ * 路径,不指定 cwd 时下载会落在 Electron 的启动目录(用户和 LLM 都找不到);
+ * 固定到 userData/bili——下载落在 userData/bili/downloads/
  */
 const BILI_CWD = path.join(userDataDir(), 'bili')
 /**
- * bili-tool 环境(2026-08-07 随包发行):base_dir 经 BILI_BASE_DIR 指向
- * userData/bili —— exe 在安装目录(只读),cookies.json/配置写不进;
- * dev 模式 tools/bili 可写也统一落 userData(登录态与下载同目录,
- * 卸载清理一致)
+ * bili-tool 环境:base_dir 经 BILI_BASE_DIR 指向 userData/bili ——
+ * cookies.json/配置落可写目录(登录态与下载同目录,清理一致)
  */
 const BILI_ENV = {
   ...process.env,
@@ -97,10 +93,10 @@ function absolutizeBiliPath(rel: string): string {
   return path.join(BILI_CWD, p)
 }
 
-/** 运行 xxt 工具(打包 = 内置 xxt.exe(playwright 内置,浏览器用系统
- * Edge);dev = 系统 python + 源码脚本;收集 stdout,超时杀进程)。
+/** 运行 xxt 工具(本地构建的 xxt.exe 存在则优先,否则系统 python +
+ * 源码脚本;收集 stdout,超时杀进程)。
  * 浏览器登录态/截图目录经环境变量隔离到 userData:原 .browser_profile
- * 含用户登录态,绝不随安装包分发(2026-08-07 随包发行改造) */
+ * 含用户登录态,不随仓库分发(2026-08-07 改造) */
 function runXxt(args: string[], timeoutMs: number): Promise<string> {
   return new Promise((resolve, reject) => {
     const env = {
@@ -489,17 +485,16 @@ function probeDocflow(): Promise<boolean> {
 }
 
 /**
- * 确保 DocFlow 服务在跑:未运行则**自动拉起**(2026-08-07 随包发行改造:
- * 打包 = 内置 docflow.exe(pyinstaller 全量打包,重依赖内置);
- * dev = 系统 python + server.py),轮询等待就绪——冻结打包启动慢
- * (warmup imports + onnxruntime 加载),给 60s
+ * 确保 DocFlow 服务在跑:未运行则**自动拉起**(2026-08-07 改造:
+ * 本地构建的 docflow.exe 存在则优先,否则系统 python + server.py),
+ * 轮询等待就绪——冻结启动慢(warmup imports + onnxruntime 加载),给 60s
  */
 async function ensureDocflowInner(): Promise<void> {
   if (await probeDocflow()) return
   const exe = path.join(toolsRoot(), 'docflow', 'dist', 'docflow', 'docflow.exe')
   const script = path.join(toolsRoot(), 'docflow', 'server.py')
   if (!existsSync(exe) && !existsSync(script)) {
-    throw new Error('DocFlow 工具缺失(安装包 tools/docflow 未找到)')
+    throw new Error('DocFlow 工具缺失(tools/docflow 未找到)')
   }
   docflowProc = existsSync(exe)
     ? spawn(exe, [], { windowsHide: true, stdio: 'ignore' })
@@ -511,7 +506,7 @@ async function ensureDocflowInner(): Promise<void> {
   for (;;) {
     if (await probeDocflow()) return
     if (Date.now() > deadline) {
-      throw new Error('DocFlow 服务启动超时,请检查安装包 tools/docflow 是否完整')
+      throw new Error('DocFlow 服务启动超时,请检查 tools/docflow 是否完整')
     }
     await new Promise((r) => setTimeout(r, 1000))
   }
@@ -547,8 +542,8 @@ async function docConvert(params: ToolParams): Promise<string> {
     typeof params.outputDir === 'string' && params.outputDir ? params.outputDir : path.dirname(inputPath)
   const timeoutMs = Math.min(Math.max(Number(params.waitTimeout) || 120, 10), 600) * 1000
 
-  // 1. 服务探测:未运行则自动拉起(2026-08-07 随包发行——用户无需
-  // 手动 python server.py;dev 用系统 python,打包用内置 docflow.exe)
+  // 1. 服务探测:未运行则自动拉起(2026-08-07——用户无需手动
+  // python server.py;优先本地构建的 docflow.exe,否则系统 python)
   await ensureDocflow()
 
   // 2. 上传(mode=to_markdown 走 Markdown 转换;否则按扩展名自动判定)
@@ -747,8 +742,7 @@ function extractMediaPathFromStart(command: string, cwd: string): string | null 
 /**
  * 功能引导文档路径(2026-08-10,get_feature_guide 工具):LLM 读取
  * docs/TECH.md(第 11 章 = 功能清单与使用引导)向用户介绍灵动岛功能。
- * - 打包版:extraResources → resources/docs/TECH.md(process.resourcesPath)
- * - dev / 测试:项目根 docs/(cwd;与 toolsRoot() 同款双环境解析)
+ * 项目根 docs/(cwd;与 toolsRoot() 同款解析)
  */
 function guideDocPath(): string {
   const res = process.resourcesPath ? path.join(process.resourcesPath, 'docs', 'TECH.md') : ''
@@ -758,9 +752,7 @@ function guideDocPath(): string {
 /**
  * 系统音量脚本路径(2026-08-10,set_system_volume 工具):winmm
  * waveOutGetVolume/SetVolume 读/写系统主音量。
- * - 打包版:extraResources → resources/bridge/system-volume.ps1
- *   (与 smtc-reader.ps1 同款放 asar 外)
- * - dev:electron/system-volume.ps1
+ * electron/system-volume.ps1(与 smtc-reader.ps1 同目录)
  */
 function volumeScriptPath(): string {
   const res = process.resourcesPath ? path.join(process.resourcesPath, 'bridge', 'system-volume.ps1') : ''
@@ -1215,7 +1207,7 @@ export function createTools(deps: {
         const url = String(params.url ?? '')
         if (action !== 'login' && !url) throw new Error('该操作需要 url 参数(作业页面链接)')
         if (!existsSync(XXT_EXE) && !existsSync(XXT_SCRIPT)) {
-          throw new Error('xxt 工具缺失(安装包 tools/xxt 未找到)')
+          throw new Error('xxt 工具缺失(tools/xxt 未找到)')
         }
         const args = [action]
         if (url) args.push('--url', url)

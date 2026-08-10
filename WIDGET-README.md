@@ -1,7 +1,7 @@
 # 灵动岛桌面挂件 — 部署与调试说明
 
-本文档是**桌面挂件版**(widget/ 入口 + Electron 主进程)的部署、运行、
-调试与发布说明,面向维护者。用户使用指南见 [README.md](README.md);
+本文档是**桌面挂件版**(widget/ 入口 + Electron 主进程)的运行、开发与
+调试说明,面向维护者。用户使用指南见 [README.md](README.md);
 完整技术文档(架构/实现/踩坑/测试,约 3000 行)见 [docs/TECH.md](docs/TECH.md);
 引擎级操作手册(逐条踩坑实录)见 [CLAUDE.md](CLAUDE.md)。
 
@@ -14,7 +14,6 @@
 - [挂件版与 Web 演示版差异](#挂件版与-web-演示版差异)
 - [开发调试](#开发调试)
 - [UI 巡检(WIDGET_SCREENSHOT)](#ui-巡检widget_screenshot)
-- [打包与发布](#打包与发布)
 - [常见调试场景](#常见调试场景)
 - [技术债务与明确不做项](#技术债务与明确不做项)
 
@@ -25,7 +24,7 @@
 | 文档 | 面向 | 内容 |
 | --- | --- | --- |
 | README.md | 用户 | 功能/使用指南/FAQ |
-| **本文档** | 挂件维护者 | 部署、调试、巡检、打包 |
+| **本文档** | 挂件维护者 | 运行、调试、巡检 |
 | docs/TECH.md | 工程师 | 完整技术文档(架构/数据流/How-To/速查表) |
 | CLAUDE.md | Claude Code | 引擎级操作手册(踩坑实录/测试断言/约束) |
 
@@ -66,7 +65,6 @@ pnpm dev:widget      # 构建挂件页面 + 启动 Electron(日常调试主入�
 pnpm watch:electron  # 热重建 Agent 引擎/桥(监听 electron/agent/*.ts,
                      # 自动 esbuild 重建 + 重启 electron)
 pnpm bridge          # 独立运行系统媒体桥接脚本(单独调试 SMTC)
-pnpm dist:win        # 完整打包(便携版 + NSIS 安装版 → release/)
 ```
 
 ### 验证约定(用户要求)
@@ -149,50 +147,11 @@ WIDGET_SCREENSHOT=D:/tmp/agent WIDGET_SCREENSHOT_MODE=agent \
 
 ---
 
-## 打包与发布
-
-### 配置要点(electron-builder.yml)
-
-- `files`:dist-widget + electron 侧 .cjs。**main.cjs 顶层 require 的每个
-  .cjs 都要列进来**——漏一个打包版启动即报 "Cannot find module"(实测:
-  settings-store.cjs / screenshot-tests.cjs 曾漏列,安装版启动即崩);
-- `extraResources`:
-  - smtc-reader.ps1 / smtc-bridge.cs 放 asar 外(asar 内文件无法被
-    powershell/csc 直接打开);
-  - tools/bili(仅 bili-tool 随包;xxt/DocFlow 不随包,打包版缺失时工具报
-    「工具缺失」,dev 回退源码 + 系统 Python);
-  - docs/TECH.md(get_feature_guide 功能引导工具读取);
-- `electronDist`:直接复用本地已解压的 Electron(跳过 zip 下载/解压;
-  安全软件实时监控会锁住新解压的 electron.exe 导致目录重命名失败);
-- `asarUnpack`:bridge.cjs(桥接进程避免从 asar 内 fork)。
-
-### 卸载保留数据
-
-- `deleteAppDataOnUninstall: false`,由 `electron/nsis-custom.nsi` 的卸载
-  页面接管:卸载向导插入「保留我的数据(推荐)」复选框页**默认勾选**,
-  取消勾选才删除 `%APPDATA%\dynamic-island`;静默卸载(/S)按保留处理;
-- **nsis-custom.nsi 必须带 UTF-8 BOM**:无 BOM 的 UTF-8 中文在 GBK 系统
-  报 "Bad text encoding"(实测;上次"安装版"从未成功打包,release 里只有
-  便携版);
-- 开始菜单「卸载 灵动岛挂件.lnk」由 customInstall 补齐
-  (electron-builder 26 辅助安装不生成独立卸载快捷方式)。
-
-### 打包验证流程
-
-1. `pnpm dist:win`(仅用户明确要求时执行);
-2. 安装版安装 → 启动 → 卸载(勾选/不勾选保留数据各验一次);
-3. 便携版解压 → 启动;
-4. 打包版与 dev 差异:bili 走 resources/tools、doc_convert/xxt 报工具
-   缺失、文档经 resources/docs/TECH.md。
-
----
-
 ## 常见调试场景
 
 | 场景 | 做法 |
 | --- | --- |
 | 改了 electron/agent/*.ts 没生效 | 重跑 build:electron(dev:widget 已前置;或 watch:electron) |
-| 打包版启动即崩 | 查 electron-builder.yml files 是否漏列新 .cjs |
 | 窗口越拖越大 | 全屏期间 setWinSize 出口(fsLockedSize + resize 校正,见 TECH.md 6.11) |
 | 透明窗口布局漂移 | 垂直居中用 transform: translateY(-50%),不用 translate 属性 |
 | 点击穿透点不到 | 鼠标悬停岛体(岛体 mouseenter 切换接收鼠标) |
@@ -219,4 +178,4 @@ WIDGET_SCREENSHOT=D:/tmp/agent WIDGET_SCREENSHOT_MODE=agent \
 ## 更新记录
 
 - 2026-08-10:重写为挂件部署/调试说明(原"实现技术笔记"内容并入
-  docs/TECH.md);新增 get_feature_guide 工具与 docs/TECH.md 收录打包。
+  docs/TECH.md);新增 get_feature_guide 工具。

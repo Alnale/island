@@ -53,7 +53,6 @@ B站查询与下载、文档转换、超星答题等),并挂载 MCP 服务、技
 | 桌面壳 | Electron 43 | 透明无边框窗口、托盘、SMTC 桥接 utilityProcess |
 | 渲染 | React 19 + TypeScript + Vite | 双入口共享一个岛体组件 |
 | 构建 | esbuild | Electron 侧 agent.cjs / bridge.cjs 打包(零第三方依赖) |
-| 打包 | electron-builder 26 | 便携版 + NSIS 安装版 |
 | 系统媒体 | Windows SMTC | PowerShell 读取 + C# WinRT 桥接 |
 | LLM | DeepSeek / Anthropic API | Responses(默认)/ Chat / Anthropic Messages 三 provider |
 | 存储 | localStorage + IndexedDB + settings.json | 参数 / 媒体数据 / 引擎配置 |
@@ -107,7 +106,6 @@ dynamic-island/
 │   ├── bridge.cjs              # esbuild 产物(SMTC 桥,不入库)
 │   ├── settings-store.cjs      # 设置持久化(原子写/加密)
 │   ├── screenshot-tests.cjs    # UI 巡检(截图/断言,~1160 行)
-│   ├── nsis-custom.nsi         # NSIS 卸载保留数据页面
 │   └── agent/                  # Agent 引擎源码(TypeScript)
 │       ├── engine.ts           # 引擎循环/工具执行/子代理/主动陪伴
 │       ├── provider.ts         # 三 provider 统一入口
@@ -126,10 +124,10 @@ dynamic-island/
 │       ├── tasks.ts            # 通用后台任务注册表
 │       ├── constants.ts        # 共享常量(零 node 依赖)
 │       └── types.ts            # 引擎类型(零 node 依赖)
-├── tools/                      # 外部工具(随包/源码)
-│   ├── bili/                   # bili-tool(Rust 单二进制,随包)
-│   ├── xxt/                    # 超星答题(不随包,dev 回退 python)
-│   └── docflow/                # 文档转换 Flask 服务(不随包)
+├── tools/                      # 外部工具(源码/脚本,dev 直跑)
+│   ├── bili/                   # bili-tool(Rust 单二进制)
+│   ├── xxt/                    # 超星答题(python 脚本)
+│   └── docflow/                # 文档转换 Flask 服务(python)
 ├── scripts/
 │   ├── test-agent-core.mjs     # 引擎核心测试入口(83 用例)
 │   ├── test-agent-core.ts      # 引擎测试源码
@@ -173,7 +171,6 @@ pnpm build           # tsc -b 类型检查 + Web 版构建
 pnpm build:widget    # 仅构建挂件页面 → dist-widget/
 pnpm build:electron  # esbuild 打包 SMTC 桥(→ electron/bridge.cjs)
                      # + Agent 引擎(→ electron/agent.cjs)+ 生成图标
-pnpm dist:win        # 完整打包(electron-builder:便携版 + NSIS 安装版 → release/)
 pnpm lint            # oxlint
 pnpm bridge          # 独立运行系统媒体桥接脚本(单独调试 SMTC)
 pnpm watch:electron  # 热重建 Agent 引擎/桥(监听 electron/agent/*.ts 与
@@ -193,41 +190,6 @@ pnpm test:markdown    # 消息气泡 Markdown 解析器测试(39 断言)
   (agent 模式等)只在用户明确要求时执行(每轮全量巡检耗时 8-10 分钟且依赖
   真实 LLM)。默认完成标准 = 构建 + dev:widget 启动 + 类型检查 + lint
   + 单测(`tsc -b` / `pnpm lint` / `node scripts/test-agent-core.mjs`)。
-- 例外:`pnpm dist:win` 打包出安装包仍只在用户明确要求时执行。
-
-### 2.3 打包发行
-
-`electron-builder.yml` 关键配置:
-
-- `files`:dist-widget + electron 侧 .cjs 脚本。**main.cjs 顶层 require 的
-  每个 .cjs 都要列进来**——漏一个打包版启动即报 "Cannot find module"
-  (实测:settings-store.cjs / screenshot-tests.cjs 曾漏列,安装版启动即崩)。
-- `extraResources`:桥接的 smtc-reader.ps1 / smtc-bridge.cs 放 asar 外
-  (asar 内文件无法被 powershell/csc 直接打开);内置工具仅 bili 打进安装包
-  (用户要求;xxt/DocFlow 不随包,打包版缺失时工具报「工具缺失」,dev 回退
-  源码 + 系统 Python);docs/TECH.md 随包(LLM 功能引导工具读取)。
-- `electronDist`:直接复用本地已解压的 Electron(跳过 zip 下载/解压;
-  安全软件实时监控会锁住新解压的 electron.exe 导致目录重命名失败)。
-- `asarUnpack`:bridge.cjs(桥接进程避免从 asar 内 fork)。
-
-### 2.4 卸载保留数据(NSIS)
-
-- `deleteAppDataOnUninstall: false`(原 true 确认卸载即删、无勾选框),
-  改由 `nsis-custom.nsi` 的卸载页面接管:
-  - `customUnWelcomePage` 钩子(assistedInstaller.nsh 检测到已定义就用它
-    替代默认卸载欢迎页)在标准欢迎页**之前**插入 nsDialogs 复选框页
-    「保留我的数据(推荐)」**默认勾选**(防误删,数据删除不可恢复);
-  - `customUnInstall` 里 `$IslandKeepData != BST_CHECKED` 才
-    `RMDir /r "$APPDATA\dynamic-island"`(打包后 userData 目录名 =
-    package.json 的 `name`,不是中文 productName);
-  - 静默卸载(/S)跳过页面按保留处理。
-- **nsis-custom.nsi 必须带 UTF-8 BOM**:NSIS 的 `!include` 只按 BOM 检测编码
-  (`-INPUTCHARSET` 只作用于主脚本),无 BOM 的 UTF-8 中文在 GBK 系统报
-  "Bad text encoding"(实测;上次"安装版"从未成功打包,release 里只有便携版)。
-- **开始菜单卸载入口**:electron-builder 26 辅助安装不生成独立的"卸载"
-  快捷方式,由 `nsis.include: electron/nsis-custom.nsi` 补齐(customInstall
-  创建「卸载 灵动岛挂件.lnk」指向 `$INSTDIR\Uninstall 灵动岛挂件.exe`,
-  customUnInstall 卸载时删除)。
 
 ---
 
@@ -599,10 +561,9 @@ send(text, history)
 
 #### 5.4.1 bili(B站)
 
-- 调内置 bili-tool(仅 bili 打进安装包;`toolsRoot()` 按
-  `process.resourcesPath` / cwd 双环境解析);spawn 注入
-  `BILI_BASE_DIR = userData/bili`(exe 在安装目录只读,cookies/登录态落
-  userData);**BILI_CWD 目录必须存在**(模块加载时 mkdirSync recursive;
+- 调内置 bili-tool(`toolsRoot()` 解析到 `tools/bili`,dev 下即项目目录);
+  spawn 注入 `BILI_BASE_DIR = userData/bili`(登录态/下载落 userData);
+  **BILI_CWD 目录必须存在**(模块加载时 mkdirSync recursive;
   从 node:fs 顶层导入——promises 命名空间没有 mkdirSync,曾调 undefined
   被空 catch 吞掉)。
 - **对话内扫码登录**:bili-tool login 支持 `--qrcode-img <path>` 生成
@@ -625,20 +586,19 @@ send(text, history)
 #### 5.4.2 doc_convert(文档转换)
 
 对接内置 DocFlow 服务 http://127.0.0.1:5000:**首次调用自动拉起服务**
-(打包 = 内置 docflow.exe,dev = 系统 python + `tools/docflow/server.py`;
-轮询 /api/engine 就绪,60s 超时,并发互斥单例防多次拉起;服务常驻,
-`disposeTools` 随引擎 dispose 清理)→ multipart 上传(files+mode=
-to_markdown)→ /api/convert → 轮询 status → 下载到输出目录。
-`AgentTool.timeoutMs = 200s` 覆盖。
+(系统 python + `tools/docflow/server.py`;轮询 /api/engine 就绪,60s 超时,
+并发互斥单例防多次拉起;服务常驻,`disposeTools` 随引擎 dispose 清理)
+→ multipart 上传(files+mode=to_markdown)→ /api/convert → 轮询 status →
+下载到输出目录。`AgentTool.timeoutMs = 200s` 覆盖。
 
 #### 5.4.3 xxt(超星学习通自动答题)
 
-打包 = 内置 xxt.exe(pyinstaller onedir,playwright 内置,浏览器走系统
-Edge channel),dev = 系统 python + `tools/xxt/auto_answer.py`;登录态/
-截图目录经环境变量 XXT_PROFILE_DIR/XXT_SCREENSHOT_DIR 隔离到
-userData/xxt-profile(原 .browser_profile 含用户登录态,绝不随安装包分发);
-子命令 login/crawl/fill(--answers JSON)/check/submit/screenshot,--url
-必填,login 300s 超时其余 180s(`AgentTool.timeoutMs = 310s` 覆盖)。
+dev = 系统 python + `tools/xxt/auto_answer.py`(playwright,浏览器走系统
+Edge channel);登录态/截图目录经环境变量 XXT_PROFILE_DIR/
+XXT_SCREENSHOT_DIR 隔离到 userData/xxt-profile(原 .browser_profile 含
+用户登录态,不随仓库分发);子命令 login/crawl/fill(--answers JSON)/
+check/submit/screenshot,--url 必填,login 300s 超时其余 180s
+(`AgentTool.timeoutMs = 310s` 覆盖)。
 
 ### 5.5 通用后台任务注册表(tasks.ts)
 
@@ -1388,8 +1348,7 @@ direction?('right'|'left'), wheelWhenOpen?}>`,四处复用:Agent 设置菜单 /
   路径含 % 需加引号;
 - 进程销毁走 taskkill /pid /T /F 连进程树(直接 kill 只杀 cmd 宿主,node
   子进程残留);
-- 透明无边框窗口实际宽比请求宽大 ~2px(set-size 补偿见 4.3);
-- 卸载保留数据页面(2.4)。
+- 透明无边框窗口实际宽比请求宽大 ~2px(set-size 补偿见 4.3)。
 
 ### 10.6 缓存前缀稳定性(省钱关键)
 
@@ -1934,11 +1893,10 @@ parts 重复回填(上下文成倍膨胀)。
 - **API Key 加密**:safeStorage(DPAPI)加密落盘(enc: 前缀,解密失败回退
   null 重填);
 - **xxt 登录态隔离**:XXT_PROFILE_DIR/XXT_SCREENSHOT_DIR 指向
-  userData/xxt-profile(原 .browser_profile 含用户登录态,绝不随安装包
-  分发);bili 登录态落 userData/bili(BILI_BASE_DIR);
+  userData/xxt-profile(原 .browser_profile 含用户登录态,不随仓库分发);
+  bili 登录态落 userData/bili(BILI_BASE_DIR);
 - **Markdown 渲染无注入面**:全部文本 React 转义,唯一例外 mermaid SVG
-  (securityLevel 'strict' 自带转义);
-- **卸载保留数据**:默认保留(勾选框默认选中),用户可显式选择删除。
+  (securityLevel 'strict' 自带转义)。
 
 ---
 
@@ -1982,7 +1940,6 @@ parts 重复回填(上下文成倍膨胀)。
 
 - **改了 electron/agent/*.ts 没生效**:必须重跑 pnpm build:electron
   (dev:widget 已前置,或 watch:electron 热重建);
-- **打包版启动即崩**:检查 electron-builder.yml files 是否漏列新 .cjs;
 - **测试**:node scripts/test-agent-core.mjs(引擎)/ pnpm test:markdown
   (解析器);巡检见第 8 章。
 
@@ -2137,7 +2094,6 @@ WidgetApp
 | 类型检查 | pnpm build(tsc -b + vite) |
 | lint | pnpm lint |
 | 单跑 SMTC 桥 | pnpm bridge |
-| 打包 | pnpm dist:win(便携 + 安装版 → release/) |
 | UI 巡检 | WIDGET_SCREENSHOT=<path> WIDGET_SCREENSHOT_QUIT=1 pnpm dev:widget |
 | 杀残留 electron | powershell Stop-Process -Name electron |
 
@@ -2156,7 +2112,6 @@ WidgetApp
 ### 22.3 常见坑(一分钟自查)
 
 - 改 electron/agent 没生效 → 重跑 build:electron(dev:widget 已前置);
-- 打包版启动即崩 → electron-builder.yml files 漏列新 .cjs;
 - 视频"无法播放" → 格式限制(H.264 mp4/webm/ogg)或 HEVC 扩展缺失;
 - 窗口越拖越大 → 全屏期间 setWinSize 出口(6.11);
 - 点击穿透点不到 → 鼠标悬停岛体;
@@ -2177,12 +2132,11 @@ WidgetApp
 4. `pnpm test:markdown`(解析器改动);
 5. `pnpm dev:widget` 实机验证(默认完成标准,配 timeout 自动退出;
    完整巡检只在用户明确要求时跑,需 WIDGET_SCREENSHOT_QUIT=1);
-6. 用户明确要求时才 `pnpm dist:win`;
-7. 同步文档:README(用户向)/ WIDGET-README(部署)/ docs/TECH.md(技术);
+6. 同步文档:README(用户向)/ WIDGET-README(部署)/ docs/TECH.md(技术);
    引擎/工具/常量改动同步 CLAUDE.md 对应章节与本文档第 5/7 章;
-8. 新增渲染端设置工具操作 → settingsTools.ts op 类型 + 桥方法 +
+7. 新增渲染端设置工具操作 → settingsTools.ts op 类型 + 桥方法 +
    main.cjs ISLAND_SETTINGS_OPS 白名单三处同步(漏白名单 = 安全侧失败);
-9. 新增 IPC → preload + desktop.d.ts + main.cjs safeHandle 三处同步。
+8. 新增 IPC → preload + desktop.d.ts + main.cjs safeHandle 三处同步。
 ---
 
 ## 第 23 章 双入口行为差异表

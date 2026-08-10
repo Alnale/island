@@ -14,10 +14,8 @@
     "build:widget": "vite build --mode widget --config vite.widget.config.ts",
     "build:electron": "node scripts/build-electron.mjs",
     "make:icon": "electron scripts/make-icon.cjs",
-    "gen:installer-bg": "node scripts/gen-installer-bg.mjs",
     "dev:widget": "pnpm build:electron && vite build --mode widget --config vite.widget.config.ts && electron .",
-  "watch:electron": "node scripts/watch-electron.mjs",
-    "dist:win": "pnpm build:widget && pnpm build:electron && electron-builder --win"
+    "watch:electron": "node scripts/watch-electron.mjs"
   },
   "dependencies": {
     "mermaid": "^11.16.1",
@@ -30,7 +28,6 @@
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.4",
     "electron": "^43.2.0",
-    "electron-builder": "^26.15.3",
     "esbuild": "^0.28.1",
     "oxlint": "^1.75.0",
     "typescript": "~6.0.2",

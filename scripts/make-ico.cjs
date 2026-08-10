@@ -1,7 +1,5 @@
 /**
  * 从 electron/icon.png 生成多尺寸标准 ICO(electron/icon.ico)。
- * 绕开 electron-builder 的 png→ico 转换缓存(该缓存对图标内容变化
- * 偶发不失效,导致 exe 嵌入旧图标)。
  * ICO 帧直接嵌入 PNG(Windows Vista+ 支持),尺寸 16/32/48/64/128/256。
  * 运行:node scripts/make-ico.cjs
  */

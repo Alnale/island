@@ -22,8 +22,7 @@ import { join } from 'node:path'
 const PORT = 8765
 /**
  * SMTC 读取脚本路径:默认 scripts/ 目录(直接运行时 cwd 为项目根);
- * Electron 挂件打包后通过 SMTC_READER_PATH 指向 resources 下的实际文件
- * (asar 内文件无法被 powershell 打开,必须解包到外部)
+ * Electron 挂件主进程经 SMTC_READER_PATH 指向 electron/ 下的实际文件
  */
 const READER_SCRIPT = process.env.SMTC_READER_PATH ?? join(process.cwd(), 'scripts', 'smtc-reader.ps1')
 /** 单条 PS 指令响应超时(ms) */

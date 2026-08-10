@@ -20,7 +20,7 @@ class NotificationStub {
 
 module.exports = {
   Notification: NotificationStub,
-  // tools.ts 随包改造后经 app.getPath('userData') 取运行时产物落点
+  // tools.ts 经 app.getPath('userData') 取运行时产物落点
   // (bili 下载 / xxt 登录态);测试环境返回固定假路径,不落盘
   app: {
     getPath() {
