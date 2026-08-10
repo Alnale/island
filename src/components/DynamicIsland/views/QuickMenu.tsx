@@ -137,13 +137,17 @@ export function QuickMenu<T>({
     onExpandChange?.(open)
   }, [open, onExpandChange])
   // 吞容器内滚轮的默认滚动(设置视图/聊天是滚动容器,不吞会整页跟滚;
-  // React onWheel 为 passive 无法 preventDefault——ScaleStepper 同款;
-  // 展开时放行:选项浮层是当时的交互面;编辑态也放行(输入交互面)
+  // React onWheel 为 passive 无法 preventDefault——ScaleStepper 同款)。
+  // **展开/编辑态也拦截(2026-08-10 修复"记忆类型按钮只能向上不能向下"):
+  // 记忆类型按钮悬浮即展开(onMouseEnter),原实现 open 时放行默认滚动
+  // ——向下滚轮(form 内容向下滚)抢在切换前生效,表现为"触发整体向下";
+  // 容器内滚轮一律拦截,切换与否由 React handleWheel 按 wheelWhenOpen
+  // 决定(展开时逐格切换),默认滚动永不触发
   useEffect(() => {
     const el = wrapRef.current
     if (!el) return
     const onNativeWheel = (event: globalThis.WheelEvent) => {
-      if (!openRef.current && !editingRef.current) event.preventDefault()
+      event.preventDefault()
     }
     el.addEventListener('wheel', onNativeWheel, { passive: false })
     return () => el.removeEventListener('wheel', onNativeWheel)

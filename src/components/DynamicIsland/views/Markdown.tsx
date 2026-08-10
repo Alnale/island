@@ -536,23 +536,22 @@ function VideoPlayer({
   }, [])
   // 挂载续播(2026-08-09 双向同步):小窗播放/seek 的进度经
   // readAgentMediaPosition 读回,面板重新挂载(收起后再展开)时从该
-  // 位置继续,不再从头;仅同 src、仅挂载时一次
-  // **播放中续播(2026-08-10 修复"视频岛切回对话窗口暂停")**:
-  // lastPlayingVideoSrc === cacheKey = 另一端(视频岛)播放中——seek 到
-  // 缓存位置后**继续播放**(原实现只 seek 不播放:autoPlay 标记已被首次
-  // 播放消费,切回永远暂停;播放状态经模块级跟踪,不经 props 传递)
+  // 位置继续,不再从头;仅同 src、仅挂载时一次。
+  // **只同步进度、不自动播放(2026-08-10 用户要求"自动播放只在元素
+  // 第一次加载到对话窗口时触发,之后都不会"):自动播放 = mediaAutoPlay
+  // 标记(当次对话首次流式落定);重挂载/视频岛切回仅 seek 到缓存位置,
+  // 播放由用户手动触发**(原 2026-08-10 二轮加的 lastPlayingVideoSrc
+  // 自动续播已按用户要求移除)
   useEffect(() => {
     const v = videoRef.current
     const pos = cacheKey ? readAgentMediaPosition(cacheKey) : undefined
     if (!v || !pos || pos <= 0) return
-    const resume = lastPlayingVideoSrc === cacheKey
     const start = () => {
       try {
         v.currentTime = pos
       } catch {
         // seek 失败忽略
       }
-      if (resume) void v.play().catch(() => {})
     }
     if (v.readyState >= 1) start()
     else v.addEventListener('loadedmetadata', start, { once: true })
@@ -1124,12 +1123,6 @@ const agentMediaPositions = new Map<string, number>()
 export function readAgentMediaPosition(src: string): number | undefined {
   return agentMediaPositions.get(src)
 }
-// 最后播放中的视频 src(2026-08-10 双向同步增强):dispatch('play'
-// playing:true) 记录、playing:false(仅同 src)清除——播放中的媒体在
-// 另一端挂载后**继续播放**(seek 到缓存位置 + play),而不只是暂停态
-// 显示。修复"视频岛切回对话窗口暂停":面板 MediaFrame 重挂载时
-// autoPlay 标记已被首次播放消费,原实现永远不自动播
-let lastPlayingVideoSrc: string | null = null
 // 媒体元素尺寸缓存(2026-08-10 小窗尺寸同步):面板 ↔ 小窗任一端的
 // 当前显示尺寸(宽 + 宽高比)经 dispatch('play') 写入;另一端挂载时
 // 按 src 读回——收起为多媒体岛时小窗 = 面板里媒体元素的尺寸,切回
@@ -1143,8 +1136,6 @@ export function dispatchAgentMedia(type: 'mount' | 'play' | 'unmount', media: Ag
     agentMediaPositions.set(media.src, media.position as number)
   }
   if (type === 'play' && media.kind === 'video') {
-    if (media.playing) lastPlayingVideoSrc = media.src
-    else if (lastPlayingVideoSrc === media.src) lastPlayingVideoSrc = null
     if (typeof media.width === 'number' && Number.isFinite(media.width) && media.width > 0) {
       agentMediaSizes.set(media.src, {
         width: Math.round(media.width),
