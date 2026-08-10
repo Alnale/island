@@ -196,8 +196,13 @@ export function formatMemoryBlock(entries: MemoryEntry[]): string {
   return `【长期记忆(对话中遵守,别自相矛盾;与你对话的是同一用户)】\n${body}`
 }
 
-/** 记忆工具(LLM 对话中读写记忆,自然语言沉淀) */
-export function createMemoryTools(store: MemoryStore): AgentTool[] {
+/** 记忆工具(LLM 对话中读写记忆,自然语言沉淀)
+ * getStore **惰性实时获取**(2026-08-10 修复"LLM 列出记忆 id 但设置视图
+ * 长期记忆为空"):引擎 tools 在创建时组装一次,若传入固定 store 实例,
+ * 清除数据(main.cjs 置 memoryStore=null 重建)后 LLM 工具仍操作旧实例
+ * (清除前的记忆),渲染端 agent:memory-get 读新实例 → 两处永久不一致;
+ * execute 时实时取,永远拿主进程最新实例 */
+export function createMemoryTools(getStore: () => MemoryStore | null): AgentTool[] {
   return [
     {
       name: 'remember',
@@ -219,6 +224,8 @@ export function createMemoryTools(store: MemoryStore): AgentTool[] {
         required: ['content'],
       },
       async execute(params: ToolParams) {
+        const store = getStore()
+        if (!store) throw new Error('记忆功能不可用(未注入记忆存储)')
         const type = String(params.type ?? 'fact') as MemoryEntry['type']
         if (!['preference', 'fact', 'workflow', 'lesson'].includes(type)) {
           throw new Error('type 仅支持 preference/fact/workflow/lesson')
@@ -245,6 +252,8 @@ export function createMemoryTools(store: MemoryStore): AgentTool[] {
         required: ['key'],
       },
       async execute(params: ToolParams) {
+        const store = getStore()
+        if (!store) throw new Error('记忆功能不可用(未注入记忆存储)')
         const n = await store.remove(String(params.key ?? '').trim())
         if (n === 0) throw new Error('未找到匹配的记忆')
         return `已删除 ${n} 条记忆`
@@ -265,6 +274,8 @@ export function createMemoryTools(store: MemoryStore): AgentTool[] {
         },
       },
       async execute(params: ToolParams) {
+        const store = getStore()
+        if (!store) throw new Error('记忆功能不可用(未注入记忆存储)')
         const entries = await store.list()
         const type = params.type ? String(params.type) : ''
         const keyword = params.keyword ? String(params.keyword) : ''
@@ -294,6 +305,8 @@ export function createMemoryTools(store: MemoryStore): AgentTool[] {
         required: ['id'],
       },
       async execute(params: ToolParams) {
+        const store = getStore()
+        if (!store) throw new Error('记忆功能不可用(未注入记忆存储)')
         const updated = await store.update(String(params.id ?? ''), {
           content: params.content ? String(params.content) : undefined,
           type: params.type as MemoryEntry['type'] | undefined,

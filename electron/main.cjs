@@ -1337,6 +1337,18 @@ safeHandle('agent:clear-data', async (scope) => {
     memoryStore = null
     evolutionHandle = null
     resetSettingsCache()
+    // 引擎随数据重建(2026-08-10 修复"LLM 列出记忆 id 但设置视图长期
+    // 记忆为空"):引擎 tools 创建时持有 store 引用,不清除则旧引用继续
+    // 操作已删除的旧记忆、与渲染端读的新实例永久不一致;dispose 清理
+    // MCP 子进程,懒加载在下次对话重建
+    if (agentEngine) {
+      try {
+        agentEngine.dispose()
+      } catch {
+        // already gone
+      }
+      agentEngine = null
+    }
     return { ok: true }
   }
   if (scope === 'tools') {

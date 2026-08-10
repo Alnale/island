@@ -32,6 +32,7 @@ import type {
   EngineDeps,
   McpServerConfig,
   MediaAttachment,
+  MemoryStoreLike,
   ToolParams,
 } from './types'
 
@@ -387,13 +388,21 @@ export function createAgentEngine(deps: EngineDeps): AgentEngine {
     return new Set(deps.getConfig().excludedTools ?? [])
   }
 
-  /** 记忆存储(主进程注入;未注入时记忆功能禁用) */
-  const memoryStore = deps.getMemoryStore?.() ?? null
+  /** 记忆存储(主进程注入;未注入时记忆功能禁用)。
+   * **必须实时获取,不能创建时捕获**:清除数据(main.cjs agentClearData
+   * 置 memoryStore=null)后主进程重建新实例——捕获旧引用会让 LLM 记忆
+   * 工具永远操作清除前的旧数据,而渲染端(agent:memory-get 实时读)读
+   * 新实例 → 两处永久不一致(实测:LLM 列出已删除记忆的 id,设置视图
+   * 长期记忆为空) */
+  function getMemoryStore(): MemoryStoreLike | null {
+    return deps.getMemoryStore?.() ?? null
+  }
   /** 记忆 → 系统提示块(静态段;按类型分组,变更才断缓存前缀) */
   async function getMemoryBlock(): Promise<string> {
-    if (!memoryStore) return ''
+    const store = getMemoryStore()
+    if (!store) return ''
     try {
-      const entries = await memoryStore.list()
+      const entries = await store.list()
       return formatMemoryBlock(entries)
     } catch {
       return ''
@@ -641,7 +650,9 @@ export function createAgentEngine(deps: EngineDeps): AgentEngine {
       ? createSettingsTools({ runIslandSettings: deps.runIslandSettings })
       : []),
     delegateTool,
-    ...(memoryStore ? createMemoryTools(memoryStore) : []),
+    // 记忆工具:getter 惰性实时获取(createMemoryTools 在引擎创建时组装
+    // 一次,固定 store 引用会在清除数据后操作已删除记忆,见 getMemoryStore)
+    ...(getMemoryStore() ? createMemoryTools(() => getMemoryStore()) : []),
     ...configTools,
     evolveTool,
     outputBudgetTool,
