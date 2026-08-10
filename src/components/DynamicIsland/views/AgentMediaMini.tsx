@@ -156,18 +156,32 @@ export function AgentMediaMini({
     }
   }
   // 进度条自动隐藏(2026-08-10 用户要求"鼠标移开视频岛后过几秒自动
-  // 隐藏"):播放中鼠标移出岛体 2.5s 后进度条行淡出(纯视频画面);
-  // 移回/暂停/拖拽进度恢复显示。暂停不隐藏(要看进度条/时间)
+  // 隐藏"):**空闲计时驱动**(2026-08-10 二轮,与对话播放器同款修复——
+  // 原实现只靠 mouseleave 计时,挂载时鼠标已在岛上则 leave 永不触发):
+  // 播放中任何交互(移入/移动/移出/拖进度)重启 2.5s 计时,超时进度条
+  // 行淡出(纯视频画面);暂停保持显示(要看进度条/时间)
   const [barHidden, setBarHidden] = useState(false)
   const barHideTimerRef = useRef(0)
+  const playingRef = useRef(playing)
+  playingRef.current = playing
   useEffect(() => () => window.clearTimeout(barHideTimerRef.current), [])
+  const restartBarTimer = () => {
+    window.clearTimeout(barHideTimerRef.current)
+    if (playingRef.current && !scrubbingRef.current) {
+      barHideTimerRef.current = window.setTimeout(() => setBarHidden(true), 2500)
+    }
+  }
   const showBar = () => {
     setBarHidden(false)
-    window.clearTimeout(barHideTimerRef.current)
+    restartBarTimer()
   }
   useEffect(() => {
-    if (!playing) showBar()
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- 暂停恢复显示
+    if (playing) restartBarTimer()
+    else {
+      setBarHidden(false)
+      window.clearTimeout(barHideTimerRef.current)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 播放状态变化驱动
   }, [playing])
   const pct = duration > 0 && Number.isFinite(duration) ? Math.min(100, (current / duration) * 100) : 0
   return (
@@ -175,13 +189,8 @@ export function AgentMediaMini({
       ref={wrapRef}
       className={`island-agent-mini${fullscreen ? ' fullscreen' : ''}${leavingFs ? ' leaving-fullscreen' : ''}`}
       onMouseEnter={showBar}
-      onMouseLeave={() => {
-        // 播放中移出 → 2.5s 后隐藏;拖拽进度中不隐藏;暂停不进入隐藏
-        if (playing && !scrubbingRef.current) {
-          window.clearTimeout(barHideTimerRef.current)
-          barHideTimerRef.current = window.setTimeout(() => setBarHidden(true), 2500)
-        }
-      }}
+      onMouseLeave={restartBarTimer}
+      onMouseMove={showBar}
     >
       {media.kind === 'img' ? (
         <>
@@ -279,9 +288,11 @@ export function AgentMediaMini({
             }}
             onPointerUp={() => {
               scrubbingRef.current = false
+              restartBarTimer() // 拖拽结束重启空闲计时(2.5s 无操作再隐藏)
             }}
             onPointerCancel={() => {
               scrubbingRef.current = false
+              restartBarTimer()
             }}
           >
             <div ref={barRef} className="island-agent-mini-track" aria-hidden="true">

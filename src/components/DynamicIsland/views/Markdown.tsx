@@ -618,19 +618,37 @@ function VideoPlayer({
     else v.pause()
   }
   // 控件自动隐藏(2026-08-10 用户要求"鼠标移开播放器后过几秒自动
-  // 隐藏"):播放中鼠标移出播放器区域 2.5s 后控件层淡出(纯视频画面,
-  // CSS opacity + pointer-events none);鼠标移回/暂停/拖拽进度恢复
-  // 显示。暂停不隐藏——用户要看进度条/状态
+  // 隐藏"):**空闲计时驱动**(2026-08-10 二轮修复"从视频岛切回对话窗口
+  // 控件不自动隐藏":原实现只靠 mouseleave 计时——切回时鼠标已停在
+  // 播放器上(mouseenter 不触发、leave 永不触发),控件一直显示,要
+  // 交互一下才开始计时)——播放中任何交互(移入/移动/移出/拖进度)
+  // 都会**重启 2.5s 空闲计时**,超时控件淡出(纯视频画面,CSS opacity +
+  // pointer-events none);暂停保持显示(用户要看进度条/状态)
   const [uiHidden, setUiHidden] = useState(false)
   const uiHideTimerRef = useRef(0)
+  const playingRef = useRef(playing)
+  playingRef.current = playing
   useEffect(() => () => window.clearTimeout(uiHideTimerRef.current), [])
+  // 重启空闲隐藏计时(播放中才进入;暂停/拖拽进度中不计时)
+  const restartHideTimer = () => {
+    window.clearTimeout(uiHideTimerRef.current)
+    if (playingRef.current && !scrubbingRef.current) {
+      uiHideTimerRef.current = window.setTimeout(() => setUiHidden(true), 2500)
+    }
+  }
   const showUi = () => {
     setUiHidden(false)
-    window.clearTimeout(uiHideTimerRef.current)
+    restartHideTimer()
   }
+  // 播放开始(含挂载续播:切回面板时鼠标已在播放器上,交互事件不触发
+  // ——playing effect 启动计时兜底)计时;暂停清除并保持显示
   useEffect(() => {
-    if (!playing) showUi()
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- 暂停恢复显示
+    if (playing) restartHideTimer()
+    else {
+      setUiHidden(false)
+      window.clearTimeout(uiHideTimerRef.current)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 播放状态变化驱动
   }, [playing])
   const seekFromPointer = (event: ReactPointerEvent<HTMLDivElement>) => {
     const bar = barRef.current
@@ -656,18 +674,8 @@ function VideoPlayer({
         if (event.button === 0) event.stopPropagation()
       }}
       onMouseEnter={showUi}
-      onMouseLeave={() => {
-        // 播放中移出 → 2.5s 后隐藏;拖拽进度中不隐藏(scrubbing 结束
-        // 自然显示);暂停不进入隐藏(playing effect 保持显示)
-        if (playing && !scrubbingRef.current) {
-          window.clearTimeout(uiHideTimerRef.current)
-          uiHideTimerRef.current = window.setTimeout(() => setUiHidden(true), 2500)
-        }
-      }}
-      onPointerMove={() => {
-        // 隐藏状态下移动指针即恢复显示(重置计时由 mouseenter 兜底)
-        if (uiHidden) showUi()
-      }}
+      onMouseLeave={restartHideTimer}
+      onMouseMove={showUi}
     >
       <video
         ref={videoRef}
@@ -768,9 +776,11 @@ function VideoPlayer({
           }}
           onPointerUp={() => {
             scrubbingRef.current = false
+            restartHideTimer() // 拖拽结束重启空闲计时(2.5s 无操作再隐藏)
           }}
           onPointerCancel={() => {
             scrubbingRef.current = false
+            restartHideTimer()
           }}
         >
           <div className="island-video-bar-fill" style={{ width: `${pct}%` }} />
