@@ -13,9 +13,12 @@
  */
 
 import {
+  clearBackgroundImage,
+  DEFAULT_BG_CROP,
   deleteImageItem,
   downscaleBackgroundImage,
   genImageId,
+  loadBackgroundImage,
   loadImageItems,
   readBackgroundParams,
   saveBackgroundImage,
@@ -46,6 +49,20 @@ import {
 // 写共享偏好经 island:video-prefs 事件三处播放器即时同步;2026-08-10 二轮
 // 支持 key = 单个视频个性化,事件带 key 只影响匹配播放器)
 import { loadVideoPrefs, setVideoPrefs as saveVideoPrefs } from './media/videoPrefs'
+// 歌词 API 提供商(2026-08-11,LLM 工具 set_lyric_provider:与设置视图
+// 歌词 API 页同款 localStorage 存储,运行时查询即时生效)
+import {
+  loadLyricAuto,
+  loadLyricProvider,
+  saveLyricAuto,
+  saveLyricProvider,
+  type LyricProvider,
+} from './media/lyricProviders'
+// 字重档位(2026-08-11,LLM 工具 set_font_weight 校验用)
+import { FONT_WEIGHTS } from './media/fontStore'
+// 播放列表持久化(2026-08-11,LLM 工具 list_playlist / remove_playlist_item:
+// 读 IndexedDB island-uploads + 删除,与播放列表 state 经事件同步)
+import { loadUploads, removeUpload } from './media/uploadStore'
 
 /** 主题色持久化键(与 WidgetApp 的 THEME_STORAGE_KEY 一致) */
 export const THEME_STORAGE_KEY = 'widget-theme-color'
@@ -67,6 +84,7 @@ export type IslandSettingsScope =
   | 'imageLibrary'
   | 'mediaWindow'
   | 'mediaLibrary'
+  | 'lyric'
 
 /** 桥方法(主进程 executeJavaScript 调用;方法名与 settingsTools 的 op 一致) */
 export interface IslandSettingsBridge {
@@ -197,6 +215,73 @@ export interface IslandSettingsBridge {
         }
     >
   >
+  /**
+   * 移除自定义背景(2026-08-10,LLM 工具 remove_background):scope =
+   * both(默认,两形态)/ expanded / compact;清除对应槽位图片,裁切
+   * 参数复位默认,不透明度保留;返回 removed 列表供 LLM 回复
+   */
+  removeBackground(scope: 'both' | 'expanded' | 'compact'): Promise<{
+    ok: true
+    removed: Array<'expanded' | 'compact'>
+    previous: { expandedImage: string | null; compactImage: string | null }
+  }>
+  /**
+   * 音频库条目 → 音乐模式播放列表(2026-08-10,LLM 工具
+   * add_audio_to_playlist):校验条目存在后派发 island:playlist-import
+   * 事件,WidgetApp 监听 → addLibraryTracks(自动播首曲)+ 切音乐模式
+   * ——用户能直接在音乐模式点播(音频库 ≠ 播放列表,import_audio_library
+   * 只进库,不加入播放列表是"LLM 说导入了却播不了"的根因)
+   */
+  addAudioLibraryToPlaylist(ids: string[]): Promise<{
+    ok: true
+    count: number
+    names: string[]
+  }>
+  /**
+   * 背景裁切参数(2026-08-11,LLM 工具 set_background_crop):展开态/
+   * 紧凑态各自独立的取景(zoom 1-4 / posX 0-100 / posY 0-100),只改
+   * 提供的字段;与背景编辑器取景框同款存储(readBackgroundParams +
+   * saveBackgroundParams),返回 previous 供 LLM 回复原值
+   */
+  setBackgroundCrop(patches: {
+    expanded?: { zoom?: number; posX?: number; posY?: number }
+    compact?: { zoom?: number; posX?: number; posY?: number }
+  }): Promise<{
+    ok: true
+    crop: { expanded: { zoom: number; posX: number; posY: number }; compact: { zoom: number; posX: number; posY: number } }
+    previous: { expanded: { zoom: number; posX: number; posY: number }; compact: { zoom: number; posX: number; posY: number } }
+  }>
+  /**
+   * 歌词 API 提供商(2026-08-11,LLM 工具 set_lyric_provider):写入
+   * localStorage(widget-lyric-provider + widget-lyric-auto,与设置视图
+   * 歌词 API 页同款存储)——**运行时歌词查询每次读 localStorage 即时
+   * 生效**(useLyrics/ControlView 提示行每查询读取);设置视图显示状态
+   * 在重进时刷新(挂载时读)
+   */
+  setLyricProvider(
+    provider: { id: string; url?: string },
+    auto: boolean,
+  ): Promise<{
+    ok: true
+    id: string
+    url?: string
+    auto: boolean
+    previous: { id: string; url?: string; auto: boolean }
+  }>
+  /** 字体粗细(2026-08-11,LLM 工具 set_font_weight):档位 300-900,
+   * 与设置界面同款存储;返回 previous 供 LLM 回复原值 */
+  setFontWeight(weight: number): Promise<{ ok: true; weight: number; previous: number }>
+  /**
+   * 音乐模式播放列表(2026-08-11,LLM 工具 list_playlist /
+   * remove_playlist_item):播放列表持久化在 IndexedDB(island-uploads,
+   * 与 addTracks/addTrackUrl 的本地文件持久化同源)——listPlaylist 读
+   * 库返回全部条目(key + 名称 + 大小);removePlaylistItem 删库条目后
+   * 派发 island:playlist-item-removed 事件,WidgetApp 监听 →
+   * player.removeTrackByStorageKey(播放列表 state 同步,删当前播放曲目
+   * 自动切相邻)
+   */
+  listPlaylist(): Promise<Array<{ key: string; name: string; size: number }>>
+  removePlaylistItem(key: string): Promise<{ ok: true }>
   /** 删除字体库条目(巡检清理用;不暴露给 LLM 工具) */
   deleteFontItem(id: string): Promise<{ ok: true }>
   /** 删除图片库条目(巡检清理用;不暴露给 LLM 工具) */
@@ -229,6 +314,54 @@ export function onMediaLibraryPlay(cb: (id: string) => void): () => void {
   return () => window.removeEventListener(MEDIA_LIBRARY_PLAY_EVENT, onEvent)
 }
 
+/** 音频库 → 播放列表导入事件(2026-08-10,LLM 工具 add_audio_to_playlist):
+ * 桥校验条目后派发,WidgetApp 监听 → player.addLibraryTracks(自动播
+ * 首曲)+ setMode('music')。与 island:media-library-play 同款"动作指令"
+ * 事件(桥不直接操作 React hook) */
+export const PLAYLIST_IMPORT_EVENT = 'island:playlist-import'
+
+/** 音频库条目(播放列表导入载荷) */
+export interface PlaylistImportItem {
+  name: string
+  type: string
+  data: ArrayBuffer
+}
+
+/** 派发播放列表导入请求(带音频条目;WidgetApp 消费) */
+export function emitPlaylistImport(items: PlaylistImportItem[]): void {
+  window.dispatchEvent(new CustomEvent(PLAYLIST_IMPORT_EVENT, { detail: { items } }))
+}
+
+/** 订阅播放列表导入请求(返回取消订阅函数) */
+export function onPlaylistImport(cb: (items: PlaylistImportItem[]) => void): () => void {
+  const onEvent = (event: Event) => {
+    const items = (event as CustomEvent<{ items?: PlaylistImportItem[] }>).detail?.items
+    if (Array.isArray(items) && items.length > 0) cb(items)
+  }
+  window.addEventListener(PLAYLIST_IMPORT_EVENT, onEvent)
+  return () => window.removeEventListener(PLAYLIST_IMPORT_EVENT, onEvent)
+}
+
+/** 播放列表条目删除事件(2026-08-11,LLM 工具 remove_playlist_item):
+ * 桥删 IndexedDB 后派发,WidgetApp 监听 → player.removeTrackByStorageKey
+ * (播放列表 state 与持久化存储同步;删当前播放曲目自动切相邻) */
+export const PLAYLIST_REMOVE_EVENT = 'island:playlist-item-removed'
+
+/** 派发播放列表条目删除请求(带持久化 key) */
+export function emitPlaylistItemRemoved(key: string): void {
+  window.dispatchEvent(new CustomEvent(PLAYLIST_REMOVE_EVENT, { detail: { key } }))
+}
+
+/** 订阅播放列表条目删除(返回取消订阅函数) */
+export function onPlaylistItemRemoved(cb: (key: string) => void): () => void {
+  const onEvent = (event: Event) => {
+    const key = (event as CustomEvent<{ key?: unknown }>).detail?.key
+    if (typeof key === 'string' && key) cb(key)
+  }
+  window.addEventListener(PLAYLIST_REMOVE_EVENT, onEvent)
+  return () => window.removeEventListener(PLAYLIST_REMOVE_EVENT, onEvent)
+}
+
 /**
  * 订阅设置变更(按 scope 过滤;返回取消订阅函数)。
  * 统一事件名/载荷类型/注销语义——调用方不再写裸字符串与强转
@@ -257,7 +390,7 @@ function hexColor(color: string): string {
   return hex.toLowerCase()
 }
 
-/** 读取当前 Agent 界面缩放(localStorage;钳制 100-300,缺省 200)。
+/** 读取当前 Agent 界面缩放(localStorage;钳制 100-400,缺省 200)。
  * 设置桥(set_agent_scale 工具读现值)与 useAgentPanelLayout(缩放状态
  * 初始化)共用,收敛两处独立 clamp(审计 P2) */
 export function readAgentScale(): number {
@@ -265,7 +398,7 @@ export function readAgentScale(): number {
     const raw = localStorage.getItem(AGENT_SCALE_STORAGE_KEY)
     if (raw) {
       const n = Number(raw)
-      if (Number.isFinite(n)) return Math.min(300, Math.max(100, Math.round(n)))
+      if (Number.isFinite(n)) return Math.min(400, Math.max(100, Math.round(n)))
     }
   } catch {
     // 读取失败按默认
@@ -340,7 +473,7 @@ export function registerIslandSettingsBridge(): void {
     },
     // Agent 界面缩放:写 localStorage,UI 经事件重读(DynamicIsland agentScale)
     async setAgentScale(percent) {
-      const scale = Math.min(300, Math.max(100, Math.round(Number(percent) || 100)))
+      const scale = Math.min(400, Math.max(100, Math.round(Number(percent) || 100)))
       const previous = readAgentScale()
       try {
         localStorage.setItem(AGENT_SCALE_STORAGE_KEY, String(scale))
@@ -667,6 +800,111 @@ export function registerIslandSettingsBridge(): void {
       }
       notify(['mediaWindow'])
       return { ok: true, width: n, previous }
+    },
+    // 背景裁切参数(2026-08-11,LLM 工具 set_background_crop):与背景
+    // 编辑器取景框同款存储——读现有参数只改提供的字段后写回;
+    // zoom 1-4 / posX,posY 0-100 钳制;返回 previous 供 LLM 回复
+    async setBackgroundCrop(patches) {
+      const previous = readBackgroundParams()
+      const clamp01 = (v: unknown, max: number, min = 0): number =>
+        Math.min(max, Math.max(min, Math.round(Number(v) * 100) / 100))
+      const merge = (
+        base: { zoom: number; posX: number; posY: number },
+        patch: { zoom?: number; posX?: number; posY?: number } | undefined,
+      ) => ({
+        zoom: patch?.zoom !== undefined ? clamp01(patch.zoom, 4, 1) : base.zoom,
+        posX: patch?.posX !== undefined ? clamp01(patch.posX, 100) : base.posX,
+        posY: patch?.posY !== undefined ? clamp01(patch.posY, 100) : base.posY,
+      })
+      const crop = {
+        expanded: merge(previous.expanded, patches?.expanded),
+        compact: merge(previous.compact, patches?.compact),
+      }
+      saveBackgroundParams({ ...previous, ...crop })
+      notify(['background'])
+      return { ok: true, crop, previous: { expanded: previous.expanded, compact: previous.compact } }
+    },
+    // 歌词 API 提供商(2026-08-11,LLM 工具 set_lyric_provider):写
+    // localStorage(与设置视图同款存储);运行时每查询读取,即时生效
+    async setLyricProvider(provider, auto) {
+      const prevProvider = loadLyricProvider()
+      const prevAuto = loadLyricAuto()
+      const p = {
+        id: String(provider?.id ?? ''),
+        name: '',
+        type: '',
+        url: typeof provider?.url === 'string' ? provider.url : undefined,
+      }
+      saveLyricProvider(p as LyricProvider)
+      saveLyricAuto(Boolean(auto))
+      notify(['lyric'])
+      return { ok: true, id: p.id, url: p.url, auto: Boolean(auto), previous: { id: prevProvider.id, url: prevProvider.url, auto: prevAuto } }
+    },
+    // 字体粗细(2026-08-11,LLM 工具 set_font_weight):档位 300-900 校验
+    // 后写字体设置(与设置界面字重按钮同款);返回 previous 供 LLM 回复
+    async setFontWeight(weight) {
+      const settings = loadFontSettings()
+      const previous = settings.weight
+      const w = Number(weight)
+      if (!FONT_WEIGHTS.includes(w)) throw new Error(`字重仅支持:${FONT_WEIGHTS.join('/')}`)
+      saveFontSettings({ ...settings, weight: w })
+      notify(['font'])
+      return { ok: true, weight: w, previous }
+    },
+    // 播放列表查看/删除(2026-08-11,LLM 工具 list_playlist /
+    // remove_playlist_item):播放列表持久化在 IndexedDB(island-uploads,
+    // addTracks 上传 / addTrackUrl 本地文件持久化同源)——list 读库;
+    // remove 删库后派发事件,WidgetApp 经 player.removeTrackByStorageKey
+    // 同步播放列表 state(删当前播放曲目自动切相邻)
+    async listPlaylist() {
+      const items = await loadUploads()
+      return items.map((it) => ({ key: it.key, name: it.name, size: it.data.byteLength }))
+    },
+    async removePlaylistItem(key) {
+      if (!key || typeof key !== 'string') throw new Error('key 不能为空')
+      await removeUpload(key)
+      emitPlaylistItemRemoved(key)
+      return { ok: true }
+    },
+    // 移除背景(2026-08-10,LLM 工具 remove_background):清槽位图片 +
+    // 裁切复位默认(与设置界面"移除背景"一致),不透明度保留;返回
+    // removed 列表与 previous(LLM 回复「已移除展开态背景」)
+    async removeBackground(scope) {
+      const previous = {
+        expandedImage: await loadBackgroundImage('expanded'),
+        compactImage: await loadBackgroundImage('compact'),
+      }
+      const removed: Array<'expanded' | 'compact'> = []
+      const slots = scope === 'both' ? (['expanded', 'compact'] as const) : [scope]
+      for (const slot of slots) {
+        if (slot === 'expanded' ? previous.expandedImage : previous.compactImage) {
+          await clearBackgroundImage(slot)
+          removed.push(slot)
+        }
+      }
+      // 裁切复位(移除后保留不透明度,与 UI 移除行为一致)
+      const params = readBackgroundParams()
+      if (removed.includes('expanded')) params.expanded = { ...DEFAULT_BG_CROP }
+      if (removed.includes('compact')) params.compact = { ...DEFAULT_BG_CROP }
+      saveBackgroundParams(params)
+      notify(['background'])
+      return { ok: true, removed, previous }
+    },
+    // 音频库 → 播放列表(2026-08-10,LLM 工具 add_audio_to_playlist):
+    // 校验条目存在(不存在抛错,LLM 可自纠)后派发事件,WidgetApp 监听
+    // 导入播放列表 + 切音乐模式自动播放
+    async addAudioLibraryToPlaylist(ids) {
+      const items = await loadAudioLibrary()
+      const picked = items.filter((it) => (ids ?? []).includes(it.id))
+      if (picked.length === 0) {
+        throw new Error(
+          `音频库中没有这些条目:${(ids ?? []).join('、')}(用 list_audio_library 查可用 id)`,
+        )
+      }
+      emitPlaylistImport(
+        picked.map((it) => ({ name: it.name, type: it.type || 'audio/mpeg', data: it.data })),
+      )
+      return { ok: true, count: picked.length, names: picked.map((it) => it.name) }
     },
     // 删除(巡检清理用;LLM 工具不暴露,防误删用户数据)
     async deleteFontItem(id) {

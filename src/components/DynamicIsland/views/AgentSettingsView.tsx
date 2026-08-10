@@ -20,7 +20,7 @@ export interface AgentSettingsViewProps {
   onSave: (patch: Partial<AgentConfig>) => void
   /** 工具清单(已注册技能/MCP 的预览展示;agent:tools 异步加载) */
   tools?: AgentToolInfo[]
-  /** 界面缩放(百分比 100-300,最低 100%) */
+  /** 界面缩放(百分比 100-400,最低 100%) */
   scale: number
   onScaleChange: (scale: number) => void
   /** 媒体窗口默认宽(对话图片/视频窗口初始宽;localStorage 即时生效,
@@ -34,7 +34,7 @@ export interface AgentSettingsViewProps {
  * 由整合按钮悬浮展开切换;保存脚全局共用。第 5 组「Sub Agent」=
  * 总结标题文风 + 心理揣测人格设置)。渲染用通用 QuickMenu 组件
  * (整合按钮 + 同行联通展开 + 滚轮 + 高亮滑块 + 宽度过渡,同款设计) */
-const SETTINGS_TABS = ['连接', '行为与界面', '工具与能力', '记忆与进化', 'Sub Agent', '数据管理'] as const
+const SETTINGS_TABS = ['账号', '行为与界面', '工具与能力', '记忆与进化', 'Sub Agent', '数据管理'] as const
 
 /** MCP 服务表单行(参数/环境变量以逐行文本编辑,保存时转换) */
 interface McpServerForm {
@@ -263,9 +263,9 @@ const PROACTIVE_PRESETS = [15, 30, 60, 120]
 const PROACTIVE_UNITS = ['s', 'm', 'h'] as const
 const PROACTIVE_UNIT_LABELS: Record<string, string> = { s: '秒', m: '分钟', h: '小时' }
 
-/** 界面放大档位(默认 200;可自定义 100-300,仅面板/窗口尺寸放大,
- *  UI 元素不缩放) */
-const SCALE_PRESETS = [100, 150, 200, 300]
+/** 界面放大档位(默认 200;可自定义 100-400,仅面板/窗口尺寸放大,
+ *  UI 元素不缩放;2026-08-11 用户要求 300% → 400%) */
+const SCALE_PRESETS = [100, 150, 200, 300, 400]
 
 /** Sub Agent 档位:默认(空串)+ 预设 id;自定义 ≤100 字直接存文本
  *  (值不在档位时按钮显示文本、无高亮,滚轮不切换) */
@@ -465,6 +465,39 @@ export function AgentSettingsView({
   useEffect(() => {
     tabRef.current = tab
   }, [tab])
+  // 账号余额(2026-08-11 用户要求"Agent 设置里添加账号余额查询功能,
+  // API 配置集成到账号功能"):进入账号 tab(0)自动查询一次,可手动
+  // 刷新;数据源 = 引擎 get_deepseek_balance 同一实现(agent:balance IPC)
+  const [balance, setBalance] = useState<{
+    isAvailable: boolean
+    balances: Array<{ currency: string; total: number; granted: number; toppedUp: number }>
+  } | null>(null)
+  const [balanceError, setBalanceError] = useState('')
+  const [balanceLoading, setBalanceLoading] = useState(false)
+  const queryBalance = useCallback(async () => {
+    setBalanceLoading(true)
+    setBalanceError('')
+    try {
+      const res = await window.desktop?.agentGetBalance?.()
+      if (!res) {
+        setBalanceError('余额查询不可用(请先配置 API Key)')
+        return
+      }
+      if ('error' in res && typeof (res as { error?: unknown }).error === 'string') {
+        setBalanceError(String((res as { error: string }).error))
+        return
+      }
+      setBalance(res as { isAvailable: boolean; balances: Array<{ currency: string; total: number; granted: number; toppedUp: number }> })
+    } catch (err) {
+      setBalanceError((err as Error).message || String(err))
+    } finally {
+      setBalanceLoading(false)
+    }
+  }, [])
+  // 进入账号 tab 自动查询一次(挂载 tab=0 也触发;余额反映当前配置)
+  useEffect(() => {
+    if (tab === 0) void queryBalance()
+  }, [tab, queryBalance])
   const [saved, setSaved] = useState(false)
   const savedTimerRef = useRef(0)
   // MCP 服务测试状态:正在测试的索引 / 最近一次结果
@@ -919,7 +952,72 @@ export function AgentSettingsView({
       <div className={`island-agent-form${leaving ? ' island-ui-out' : ''}`} key={animSeq}>
         {tab === 0 && (
           <>
-            {/* 连接:协议提示 + API Key / Base URL / 模型 / 思考强度 */}
+            {/* 账号(2026-08-11 用户要求"添加账号余额查询功能,API 配置
+                集成到账号功能"):余额卡片 + API Key / Base URL / 模型 /
+                思考强度 / 输出预算。余额查询与 LLM 工具同一实现;
+                **去充值(2026-08-11 用户问"能否支持充值"):DeepSeek 无
+                充值 API,充值必须网页端(platform.deepseek.com/top_up,
+                需登录+实名认证,支付宝/微信),按钮经 openExternal 跳转
+                系统浏览器;余额不足时醒目提示 + 充值入口 */}
+            <div className="island-agent-account">
+              <div className="island-agent-account-head">
+                <span>账户余额</span>
+                <div className="island-agent-account-actions">
+                  <button
+                    type="button"
+                    className="island-agent-account-topup"
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      // openExternal 校验 http/https 后 shell.openExternal
+                      window.desktop?.openExternal?.('https://platform.deepseek.com/top_up')
+                    }}
+                  >
+                    去充值
+                  </button>
+                  <button
+                    type="button"
+                    className="island-agent-account-refresh"
+                    disabled={balanceLoading}
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      void queryBalance()
+                    }}
+                  >
+                    {balanceLoading ? '查询中…' : '刷新'}
+                  </button>
+                </div>
+              </div>
+              {balanceError && (
+                <div className="island-agent-account-error">{balanceError}</div>
+              )}
+              {!balanceError && balance && balance.balances.length > 0 && (
+                <div className="island-agent-account-bal">
+                  {balance.balances.map((b) => (
+                    <div key={b.currency} className="island-agent-account-row">
+                      <span className="island-agent-account-cur">{b.currency}</span>
+                      <span className="island-agent-account-total">
+                        ¥{b.total.toFixed(2)}
+                        {b.total < 1 && <em className="island-agent-account-low">余额不足</em>}
+                      </span>
+                      <span className="island-agent-account-sub">
+                        充值 {b.toppedUp.toFixed(2)} + 赠送 {b.granted.toFixed(2)}
+                      </span>
+                    </div>
+                  ))}
+                  {balance.balances.some((b) => b.total < 1) && (
+                    <div className="island-agent-account-lowtip">
+                      余额不足,点右上角「去充值」在 DeepSeek 平台网页端充值(支付宝/微信,需实名认证,单笔最低 ¥10)
+                    </div>
+                  )}
+                </div>
+              )}
+              {!balanceError && !balance && !balanceLoading && (
+                <div className="island-agent-account-empty">
+                  未查询余额。填写下方 API Key 后点「刷新」(仅 DeepSeek API 支持余额查询)
+                </div>
+              )}
+            </div>
+            {/* 连接配置:协议提示 + API Key / Base URL / 模型 / 思考强度 */}
             <div className="island-agent-protocol">
               {protocol === 'Anthropic Messages'
                 ? 'Anthropic 协议:填写含 anthropic 的地址自动切换(如 https://api.deepseek.com/anthropic,模型填 deepseek-chat 等)'
@@ -1062,7 +1160,8 @@ export function AgentSettingsView({
           </div>
         </div>
         {/* 界面放大(2026-08-08 QuickMenu 化):默认 200;自定义值参考
-            输出预算按钮(点击快捷按钮内联输入,100-300 钳制) */}
+            输出预算按钮(点击快捷按钮内联输入,100-400 钳制,2026-08-11
+            用户要求 300% → 400%) */}
         <div className="island-agent-field">
           <span>界面放大(仅面板尺寸,文字按钮不变)</span>
           <div className="island-agent-scale-row">
@@ -1075,7 +1174,7 @@ export function AgentSettingsView({
               wheelWhenOpen
               allowCustom
               min={100}
-              max={300}
+              max={400}
               compare={(a, b) => a - b}
             />
             <span className="island-agent-scale-hint">仅面板/窗口尺寸</span>

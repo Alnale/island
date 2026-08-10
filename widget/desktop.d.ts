@@ -51,6 +51,9 @@ interface DesktopApi {
    * immediate(2026-08-10):窗口补间直通 setBounds 跳过合帧,
    * 防补间被压成 ~10Hz 台阶与岛体过渡不同步 */
   setWindowSize(width: number, height: number, immediate?: boolean): void
+  /** 窗口层级(2026-08-10 用户要求):紧凑态(灵动岛/多媒体岛)= 置顶,
+   * 展开面板 = 不置顶。主进程尊重托盘"总在最前"开关 */
+  setTopmost(on: boolean): void
   /** 全屏状态上报(2026-08-08):主进程在全屏期间兜底忽略 set-size,
    * 防全屏层(100% viewport)跟随窗口 resize 放大。
    * inMini(2026-08-10):全屏元素是否在媒体岛内——岛全屏放大窗口到
@@ -111,6 +114,15 @@ interface DesktopApi {
       sourceKind?: 'created' | 'imported' | 'scanned'
     }>
   >
+  /** Agent:账户余额查询(2026-08-11 设置界面「账号」功能;与 LLM 工具
+   * get_deepseek_balance 同一实现;失败返回 {error}) */
+  agentGetBalance(): Promise<
+    | {
+        isAvailable: boolean
+        balances: Array<{ currency: string; total: number; granted: number; toppedUp: number }>
+      }
+    | { error: string }
+  >
   /** Agent:测试 MCP 服务连通性(独立连接 → 列工具 → 销毁) */
   agentTestMcp(server: {
     name: string
@@ -169,7 +181,9 @@ interface DesktopApi {
   agentProactiveTick(messages: unknown[], idleMinutes: number): Promise<{ started: boolean; reason?: string }>
   /** 模式切换(托盘右键菜单):订阅回调(payload = 目标模式 + 切换来源;
    * source 'tool' = Agent 工具 switch_to_music 触发的切换) */
-  onSetMode(callback: (payload: { mode: 'music' | 'agent'; source: 'user' | 'tool' }) => void): void
+  onSetMode(
+    callback: (payload: { mode: 'music' | 'agent'; source: 'user' | 'tool'; play?: boolean }) => void,
+  ): void
   /** 请求切换模式(音乐 ↔ agent;Agent 文字区滑动手势退出 → 音乐) */
   setMode(mode: 'music' | 'agent'): void
   /** 启动时询问当前模式(音乐 / agent) */

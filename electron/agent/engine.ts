@@ -16,6 +16,7 @@
 import { randomUUID } from 'node:crypto'
 import { parseToolArgs } from './deepseek'
 import { streamByConfig } from './provider'
+import { detectProvider, apiErrorMessage } from './constants'
 import { createTools, disposeTools } from './tools'
 import { getTasksStatusBlock } from './tasks'
 import { createSettingsTools } from './settingsTools'
@@ -125,6 +126,62 @@ const PROACTIVE_INSTRUCTION =
   '用灵动岛设置工具帮用户调整挂件等),不要凭空猜测;但不要为了用工具而用工具,' +
   '把话说短、说自然,行动融入对话而不是罗列工具。' +
   '不要提及这是系统任务,不要长篇大论,不要解释你的行为。'
+
+/**
+ * DeepSeek 账户余额查询(2026-08-10 用户要求;官方 API 参考
+ * https://api-docs.deepseek.com/zh-cn/api/get-user-balance):
+ * GET {baseURL}/user/balance,Bearer 认证(15s 超时)。测试用导出;
+ * balanceTool(LLM 工具)与 AgentEngine.queryBalance(设置界面"账号"
+ * 功能,2026-08-11)共用同一实现。仅 DeepSeek API(baseURL 判定)可用
+ * ——Anthropic 兼容端点没有余额接口,抛明确错误(调用方可展示/自纠);
+ * 未配置 Key / HTTP 错误(经 apiErrorMessage 映射)同样抛可读错误
+ */
+export async function fetchDeepseekBalance(config: {
+  baseURL: string
+  apiKey: string
+}): Promise<{
+  isAvailable: boolean
+  balances: Array<{ currency: string; total: number; granted: number; toppedUp: number }>
+}> {
+  if (detectProvider(config.baseURL) === 'anthropic') {
+    throw new Error('当前 API 是 Anthropic 兼容端点,没有余额接口(余额查询仅支持 DeepSeek API)')
+  }
+  const base = config.baseURL.trim().replace(/\/+$/, '')
+  const key = config.apiKey.trim()
+  if (!key) throw new Error('尚未配置 API Key')
+  const res = await fetch(`${base}/user/balance`, {
+    headers: { Authorization: `Bearer ${key}` },
+    signal: AbortSignal.timeout(15000),
+  })
+  if (!res.ok) {
+    let detail = ''
+    try {
+      detail = (await res.text()).slice(0, 500)
+    } catch {
+      // 忽略读失败
+    }
+    throw new Error(apiErrorMessage(res.status, detail))
+  }
+  const json = (await res.json()) as {
+    is_available?: boolean
+    balance_infos?: Array<{
+      currency: string
+      total_balance: string
+      granted_balance: string
+      topped_up_balance: string
+    }>
+  }
+  const infos = Array.isArray(json.balance_infos) ? json.balance_infos : []
+  return {
+    isAvailable: json.is_available !== false,
+    balances: infos.map((b) => ({
+      currency: b.currency,
+      total: Number(b.total_balance ?? 0),
+      granted: Number(b.granted_balance ?? 0),
+      toppedUp: Number(b.topped_up_balance ?? 0),
+    })),
+  }
+}
 
 /**
  * 工具执行兜底超时(测试用导出):promise 与超时赛跑,超时/中止后拒绝
@@ -273,6 +330,15 @@ export interface AgentEngine {
   listAllTools(): Promise<Array<{ name: string; description: string; parameters: AgentTool['parameters'] }>>
   /** 测试 MCP 服务连通性(独立连接 → 列工具 → 销毁,不进入常驻) */
   testMCP(server: McpServerConfig): Promise<{ ok: boolean; error?: string; toolCount?: number }>
+  /**
+   * 账户余额查询(2026-08-11 设置界面"账号"功能;与 LLM 工具
+   * get_deepseek_balance 同一实现,结构化数据供 UI 展示)。
+   * 未配置 Key / Anthropic 端点 / HTTP 错误抛可读错误(IPC 层转 {error})
+   */
+  queryBalance(): Promise<{
+    isAvailable: boolean
+    balances: Array<{ currency: string; total: number; granted: number; toppedUp: number }>
+  }>
   /** 销毁外部工具资源(MCP 子进程),应用退出时调用 */
   dispose(): void
 }
@@ -332,6 +398,28 @@ export function findManualTool(
     tool: null,
     hint: `未找到「${name}」。技能用 /技能名,如 /trump-perspective;MCP 工具用 @完整工具名,如 @mcp_filesystem_read_file(可用工具列表查看现有工具)`,
   }
+}
+
+/**
+ * 手动调用前缀分离(测试用导出,2026-08-10 修复"点选技能后直接追加描述
+ * 不敲空格,整串当工具名"):在 findManualTool 未命中后调用——遍历工具,
+ * 找「name 以工具名开头」的**最长前缀**;命中返回 {tool, rest = 剩余
+ * 文本(并入描述,与手动调用原 rest 拼接)},未命中返回 null
+ */
+export function matchManualToolPrefix(
+  tools: AgentTool[],
+  name: string,
+): { tool: AgentTool; rest: string } | null {
+  let best: AgentTool | null = null
+  let bestLen = 0
+  for (const t of tools) {
+    if (name.startsWith(t.name) && t.name.length > bestLen) {
+      best = t
+      bestLen = t.name.length
+    }
+  }
+  if (!best) return null
+  return { tool: best, rest: name.slice(bestLen).trim() }
 }
 
 interface TurnCtx {
@@ -641,12 +729,44 @@ export function createAgentEngine(deps: EngineDeps): AgentEngine {
     },
   }
 
+  /**
+   * DeepSeek 账户余额查询工具(2026-08-10,用户要求;官方 API 参考
+   * https://api-docs.deepseek.com/zh-cn/api/get-user-balance):
+   * 返回各币种的总余额(充值 + 赠送)与是否可用,供 LLM 回答"账户还有
+   * 多少钱"。实现抽到模块级 fetchDeepseekBalance(测试用导出)——设置
+   * 界面"账号"功能的余额查询(AgentEngine.queryBalance,2026-08-11)
+   * 复用同一实现,结构化数据供 UI 展示
+   */
+  const balanceTool: AgentTool = {
+    name: 'get_deepseek_balance',
+    description:
+      '查询 DeepSeek API 账户余额(按币种列出:总余额 = 充值余额 + 赠送余额,单位元/美元)。' +
+      '适合:用户问"账户还有多少钱""余额够不够""快没钱了没"时调用。' +
+      '仅 DeepSeek API 可用(Anthropic 兼容端点无余额接口)。',
+    parameters: { type: 'object', properties: {} },
+    async execute() {
+      const config = deps.getConfig()
+      const { balances } = await fetchDeepseekBalance({ baseURL: config.baseURL, apiKey: config.apiKey })
+      if (balances.length === 0) return '(余额接口返回为空,可稍后重试)'
+      return balances
+        .map(
+          (b) =>
+            `${b.currency}:总余额 ${b.total.toFixed(2)}(充值 ${b.toppedUp.toFixed(2)} + 赠送 ${b.granted.toFixed(2)})` +
+            (Number.isFinite(b.total) && b.total < 1 ? ',余额不足,请提醒用户及时充值' : ''),
+        )
+        .join('\n')
+    },
+  }
+
   const tools = [
     ...createTools({
       onSwitchToMusic: deps.onSwitchToMusic,
       // 后台长任务完成(如 bili 下载)→ background-done 事件转发渲染端,
       // 渲染端自动触发一轮对话让 LLM 主动回复(用户无需提问)
       onBackgroundDone: (info) => emit({ type: 'background-done', ...info }),
+      // bili 批量下载确认门(2026-08-10,用户要求"批量下载先征得同意";
+      // 主进程注入 tool-confirm-request → 渲染端确认卡)
+      confirmAction: deps.confirmAction,
     }),
     // 灵动岛设置工具(主题色/缩放/字体/背景图库):主进程注入了
     // runIslandSettings 才注册(挂件环境;Web 演示版无主进程)
@@ -660,6 +780,7 @@ export function createAgentEngine(deps: EngineDeps): AgentEngine {
     ...configTools,
     evolveTool,
     outputBudgetTool,
+    balanceTool,
   ]
 
   /**
@@ -816,7 +937,21 @@ export function createAgentEngine(deps: EngineDeps): AgentEngine {
       const turnTools = [...tools, ...(await getExternalTools())].filter(
         (t) => !excludedToolSet().has(t.name),
       )
-      const found = findManualTool(turnTools, manual.name)
+      let found = findManualTool(turnTools, manual.name)
+      // **技能名与描述无空格分离修复(2026-08-10 用户实测
+      // "/skill_zhangxuefeng-perspective帮我调用"报未找到)**:候选点选后
+      // 用户直接追加描述(不敲空格),`\S+` 把整串当工具名,精确/模糊都
+      // 匹配不到。遍历工具找"manual.name 以工具名开头"的**最长前缀**,
+      // 前缀 = 工具名,剩余文本并入 rest(描述文字)——LLM 的输入消息里
+      // 有完整描述,工具结果回填后它能看到用户意图
+      let rest = manual.rest
+      if (!found.tool) {
+        const prefixed = matchManualToolPrefix(turnTools, manual.name)
+        if (prefixed) {
+          found = { tool: prefixed.tool, hint: '' }
+          rest = prefixed.rest + (rest ? ' ' + rest : '')
+        }
+      }
       if (!found.tool) {
         onEvent({ type: 'error', message: found.hint })
         onEvent({ type: 'status', status: 'idle' })
@@ -827,10 +962,10 @@ export function createAgentEngine(deps: EngineDeps): AgentEngine {
       // 剩余文本:是合法 JSON 对象则作为参数,否则空参数
       // (文本进用户消息,LLM 有上下文可理解意图)
       let args: Record<string, unknown> = {}
-      const rest = manual.rest.trim()
-      if (rest) {
+      const restTrimmed = rest.trim()
+      if (restTrimmed) {
         try {
-          const parsed = JSON.parse(rest)
+          const parsed = JSON.parse(restTrimmed)
           if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) args = parsed
         } catch {
           // 非 JSON:空参数
@@ -877,7 +1012,16 @@ export function createAgentEngine(deps: EngineDeps): AgentEngine {
       if (outMedia && outMedia.length > 0) {
         for (const m of outMedia) msgParts.push({ type: 'media', kind: m.kind, url: m.url, name: m.name })
       }
-      // 手动调用的执行结果入历史(在用户消息之后),LLM 第一步即看到
+      // 手动调用的执行结果入历史(在用户消息之后),LLM 第一步即看到。
+      // **DeepSeek thinking 模式必须回传 reasoning(2026-08-10 用户实测
+      // "/skill_xxx 单独调用"报 400 "reasoning_text must be passed back")**:
+      // 手动插入的 assistant 消息没有思维链,Responses API 要求 thinking
+      // 模式下每个 assistant 回合都带 reasoning_text,缺失即 400。
+      // 补一条说明性 reasoning 回传(Anthropic 路径丢弃 thinking 不需
+      // 要;渲染端不渲染落定消息的 reasoning part,UI 无感)
+      if (detectProvider(config.baseURL) !== 'anthropic') {
+        msgParts.unshift({ type: 'reasoning', text: `(手动调用工具:${found.tool.name})` })
+      }
       historyIn.push({ id: randomUUID(), role: 'assistant', parts: msgParts.slice(0) })
       pushedParts = msgParts.length
     }
@@ -1117,6 +1261,10 @@ export function createAgentEngine(deps: EngineDeps): AgentEngine {
     },
     async testMCP(server: McpServerConfig) {
       return mcpManager.test(server)
+    },
+    async queryBalance() {
+      const config = deps.getConfig()
+      return fetchDeepseekBalance({ baseURL: config.baseURL, apiKey: config.apiKey })
     },
     dispose() {
       mcpManager.dispose()

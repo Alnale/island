@@ -104,7 +104,8 @@ export interface FontSettings {
   colorMode: FontColorMode
   /** 自定义颜色(custom 模式生效,hex) */
   colorValue: string | null
-  /** 字体粗细(400 常规 / 600 中等 / 800 粗体,单字重字体由浏览器合成) */
+  /** 字体粗细(300-900 档位,单字重字体由浏览器合成;2026-08-11 用户
+   * 要求更多选择,原 400/600/800 三档扩展为七档) */
   weight: number
 }
 
@@ -116,8 +117,8 @@ export const DEFAULT_FONT_SETTINGS: FontSettings = {
   weight: 400,
 }
 
-/** 允许的字重档位 */
-export const FONT_WEIGHTS = [400, 600, 800]
+/** 允许的字重档位(2026-08-11 用户要求"更多选择":300-900 七档) */
+export const FONT_WEIGHTS = [300, 400, 500, 600, 700, 800, 900]
 
 /** 读取字体设置(localStorage,损坏时回退默认) */
 export function loadFontSettings(): FontSettings {

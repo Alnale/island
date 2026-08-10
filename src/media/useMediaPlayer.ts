@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { TrackInfo } from '../data/islandStates'
 import type { PlaybackMode } from './playbackModes'
 import { loadTracks } from './tracks'
-import { loadUploads, removeUpload, saveUpload, saveUploadData } from './uploadStore'
+import { inferAudioType, loadUploads, removeUpload, saveUpload, saveUploadData } from './uploadStore'
 // 播放列表 ↔ 音频库同步(2026-08-08):上传歌曲到播放列表时自动补录
 // 音频库(同名不重复导入);多媒体库音频 tab 可导入播放列表
 import {
@@ -45,8 +45,24 @@ export interface MediaPlayer {
   /** 从音频库导入播放列表(2026-08-08,单个/批量;自动播放第一首新曲;
       不重复入库——音频库已是来源) */
   addLibraryTracks(items: AudioLibraryItem[]): void
+  /**
+   * 以原始 URL 加入播放列表并播放(2026-08-11 音频移交优化):**不 fetch
+   * 不转码,立即播放**——对话窗口播放中的音频切到音乐模式不中断;
+   * opts.position = 移交时播放进度(从该位置续播,不从头,参考视频岛
+   * 续播机制);opts.loop = 对话窗口循环播放 → 音乐模式同步为单曲循环。
+   * 本地文件(island-media:/绝对路径)后台异步持久化到 IndexedDB
+   * (刷新后播放列表恢复;失败不影响本次播放);https/data/blob 跳过
+   * (仅本次会话,与既有 addTracks 的持久化语义一致的部分)
+   */
+  addTrackUrl(url: string, name: string, opts?: { position?: number; loop?: boolean }): void
   /** 删除列表曲目(仅上传曲目可删);删除当前播放曲目则切到相邻曲目 */
   removeTrack(index: number): void
+  /**
+   * 按持久化 key 删除曲目(2026-08-11,LLM 工具 remove_playlist_item:
+   * 桥删 IndexedDB 后经事件回调本方法)——播放列表与持久化存储保持
+   * 同步(删当前播放曲目切相邻,复用 removeTrack 语义)
+   */
+  removeTrackByStorageKey(key: string): void
   /** 跳转进度(秒),由灵动岛进度条拖动回传 */
   seek(seconds: number): void
 }
@@ -85,7 +101,7 @@ export function useMediaPlayer(): MediaPlayer {
   phaseRef.current = phase
   modeRef.current = mode
 
-  const playTrack = useCallback((nextIndex: number) => {
+  const playTrack = useCallback((nextIndex: number, fromPosition?: number) => {
     const audio = audioRef.current
     const list = tracksRef.current
     const track = list[nextIndex]
@@ -102,6 +118,19 @@ export function useMediaPlayer(): MediaPlayer {
       if (timerRef.current !== null) {
         window.clearTimeout(timerRef.current)
         timerRef.current = null
+      }
+      // 续播位置(2026-08-11 音频移交):canplay 后先 seek 到移交时进度
+      // 再 play——从对话窗口切到音乐模式不从头播(参考视频岛续播机制)
+      if (fromPosition && fromPosition > 0) {
+        try {
+          audio.currentTime = Math.min(
+            fromPosition,
+            Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : fromPosition,
+          )
+          setPosition(audio.currentTime)
+        } catch {
+          // seek 失败忽略(照常播放)
+        }
       }
       audio.play().catch(() => setPhase('idle'))
     }
@@ -246,6 +275,54 @@ export function useMediaPlayer(): MediaPlayer {
       tracksRef.current = next // 先同步 ref,playTrack 立即用新列表
       setTracks(next)
       playTrack(next.length - uploaded.length) // 播放第一首新曲
+    },
+    [playTrack],
+  )
+
+  /** 以原始 URL 加入播放列表并播放(2026-08-11 音频移交优化,见接口注释):
+   * 立即播放不中断;本地文件后台持久化;position 续播 + loop 单曲循环 */
+  const addTrackUrl = useCallback(
+    (url: string, name: string, opts?: { position?: number; loop?: boolean }) => {
+      const audio = audioRef.current
+      if (!audio) return
+      const title = (name || '对话音频').replace(/\.[^.]+$/, '')
+      const track: TrackInfo = {
+        title,
+        artist: '本地音乐',
+        duration: 0,
+        url,
+        source: 'uploaded' as const,
+      }
+      const idx = tracksRef.current.length
+      const next = [...tracksRef.current, track]
+      tracksRef.current = next // 先同步 ref,playTrack 立即用新列表
+      setTracks(next)
+      // 循环同步:对话窗口循环 → 音乐模式单曲循环(播完自动重播)
+      if (opts?.loop) setModeState('repeat-one')
+      // 从移交进度续播,不从头(参考视频岛续播机制)
+      playTrack(idx, opts?.position)
+      // 后台持久化(本地文件):刷新后播放列表恢复该曲目;island-media
+      // 协议 fetch 返回文件内容(主进程流式协议);失败不影响本次播放
+      if (/^(island-media:|[a-zA-Z]:[\\/]|\/)/.test(url)) {
+        void (async () => {
+          try {
+            const res = await fetch(url)
+            if (!res.ok) return
+            const data = await res.arrayBuffer()
+            const type = inferAudioType(name, '')
+            const storageKey = await saveUploadData(name, type, data)
+            if (storageKey) {
+              const list = tracksRef.current.map((t, i) =>
+                i === idx ? { ...t, storageKey } : t,
+              )
+              tracksRef.current = list
+              setTracks(list)
+            }
+          } catch {
+            // 持久化失败忽略(本次播放不受影响)
+          }
+        })()
+      }
     },
     [playTrack],
   )
@@ -447,7 +524,12 @@ export function useMediaPlayer(): MediaPlayer {
     playIndex,
     addTracks,
     addLibraryTracks,
+    addTrackUrl,
     removeTrack,
+    removeTrackByStorageKey: (key) => {
+      const idx = tracksRef.current.findIndex((t) => t.storageKey === key)
+      if (idx >= 0) removeTrack(idx)
+    },
     seek,
   }
 }

@@ -111,8 +111,9 @@ export interface AgentController {
   abort(): void
   /** exec_command 确认门:回传用户选择(引擎在等待 tool-confirm-request) */
   confirmTool(approved: boolean): void
-  /** 待确认的命令(引擎请求,等待用户允许/拒绝;null = 无) */
-  pendingConfirm: { command: string } | null
+  /** 待确认的请求(引擎等待用户允许/拒绝;exec_command 带 command,
+   * bili 批量下载等带 title/detail;null = 无) */
+  pendingConfirm: { command: string; title?: string; detail?: string } | null
   clear(): void
   loadSession(id: string): void
   deleteSession(id: string): void
@@ -131,13 +132,20 @@ export function useAgent(opts?: { allowProactive?: boolean }): AgentController {
   const [status, setStatus] = useState<AgentStatus>('idle')
   const [streaming, setStreaming] = useState<PendingAssistant | null>(null)
   const [lastError, setLastError] = useState<string | null>(null)
-  // exec_command 确认门:引擎发 tool-confirm-request 等待用户选择
-  const [pendingConfirm, setPendingConfirm] = useState<{ command: string } | null>(null)
+  // 确认门:引擎发 tool-confirm-request 等待用户选择(exec_command 确认
+  // 带 command;bili 批量下载等动作确认带 title/detail,2026-08-10)
+  const [pendingConfirm, setPendingConfirm] = useState<{
+    command: string
+    title?: string
+    detail?: string
+  } | null>(null)
   const [config, setConfig] = useState<AgentConfig | null>(null)
   // 历史会话列表(新对话时自动存档当前对话)
   const [sessions, setSessions] = useState<AgentSession[]>(loadSessions)
   // 工具清单(引擎 → 主进程 IPC,UI 展示用)
   const [tools, setTools] = useState<AgentToolInfo[]>([])
+  const toolsRef = useRef(tools)
+  toolsRef.current = tools
   // 当前对话实时总结标题(每轮回复完成后静默总结;入历史时作为标题)
   const [currentTitle, setCurrentTitle] = useState<string | null>(() => {
     try {
@@ -275,7 +283,7 @@ export function useAgent(opts?: { allowProactive?: boolean }): AgentController {
           setStatus('idle')
           break
         case 'tool-confirm-request':
-          setPendingConfirm({ command: event.command })
+          setPendingConfirm({ command: event.command, title: event.title, detail: event.detail })
           break
         case 'background-done': {
           // 后台长任务完成(如 bili 下载):自动触发一轮对话——LLM 基于
@@ -517,6 +525,30 @@ export function useAgent(opts?: { allowProactive?: boolean }): AgentController {
   // 启动时读取配置(API Key / 模型等,主进程 settings.json)与工具清单
   useEffect(() => {
     loadConfigAndTools()
+    // **外部工具缺失自动重拉(2026-08-10 修复"输入框 @ 不显示 MCP 服务")**:
+    // agentGetTools(listAllTools)对 MCP 服务是逐个连接,握手慢的服务
+    // (如 npx 首次下载 siyuan-mcp 需数秒)在挂载时可能还没就绪,工具
+    // 清单里就缺了 MCP 工具 → @ 候选永远为空(引擎对话循环每轮都刷新,
+    // 所以"对话里能用 @ 但候选不显示"这类不一致)。挂载后若清单里
+    // 没有任何外部工具(mcp_/skill_),延迟 3s 重拉一次(至多 2 次,
+    // 命中即停)
+    let retries = 2
+    const timer = window.setInterval(() => {
+      if (retries <= 0) {
+        window.clearInterval(timer)
+        return
+      }
+      const list = toolsRef.current
+      const hasExternal = list.some((t) => t.name.startsWith('mcp_') || t.name.startsWith('skill_'))
+      if (hasExternal) {
+        window.clearInterval(timer)
+        return
+      }
+      retries -= 1
+      window.desktop?.agentGetTools?.().then((list2) => setTools(list2)).catch(() => {})
+    }, 3000)
+    return () => window.clearInterval(timer)
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 挂载时一次性
   }, [loadConfigAndTools])
 
   // 主动陪伴调度器(2026-08-07):每 60s 检查触发条件——① Agent 模式
@@ -618,6 +650,15 @@ export function useAgent(opts?: { allowProactive?: boolean }): AgentController {
   }, [resetStreaming])
 
   const clear = useCallback(() => {
+    // **中止正在运行的回合(2026-08-11 修复"新对话后对话窗口仍 16:9")**:
+    // 新对话不清除会让引擎继续流式——① 迟到的回复落进新对话(孤儿消息,
+    // 用户没问新问题窗口却撑回 16:9);② status 停在 thinking 时思考占位
+    // 行让空对话测高 > 面板下限,高度公式误判"有内容"直接按宽度 9/16
+    // 封顶——新对话永远等不到扁平窗口(用户实测)。abort 同步复位引擎
+    // running(引擎经 abort 事件回 status idle),setStatus('idle') 让
+    // 渲染端立即进入空闲,迟到的流式事件被 statusRef 守卫丢弃
+    abort()
+    setStatus('idle')
     // 新对话:当前对话(非空)存档到历史,再清空。
     // 标题用实时总结(每轮回复后已静默更新,无需再次调用 LLM)
     sessionVersionRef.current += 1
@@ -641,7 +682,7 @@ export function useAgent(opts?: { allowProactive?: boolean }): AgentController {
     setMindGuess(null)
     // 主动陪伴:切换会话 = 有操作(新会话从零计时)
     lastUserSendRef.current = Date.now()
-  }, [resetStreaming])
+  }, [abort, resetStreaming])
 
   const loadSession = useCallback((id: string) => {
     const target = sessionsRef.current.find((s) => s.id === id)

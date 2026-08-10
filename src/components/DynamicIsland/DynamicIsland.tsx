@@ -21,7 +21,7 @@ import {
 import { formatTime } from '../../utils/format'
 import type { PlaybackMode } from '../../media/playbackModes'
 import { DEFAULT_BG_CROP, type ImageLibraryItem } from '../../media/backgroundStore'
-import { type FontColorMode, type FontLibraryItem } from '../../media/fontStore'
+import { FONT_WEIGHTS, type FontColorMode, type FontLibraryItem } from '../../media/fontStore'
 import { useAgentPanelLayout } from '../../hooks/useAgentPanelLayout'
 import type { AudioLibraryItem, VideoLibraryItem } from '../../media/libraryStore'
 import { loadImageNaturalSize, sampleImageBrightness } from '../../media/imageUtils'
@@ -44,7 +44,11 @@ import {
 import type { AgentConfig, AgentPanelProps } from '../../agent/types'
 import { textFromMessage } from '../../agent/text'
 import { AgentMediaMini } from './views/AgentMediaMini'
-import { AGENT_MEDIA_EVENT, type AgentMediaReport } from './views/Markdown'
+import {
+  AGENT_MEDIA_EVENT,
+  clearAgentVideoResume,
+  type AgentMediaReport,
+} from './views/Markdown'
 
 /** 媒体源归一化比较(2026-08-09 修复"移交永不触发"):agentPlaying 上报
  * 的是**已解析形态**(VoiceBubble 收到 resolved 后原样上报,
@@ -127,7 +131,14 @@ interface DynamicIslandProps {
    * addTracks 自动播放)再切模式;**未播放(暂停/播完/从未播过)收起
    * 不切音乐模式**(2026-08-09 用户要求:历史消息里有音频 ≠ 在播,
    * 收起面板不该跳到音乐模式),留在 Agent 模式紧凑态 */
-  onAgentAudioHandoff?: (audio: { src: string; name?: string }) => void
+  onAgentAudioHandoff?: (audio: {
+    src: string
+    name?: string
+    /** 移交时播放进度秒(2026-08-11 音乐模式从该位置续播,不从头) */
+    position?: number
+    /** 对话窗口循环播放(2026-08-11 同步为音乐模式单曲循环) */
+    loop?: boolean
+  }) => void
   /** 音乐模式:文字区三连击回调(通常切入 Agent 模式) */
   onAgentTripleClick?: () => void
   /** 文字区双击回调(通常暂停/继续播放) */
@@ -992,10 +1003,17 @@ export const DynamicIsland = memo(function DynamicIsland({
     const mediaMini = opts?.mediaMini !== false
     const last = agentLastMediaRef.current
     const playingMedia = agentPlayingRef.current
-    const media =
-      playingMedia && playingMedia.playing && playingMedia.kind !== 'audio' && playingMedia.src
+    // **播放优先只认视频(2026-08-10 用户要求"最新消息为图片,且无视频
+    // 播放则展示图片")**:playingMedia 是播放状态事件上报,残留的
+    // playing:true(视频暂停/播完偶发未清)会让收起取旧视频而非最新消息
+    // 的图片;图片没有"播放中"概念,不该参与播放优先——只有 kind===
+    // 'video' 且 playing 才优先作小窗候选,其余场景一律取数据驱动的
+    // 最后媒体(最新消息里的媒体,见 AgentView lastMedia)
+    const playingVideo =
+      playingMedia && playingMedia.kind === 'video' && playingMedia.playing && playingMedia.src
         ? playingMedia
-        : last
+        : null
+    const media = playingVideo ?? last
     // 同 src 判据(2026-08-09):播放中 → 自动续播标记;暂停后收起 → 仍
     // 带进度,小窗点播放从暂停处继续(修复"收起变多媒体岛从头播放")
     const sameSrc =
@@ -1011,8 +1029,38 @@ export const DynamicIsland = memo(function DynamicIsland({
     } else {
       setAgentMini(null)
     }
-    if (media?.kind === 'audio' && playing && onAgentAudioHandoffRef.current) {
-      onAgentAudioHandoffRef.current({ src: media.src, name: media.name })
+    // **收起为灵动岛(mediaMini:false)清除视频续播标记(2026-08-11 用户
+    // 要求"从别的窗口/模式切换回不自动播放,除非从视频岛正在播放的视频
+    // 切换回来")**:面板卸载 = 视频播放停止,lastPlayingVideoSrc 残留会让
+    // 下次展开面板"诈尸续播"(实测:收起为灵动岛 → 切音乐 → 切回 Agent
+    // 展开,视频自动播)。收起为多媒体岛(默认)不清——小窗接管播放,
+    // 小窗在播 → 展开面板的续播路径保留(小窗暂停/播完经 dispatch
+    // playing:false 自清);模式切换的清理由 WidgetApp 负责(小窗/面板
+    // 卸载的同一语义)
+    if (!mediaMini && playingVideo) {
+      clearAgentVideoResume()
+    }
+    // **音频移交独立判定(2026-08-10)**:小窗候选只认视频后,media 可能
+    // 是最后消息(非音频),播放中的音频要单独取——playingMedia 是
+    // audio 且在播(暂停/播完会 dispatch playing:false 清)才移交,
+    // 不受数据最后媒体影响(用户实测"bili 下载的歌切音乐模式播放"走
+    // 的就是这条链路)。
+    // **同步进度与播放模式(2026-08-11 用户要求"参考视频岛切换逻辑")**:
+    // VoiceBubble 播放时经上报带 position(节流 ~1Hz)与 loop(循环按钮);
+    // 移交时一并传给宿主——音乐模式从该位置续播(不从头),循环同步为
+    // 单曲循环;正在播放的音频**不中断**(宿主 addTrackUrl 直接用原始
+    // src 立即播放,不再 fetch 转码等待)
+    const playingAudio =
+      playingMedia && playingMedia.kind === 'audio' && playingMedia.playing && playingMedia.src
+        ? playingMedia
+        : null
+    if (playingAudio && onAgentAudioHandoffRef.current) {
+      onAgentAudioHandoffRef.current({
+        src: playingAudio.src,
+        name: playingAudio.name,
+        position: playingAudio.position,
+        loop: playingAudio.loop,
+      })
     }
     setAgentPlaying(null)
     setExpanded(false)
@@ -1522,12 +1570,14 @@ export const DynamicIsland = memo(function DynamicIsland({
     : undefined
   // 自定义字体应用:覆盖岛体及后代文字(按钮/输入 font-family: inherit 跟随),
   // fallback 取运行时 body 字体栈,保证无字体时的观感一致;
-  // 粗细随设置(400/600/800,单字重字体由浏览器合成加粗)
+  // 粗细随设置(300-900 档位,2026-08-11 用户要求"更多选择";**原
+  // 白名单只有 400/600/800,扩展后的 300/500/700/900 被过滤成
+  // undefined = 切换无响应**,改为 FONT_WEIGHTS 校验)
   const islandFontFamily = fontDataUrl
     ? `'${CUSTOM_FONT_FAMILY}', ${getComputedStyle(document.body).fontFamily}`
     : undefined
   const islandFontWeight =
-    fontWeight && [400, 600, 800].includes(fontWeight) ? fontWeight : undefined
+    fontWeight && FONT_WEIGHTS.includes(fontWeight) ? fontWeight : undefined
 
   const stateClass = state === 'playing' || state === 'idle' ? '' : state
 

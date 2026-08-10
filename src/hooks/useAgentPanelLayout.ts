@@ -7,7 +7,7 @@
  * - 岛体高度(--agent-h 变量):AgentView 测量回调写入目标值,JS 动画
  *   rAF + easeOutCubic 逼近(60fps 动画直接写 DOM 变量,不经 React
  *   state,不触发整岛重渲染),每帧上报显示高度给宿主跟随窗口;
- * - 界面缩放(100-300%):等比例放大展开态 UI(UI 元素不缩放),
+ * - 界面缩放(100-400%):等比例放大展开态 UI(UI 元素不缩放),
  *   localStorage 持久化,LLM 设置工具(set_agent_scale)即时生效;
  * - 进入 agent 视图入口高度从紧凑 56 滑升到面板下限、缩放变化即时
  *   同步窗口宽度。
@@ -45,7 +45,7 @@ export function useAgentPanelLayout(params: AgentPanelLayoutParams): {
   /** 岛体高度目标值 setter(AgentView 测量写入;高度动画在 hook 内驱动,
    * 组件侧只消费 setter) */
   setAgentPanelH: (h: number) => void
-  /** 界面缩放(100-300,百分比) */
+  /** 界面缩放(100-400,百分比) */
   agentScale: number
   handleAgentScaleChange: (scale: number) => void
   /** 高度动画就绪(宽度动画完成,2026-08-08 串行展开):组件侧据此
@@ -63,9 +63,9 @@ export function useAgentPanelLayout(params: AgentPanelLayoutParams): {
     onAgentPanelWidth,
   } = params
 
-  // Agent 面板岛体高度(px,逻辑值,作为**动画目标**):内容自适应
-  // (AgentView 测量回调写入),默认下限留一点空;离开 agent 视图重置,
-  // 下次进入重新测量
+  // Agent 面板岛体高度(px,逻辑值):AgentView 测量回调写入(内容自适应);
+  // 动画目标 = min(内容高 × 缩放, 宽度 × 9/16)——**内容少时随内容
+  // 收缩(新对话面板紧凑),内容多时 16:9 截断(列表滚动)**
   const [agentPanelH, setAgentPanelH] = useState(AGENT_PANEL_MIN_H)
   useEffect(() => {
     if (panelView !== 'agent') setAgentPanelH(AGENT_PANEL_MIN_H)
@@ -181,24 +181,31 @@ export function useAgentPanelLayout(params: AgentPanelLayoutParams): {
       )
       onAgentPanelSize?.(w, ISLAND_COMPACT_H)
     } else {
-      // agent-settings 视图保持原并行逻辑(从当前显示高度滑升到固定 540)
+      // agent-settings 视图:从当前显示高度滑升到固定 540。
+      // **窗口一次性 resize 到最终尺寸(2026-08-11 优化"进入 Agent 设置
+      // 面板加载动画卡")**:原实现逐帧 onAgentPanelSize 跟随窗口(每帧
+      // setSize = 软件渲染全幅重绘,一次滑升 ~20 次 resize = "加载卡"的
+      // 根源,agent 视图同款取舍)——岛体 ≤ 窗口不裁剪,透明区无视觉,
+      // 动画期间窗口不动、只滑岛体高度;最终尺寸与 handlePanelViewChange
+      // 的 VIEW_WINDOW_H['agent-settings'](580)同值,后发覆盖一致
       setAgentHReady(false)
       window.clearTimeout(agentHReadyTimerRef.current)
       const startH = Math.max(agentHDispRef.current, ISLAND_PANEL_H)
       agentHDispRef.current = startH
-      animateAgentH(AGENT_SETTINGS_H, (h) => onAgentPanelSize?.(w, h))
+      onAgentPanelSize?.(w, AGENT_SETTINGS_H)
+      animateAgentH(AGENT_SETTINGS_H, () => {})
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅在视图切换时触发
   }, [panelView])
 
-  // Agent 面板界面缩放(百分比 100-300,最低 100%):等比例缩放展开态 UI。
+  // Agent 面板界面缩放(百分比 100-400,最低 100%):等比例缩放展开态 UI。
   // 持久化 localStorage;视觉尺寸 = 逻辑值 × 缩放,窗口由宿主跟随。
   // 默认 200%(用户要求:初次安装初次进入 Agent 模式时默认放大——小屏
   // 挂件默认 100% 观感偏小;已有 localStorage(用户改过)保留原值)
   // 缩放初始化与设置桥共用 readAgentScale(收敛两处独立 clamp,审计 P2)
   const [agentScale, setAgentScale] = useState(() => readAgentScale())
   const handleAgentScaleChange = useCallback((scale: number) => {
-    const clamped = Math.min(300, Math.max(100, Math.round(scale)))
+    const clamped = Math.min(400, Math.max(100, Math.round(scale)))
     setAgentScale(clamped)
     try {
       localStorage.setItem(AGENT_SCALE_STORAGE_KEY, String(clamped))
@@ -214,7 +221,7 @@ export function useAgentPanelLayout(params: AgentPanelLayoutParams): {
       onSettingsChange(['scale'], () => {
         try {
           const v = Number(localStorage.getItem(AGENT_SCALE_STORAGE_KEY))
-          if (Number.isFinite(v) && v >= 100 && v <= 300) setAgentScale(Math.round(v))
+          if (Number.isFinite(v) && v >= 100 && v <= 400) setAgentScale(Math.round(v))
         } catch {
           // 忽略存储失败
         }
@@ -236,8 +243,22 @@ export function useAgentPanelLayout(params: AgentPanelLayoutParams): {
     if (!agentHReady) return
     const s = agentScale / 100
     const w = Math.round(expandedWidth * s)
-    onAgentPanelSize?.(w, agentPanelH)
-    animateAgentH(agentPanelH, () => {})
+    // **高度 = 内容测高 1:1 跟随,上限 = 宽度 9/16(2026-08-11 六轮
+    // 迭代定稿:16:9 封顶 → 内容自适应 → 新对话不放大 → 纯测高 → 斜坡
+    // → 1:1 + 16:9)**:
+    // - 窗口高度 = min(内容测高, 宽度 × 9/16)——消息多长窗口多高,
+    //   逐行跟随(发送/流式每行 ~20px 窗口跟着长),空对话扁平(176);
+    // - 上限 = 宽度 × 9/16(16:9 观感),内容超高封顶、列表滚动;
+    // - 内容测高上限 700(layout.ts AGENT_PANEL_MAX_H,2026-08-11 从
+    //   600 上调)——高缩放比例(300% 时 16:9 = 675)下 1:1 增长仍能
+    //   到达 16:9 上限,不再"最大高度比 16:9 小,大概 6、7"(用户实测)。
+    // 迭代实录:斜坡(下限以上 × 缩放)让一次对话就展开很多高度
+    // ("一个对话就展开很多高度,一点跟随性都没有,两次对话就完全
+    // 展开了"用户实测,300% 时 1 次对话 236 测高 → 356 窗口)——
+    // 1:1 才是真正的"随对话展开"
+    const h = Math.min(agentPanelH, Math.round((w * 9) / 16))
+    onAgentPanelSize?.(w, h)
+    animateAgentH(h, () => {})
   }, [agentPanelH, agentScale, expandedWidth, onAgentPanelSize, panelView, agentHReady, animateAgentH])
   // 缩放变化立即同步窗口宽度(无论当前面板视图——设置视图里切缩放
   // 也要即时看到放大效果;高度由各视图回调管理)

@@ -6,7 +6,7 @@
  * 保持 main.cjs 与测试代码零耦合。
  */
 
-function runScreenshotTests({ win, app, fs, path, settingsPath, runIslandSettings, resetSettingsCache, runProactiveGuess, startProactiveTurn, getLastProactiveTick }) {
+function runScreenshotTests({ win, app, fs, path, settingsPath, runIslandSettings, resetSettingsCache, runProactiveGuess, startProactiveTurn, getLastProactiveTick, requestEvolution }) {
     // 巡检起点时刻(完成日志总耗时用)
     if (global.__screenshotT0 === undefined) global.__screenshotT0 = Date.now()
     // 终端进程监控(2026-08-08 用户报告"巡检约 40 秒弹新终端"):
@@ -281,6 +281,271 @@ function runScreenshotTests({ win, app, fs, path, settingsPath, runIslandSetting
             })()`)
             console.log('[widget] test:', result)
           }
+          if (process.env.WIDGET_SCREENSHOT_MODE === 'probe-clear') {
+            // 诊断探针(2026-08-11):新对话后 Agent 面板窗口应缩回扁平
+            // (~176),实测仍 16:9。多场景:① 长对话直接清空 ② 含视频的
+            // 对话清空 ③ 空白新会话展开 ④ 收起为多媒体岛 → 展开 → 清空。
+            // 不调 LLM;mode 由 settings.json 决定
+            const sleep = (ms) => new Promise((res) => setTimeout(res, ms))
+            const snapshot = () => win.webContents.executeJavaScript(`(() => {
+              const island = document.querySelector('.island-demo')
+              const msgs = (() => { try { return JSON.parse(localStorage.getItem('widget-agent-messages') || '[]') } catch { return [] } })()
+              const quickBtn = document.querySelector('.island-quick-menu-btn')
+              const qr = quickBtn ? quickBtn.getBoundingClientRect() : null
+              const items = [...(document.querySelectorAll('.island-quick-menu-item') ?? [])].map((b) => b.textContent)
+              return JSON.stringify({
+                expanded: island?.classList.contains('expanded'),
+                agentView: !!document.querySelector('.island-agent'),
+                mini: island?.classList.contains('island-agent-mini') ?? false,
+                agentH: island ? getComputedStyle(island).getPropertyValue('--agent-h') : null,
+                islandRect: island ? { x: island.getBoundingClientRect().x, y: island.getBoundingClientRect().y, w: island.getBoundingClientRect().width, h: island.getBoundingClientRect().height } : null,
+                msgCount: msgs.length,
+                welcome: !!document.querySelector('.island-agent-welcome'),
+                mediaFrames: document.querySelectorAll('.island-media-frame').length,
+                quickBtn: qr ? { x: Math.round(qr.left + qr.width / 2), y: Math.round(qr.top + qr.height / 2) } : null,
+                quickLabel: quickBtn?.textContent ?? null,
+                menuItems: items,
+              })
+            })()`)
+            const winState = async (tag) => {
+              console.log('[widget] probe', tag, '→', await snapshot(), '| win:', win.getSize())
+            }
+            const longPress = async (x, y) => {
+              win.webContents.sendInputEvent({ type: 'mouseMove', x, y })
+              win.webContents.sendInputEvent({ type: 'mouseDown', x, y, button: 'left', clickCount: 1 })
+              await sleep(650)
+              win.webContents.sendInputEvent({ type: 'mouseUp', x, y, button: 'left', clickCount: 1 })
+              await sleep(1600)
+            }
+            const click = async (x, y) => {
+              win.webContents.sendInputEvent({ type: 'mouseMove', x, y })
+              win.webContents.sendInputEvent({ type: 'mouseDown', x, y, button: 'left', clickCount: 1 })
+              await sleep(120)
+              win.webContents.sendInputEvent({ type: 'mouseUp', x, y, button: 'left', clickCount: 1 })
+              await sleep(1200)
+            }
+            const center = async () => {
+              const s = await snapshot()
+              const j = JSON.parse(s)
+              return j.islandRect
+                ? { x: Math.round(j.islandRect.x + j.islandRect.w / 2), y: Math.round(j.islandRect.y + j.islandRect.h / 2) }
+                : { x: 260, y: 28 }
+            }
+            const clickQuickItem = async (label) => {
+              // 悬浮打开 QuickMenu → 点菜单项
+              const s = JSON.parse(await snapshot())
+              const qb = s.quickBtn
+              if (!qb) return false
+              win.webContents.sendInputEvent({ type: 'mouseMove', x: qb.x, y: qb.y })
+              await sleep(500)
+              const s2 = JSON.parse(await snapshot())
+              const item = s2.menuItems.map((t, i) => [t, i]).find(([t]) => t.includes(label))
+              if (!item) return false
+              const els = await win.webContents.executeJavaScript(`(() => {
+                const btns = [...document.querySelectorAll('.island-quick-menu-item')]
+                const b = btns.find((x) => x.textContent.includes(${JSON.stringify(label)}))
+                if (!b) return null
+                const r = b.getBoundingClientRect()
+                return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) }
+              })()`)
+              if (!els) return false
+              await click(els.x, els.y)
+              return true
+            }
+            const seedMsgs = (withMedia) => win.webContents.executeJavaScript(`(() => {
+              const mk = (role, text, extra) => ({
+                id: 'probe-' + role + '-' + Math.random().toString(36).slice(2),
+                role,
+                parts: extra ? [{ type: 'text', text }, ...extra] : [{ type: 'text', text }],
+                usage: null,
+                createdAt: Date.now(),
+              })
+              const msgs = []
+              for (let i = 0; i < 8; i++) {
+                msgs.push(mk('user', '探针问题 ' + (i + 1) + ':帮我处理一下这个任务'))
+                msgs.push(mk('assistant', '这是第 ' + (i + 1) + ' 条探针回复。' + '详细内容 '.repeat(60) + '结尾 ' + i))
+              }
+              ${
+                withMedia
+                  ? `msgs.push(mk('assistant', '下面是视频:', [{ type: 'media', kind: 'video', url: 'island-media://local/test.mp4', name: '测试视频.mp4' }]))`
+                  : ''
+              }
+              localStorage.setItem('widget-agent-messages', JSON.stringify(msgs))
+              localStorage.setItem('widget-agent-scale', '200')
+              localStorage.setItem('widget-agent-sessions', '[]')
+              return { msgs: msgs.length }
+            })()`)
+            const resetStorage = () => win.webContents.executeJavaScript(`(() => {
+              localStorage.removeItem('widget-agent-messages')
+              localStorage.removeItem('widget-agent-sessions')
+              localStorage.setItem('widget-agent-scale', '200')
+              return true
+            })()`)
+            // ===== 场景 B:长对话(含视频)→ 展开 → 新对话 =====
+            console.log('[widget] probe ==== 场景 B:含视频长对话 → 新对话 ====')
+            await seedMsgs(true)
+            win.webContents.reload()
+            await sleep(2000)
+            {
+              const p = await center()
+              await longPress(p.x, p.y)
+            }
+            await winState('B1 展开(含视频)')
+            {
+              const s = JSON.parse(await snapshot())
+              if (s.quickBtn) {
+                await click(s.quickBtn.x, s.quickBtn.y) // 单击 = 执行当前项(新对话)
+              }
+            }
+            await winState('B2 新对话后')
+            // ===== 场景 C:空白新会话 → 展开 =====
+            console.log('[widget] probe ==== 场景 C:空白新会话展开 ====')
+            await resetStorage()
+            win.webContents.reload()
+            await sleep(2000)
+            {
+              const p = await center()
+              await longPress(p.x, p.y)
+            }
+            await winState('C1 空白展开')
+            // ===== 场景 D:收起为多媒体岛 → 展开 → 新对话 =====
+            console.log('[widget] probe ==== 场景 D:媒体岛 → 展开 → 新对话 ====')
+            await seedMsgs(true)
+            win.webContents.reload()
+            await sleep(2000)
+            {
+              const p = await center()
+              await longPress(p.x, p.y)
+            }
+            await winState('D1 展开(含视频)')
+            await clickQuickItem('收起为多媒体岛')
+            await sleep(1000)
+            await winState('D2 媒体岛')
+            {
+              const p = await center()
+              await longPress(p.x, p.y)
+            }
+            await winState('D3 从媒体岛展开')
+            {
+              const s = JSON.parse(await snapshot())
+              if (s.quickBtn) {
+                await click(s.quickBtn.x, s.quickBtn.y)
+              }
+            }
+            await winState('D4 新对话后')
+            {
+              const image = await win.webContents.capturePage()
+              fs.writeFileSync(process.env.WIDGET_SCREENSHOT + '.probe-d4.png', image.toPNG())
+            }
+            // ===== 场景 E:真实 LLM 回复中点击新对话 =====
+            // clear 必须中止引擎回合:否则孤儿回复落进新对话 + status 停在
+            // thinking(思考占位行把空对话测高顶过下限 → 16:9 封顶)
+            console.log('[widget] probe ==== 场景 E:回复中点新对话 ====')
+            await resetStorage()
+            win.webContents.reload()
+            await sleep(2000)
+            {
+              const p = await center()
+              await longPress(p.x, p.y)
+            }
+            await winState('E1 空白展开')
+            // 真实发送(settings.json 已配 apiKey;history 末尾 = 本轮用户消息)
+            await win.webContents.executeJavaScript(`window.desktop?.agentSend?.('只回复四个字:你好世界', [{ id: 'probe-u-e', role: 'user', parts: [{ type: 'text', text: '只回复四个字:你好世界' }], usage: null, createdAt: Date.now() }])`)
+            await sleep(1800)
+            await winState('E2 流式/思考中')
+            // 悬浮展开 QuickMenu → 点「新对话」菜单项(按钮当前项可能是
+            // 收起等其它项——按钮执行的是当前 wheel 项,必须点具体菜单项)
+            await clickQuickItem('新对话')
+            await winState('E3 回复中点新对话')
+            await sleep(5000) // 等引擎 abort 收敛
+            await winState('E4 稳定后(应 0 消息 + 扁平)')
+            {
+              const image = await win.webContents.capturePage()
+              fs.writeFileSync(process.env.WIDGET_SCREENSHOT + '.probe-e4.png', image.toPNG())
+            }
+          }
+          if (process.env.WIDGET_SCREENSHOT_MODE === 'probe-evolve') {
+            // 记忆进化实测探针(2026-08-11 用户要求"后台测试,什么时候能
+            // 真正整合有效信息,要求垂直细分,关键词不能散落重复出现在
+            // 那么多记忆里"):① 备份记忆/状态/日志 ② 统计"关键词散落"
+            // (每个主题词出现在几条记忆,应趋向 1 = 垂直细分整合)
+            // ③ 触发真实进化(主进程 getEvolution,4 轮上限,真实 LLM)
+            // ④ 轮询日志直到完成 ⑤ 复统计 + 日志摘要 + 增删明细
+            const sleep = (ms) => new Promise((res) => setTimeout(res, ms))
+            const dir = path.dirname(settingsPath())
+            const file = (name) => path.join(dir, name)
+            const readJson = async (name) => {
+              try {
+                return JSON.parse(await fs.promises.readFile(file(name), 'utf8'))
+              } catch {
+                return null
+              }
+            }
+            const memoryEntries = async () => {
+              const d = await readJson('memory.json')
+              return Array.isArray(d) ? d : d?.entries ?? []
+            }
+            const KEYWORDS = ['小胖', 'TTG', '1080P', 'B站', '收藏夹', '夜间', '凌晨', '夜猫', 'MV']
+            const scatter = (entries) => {
+              const out = {}
+              for (const k of KEYWORDS) out[k] = entries.filter((e) => e.content.includes(k)).length
+              return out
+            }
+            // 备份(进化接受的新版本可经设置界面回滚;这里双保险)
+            for (const n of ['memory.json', 'memory-state.json', 'evolution.json']) {
+              try {
+                await fs.promises.copyFile(file(n), file(n + '.probe-bak'))
+              } catch {
+                // 无此文件
+              }
+            }
+            const before = await memoryEntries()
+            console.log(
+              '[widget] probe-evolve before:',
+              JSON.stringify({ count: before.length, scatter: scatter(before) }),
+            )
+            const logBefore = (await readJson('evolution.json'))?.logs?.length ?? 0
+            const res = await requestEvolution(4)
+            console.log('[widget] probe-evolve start:', JSON.stringify(res))
+            let done = false
+            const t0 = Date.now()
+            while (Date.now() - t0 < 240_000) {
+              await sleep(3000)
+              const logNow = (await readJson('evolution.json'))?.logs?.length ?? 0
+              if (logNow > logBefore) {
+                done = true
+                break
+              }
+            }
+            await sleep(2000) // 等最后一轮日志落盘
+            const after = await memoryEntries()
+            const logAfter = (await readJson('evolution.json'))?.logs ?? []
+            const newLogs = logAfter.slice(0, Math.max(0, logAfter.length - logBefore))
+            console.log(
+              '[widget] probe-evolve done:',
+              JSON.stringify({
+                done,
+                count: after.length,
+                scatter: scatter(after),
+                logCount: logAfter.length,
+                rounds: newLogs.map((l) => l.summary),
+              }),
+            )
+            const c1 = before.map((e) => e.content)
+            const c2 = after.map((e) => e.content)
+            console.log(
+              '[widget] probe-evolve deleted:',
+              JSON.stringify(c1.filter((c) => !c2.includes(c)).map((c) => c.slice(0, 70))),
+            )
+            console.log(
+              '[widget] probe-evolve added:',
+              JSON.stringify(c2.filter((c) => !c1.includes(c)).map((c) => c.slice(0, 100))),
+            )
+            console.log(
+              '[widget] probe-evolve final entries:',
+              JSON.stringify(after.map((e, i) => `${i + 1}. [${e.type}] ${e.content.slice(0, 110)}`)),
+            )
+          }
           if (process.env.WIDGET_SCREENSHOT_MODE === 'agent') {
             // Agent 功能巡检(严格 UI 测试):托盘设置 → Agent 设置视图 →
             // 表单/MCP 双传输编辑/测试连接/技能目录/记忆增删/进化/保存。
@@ -480,6 +745,39 @@ function runScreenshotTests({ win, app, fs, path, settingsPath, runIslandSetting
               out.tabsItemCount = tabItems.length
               out.tabsItems = tabItems.map((t) => t.text)
               out.tabsCurrentOn = tabItems.find((t) => t.on)?.text ?? '(无)'
+
+              // ---- 账号功能(2026-08-11 用户要求"Agent 设置添加账号余额
+              // 查询,API 配置集成到账号功能") ----tab 0(账号)余额卡片 +
+              // 刷新按钮;点刷新触发**真实余额查询**(巡检环境有真实 API
+              // Key,GET /user/balance 只读安全);断言余额行渲染或明确错误
+              const accountCard = view.querySelector('.island-agent-account')
+              out.accountCardShown = !!accountCard
+              if (accountCard) {
+                // 去充值按钮(2026-08-11:DeepSeek 无充值 API,跳转网页端
+                // 充值中心;openExternal stub 捕获 URL 断言接线)
+                const topupBtn = accountCard.querySelector('.island-agent-account-topup')
+                out.accountTopupShown = !!topupBtn
+                const openCalls = []
+                const origOpen = window.desktop.openExternal
+                window.desktop.openExternal = (url) => openCalls.push(url)
+                topupBtn?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+                window.desktop.openExternal = origOpen
+                out.accountTopupUrl = openCalls[0] ?? null
+                out.accountTopupOk = openCalls[0] === 'https://platform.deepseek.com/top_up'
+                const refreshBtn = accountCard.querySelector('.island-agent-account-refresh')
+                out.accountRefreshShown = !!refreshBtn
+                refreshBtn?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+                // 真实查询等待(网络往返 + 引擎 fetch)
+                await sleep(3000)
+                const rows = [...accountCard.querySelectorAll('.island-agent-account-row')].map((r) =>
+                  r.textContent.replace(/\s+/g, ' ').trim(),
+                )
+                const errEl = accountCard.querySelector('.island-agent-account-error')
+                out.accountRows = rows
+                out.accountError = errEl ? errEl.textContent.trim() : null
+                out.accountOk =
+                  rows.length > 0 || (errEl !== null && (errEl.textContent || '').length > 0)
+              }
 
               // ---- MCP 服务编辑(工具与能力菜单) ----
               await switchTab('工具与能力')
@@ -887,7 +1185,9 @@ function runScreenshotTests({ win, app, fs, path, settingsPath, runIslandSetting
               const y = r.top + r.height / 2
               island.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, clientX: x, clientY: y, pointerId: 1, isPrimary: true, button: 0 }))
               setTimeout(() => island.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, clientX: x, clientY: y, pointerId: 1, isPrimary: true, button: 0 })), 600)
-              await sleep(1100)
+              // 2026-08-11:400% 缩放下软件渲染展开慢,1100ms 不够(诊断
+              // 读到 56px 紧凑态),加长到 2500ms
+              await sleep(2500)
               out.expanded = island.classList.contains('expanded')
               const ta = document.querySelector('.island-agent-input textarea')
               out.inputShown = !!ta
@@ -896,6 +1196,13 @@ function runScreenshotTests({ win, app, fs, path, settingsPath, runIslandSetting
               out.agentViewShown = !!document.querySelector('.island-agent-view')
               out.panelHtml = document.querySelector('.island-panel')?.className ?? '(无面板)'
               out.panelContent = (document.querySelector('.island-panel')?.innerHTML ?? '').replace(/<[^>]+>/g, ' ').trim().slice(0, 120)
+              // 2026-08-11 临时诊断:新对话高度(0 消息应矮小,不乘缩放)
+              out.agentHVar = island.style.getPropertyValue('--agent-h') || '(空)'
+              out.agentScaleVar = island.style.getPropertyValue('--agent-s') || '(空)'
+              out.islandRectH = Math.round(island.getBoundingClientRect().height)
+              out.islandRectW = Math.round(island.getBoundingClientRect().width)
+              out.winH = window.innerHeight
+              out.msgCount = document.querySelectorAll('.island-agent-msg-assistant, .island-agent-msg-user').length
               if (!ta) return JSON.stringify(out)
               const setVal = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set
               const type = async (v) => {
@@ -2440,7 +2747,6 @@ function runScreenshotTests({ win, app, fs, path, settingsPath, runIslandSetting
                 console.error(`[chat-media] CONV-MEDIA-AUDIO: FAIL 音频清单应带播放状态:${JSON.stringify(mediaList).slice(0, 400)}`)
               }
             }
-
             // 4.6 音频移交端到端(2026-08-09 五轮修复 + UI 验证):收起
             // 面板时对话音频应加载进音乐模式继续播放——注入真实 mp3
             // 媒体消息(触发挂载上报)→ 长按消息区收起面板(doCollapse

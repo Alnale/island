@@ -19,6 +19,7 @@ import {
   useRef,
   useState,
   type CSSProperties,
+  type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from 'react'
@@ -258,6 +259,28 @@ function VoiceBubble({
   const [duration, setDuration] = useState<number | null>(null)
   const [err, setErr] = useState(false)
   const scrubbingRef = useRef(false)
+  // 循环播放(2026-08-11 用户要求"音频条支持切换播放模式(循环)"):
+  // 按钮切换 audio.loop;移交音乐模式时经上报的 loop 同步为单曲循环
+  const [looping, setLooping] = useState(false)
+  const loopingRef = useRef(false)
+  loopingRef.current = looping
+  // 播放状态/进度上报(2026-08-11 音频移交同步进度):timeupdate 节流
+  // ~1Hz(与视频一致)——doCollapse 移交时带 position,音乐模式从该
+  // 位置续播,不从头
+  const lastPosReportRef = useRef(-1)
+  const reportAudio = (a: HTMLAudioElement, force = false) => {
+    const pos = Math.round(a.currentTime)
+    if (!force && pos === lastPosReportRef.current) return
+    lastPosReportRef.current = pos
+    dispatchAgentMedia('play', {
+      kind: 'audio',
+      src,
+      name: alt,
+      playing: !a.paused,
+      position: pos,
+      loop: loopingRef.current,
+    })
+  }
   // 自动播放(2026-08-10 修复"找歌来听没自动播放"):**挂载时一次性捕获
   // autoPlay(useRef)——消息落定渲染(autoPlay=true)后消费标记使 prop 变
   // false,若 effect 依赖 [autoPlay] 会重跑:cleanup 移除 loadedmetadata
@@ -286,6 +309,18 @@ function VoiceBubble({
     if (playing) a.pause()
     else void a.play().catch(() => setErr(true))
   }
+  // 循环按钮:切换 audio.loop(即时生效,播完自动重播);上报循环状态
+  // (移交音乐模式时同步为单曲循环)
+  const toggleLoop = (event: ReactMouseEvent<HTMLButtonElement>) => {
+    event.stopPropagation()
+    const a = audioRef.current
+    if (!a) return
+    const next = !looping
+    setLooping(next)
+    a.loop = next
+    if (!next) lastPosReportRef.current = -1
+    reportAudio(a, true)
+  }
   // 进度条拖拽 seek(2026-08-08 用户要求"音频播放气泡支持拖拽进度"):
   // 点击/拖动进度条跳转播放位置;拦截左键(防整条气泡 toggle 与岛体
   // 长按收回)
@@ -300,9 +335,12 @@ function VoiceBubble({
   }
   if (err) return <MediaError src={src} kind="audio" code={null} />
   const dur = duration != null && Number.isFinite(duration) ? Math.round(duration) : 0
+  // 歌名(2026-08-11 用户要求"音频条显示歌名"):alt(media part 的 name)
+  // 优先,回退文件名(截扩展名);超长省略
+  const voiceTitle = (alt ?? '').replace(/\.[^.]+$/, '') || '语音消息'
   return (
     <div
-      className={`island-agent-voice${playing ? ' playing' : ''}`}
+      className={`island-agent-voice${playing ? ' playing' : ''}${looping ? ' looping' : ''}`}
       role="button"
       tabIndex={0}
       title={alt ? `语音:${alt}` : '语音消息'}
@@ -342,10 +380,17 @@ function VoiceBubble({
         )}
       </button>
       <span className="island-agent-voice-body">
-        <span className="island-agent-voice-wave" aria-hidden="true">
-          {[0, 1, 2, 3, 4].map((i) => (
-            <span key={i} style={{ '--i': i } as CSSProperties} />
-          ))}
+        {/* 歌名行(2026-08-11 用户要求"音频条显示歌名"):声波在歌名
+            左侧,播放时跳动;超长省略号 */}
+        <span className="island-agent-voice-title-row">
+          <span className="island-agent-voice-wave" aria-hidden="true">
+            {[0, 1, 2, 3, 4].map((i) => (
+              <span key={i} style={{ '--i': i } as CSSProperties} />
+            ))}
+          </span>
+          <span className="island-agent-voice-title" title={voiceTitle}>
+            {voiceTitle}
+          </span>
         </span>
         <span
           ref={progressRef}
@@ -369,6 +414,8 @@ function VoiceBubble({
           }}
           onPointerUp={() => {
             scrubbingRef.current = false
+            const a = audioRef.current
+            if (a) reportAudio(a, true)
           }}
           onPointerCancel={() => {
             scrubbingRef.current = false
@@ -381,31 +428,52 @@ function VoiceBubble({
       <span className="island-agent-voice-dur">
         {dur >= 60 ? `${Math.floor(dur / 60)}'${String(dur % 60).padStart(2, '0')}″` : `${dur}″`}
       </span>
+      {/* 循环按钮(2026-08-11 用户要求"支持切换播放模式(循环)"):切换
+          audio.loop(播完自动重播),激活态强调色高亮;与音乐模式单曲
+          循环语义对应,移交时经上报的 loop 同步 */}
+      <button
+        type="button"
+        className="island-agent-voice-loop"
+        aria-label={looping ? '关闭循环' : '循环播放'}
+        aria-pressed={looping}
+        title={looping ? '循环播放(点击关闭)' : '循环播放(点击开启)'}
+        onClick={toggleLoop}
+      >
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <polyline points="17 2 21 6 17 10" />
+          <path d="M3 11V9a4 4 0 0 1 4-4h14" />
+          <polyline points="7 22 3 18 7 14" />
+          <path d="M21 13v2a4 4 0 0 1-4 4H3" />
+        </svg>
+      </button>
       <audio
         ref={audioRef}
         src={src}
         preload="metadata"
         onError={() => setErr(true)}
         onLoadedMetadata={(event) => setDuration(event.currentTarget.duration)}
-        onTimeUpdate={(event) =>
-          setProgress(
-            event.currentTarget.duration > 0
-              ? event.currentTarget.currentTime / event.currentTarget.duration
-              : 0,
-          )
-        }
+        onTimeUpdate={(event) => {
+          const a = event.currentTarget
+          setProgress(a.duration > 0 ? a.currentTime / a.duration : 0)
+          // 播放进度节流上报(~1Hz;移交音乐模式时从该位置续播,不从头)
+          reportAudio(a)
+        }}
         onEnded={() => {
           setPlaying(false)
           setProgress(0)
-          dispatchAgentMedia('play', { kind: 'audio', src, playing: false })
+          lastPosReportRef.current = -1
+          dispatchAgentMedia('play', { kind: 'audio', src, name: alt, playing: false, loop: loopingRef.current })
         }}
         onPlay={() => {
           setPlaying(true)
-          dispatchAgentMedia('play', { kind: 'audio', src, playing: true })
+          const a = audioRef.current
+          if (a) reportAudio(a, true)
+          else dispatchAgentMedia('play', { kind: 'audio', src, name: alt, playing: true, loop: loopingRef.current })
         }}
         onPause={() => {
           setPlaying(false)
-          dispatchAgentMedia('play', { kind: 'audio', src, playing: false })
+          lastPosReportRef.current = -1
+          dispatchAgentMedia('play', { kind: 'audio', src, name: alt, playing: false, loop: loopingRef.current })
         }}
       />
     </div>
@@ -475,6 +543,13 @@ function VideoPlayer({
   const [leavingFs, setLeavingFs] = useState(false)
   const fsLeaveTimerRef = useRef(0)
   useEffect(() => () => window.clearTimeout(fsLeaveTimerRef.current), [])
+  // 自动播放标记(2026-08-11 从下方 effect 提前:封面抓帧 effect 需要
+  // 在挂载时判断"是否将自动播放"——自动播放的视频**不抓封面**,否则
+  // 抓帧的 seek(0.05) 会打断同时进行的 play()(AbortError 被静默吞掉,
+  // 视频停在暂停,实测 data URL 快媒体 chat-media 巡检 AUTOPLAY 失败;
+  // 本地协议慢媒体 play 先成功侥幸通过)——自动播放意味着马上要放,
+  // 封面没有意义,播完暂停显示真实帧)
+  const autoPlayOnceRef = useRef(autoPlay)
   // 视频封面(2026-08-10 用户要求"默认展示视频第一帧作为封面,不然
   // 黑色的也不清楚"):未播放时黑色画面难辨认——加载完成后暂停态
   // seek 到小偏移用 canvas 抓第一帧转 dataURL 作封面;**仅从未播放
@@ -485,6 +560,8 @@ function VideoPlayer({
   useEffect(() => {
     const v = videoRef.current
     if (!v) return
+    // 自动播放的视频跳过封面抓帧(2026-08-11,见上方 autoPlayOnceRef 注释)
+    if (autoPlayOnceRef.current) return
     // 续播媒体跳过封面抓帧(2026-08-10 修复"视频岛切回面板进度没同步"):
     // 缓存位置 > 0 = 续播场景——抓帧 seek(0.05) 与续播 seek(缓存位置)
     // 竞态,抓帧 seeked 回调的 restore 会把进度重置回 0(实测);续播
@@ -574,14 +651,14 @@ function VideoPlayer({
     v.loop = p.loop
   }, [])
   // 自动播放(2026-08-10 用户要求"LLM 播放视频,加载出媒体元素后自动
-  // 播放";三轮修复):**挂载时一次性捕获 autoPlay(useRef)**——消费标记
-  // 使 prop 变 false 时 effect 不重跑(cleanup 移除 loadedmetadata 监听
-  // 会让慢加载媒体永远等不到 play,2026-08-10 音频实测根因);
-  // **readyState >= 1 即 play**(play() 触发继续加载;原等 canplay 在
-  // preload=metadata 下可能永不触发,短媒体播完/未播静默失败实测)。
-  // 被策略拦截静默回退封面+播放键(不误报);与挂载续播并存:面板重挂载
-  // 场景先从缓存位置 seek,再自动播放续上;重挂载新实例读 false 不播
-  const autoPlayOnceRef = useRef(autoPlay)
+  // 播放";三轮修复):**挂载时一次性捕获 autoPlay(useRef,声明已提前到
+  // 封面抓帧 effect 之前,2026-08-11)**——消费标记使 prop 变 false 时
+  // effect 不重跑(cleanup 移除 loadedmetadata 监听会让慢加载媒体永远
+  // 等不到 play,2026-08-10 音频实测根因);**readyState >= 1 即 play**
+  // (play() 触发继续加载;原等 canplay 在 preload=metadata 下可能永不
+  // 触发,短媒体播完/未播静默失败实测)。被策略拦截静默回退封面+播放键
+  // (不误报);与挂载续播并存:面板重挂载场景先从缓存位置 seek,再自动
+  // 播放续上;重挂载新实例读 false 不播
   useEffect(() => {
     if (!autoPlayOnceRef.current) return
     const v = videoRef.current
@@ -1112,8 +1189,10 @@ export interface AgentMediaReport {
   src: string
   name?: string
   playing?: boolean
-  /** 播放进度秒(仅视频上报;节流 ~1Hz) */
+  /** 播放进度秒(视频与音频节流 ~1Hz 上报) */
   position?: number
+  /** 循环播放(2026-08-11 音频条循环按钮;移交音乐模式时同步为单曲循环) */
+  loop?: boolean
   /** 媒体元素当前显示宽度 px(2026-08-10 小窗尺寸同步:收起为多媒体岛
    * 时小窗 = 对话窗口里媒体元素的尺寸,切回面板保持相同尺寸) */
   width?: number
@@ -1143,6 +1222,21 @@ export function readAgentMediaSize(src: string): { width: number; aspect: number
 // 当前真实播放状态恢复(视频岛在播 → 切回面板继续播;面板手动暂停 →
 // playing:false 清除 → 重挂载不播)
 let lastPlayingVideoSrc: string | null = null
+
+/**
+ * 清除"最后播放中的视频"续播标记(2026-08-11 用户要求"从别的窗口/模式
+ * 切换回 Agent 对话,不是第一次加载不需要自动播放;除非从视频岛正在
+ * 播放的视频切换回来"):
+ * - 面板/视频岛**卸载且播放停止**的场景(收起为灵动岛、模式切换、清
+ *   数据)调用——重挂载不再"诈尸续播";
+ * - **视频岛在播 → 展开面板的路径不清**(展开不是模式切换/收起,小窗
+ *   卸载后播放状态由面板接管,续播保留);
+ * - 视频岛暂停/播完本就经 dispatch playing:false 清除(本函数兜底
+ *   非事件路径)
+ */
+export function clearAgentVideoResume(): void {
+  lastPlayingVideoSrc = null
+}
 export function dispatchAgentMedia(type: 'mount' | 'play' | 'unmount', media: AgentMediaReport) {
   if (type === 'play' && Number.isFinite(media.position)) {
     agentMediaPositions.set(media.src, media.position as number)
@@ -1177,7 +1271,12 @@ export function dispatchAgentMedia(type: 'mount' | 'play' | 'unmount', media: Ag
  *   图片 10GB)流式返回,Chromium 媒体栈边下边播,大文件不整体进内存;
  * - 播放失败 → MediaError 降级「用系统播放器打开」(外部播放器仅为
  *   降级选择);
- * - 初始宽 = 媒体窗口默认设置(localStorage widget-media-window)。
+ * - 初始宽 = 媒体窗口默认设置(localStorage widget-media-window);
+ * - **图片初始宽 = 原图宽(2026-08-11 用户要求"对话窗口内自定义图片被
+ *   压缩,改成原图;音乐模式不变"):图片不再按媒体窗口默认宽(320px)
+ *   显示——大图按原图 naturalWidth 显示(超出消息列表由 CSS max-width:
+ *   100% 兜底压缩保持比例),拖拽缩放/小窗尺寸缓存优先(用户调整过的
+ *   尺寸保留);视频无"原图"概念,仍用媒体窗口默认宽。
  */
 export function MediaFrame({
   kind,
@@ -1209,6 +1308,11 @@ export function MediaFrame({
     return cached ? Math.round(cached.width) : null
   })
   const [aspect, setAspect] = useState<number | null>(null)
+  // 图片原图宽(2026-08-11 用户要求"对话窗口内自定义图片改成原图"):
+  // onLoad 读 naturalWidth——图片初始宽 = 原图宽(非媒体窗口默认 320,
+  // 那是视频的默认;大图按原图显示,超出面板由 CSS 兜底);拖拽缩放/
+  // 小窗尺寸缓存(width 非 null)优先于原图(用户调整过的尺寸保留)
+  const [naturalW, setNaturalW] = useState<number | null>(null)
   // 图片全屏状态(2026-08-10 用户要求:全屏图标切换;容器级全屏,
   // 范围 = Agent 对话窗口)
   const [imgFullscreen, setImgFullscreen] = useState(false)
@@ -1286,7 +1390,10 @@ export function MediaFrame({
   if (err) return <MediaError src={resolved} kind={kind} code={err.code} />
   // 音频 = 语音气泡(不参与拖拽缩放;LLM 播放的音频自动播放)
   if (kind === 'audio') return <VoiceBubble src={resolved} alt={alt} autoPlay={autoPlay} />
-  const w = width ?? readMediaWindowWidth()
+  // 图片原图优先(2026-08-11):width(拖拽/小窗缓存) → 图片原图宽 →
+  // 媒体窗口默认宽;视频保持默认宽(无"原图"概念,元数据加载后按
+  // 真实比例,16/9 兜底)
+  const w = width ?? (kind === 'img' ? (naturalW ?? readMediaWindowWidth()) : readMediaWindowWidth())
   // 图片/视频:气泡容器固定宽 + 按自然比例的高,内容 100% 填充(无留白)。
   // 外层 wrap 承载拖拽手柄(2026-08-08 用户要求"手柄移到气泡外面"——
   // 与全屏按键重叠):frame 有 overflow:hidden 裁剪内容圆角,手柄放
@@ -1315,6 +1422,8 @@ export function MediaFrame({
                 const n = event.currentTarget
                 if (n.naturalWidth > 0 && n.naturalHeight > 0) {
                   setAspect(n.naturalWidth / n.naturalHeight)
+                  // 原图宽记录(2026-08-11:图片初始显示 = 原图,不压缩)
+                  setNaturalW(n.naturalWidth)
                 }
               }}
             />

@@ -109,7 +109,7 @@ WIDGET_SCREENSHOT 六种巡检模式 ~1160 行已从 main.cjs 抽离)。
 | 变量 | 说明 |
 | --- | --- |
 | WIDGET_SCREENSHOT | 截图输出路径(加载后自动截图) |
-| WIDGET_SCREENSHOT_MODE | 巡检模式(见下表) |
+| WIDGET_SCREENSHOT_MODE | 巡检模式(见下表);**probe-clear** = 新对话后窗口扁平回归探针, **probe-evolve** = 记忆进化垂直细分整合实测探针(真实 LLM,4 轮) |
 | WIDGET_SCREENSHOT_QUIT | **必须带 1**:巡检完成后优雅退出(app.quit)——应用托盘常驻不自退,用 timeout/taskkill 强杀进程树会让子进程(bridge/GPU/renderer)打出 "renderer gone: crashed" 假象(实测误导) |
 | WIDGET_MOCK_SERVER | mock MCP 服务器路径(agent 巡检段 3 真实连接) |
 

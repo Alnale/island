@@ -23,6 +23,7 @@ import {
   createConfigTools,
   parseManualCall,
   findManualTool,
+  matchManualToolPrefix,
   compressArgs,
   parseTitleJson,
   extractJsonTitle,
@@ -33,6 +34,7 @@ import {
   buildUserStyleSystem,
   createSummaryAgent,
   createMindAgent,
+  fetchDeepseekBalance,
 } from '../electron/agent/engine'
 import { createTools } from '../electron/agent/tools'
 import { streamResponse } from '../electron/agent/deepseek'
@@ -47,7 +49,7 @@ import {
   type AgentTask,
 } from '../electron/agent/tasks'
 import { createSettingsTools } from '../electron/agent/settingsTools'
-import { createEvolution, mapSeqToEntry } from '../electron/agent/evolution'
+import { applyChanges, createEvolution, isCleanupChange, mapSeqToEntry } from '../electron/agent/evolution'
 import type { AgentTool, McpServerConfig, MemoryEntry } from '../electron/agent/types'
 
 // 打包产物运行时路径会变(import.meta.url 指向 node_modules/.cache),
@@ -899,6 +901,25 @@ await test('findManualTool:精确/模糊唯一/多命中/未找到', () => {
   assert(findManualTool(tools, 'ghost').tool === null && findManualTool(tools, 'ghost').hint.includes('未找到'), '未找到应给提示')
 })
 
+await test('matchManualToolPrefix:技能名与描述无空格分离', () => {
+  const tools: AgentTool[] = [
+    { name: 'skill_zhangxuefeng-perspective', description: '', parameters: { type: 'object', properties: {} }, execute: async () => '' },
+    { name: 'skill_trump-perspective', description: '', parameters: { type: 'object', properties: {} }, execute: async () => '' },
+  ]
+  // 精确匹配走 findManualTool,不进前缀逻辑(前缀只处理"名字含描述"的形态)
+  const hit = matchManualToolPrefix(tools, 'skill_zhangxuefeng-perspective帮我调用')
+  assert(hit?.tool.name === 'skill_zhangxuefeng-perspective', `应命中技能,实际:${hit?.tool?.name}`)
+  assert(hit?.rest === '帮我调用', `剩余文本应为描述,实际:${hit?.rest}`)
+  // 带空格也兼容(rest 合并时去重)
+  const hit2 = matchManualToolPrefix(tools, 'skill_trump-perspective 用懂王视角')
+  assert(hit2?.tool.name === 'skill_trump-perspective' && hit2?.rest === '用懂王视角', '带空格前缀也应分离')
+  // 非前缀/无匹配返回 null
+  assert(matchManualToolPrefix(tools, 'some_random_text') === null, '无匹配返回 null')
+  // 前缀重叠取最长
+  const long = matchManualToolPrefix(tools, 'skill_zhangxuefeng-perspective')
+  assert(long?.tool.name === 'skill_zhangxuefeng-perspective' && long?.rest === '', '完整技能名 + 空描述')
+})
+
 // ---------------------------------------------------------------------------
 // 7. 自我进化(版本化快照 / 回滚防降级)
 // ---------------------------------------------------------------------------
@@ -934,6 +955,68 @@ await test('mapSeqToEntry:序号映射最新列表;越界/非法返回 null', ()
   assert(mapSeqToEntry(entries, '-1') === null, '负数返回 null')
   assert(mapSeqToEntry(entries, 'abc') === null, '非法返回 null')
   assert(mapSeqToEntry(entries, undefined) === null, '缺省返回 null')
+})
+
+await test('isCleanupChange:delete 与 merge 整合 = 清理类(豁免假说);add/普通 update 不是', () => {
+  // 2026-08-11 垂直细分整合:合并 update 与 delete 同例豁免 hypothesis
+  assert(isCleanupChange({ op: 'delete', id: '1' }), 'delete 是清理类')
+  assert(isCleanupChange({ op: 'update', id: '1', content: '整合', merge: true }), 'merge 整合是清理类')
+  assert(!isCleanupChange({ op: 'update', id: '1', content: '改' }), '普通 update 不是清理类')
+  assert(!isCleanupChange({ op: 'add', content: 'x' }), 'add 不是清理类')
+})
+
+await test('applyChanges:merge 整合 + delete 无假说也执行(垂直细分合并端到端)', async () => {
+  // 2026-08-11 修复"明明很多冗余记忆却没整合":三条 TTG/小胖重复 →
+  // 评审输出 1 条 merge update(整合内容,无 hypothesis)+ 2 条 delete
+  // (无 hypothesis)→ 全部执行,最终只剩一条整合条目
+  const store = createMemoryStore(() => path.join(memoryDir, 'memory.json'))
+  await store.replaceAll([]) // 隔离:测试共用同一 memory.json,清空残留
+  await store.add({ content: '用户关注KPL/TTG战队小胖,下载视频要1080P', type: 'preference', source: 'manual' })
+  await store.add({ content: '用户关注TTG战队,收藏夹视频太多', type: 'preference', source: 'manual' })
+  await store.add({ content: '用户常看KPL,T雨后小胖是选手', type: 'preference', source: 'manual' })
+  const before = await store.list()
+  assert(before.length === 3, '预置 3 条重复')
+  const n = await applyChanges(
+    [
+      // 保留第 1 条并整合(merge:true,无假说)
+      { op: 'update', id: '1', content: '用户关注KPL/TTG战队及选手小胖(太强野王),下载其比赛/收藏夹视频默认1080P', type: 'preference', merge: true },
+      // 其余两条重复 delete(无假说)
+      { op: 'delete', id: '2' },
+      { op: 'delete', id: '3' },
+    ],
+    store,
+  )
+  assert(n === 3, `应应用 3 条(1 整合 + 2 删除),实际 ${n}`)
+  const after = await store.list()
+  assert(after.length === 1, `合并后应只剩 1 条,实际 ${after.length}`)
+  assert(after[0].content.includes('1080P') && after[0].content.includes('小胖'), '整合内容应保留全部要点')
+})
+
+await test('applyChanges:普通 update 无假说跳过(假说驱动不放松)', async () => {
+  // 合并豁免只针对 merge:true;普通 update 仍强制假说(防无意义措辞改写)
+  const store = createMemoryStore(() => path.join(memoryDir, 'memory.json'))
+  await store.replaceAll([]) // 隔离:测试共用同一 memory.json,清空残留
+  await store.add({ content: '原始内容', type: 'fact', source: 'manual' })
+  const n = await applyChanges([{ op: 'update', id: '1', content: '改写内容' }], store)
+  assert(n === 0, '普通 update 无假说应跳过')
+  const list = await store.list()
+  assert(list.length === 1 && list[0].content === '原始内容', '内容不应被改写')
+})
+
+await test('applyChanges:带假说的普通 update 与 add 照常执行(回归)', async () => {
+  const store = createMemoryStore(() => path.join(memoryDir, 'memory.json'))
+  await store.replaceAll([]) // 隔离:测试共用同一 memory.json,清空残留
+  await store.add({ content: '旧内容', type: 'fact', source: 'manual' })
+  const n = await applyChanges(
+    [
+      { op: 'update', id: '1', content: '新内容', hypothesis: '更精确' },
+      { op: 'add', content: '新增维度', type: 'workflow', hypothesis: '补全缺失' },
+    ],
+    store,
+  )
+  assert(n === 2, `应应用 2 条,实际 ${n}`)
+  const list = await store.list()
+  assert(list.length === 2, '更新 + 新增后共 2 条')
 })
 
 await test('无 API Key:进化后台启动 → 优雅失败(通知)', async () => {
@@ -1424,11 +1507,11 @@ await test('预算不足提示:截断(response.incomplete)→ 下一轮请求注
 
 console.log('\n=== 灵动岛设置工具(createSettingsTools) ===')
 
-await test('设置工具:未注入桥时不注册;注入后 23 个工具齐', () => {
+await test('设置工具:未注入桥时不注册;注入后 30 个工具齐', () => {
   assert(createSettingsTools({}).length === 0, '无 runIslandSettings 不应注册')
   const tools = createSettingsTools({ runIslandSettings: async () => ({ ok: true }) })
   const names = tools.map((t) => t.name)
-  assert(names.length === 23, `应有 23 个工具,实际 ${names.length}:${names.join(',')}`)
+  assert(names.length === 30, `应有 30 个工具,实际 ${names.length}:${names.join(',')}`)
   for (const n of [
     'set_theme_color',
     'set_agent_scale',
@@ -1441,15 +1524,140 @@ await test('设置工具:未注入桥时不注册;注入后 23 个工具齐', ()
     'set_media_window_size',
     'list_audio_library',
     'import_audio_library',
+    'add_audio_to_playlist',
+    'remove_background',
     'rename_audio_library',
     'remove_audio_library',
     'list_video_library',
     'import_video_library',
     'rename_video_library',
     'remove_video_library',
+    'set_background_crop',
+    'set_lyric_provider',
+    'set_font_weight',
+    'list_playlist',
+    'remove_playlist_item',
   ]) {
     assert(names.includes(n), `应含工具 ${n}`)
   }
+})
+
+await test('播放列表:list_playlist 格式化 / remove_playlist_item 校验透传', async () => {
+  const calls: Array<{ op: string; args: unknown[] }> = []
+  const tools = createSettingsTools({
+    runIslandSettings: async (op, args) => {
+      calls.push({ op, args })
+      if (op === 'listPlaylist') {
+        return [
+          { key: 'u-1', name: '测试歌.mp3', size: 3 * 1024 * 1024 },
+          { key: 'u-2', name: '另一首.mp3', size: 2 * 1024 * 1024 },
+        ]
+      }
+      return { ok: true }
+    },
+  })
+  const list = tools.find((x) => x.name === 'list_playlist')!
+  const out = String(await list.execute({}))
+  assert(out.includes('测试歌') && out.includes('u-1') && out.includes('3.0MB'), `应格式化列表,实际:${out}`)
+  assert(calls[0].op === 'listPlaylist', 'list 走 listPlaylist op')
+  const remove = tools.find((x) => x.name === 'remove_playlist_item')!
+  const out2 = String(await remove.execute({ key: 'u-1' }))
+  assert(out2.includes('已从播放列表删除'), `应回复删除,实际:${out2}`)
+  assert(calls[1].op === 'removePlaylistItem' && calls[1].args[0] === 'u-1', 'remove 透传 key')
+  await assertRejects(() => remove.execute({}), 'key 不能为空', '空 key 应拒绝')
+})
+
+await test('背景取景:set_background_crop 校验与透传', async () => {
+  const calls: Array<{ op: string; args: unknown[] }> = []
+  const tools = createSettingsTools({
+    runIslandSettings: async (op, args) => {
+      calls.push({ op, args })
+      return {
+        ok: true,
+        crop: {
+          expanded: { zoom: 2, posX: 30, posY: 60 },
+          compact: { zoom: 1, posX: 50, posY: 50 },
+        },
+        previous: {
+          expanded: { zoom: 1, posX: 50, posY: 50 },
+          compact: { zoom: 1, posX: 50, posY: 50 },
+        },
+      }
+    },
+  })
+  const t = tools.find((x) => x.name === 'set_background_crop')!
+  const out = String(await t.execute({ expanded: { zoom: 2, posX: 30, posY: 60 } }))
+  assert(out.includes('展开态'), `应回复展开态,实际:${out}`)
+  assert(calls[0].op === 'setBackgroundCrop', `op 应为 setBackgroundCrop,实际:${calls[0]?.op}`)
+  const patch = calls[0].args[0] as { expanded?: { zoom?: number } }
+  assert(patch.expanded?.zoom === 2, 'zoom 透传')
+  await assertRejects(() => t.execute({}), '需要至少提供 expanded 或 compact 之一', '空参数应拒绝')
+})
+
+await test('歌词 API:set_lyric_provider 校验与透传', async () => {
+  const calls: Array<{ op: string; args: unknown[] }> = []
+  const tools = createSettingsTools({
+    runIslandSettings: async (op, args) => {
+      calls.push({ op, args })
+      return { ok: true, id: String((args[0] as { id?: string })?.id), url: undefined, auto: Boolean(args[1]), previous: { id: 'qq', url: undefined, auto: true } }
+    },
+  })
+  const t = tools.find((x) => x.name === 'set_lyric_provider')!
+  const out = String(await t.execute({ provider: 'kugou', auto: false }))
+  assert(out.includes('酷狗音乐'), `应回复酷狗,实际:${out}`)
+  assert(calls[0].op === 'setLyricProvider', `op 应为 setLyricProvider,实际:${calls[0]?.op}`)
+  const arg = calls[0].args[0] as { id?: string }
+  assert(arg.id === 'kugou' && calls[0].args[1] === false, 'provider 与 auto 透传')
+  await assertRejects(() => t.execute({ provider: 'x' }), 'provider 仅支持', '非法厂商应拒绝')
+  await assertRejects(() => t.execute({ provider: 'custom' }), '需要 url 模板', 'custom 缺 url 应拒绝')
+})
+
+await test('字体粗细:set_font_weight 校验与透传', async () => {
+  const calls: Array<{ op: string; args: unknown[] }> = []
+  const tools = createSettingsTools({
+    runIslandSettings: async (op, args) => {
+      calls.push({ op, args })
+      return { ok: true, weight: Number(args[0]), previous: 400 }
+    },
+  })
+  const t = tools.find((x) => x.name === 'set_font_weight')!
+  const out = String(await t.execute({ weight: 700 }))
+  assert(out.includes('700'), `应回复 700,实际:${out}`)
+  assert(calls[0].op === 'setFontWeight' && calls[0].args[0] === 700, 'op 与参数透传')
+  await assertRejects(() => t.execute({}), 'weight 需要是数字', '缺参应拒绝')
+})
+
+await test('播放列表导入:add_audio_to_playlist 校验 ids 并透传', async () => {
+  const calls: Array<{ op: string; args: unknown[] }> = []
+  const tools = createSettingsTools({
+    runIslandSettings: async (op, args) => {
+      calls.push({ op, args })
+      return { ok: true, count: 1, names: ['测试歌.mp3'] }
+    },
+  })
+  const t = tools.find((x) => x.name === 'add_audio_to_playlist')!
+  const out = String(await t.execute({ ids: ['a-1'] }))
+  assert(out.includes('加入播放列表'), `应成功,实际:${out}`)
+  assert(calls[0].op === 'addAudioLibraryToPlaylist', `op 应为 addAudioLibraryToPlaylist,实际:${calls[0]?.op}`)
+  await assertRejects(() => t.execute({}), 'ids 需要至少一个音频条目 id', '空 ids 应拒绝')
+  await assertRejects(() => t.execute({ ids: [] }), 'ids 需要至少一个音频条目 id', '空数组应拒绝')
+})
+
+await test('移除背景:remove_background 校验 scope 并透传', async () => {
+  const calls: Array<{ op: string; args: unknown[] }> = []
+  const tools = createSettingsTools({
+    runIslandSettings: async (op, args) => {
+      calls.push({ op, args })
+      return { ok: true, removed: ['expanded', 'compact'] }
+    },
+  })
+  const t = tools.find((x) => x.name === 'remove_background')!
+  const out = String(await t.execute({}))
+  assert(out.includes('移除'), `应成功,实际:${out}`)
+  assert(calls[0].op === 'removeBackground' && calls[0].args[0] === 'both', '缺省 scope 应为 both')
+  await t.execute({ scope: 'expanded' })
+  assert(calls[1].args[0] === 'expanded', 'scope 透传')
+  await assertRejects(() => t.execute({ scope: 'x' }), 'scope 只能是 both/expanded/compact', '非法 scope 应拒绝')
 })
 
 await test('多媒体库工具:音频导入(扩展名/大小校验 + data URL 传递)/ 视频导入(路径校验)', async () => {
@@ -1543,16 +1751,20 @@ await test('set_theme_color:hex 校验与归一化', async () => {
   await assertRejects(() => tool.execute({ color: '#12345' }), '颜色格式不正确', '5 位 hex 应拒绝')
 })
 
-await test('set_agent_scale:钳制 100-300', async () => {
+await test('set_agent_scale:钳制 100-400(2026-08-11 上限从 300 上调)', async () => {
   const calls: Array<{ op: string; args: unknown[] }> = []
   const tools = createSettingsTools({ runIslandSettings: async (op, args) => { calls.push({ op, args }); return { ok: true } } })
   const tool = tools.find((t) => t.name === 'set_agent_scale')!
   await tool.execute({ percent: 150 })
   await tool.execute({ percent: 50 })
   await tool.execute({ percent: 500 })
+  await tool.execute({ percent: 400 })
   await tool.execute({ percent: 150.6 })
   const scales = calls.map((c) => c.args[0] as number)
-  assert(scales[0] === 150 && scales[1] === 100 && scales[2] === 300 && scales[3] === 151, `钳制/取整错误:${scales.join(',')}`)
+  assert(
+    scales[0] === 150 && scales[1] === 100 && scales[2] === 400 && scales[3] === 400 && scales[4] === 151,
+    `钳制/取整错误:${scales.join(',')}`,
+  )
   await assertRejects(() => tool.execute({ percent: 'abc' }), '需要是数字', '非数字应拒绝')
 })
 
@@ -1726,6 +1938,22 @@ await test('set_video_config:target 指定单视频(音量/速度/循环/播放�
     '没有名为「不存在的.mp4」的视频',
     '未知 target 应报错',
   )
+})
+
+await test('switch_to_music:play 参数透传 onSwitchToMusic(听歌自动播放)', async () => {
+  // 2026-08-11 用户"让 LLM 切换成音乐模式听歌,没有自动播放":工具带
+  // play:true 时切换后立即开始播放当前播放列表
+  const calls: Array<boolean | undefined> = []
+  const tools = createTools({ onSwitchToMusic: (play) => calls.push(play) })
+  const tool = tools.find((t) => t.name === 'switch_to_music')
+  assert(tool, '应注册 switch_to_music')
+  assert(tool!.parameters.properties?.play, '参数应含 play(布尔)')
+  assert(tool!.description.includes('play:true'), '描述应引导听歌时带 play:true')
+  const outPlay = String(await tool!.execute({ play: true }))
+  assert(outPlay.includes('开始播放'), 'play:true 的返回应说明开始播放')
+  const outPlain = String(await tool!.execute({}))
+  assert(!outPlain.includes('开始播放'), '不带 play 的返回应只说明切换')
+  assert(calls[0] === true && calls[1] === false, `onSwitchToMusic 应收到 play 透传:${calls}`)
 })
 
 await test('set_system_volume:注册与参数校验;不实际改系统音量', async () => {
@@ -2328,6 +2556,229 @@ await test('exec_command start 拦截端到端:引擎执行后 message parts 含
   } finally {
     globalThis.fetch = origFetch
     engine.dispose()
+  }
+})
+
+await test('bili 批量下载确认门:用户拒绝则不启动下载', async () => {
+  // 2026-08-10 用户要求"批量下载首先要征得用户同意":download_up 经
+  // confirmAction 确认,拒绝 = 不 spawn(返回拒绝文本,LLM 可告知用户)
+  let confirmed = false
+  const tools = createTools({
+    onSwitchToMusic: () => {},
+    confirmAction: async (title, detail) => {
+      assert(title.includes('B站'), `确认标题应含 B站,实际:${title}`)
+      assert(detail.includes('批量下载'), `确认详情应含批量下载,实际:${detail}`)
+      return false
+    },
+  })
+  const bili = tools.find((t) => t.name === 'bili')!
+  const out = String(await bili.execute({ action: 'download_up', query: '12345', limit: 3 }))
+  assert(out.includes('拒绝'), `应返回拒绝文本,实际:${out}`)
+  assert(!confirmed, '不应启动下载')
+  // 确认通过 → 进入后台启动路径(返回"已后台启动",spawn 失败是异步的
+  // 不影响返回文本;证明确认通过后确实启动了下载而非被拦下)
+  const tools2 = createTools({
+    onSwitchToMusic: () => {},
+    confirmAction: async () => true,
+  })
+  const bili2 = tools2.find((t) => t.name === 'bili')!
+  const out2 = String(await bili2.execute({ action: 'download_up', query: '12345' }))
+  assert(out2.includes('已后台启动'), `确认通过应启动下载,实际:${out2.slice(0, 80)}`)
+})
+
+await test('手动调用端到端:技能名+描述无空格分离 + DeepSeek reasoning 回传(400 回归)', async () => {
+  // 2026-08-10 用户实测两个 bug 的端到端回归:
+  // ① /skill_zhangxuefeng-perspective帮我调用(无空格)→ 前缀分离出工具名;
+  // ② 手动调用后的 assistant 消息必须带 reasoning part(Responses thinking
+  // 模式缺失回传 = 400 "reasoning_text must be passed back")
+  // 真实创建技能目录(技能经 skillLoader 扫描注册,非 config 注入)
+  const skillDir = path.join(tmp, 'skills-e2e', 'zhangxuefeng-perspective')
+  await fs.mkdir(skillDir, { recursive: true })
+  await fs.writeFile(
+    path.join(skillDir, 'SKILL.md'),
+    '---\nname: zhangxuefeng-perspective\ndescription: 张雪峰视角分析\n---\n用张雪峰的思维框架分析问题。',
+  )
+  const capturedBodies: string[] = []
+  const engine = createAgentEngine({
+    getConfig: () => ({
+      apiKey: 'k',
+      baseURL: 'https://api.deepseek.com',
+      model: 'deepseek-v4-flash',
+      reasoningEffort: 'high',
+      systemPrompt: '',
+      mcpServers: [],
+      skillsDirs: [path.join(tmp, 'skills-e2e')],
+      excludedTools: [],
+      excludedSkills: [],
+    }),
+    onEvent: () => {},
+    onSwitchToMusic: () => {},
+    getSkillDir: () => path.join(tmp, 'skills-e2e'),
+    getMemoryStore: () => null,
+    getEvolution: () => null,
+  })
+  const origFetch = globalThis.fetch
+  globalThis.fetch = async (_url: string | URL | Request, opts?: RequestInit) => {
+    capturedBodies.push(String(opts?.body ?? ''))
+    return sseResponse([
+      { type: 'response.created', response: { id: 'r1' } },
+      { type: 'response.output_item.added', output_index: 0, item: { type: 'message', id: 'item_1' } },
+      { type: 'response.output_text.delta', output_index: 0, delta: '已按张雪峰视角分析' },
+      { type: 'response.output_item.done', output_index: 0, item: { type: 'message', id: 'item_1' } },
+      { type: 'response.completed', response: { usage: { input_tokens: 10, output_tokens: 5 } } },
+    ])
+  }
+  try {
+    engine.send('/skill_zhangxuefeng-perspective帮我调用', [])
+    await waitFor(() => !engine.busy, 10000, '手动调用回合结束')
+    // 断言:第一次请求(手动调用后的 LLM 回合)input 里必须含
+    // reasoning item(手动 assistant 消息回传)与 function_call +
+    // function_call_output(工具结果)——缺失 reasoning 正是 400 根因
+    const body = JSON.parse(capturedBodies[0] ?? '{}') as { input?: Array<{ type?: string }> }
+    const input = body.input ?? []
+    assert(
+      input.some((i) => i.type === 'reasoning'),
+      `手动调用后首请求应含 reasoning item,实际:${JSON.stringify(input.map((i) => i.type))}`,
+    )
+    assert(
+      input.some((i) => i.type === 'function_call') && input.some((i) => i.type === 'function_call_output'),
+      '应含 function_call 与 function_call_output',
+    )
+    // 用户消息完整(含描述文字,LLM 可理解意图)
+    const userItem = input.find((i) => i.type === 'message' && (i as { role?: string }).role === 'user') as
+      | { content?: Array<{ text?: string }> }
+      | undefined
+    const userText = userItem?.content?.map((c) => c.text ?? '').join('') ?? ''
+    assert(userText.includes('帮我调用'), `用户消息应含描述文字,实际:${userText}`)
+  } finally {
+    globalThis.fetch = origFetch
+    engine.dispose()
+  }
+})
+
+await test('fetchDeepseekBalance:结构化余额/Anthropic 拒绝/未配置 Key/HTTP 错误', async () => {
+  const origFetch = globalThis.fetch
+  const urls: string[] = []
+  globalThis.fetch = async (url: string | URL | Request) => {
+    urls.push(String(url))
+    return new Response(
+      JSON.stringify({
+        is_available: true,
+        balance_infos: [
+          { currency: 'CNY', total_balance: '12.34', granted_balance: '2.00', topped_up_balance: '10.34' },
+        ],
+      }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    )
+  }
+  try {
+    const res = await fetchDeepseekBalance({
+      baseURL: 'https://api.deepseek.com',
+      apiKey: 'k',
+    })
+    assert(res.isAvailable === true, 'isAvailable 透传')
+    assert(res.balances.length === 1, 'balances 数量')
+    assert(
+      res.balances[0]?.total === 12.34 && res.balances[0]?.toppedUp === 10.34 && res.balances[0]?.granted === 2,
+      `余额字段解析,实际 ${JSON.stringify(res.balances[0])}`,
+    )
+    assert(urls[0]?.endsWith('/user/balance'), '应请求 /user/balance')
+    // Anthropic 端点:直接抛错(不请求)
+    await assertRejects(
+      () => fetchDeepseekBalance({ baseURL: 'https://api.deepseek.com/anthropic', apiKey: 'k' }),
+      'Anthropic 兼容端点',
+      'Anthropic 端点应拒绝',
+    )
+    // 未配置 Key:抛错(不请求)
+    await assertRejects(
+      () => fetchDeepseekBalance({ baseURL: 'https://api.deepseek.com', apiKey: '  ' }),
+      '尚未配置 API Key',
+      '空 Key 应拒绝',
+    )
+    // HTTP 错误 → apiErrorMessage 可读文案
+    globalThis.fetch = async () => new Response('{"error":{"message":"Insufficient Balance"}}', { status: 402 })
+    await assertRejects(
+      () => fetchDeepseekBalance({ baseURL: 'https://api.deepseek.com', apiKey: 'k' }),
+      '余额不足',
+      '402 应映射为余额不足',
+    )
+  } finally {
+    globalThis.fetch = origFetch
+  }
+})
+
+await test('余额查询工具:get_deepseek_balance 注册并格式化余额', async () => {
+  const engine = createAgentEngine({
+    getConfig: () => ({
+      apiKey: 'k',
+      baseURL: 'https://api.deepseek.com',
+      model: 'deepseek-v4-flash',
+      reasoningEffort: 'high',
+      systemPrompt: '',
+      mcpServers: [],
+      skillsDirs: [],
+    }),
+    onEvent: () => {},
+    onSwitchToMusic: () => {},
+  })
+  const origFetch = globalThis.fetch
+  const urls: string[] = []
+  globalThis.fetch = async (url: string | URL | Request) => {
+    urls.push(String(url))
+    return new Response(
+      JSON.stringify({
+        is_available: true,
+        balance_infos: [
+          { currency: 'CNY', total_balance: '12.34', granted_balance: '2.00', topped_up_balance: '10.34' },
+        ],
+      }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    )
+  }
+  try {
+    const balanceTool = engine.listTools().find((t) => t.name === 'get_deepseek_balance')
+    assert(balanceTool, '应注册 get_deepseek_balance')
+    // 经手动调用路径执行(与用户实际使用一致)
+    engine.send('@get_deepseek_balance', [])
+    await waitFor(() => !engine.busy, 10000, '余额查询回合结束')
+    assert(urls[0]?.endsWith('/user/balance'), `应请求 /user/balance,实际:${urls[0]}`)
+    assert(urls[0]?.startsWith('https://api.deepseek.com'), `应请求 DeepSeek API,实际:${urls[0]}`)
+  } finally {
+    globalThis.fetch = origFetch
+    engine.dispose()
+  }
+  // Anthropic 兼容端点:工具报错提示(不请求)
+  const engine2 = createAgentEngine({
+    getConfig: () => ({
+      apiKey: 'k',
+      baseURL: 'https://api.deepseek.com/anthropic',
+      model: 'deepseek-v4-flash',
+      reasoningEffort: 'high',
+      systemPrompt: '',
+      mcpServers: [],
+      skillsDirs: [],
+    }),
+    onEvent: () => {},
+    onSwitchToMusic: () => {},
+  })
+  const origFetch2 = globalThis.fetch
+  const urls2: string[] = []
+  globalThis.fetch = async (url: string | URL | Request) => {
+    urls2.push(String(url))
+    return sseResponse([{ type: 'response.completed', response: { usage: { input_tokens: 1, output_tokens: 1 } } }])
+  }
+  try {
+    engine2.send('@get_deepseek_balance', [])
+    await waitFor(() => !engine2.busy, 10000, 'anthropic 端点余额回合结束')
+    // 工具层 detectProvider 判定为 anthropic → 抛错(不请求余额);
+    // 后续 fetch 是 LLM 循环的正常请求,只需断言没有 /user/balance
+    assert(
+      !urls2.some((u) => u.includes('/user/balance')),
+      `Anthropic 端点不应请求余额接口,实际:${urls2.join(',')}`,
+    )
+  } finally {
+    globalThis.fetch = origFetch2
+    engine2.dispose()
   }
 })
 

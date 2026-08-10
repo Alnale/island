@@ -46,6 +46,13 @@ export type IslandSettingsOp =
   | 'getConversationMedia'
   | 'deleteFontItem'
   | 'deleteLibraryImage'
+  | 'removeBackground'
+  | 'addAudioLibraryToPlaylist'
+  | 'setBackgroundCrop'
+  | 'setLyricProvider'
+  | 'setFontWeight'
+  | 'listPlaylist'
+  | 'removePlaylistItem'
 
 export interface SettingsToolsDeps {
   /** 调渲染端设置桥(主进程注入;未注入则不注册设置工具) */
@@ -125,11 +132,12 @@ function parseHexColor(color: unknown): string {
   return hex.toLowerCase()
 }
 
-/** 缩放百分比校验与钳制(100-300,与设置界面一致) */
+/** 缩放百分比校验与钳制(100-400,与设置界面一致;2026-08-11 用户
+ * 要求最大缩放从 300% 上调到 400%) */
 function parseScale(percent: unknown): number {
   const n = Number(percent)
-  if (!Number.isFinite(n)) throw new Error('缩放比例需要是数字(100-300)')
-  return Math.min(300, Math.max(100, Math.round(n)))
+  if (!Number.isFinite(n)) throw new Error('缩放比例需要是数字(100-400)')
+  return Math.min(400, Math.max(100, Math.round(n)))
 }
 
 /** 库条目名称校验(非空、≤50 字) */
@@ -150,6 +158,7 @@ function formatSettings(s: unknown): string {
     currentFontName?: string | null
     backgroundOpacity?: { expanded?: number; compact?: number }
     mediaWindowWidth?: number
+    fontWeight?: number
     video?: { volume?: number; speed?: number; loop?: boolean; fullscreen?: boolean }
   }
   const opacity = d.backgroundOpacity ?? {}
@@ -163,6 +172,7 @@ function formatSettings(s: unknown): string {
     `- 当前字体:${d.currentFontName ? `「${d.currentFontName}」` : ' 无(系统默认)'}`,
     `- 媒体窗口默认宽:${typeof d.mediaWindowWidth === 'number' ? ` ${d.mediaWindowWidth}px` : ' 未设置(默认 320px)'}`,
     `- 视频播放:音量 ${Math.round((video.volume ?? 1) * 100)}% / 速度 ${video.speed ?? 1}x / 循环${video.loop ? '开' : '关'} / ${video.fullscreen ? '全屏中' : '非全屏'}`,
+    `- 字体粗细:${typeof d.fontWeight === 'number' ? ` ${d.fontWeight}` : ' 400(常规)'}`,
   ].join('\n')
 }
 
@@ -216,13 +226,13 @@ export function createSettingsTools(deps: SettingsToolsDeps): AgentTool[] {
     {
       name: 'set_agent_scale',
       description:
-        '设置 Agent 模式界面缩放比例(100%-300%,默认 200%)。' +
+        '设置 Agent 模式界面缩放比例(100%-400%,默认 200%)。' +
         '只放大面板/窗口尺寸,UI 元素(文字/按钮)不缩放——适合用户觉得' +
         '"字太小/面板太小"时调大。',
       parameters: {
         type: 'object',
         properties: {
-          percent: { type: 'number', description: '缩放百分比,100-300,如 150' },
+          percent: { type: 'number', description: '缩放百分比,100-400,如 150' },
         },
         required: ['percent'],
       },
@@ -364,6 +374,31 @@ export function createSettingsTools(deps: SettingsToolsDeps): AgentTool[] {
       },
     },
     {
+      name: 'set_font_weight',
+      description:
+        '设置灵动岛**字体粗细**(字重,立即生效):300(细)/ 400(常规)/ 500 / 600 / 700(粗)/ 800 / 900(特粗)。' +
+        '适合:用户说"字太细了""字加粗一点""字体再细一点"。' +
+        '注意:单字重字体(如部分自定义字体)由浏览器合成粗细,效果有限。',
+      parameters: {
+        type: 'object',
+        properties: {
+          weight: { type: 'number', description: '字重 300-900,档位:300/400/500/600/700/800/900,如 700' },
+        },
+        required: ['weight'],
+      },
+      async execute(params: ToolParams) {
+        const w = Number(params.weight)
+        if (!Number.isFinite(w)) throw new Error('weight 需要是数字(300-900)')
+        const res = (await run('setFontWeight', [w])) as {
+          ok?: boolean
+          weight?: number
+          previous?: number
+        }
+        if (res?.weight === res?.previous) return `字体粗细当前已是 ${res.weight},无需修改`
+        return `已将字体粗细从 ${res?.previous ?? '?'} 调整为 ${res?.weight ?? w}`
+      },
+    },
+    {
       name: 'set_background_opacity',
       description:
         '设置自定义背景图的不透明度(0-1 小数,如 0.3 = 30% 不透明,1 = 完全不透明;' +
@@ -409,6 +444,110 @@ export function createSettingsTools(deps: SettingsToolsDeps): AgentTool[] {
       },
     },
     {
+      name: 'set_background_crop',
+      description:
+        '调整自定义背景图的**取景/裁切**(立即生效,与设置界面背景编辑器的取景框同款参数):' +
+        'zoom = 放大倍数(1-4,1 = 原图铺满,越大放大越多);' +
+        'posX = 水平位置(0-100,0 = 最左,100 = 最右,50 = 居中);' +
+        'posY = 垂直位置(0-100,0 = 最上,100 = 最下,50 = 居中)。' +
+        'expanded/compact 分别对应展开态与紧凑态,只传一个就只改对应形态。' +
+        '每个形态的 zoom/posX/posY 都可单独传(只改提供的字段)。' +
+        '适合:用户说"背景图放太大了/太小了""背景往左移/往右移/往上一点/往下一点"。',
+      parameters: {
+        type: 'object',
+        properties: {
+          expanded: {
+            type: 'object',
+            description: '展开态取景参数(可选):{zoom: 1-4, posX: 0-100, posY: 0-100}',
+          },
+          compact: {
+            type: 'object',
+            description: '紧凑态取景参数(可选):{zoom: 1-4, posX: 0-100, posY: 0-100}',
+          },
+        },
+        required: [],
+      },
+      async execute(params: ToolParams) {
+        const hasExpanded = params.expanded && typeof params.expanded === 'object'
+        const hasCompact = params.compact && typeof params.compact === 'object'
+        if (!hasExpanded && !hasCompact) {
+          throw new Error('需要至少提供 expanded 或 compact 之一(取景参数对象)')
+        }
+        const patches: {
+          expanded?: { zoom?: number; posX?: number; posY?: number }
+          compact?: { zoom?: number; posX?: number; posY?: number }
+        } = {}
+        if (hasExpanded) patches.expanded = params.expanded as Record<string, number>
+        if (hasCompact) patches.compact = params.compact as Record<string, number>
+        const res = (await run('setBackgroundCrop', [patches])) as {
+          ok?: boolean
+          crop?: { expanded: { zoom: number; posX: number; posY: number }; compact: { zoom: number; posX: number; posY: number } }
+          previous?: { expanded: { zoom: number; posX: number; posY: number }; compact: { zoom: number; posX: number; posY: number } }
+        }
+        const fmt = (c?: { zoom: number; posX: number; posY: number }) =>
+          c ? `缩放 ${c.zoom}x / 位置 (${c.posX},${c.posY})` : '?'
+        const parts = [
+          hasExpanded ? `展开态:${fmt(res?.crop?.expanded)}` : '',
+          hasCompact ? `紧凑态:${fmt(res?.crop?.compact)}` : '',
+        ].filter(Boolean)
+        const prevParts = [
+          hasExpanded ? `展开态:${fmt(res?.previous?.expanded)}` : '',
+          hasCompact ? `紧凑态:${fmt(res?.previous?.compact)}` : '',
+        ].filter(Boolean)
+        return `已调整背景取景:${parts.join(' / ')}(原为:${prevParts.join(' / ')})`
+      },
+    },
+    {
+      name: 'set_lyric_provider',
+      description:
+        '设置**歌词 API 厂商**(立即生效):provider 支持 qq(QQ音乐)/ netease(网易云音乐)/ ' +
+        'kuwo(酷我音乐)/ kugou(酷狗音乐)/ custom(自定义模板)。' +
+        'auto = 是否按监听平台自动切换对应厂商(默认开启;如开着,SMTC 识别到网易云时自动用网易云歌词)。' +
+        'custom 需要 url 模板(占位符 {title} 歌名 / {artist} 歌手,如 https://example.com/lyric?t={title}&a={artist})。' +
+        '适合:用户说"歌词换成酷狗的""歌词接口用网易云""关掉歌词自动切换""用自定义歌词接口"。' +
+        '修改前可先调 get_island_settings 看当前配置。',
+      parameters: {
+        type: 'object',
+        properties: {
+          provider: {
+            type: 'string',
+            enum: ['qq', 'netease', 'kuwo', 'kugou', 'custom'],
+            description: '歌词厂商:qq/netease/kuwo/kugou/custom',
+          },
+          url: { type: 'string', description: 'custom 模式的 URL 模板(占位符 {title}/{artist}),其他厂商不需要' },
+          auto: { type: 'boolean', description: '按监听平台自动切换开关(默认开启),可选' },
+        },
+        required: ['provider'],
+      },
+      async execute(params: ToolParams) {
+        const provider = String(params.provider ?? '')
+        if (!['qq', 'netease', 'kuwo', 'kugou', 'custom'].includes(provider)) {
+          throw new Error('provider 仅支持 qq/netease/kuwo/kugou/custom')
+        }
+        if (provider === 'custom') {
+          const url = String(params.url ?? '').trim()
+          if (!url) throw new Error('custom 模式需要 url 模板(含 {title}/{artist} 占位符)')
+        }
+        const auto = params.auto !== undefined ? Boolean(params.auto) : true
+        const res = (await run('setLyricProvider', [{ id: provider, url: params.url ? String(params.url) : undefined }, auto])) as {
+          ok?: boolean
+          id?: string
+          url?: string
+          auto?: boolean
+          previous?: { id: string; url?: string; auto: boolean }
+        }
+        const NAME: Record<string, string> = { qq: 'QQ音乐', netease: '网易云音乐', kuwo: '酷我音乐', kugou: '酷狗音乐', custom: '自定义' }
+        if (res?.id === res?.previous?.id && res?.auto === res?.previous?.auto) {
+          return `歌词 API 当前已是 ${NAME[provider]},自动切换${res.auto ? '开' : '关'},无需修改`
+        }
+        const urlPart = provider === 'custom' && res?.url ? `(模板:${res.url})` : ''
+        return (
+          `已将歌词 API 从 ${NAME[res?.previous?.id ?? ''] ?? '?'} 切换为 ${NAME[provider]}${urlPart};` +
+          `自动切换${res?.auto ? '开启(按监听平台自动换对应厂商)' : '关闭(固定用当前厂商)'}`
+        )
+      },
+    },
+    {
       name: 'set_media_window_size',
       description:
         '设置对话里**媒体窗口的默认宽度**(图片/视频在消息里的初始显示宽度,立即生效,' +
@@ -438,6 +577,43 @@ export function createSettingsTools(deps: SettingsToolsDeps): AgentTool[] {
     },
     /* ---- 多媒体库(2026-08-08):音频库(ArrayBuffer)/ 视频库(路径引用) ---- */
     {
+      name: 'list_playlist',
+      description:
+        '列出音乐模式**当前播放列表**的全部歌曲(key + 名称 + 大小)。' +
+        '适合:用户问"播放列表里有什么歌""现在列表里有哪些歌"。' +
+        '删除曲目用 remove_playlist_item(先查 key)。' +
+        '注意:播放列表 ≠ 音频库(音频库用 list_audio_library 查)。',
+      parameters: { type: 'object', properties: {} },
+      async execute() {
+        const items = (await run('listPlaylist', [])) as Array<{ key: string; name: string; size: number }>
+        if (!Array.isArray(items) || items.length === 0) return '(播放列表为空)'
+        return items
+          .map((it, i) => `- ${i + 1}. ${it.name}(${(it.size / 1024 / 1024).toFixed(1)}MB,key:${it.key})`)
+          .join('\n')
+      },
+    },
+    {
+      name: 'remove_playlist_item',
+      description:
+        '从音乐模式**播放列表**删除一首歌(key 用 list_playlist 查询,立即生效;' +
+        '正在播放该曲目时自动切到相邻曲目)。' +
+        '注意:删除的是播放列表条目,**音频库与源文件不受影响**。' +
+        '适合:用户说"把播放列表里那首歌删掉""清掉这首歌"。',
+      parameters: {
+        type: 'object',
+        properties: {
+          key: { type: 'string', description: '播放列表条目 key(list_playlist 查询)' },
+        },
+        required: ['key'],
+      },
+      async execute(params: ToolParams) {
+        const key = String(params.key ?? '').trim()
+        if (!key) throw new Error('key 不能为空(list_playlist 查询)')
+        await run('removePlaylistItem', [key])
+        return `已从播放列表删除 ${key}`
+      },
+    },
+    {
       name: 'list_audio_library',
       description:
         '列出多媒体库音频库的全部歌曲(id + 名称 + 大小)。管理音频库前先查 id。' +
@@ -452,8 +628,11 @@ export function createSettingsTools(deps: SettingsToolsDeps): AgentTool[] {
     {
       name: 'import_audio_library',
       description:
-        '导入本地音频文件到多媒体库音频库(立即生效,可再从音频库导入播放列表)。' +
-        '支持 mp3/wav/flac/ogg/m4a/aac 等,上限 200MB。适合:用户给音频文件路径要求存入多媒体库。',
+        '导入本地音频文件到**多媒体库音频库**(立即生效)。' +
+        '支持 mp3/wav/flac/ogg/m4a/aac 等,上限 200MB。适合:用户给音频文件路径要求存入多媒体库。' +
+        '**注意:音频库 ≠ 播放列表**——音乐模式播放的是播放列表,' +
+        '音频库条目不会自动出现在音乐模式;要加入播放列表并让用户能点播,导入后调用 ' +
+        'add_audio_to_playlist(传返回的 id)。',
       parameters: {
         type: 'object',
         properties: {
@@ -475,6 +654,69 @@ export function createSettingsTools(deps: SettingsToolsDeps): AgentTool[] {
           name?: string
         }
         return `已将「${res?.name ?? display}」导入音频库(可用 list_audio_library 查看)`
+      },
+    },
+    {
+      name: 'add_audio_to_playlist',
+      description:
+        '把多媒体库**音频库**里的歌曲加入音乐模式**播放列表**(立即生效,自动开始播放首曲并切到音乐模式,' +
+        '用户可直接在音乐模式里点播/切歌)。id 用 list_audio_library 查询(可一次传多个 id 批量加入)。' +
+        '适合:用户说"把这首歌加入播放列表/加进歌单""下载的歌曲放进播放列表"——' +
+        '注意 import_audio_library 只进音频库,**音乐模式播不了音频库里的歌**,必须经本工具加入播放列表。',
+      parameters: {
+        type: 'object',
+        properties: {
+          ids: {
+            type: 'array',
+            items: { type: 'string' },
+            description: '音频库条目 id 列表(list_audio_library 查询),至少一个',
+          },
+        },
+        required: ['ids'],
+      },
+      async execute(params: ToolParams) {
+        const ids = Array.isArray(params.ids)
+          ? params.ids.map(String).map((s) => s.trim()).filter(Boolean)
+          : []
+        if (ids.length === 0) throw new Error('ids 需要至少一个音频条目 id(list_audio_library 查询)')
+        const res = (await run('addAudioLibraryToPlaylist', [ids])) as {
+          ok?: boolean
+          count?: number
+          names?: string[]
+        }
+        const names = res?.names ?? []
+        return `已将 ${res?.count ?? names.length} 首歌加入播放列表并切到音乐模式开始播放${names.length > 0 ? `:${names.join('、')}` : ''}(可在音乐模式播放列表里查看)`
+      },
+    },
+    {
+      name: 'remove_background',
+      description:
+        '移除灵动岛自定义背景,恢复默认纯色底(立即生效)。' +
+        'scope=expanded 只移除展开态 / scope=compact 只移除紧凑态 / scope=both(默认)两态都移除。' +
+        '移除后背景裁切参数复位,不透明度保留。适合:用户说"背景去掉""不要背景了""恢复默认背景"。',
+      parameters: {
+        type: 'object',
+        properties: {
+          scope: {
+            type: 'string',
+            enum: ['both', 'expanded', 'compact'],
+            description: '移除范围:both = 展开+紧凑都移除(默认)/ expanded = 仅展开态 / compact = 仅紧凑态',
+          },
+        },
+        required: [],
+      },
+      async execute(params: ToolParams) {
+        const scope = String(params.scope ?? 'both')
+        if (!['both', 'expanded', 'compact'].includes(scope)) throw new Error('scope 只能是 both/expanded/compact')
+        const res = (await run('removeBackground', [scope])) as {
+          ok?: boolean
+          removed: string[]
+          previous?: unknown
+        }
+        const removed = res?.removed ?? []
+        if (removed.length === 0) return '当前没有自定义背景,无需移除'
+        const label = removed.map((s) => (s === 'expanded' ? '展开态' : '紧凑态')).join('、')
+        return `已移除${label}背景,恢复默认纯色底`
       },
     },
     {

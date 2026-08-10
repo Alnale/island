@@ -136,13 +136,15 @@ function currentMode() {
   return loadSettings().mode === 'agent' ? 'agent' : 'music'
 }
 
-function setWidgetMode(mode, source = 'user') {
+function setWidgetMode(mode, source = 'user', play) {
   const next = mode === 'agent' ? 'agent' : 'music'
   saveSettings({ mode: next })
   // source:切换来源——'tool' = Agent 的 switch_to_music 工具(属于对话
   // 流程,渲染端据此**不中止**正在运行的本轮,回复正常落定);
   // 'user' = 托盘/手势(用户主动离开,中止当前轮)
-  win?.webContents.send('widget:set-mode', { mode: next, source })
+  // play(2026-08-11 用户"让 LLM 切音乐模式听歌没有自动播放"):
+  // switch_to_music 带 play:true 时切换后立即开始播放(渲染端处理)
+  win?.webContents.send('widget:set-mode', { mode: next, source, ...(play ? { play: true } : {}) })
   // 托盘 radio 选中态同步:菜单 checked 是构建时一次性设置的,
   // 代码路径切换(Agent 工具 switch_to_music)不会自动更新——
   // 必须重建菜单(rebuildTrayMenu 同时更新 tooltip),否则托盘
@@ -370,9 +372,40 @@ function applyAgentConfigPatch(patch) {
   return next
 }
 
-// exec_command 确认门 pending(引擎 confirmCommand 持此 promise,
+// 确认门 pending(引擎 confirmCommand / confirmAction 持此 promise,
 // 渲染端经 agent:tool-confirm IPC 回用户选择)
 let pendingCommandConfirm = null
+
+/**
+ * 用户确认请求(2026-08-10 通用化:exec_command 确认门与 bili 批量下载
+ * 确认共用同一槽机制——**并行确认互斥**:LLM 一轮内并行多个确认
+ * (executeToolBatch 是 Promise.all)时,新请求到达立即以"拒绝"落定旧
+ * 请求(引擎结构化回填,LLM 可自纠)——否则旧 promise 永挂(其定时器
+ * 触发时槽已指向新请求,无人 resolve),整轮冻结,agent:abort 也解不
+ * 开;定时器只处理**自己那次**(=== slot)。120s 超时 = 拒绝
+ */
+function requestUserConfirm({ command, title, detail } = {}) {
+  return new Promise((resolve) => {
+    if (pendingCommandConfirm) {
+      clearTimeout(pendingCommandConfirm.timer)
+      pendingCommandConfirm.resolve(false)
+    }
+    const slot = { resolve, timer: null }
+    slot.timer = setTimeout(() => {
+      if (pendingCommandConfirm === slot) {
+        pendingCommandConfirm = null
+        resolve(false)
+      }
+    }, 120000)
+    pendingCommandConfirm = slot
+    sendToWidget('agent:event', {
+      type: 'tool-confirm-request',
+      command: String(command ?? '').slice(0, 400),
+      ...(title ? { title: String(title).slice(0, 100) } : {}),
+      ...(detail ? { detail: String(detail).slice(0, 300) } : {}),
+    })
+  })
+}
 
 /** 安全转发事件到挂件窗口(审计 P2-5):win 存在但 webContents 已销毁的
  * 竞态窗口 send 会抛原生异常,依赖全局 uncaughtException 兜底不可靠 */
@@ -421,7 +454,7 @@ function getAgentEngine() {
         void runProactiveGuess(event.message)
       }
     },
-    onSwitchToMusic: () => setWidgetMode('music', 'tool'),
+    onSwitchToMusic: (play) => setWidgetMode('music', 'tool', play),
     // 记忆系统(引擎记忆工具 + 系统提示记忆块)
     getMemoryStore: () => getMemoryStore(),
     // 自我进化 harness(evolve_memory 工具 + 系统提示状态注入)
@@ -432,31 +465,14 @@ function getAgentEngine() {
     getSkillDir: () => path.join(app.getPath('userData'), 'skills'),
     // 灵动岛设置工具(主题色/缩放/字体/背景图库,应用后即时生效)
     runIslandSettings,
-    // exec_command 确认门:发确认请求给渲染端,等用户选择(超时拒绝)。
-    // **并行确认互斥**(2026-08-07 审计 P0):LLM 一轮内并行多个
-    // exec_command(executeToolBatch 是 Promise.all)时,新请求到达立即
-    // 以"拒绝"落定旧请求(引擎结构化回填,LLM 可自纠)——否则旧 promise
-    // 永挂(其定时器触发时槽已指向新请求,无人 resolve),整轮冻结,
-    // agent:abort 也解不开;定时器只处理**自己那次**(=== slot)
-    confirmCommand: (command) =>
-      new Promise((resolve) => {
-        if (pendingCommandConfirm) {
-          clearTimeout(pendingCommandConfirm.timer)
-          pendingCommandConfirm.resolve(false)
-        }
-        const slot = { resolve, timer: null }
-        slot.timer = setTimeout(() => {
-          if (pendingCommandConfirm === slot) {
-            pendingCommandConfirm = null
-            resolve(false)
-          }
-        }, 120000)
-        pendingCommandConfirm = slot
-        sendToWidget('agent:event', {
-          type: 'tool-confirm-request',
-          command: String(command ?? '').slice(0, 400),
-        })
-      }),
+    // exec_command 确认门(confirmExec 开启时每轮首个命令确认一次):
+    // 发确认请求给渲染端,等用户选择(超时拒绝;并行确认互斥见
+    // requestUserConfirm——2026-08-07 审计 P0 修复并行挂死)
+    confirmCommand: (command) => requestUserConfirm({ command }),
+    // 通用动作确认门(2026-08-10,bili 批量下载等每次调用都确认):
+    // 与 confirmCommand 同款槽机制,payload 带 title/detail
+    // (渲染端确认卡通用化:title 存在时展示标题 + 详情)
+    confirmAction: (title, detail) => requestUserConfirm({ title, detail }),
   })
   return agentEngine
 }
@@ -490,6 +506,14 @@ const ISLAND_SETTINGS_OPS = new Set([
   'setVideoState',
   // 对话窗口媒体清单(2026-08-10,list_conversation_media 工具)
   'getConversationMedia',
+  // 移除背景 / 音频库 → 播放列表(2026-08-10,remove_background /
+  // add_audio_to_playlist 工具)
+  'removeBackground', 'addAudioLibraryToPlaylist',
+  // 背景取景 / 歌词 API / 字体粗细(2026-08-11,set_background_crop /
+  // set_lyric_provider / set_font_weight 工具)
+  'setBackgroundCrop', 'setLyricProvider', 'setFontWeight',
+  // 播放列表查看/删除(2026-08-11,list_playlist / remove_playlist_item 工具)
+  'listPlaylist', 'removePlaylistItem',
 ])
 async function runIslandSettings(op, args) {
   if (!ISLAND_SETTINGS_OPS.has(op)) throw new Error(`未知的设置操作:${String(op)}`)
@@ -653,6 +677,12 @@ function createWindow() {
   // 禁止窗口内新开浏览器窗口(渲染端链接一律走 app:open-external 系统
   // 浏览器,经 http/https 白名单;防 window.open 弹出裸窗口)
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+  // 2026-08-11 临时诊断:转发渲染 console 到主进程(高度动画排查)
+  win.webContents.on('console-message', (_e, level, message) => {
+    if (typeof message === 'string' && /error|Error|animateAgentH|agentH/i.test(message)) {
+      console.log('[renderer]', message.slice(0, 300))
+    }
+  })
 
   // 灵动岛默认悬浮在所有程序顶部(2026-08-09 用户要求恢复:始终置顶,
   // 不再沉底)——托盘"总在最前"可关
@@ -745,6 +775,8 @@ function createWindow() {
       // 主动陪伴 tick 最近结果(巡检轮询:判定调度器按 10s 真实触发,
       // 不依赖 judge 结果——judge-no 也证明调度链路通了)
       getLastProactiveTick,
+      // 记忆进化(探针直接调主进程,绕开 UI/工具层;rounds 轮数预算)
+      requestEvolution: (rounds) => getEvolution().requestEvolve(undefined, rounds),
     })
   }
 
@@ -1012,6 +1044,19 @@ ipcMain.on('widget:set-size', (_event, width, height, immediate) => {
     }
     applyWindowSize(cw, ch)
   })
+})
+
+// 窗口层级(2026-08-10 用户要求"除了紧凑态,即灵动岛、多媒体岛,其它
+// 情况不再严格在所有应用上层"):渲染端在展开/收起时上报形态——
+// expanded=false(紧凑态,含灵动岛本体与多媒体岛)= 置顶;expanded=true
+// (展开面板/设置等)= 不置顶,让用户能看被面板挡住的窗口。
+// **尊重托盘"总在最前"开关**:用户显式关闭(settings.alwaysOnTop ===
+// false)时完全不动(运行时形态自动控制只作用于默认置顶的场景);
+// 本通道不写 settings(开关语义保留,重启后恢复用户设置)
+ipcMain.on('widget:topmost', (_event, on) => {
+  if (!win || win.isDestroyed()) return
+  if (loadSettings().alwaysOnTop === false) return
+  win.setAlwaysOnTop(Boolean(on), 'screen-saver')
 })
 
 // 右键长按拖拽移动挂件。
@@ -1335,6 +1380,10 @@ function safeHandle(channel, fn) {
 safeHandle('agent:evolution-rollback', async () => getEvolution().rollback())
 safeHandle('agent:evolution-reset', async () => getEvolution().resetAll())
 safeHandle('agent:tools', async () => getAgentEngine().listAllTools())
+// 账户余额查询(2026-08-11 设置界面「账号」功能):与 LLM 工具
+// get_deepseek_balance 同一实现(引擎 queryBalance),结构化数据供 UI;
+// 未配置 Key / Anthropic 端点 / 余额不足等错误统一 {error} 返回
+safeHandle('agent:balance', async () => getAgentEngine().queryBalance())
 // 清除数据(2026-08-10 用户要求,Agent 设置「数据管理」区):
 // - scope 'app'   = 灵动岛所有数据:记忆/进化版本/settings.json(含
 //   API Key/模型/模式)——渲染端已清 localStorage + IndexedDB,这里清

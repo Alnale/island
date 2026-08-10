@@ -26,6 +26,7 @@
  */
 
 import { parseSse, truncateResult } from './sse'
+import { apiErrorMessage } from './constants'
 import type { AgentConfig, AgentEvent, AgentMessage, AgentPart, AgentTool, ProviderOutcome } from './types'
 
 /** 工具调用流式累积器 */
@@ -219,12 +220,13 @@ export async function streamResponse(params: {
   if (!res.ok || !res.body) {
     let detail = ''
     try {
-      const text = await res.text()
-      detail = text.slice(0, 500)
+      detail = (await res.text()).slice(0, 500)
     } catch {
       // 忽略读失败
     }
-    throw new Error(`DeepSeek API 请求失败 HTTP ${res.status}:${detail}`)
+    // 错误码映射(2026-08-10,官方 error_codes 文档;401/402/429 等
+    // 转可读中文,LLM 与用户都能看懂——原"HTTP 400:xxx"太裸)
+    throw new Error(apiErrorMessage(res.status, detail))
   }
 
   const calls = new Map<string, StreamCall>()

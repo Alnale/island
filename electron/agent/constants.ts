@@ -43,6 +43,45 @@ export function providerLabel(baseURL: string): string {
 }
 
 /**
+ * API 错误码 → 人话提示(2026-08-10,用户要求"增加对应API错误码的支持",
+ * 官方文档 https://api-docs.deepseek.com/zh-cn/quick_start/error_codes):
+ * 三 provider(Responses / Chat / Anthropic)的非 2xx 响应统一经此映射,
+ * 错误从"HTTP 400:xxx"变成用户能看懂的中文(余额不足/密钥无效/限流/
+ * 服务器繁忙…)。detail = 响应体原文(截断 500),解析其中的 message 字段
+ * 追加展示;未知状态码回退 HTTP <status> + 原文
+ */
+export function apiErrorMessage(status: number, detail: string): string {
+  const body = String(detail ?? '').trim()
+  // 响应体里的 message(openai/deepseek 格式 error.message / 纯文本)
+  let message = ''
+  try {
+    const parsed = JSON.parse(body) as {
+      error?: { message?: string; type?: string } | string
+      message?: string
+    }
+    if (parsed && typeof parsed === 'object') {
+      const err = parsed.error
+      message = typeof err === 'string' ? err : err?.message ?? parsed.message ?? ''
+    }
+  } catch {
+    // 非 JSON(纯文本)整体作 message
+    if (!message && body) message = body.slice(0, 200)
+  }
+  const detailHint = message ? `:${message.slice(0, 300)}` : ''
+  const known: Record<number, string> = {
+    400: '请求参数错误(参数格式/JSON 无效/上下文超长或内容不合规)',
+    401: '认证失败(API Key 无效,请检查 Agent 设置里的 API Key)',
+    402: '余额不足(Insufficient Balance,请前往 DeepSeek 平台充值)',
+    422: '请求参数校验失败',
+    429: '请求频率超限(并发/速率超限,请稍后重试或降低请求频率)',
+    500: 'DeepSeek 服务器内部错误',
+    503: 'DeepSeek 服务器繁忙(过载或维护中,请稍后重试)',
+    529: 'DeepSeek 服务器繁忙(过载,请稍后重试)',
+  }
+  return `API 请求失败:${known[status] ?? `HTTP ${status}`}${detailHint}`
+}
+
+/**
  * 总结标题文风预设(2026-08-07 Sub Agent 设置):id 入库(settings.json),
  * desc 为提示词片段(引擎注入总结系统提示);name 设置界面展示。
  * 8 种预设 = 文风 4 + 人格 4;渲染端可安全 import(零 node 依赖)

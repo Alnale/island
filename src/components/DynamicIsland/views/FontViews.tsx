@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type CSSProperties } from 'react'
 import {
+  FONT_WEIGHTS,
   type FontColorMode,
   type FontLibraryItem,
 } from '../../../media/fontStore'
@@ -61,18 +62,19 @@ export function FontView({
         </span>
         {onFontWeightChange && (
           <span className="island-font-weights" role="group" aria-label="字体粗细">
-            {[400, 600, 800].map((w) => (
+            {FONT_WEIGHTS.map((w) => (
               <button
                 key={w}
                 type="button"
                 className={`island-font-weight${(fontWeight ?? 400) === w ? ' on' : ''}`}
                 style={{ fontWeight: w }}
+                title={w === 400 ? '常规' : w >= 700 ? '粗体' : '细体'}
                 onClick={(event) => {
                   event.stopPropagation()
                   onFontWeightChange(w)
                 }}
               >
-                {w === 400 ? '常规' : w === 600 ? '中等' : '粗体'}
+                {w === 400 ? '常规' : String(w)}
               </button>
             ))}
           </span>

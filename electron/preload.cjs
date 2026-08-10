@@ -36,6 +36,12 @@ contextBridge.exposeInMainWorld('desktop', {
   setWindowSize(width, height, immediate) {
     ipcRenderer.send('widget:set-size', Number(width), Number(height), immediate === true)
   },
+  /** 窗口层级(2026-08-10 用户要求):展开态不严格置顶。渲染端在展开/
+   * 收起时上报形态——紧凑(灵动岛/多媒体岛)= true 置顶,展开面板 =
+   * false 不置顶。主进程尊重托盘"总在最前"开关(用户显式关闭时不动作) */
+  setTopmost(on) {
+    ipcRenderer.send('widget:topmost', Boolean(on))
+  },
   /** 全屏状态上报(2026-08-08):fullscreenchange 时通知主进程,主进程
    * 在全屏期间兜底忽略 widget:set-size——全屏层(100% viewport)跟随
    * 窗口 resize 放大 = "全屏界面越来越大",渲染端守卫之外的漏网路径
@@ -85,6 +91,11 @@ contextBridge.exposeInMainWorld('desktop', {
   /** Agent:工具清单(名称/描述/参数 schema,UI 展示用;含 MCP/技能) */
   agentGetTools() {
     return ipcRenderer.invoke('agent:tools')
+  },
+  /** Agent:账户余额查询(2026-08-11 设置界面「账号」功能;引擎与 LLM
+   * 工具 get_deepseek_balance 同一实现,结构化数据;失败返回 {error}) */
+  agentGetBalance() {
+    return ipcRenderer.invoke('agent:balance')
   },
   /** Agent:测试 MCP 服务连通性(独立连接 → 列工具 → 销毁) */
   agentTestMcp(server) {

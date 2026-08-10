@@ -42,6 +42,7 @@
  */
 
 import { parseSse, truncateResult } from './sse'
+import { apiErrorMessage } from './constants'
 import type { AgentConfig, AgentEvent, AgentMessage, AgentPart, AgentTool, ProviderOutcome } from './types'
 
 /** 工具 → Chat Completions tools(官方格式:function 嵌套) */
@@ -194,12 +195,12 @@ export async function streamChatCompletion(params: {
   if (!res.ok || !res.body) {
     let detail = ''
     try {
-      const text = await res.text()
-      detail = text.slice(0, 500)
+      detail = (await res.text()).slice(0, 500)
     } catch {
       // 忽略读失败
     }
-    throw new Error(`DeepSeek API 请求失败 HTTP ${res.status}:${detail}`)
+    // 错误码映射(2026-08-10,与 Responses 同款可读中文错误)
+    throw new Error(apiErrorMessage(res.status, detail))
   }
 
   // 流式工具调用按 index 累积(OpenAI 格式:首个 delta 带 id/name,

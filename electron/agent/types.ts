@@ -92,9 +92,10 @@ export type AgentEvent =
    * 不提问就不知道结果)。主进程只在 Agent 模式转发
    */
   | { type: 'background-done'; title: string; message: string }
-  /** exec_command 确认门:引擎请求用户确认(主进程转发;渲染端允许/拒绝后
-   * 经 agent:tool-confirm 回传) */
-  | { type: 'tool-confirm-request'; command: string }
+  /** 确认门:引擎请求用户确认(主进程转发;渲染端允许/拒绝后经
+   * agent:tool-confirm 回传)。title/detail 可选——exec_command 确认只带
+   * command(兼容),bili 批量下载等动作确认带 title+detail 展示 */
+  | { type: 'tool-confirm-request'; command: string; title?: string; detail?: string }
   /**
    * 主动陪伴:主进程对主动回合消息的心理揣测结果(与 Windows 系统通知
    * 同一条 guess)——渲染端更新紧凑态文字区 mindGuess,与通知一致
@@ -268,8 +269,9 @@ export interface EngineDeps {
   getConfig(): AgentConfig
   /** 事件转发(→ 渲染端) */
   onEvent(event: AgentEvent): void
-  /** switch_to_music 工具:切换回音乐模式 */
-  onSwitchToMusic(): void
+  /** switch_to_music 工具:切换回音乐模式;play=true = 切换后立即开始
+   * 播放当前播放列表(2026-08-11 用户"让 LLM 切音乐模式听歌没有自动播放") */
+  onSwitchToMusic(play?: boolean): void
   /** 记忆存储(主进程创建;未注入则记忆工具/记忆块不可用) */
   getMemoryStore?(): MemoryStoreLike | null
   /** 自我进化 harness(主进程创建,懒加载;未注入则 evolve 工具不可用) */
@@ -286,6 +288,13 @@ export interface EngineDeps {
    * 主进程持 pending,渲染端经 IPC 回用户选择,超时/无注入 = 拒绝)
    */
   confirmCommand?(command: string): Promise<boolean>
+  /**
+   * 通用动作确认门(2026-08-10,bili 批量下载等**每次调用**都须征求用户
+   * 同意;与 confirmCommand 的"每轮首个命令确认一次"语义不同——本门
+   * 每次调用都确认,不做轮内放行)。主进程实现与 confirmCommand 同款
+   * 槽机制(并行确认互斥,超时 = 拒绝);未注入 = 直接放行(测试环境)
+   */
+  confirmAction?(title: string, detail: string): Promise<boolean>
   /**
    * 灵动岛设置工具:调渲染端设置桥(主进程注入,executeJavaScript 调
    * window.__islandSettings → 写 localStorage/IndexedDB → 派发

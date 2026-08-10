@@ -90,8 +90,11 @@ export interface AgentPanelProps {
   excludedTools?: string[]
   /** 更新禁用工具列表(工具列表视图禁用 / 恢复) */
   onExcludedToolsChange?(names: string[]): void
-  /** exec_command 确认请求(confirmExec 开启,引擎等待用户选择) */
-  pendingConfirm: { command: string } | null
+  /**
+   * 确认请求(引擎等待用户选择):exec_command 确认门只带 command;
+   * bili 批量下载等动作确认带 title/detail(2026-08-10 通用化)
+   */
+  pendingConfirm: { command: string; title?: string; detail?: string } | null
   /** 回传确认结果(允许 / 拒绝) */
   onConfirmTool(approved: boolean): void
   /** 本会话流式落定且未自动播放过的消息 id(2026-08-10:媒体自动播放

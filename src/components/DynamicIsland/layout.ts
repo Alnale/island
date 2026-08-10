@@ -113,12 +113,17 @@ export function clamp01(v: number): number {
 }
 
 // Agent 面板岛体高度自适应:固定部分(头部 26 + 输入 34 + 间距 20 +
-// 内边距 26 ≈ 106,取 116 留余量)、下限 200(稍微留一点空)、上限 600(内容
-// 超高滚动)。CSS 的 .island-agent-view height 与 .island-agent-messages
-// max-height 同步用 --agent-h 变量(差值 = FIXED_H)
+// 内边距 26 ≈ 106,取 116 留余量)、下限 176(2026-08-11 从 200 下调:
+// 0 消息自然高 = 固定区 116 + 欢迎语 ~41 ≈ 157,下限 176 = 新对话面板
+// 保持矮小,不再被 200 顶高)、上限 700(2026-08-11 从 600 上调:窗口
+// 高度 1:1 跟随内容、上限 = 宽度 9/16——高缩放比例(300% 时 16:9 =
+// 675)下内容测高必须能超过 600 才能到达 16:9 上限,否则"最大高度
+// 比 16:9 小,大概 6、7";内容超高滚动)。
+// CSS 的 .island-agent-view height 与 .island-agent-messages max-height
+// 同步用 --agent-h 变量(差值 = FIXED_H)
 export const AGENT_PANEL_FIXED_H = 116
-export const AGENT_PANEL_MIN_H = 200
-export const AGENT_PANEL_MAX_H = 600
+export const AGENT_PANEL_MIN_H = 176
+export const AGENT_PANEL_MAX_H = 700
 /** 展开首帧骨架屏时长(ms):形变动画期间先渲染轻量占位,之后挂载真实内容。
  *  120ms:形变(0.3s)进行到约 1/3 时挂载内容并测量——高度从该点以 CSS
  *  过渡并入宽度动画(并行动画;若等形变结束才测,就变成"先宽后高"顺序) */

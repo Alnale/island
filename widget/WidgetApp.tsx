@@ -18,13 +18,17 @@ import {
 import { PLAY_MODES } from '../src/media/playbackModes'
 import type { PanelView } from '../src/components/DynamicIsland/layout'
 import { useMediaPlayer } from '../src/media/useMediaPlayer'
-import { inferAudioType } from '../src/media/uploadStore'
-import { resolveMediaSrc } from '../src/components/DynamicIsland/views/Markdown'
+import {
+  clearAgentVideoResume,
+  resolveMediaSrc,
+} from '../src/components/DynamicIsland/views/Markdown'
 import type { AgentPanelProps } from '../src/agent/types'
 import { useAgent } from '../src/hooks/useAgent'
 import {
   MEDIA_WINDOW_STORAGE_KEY,
   onMediaLibraryPlay,
+  onPlaylistImport,
+  onPlaylistItemRemoved,
   onSettingsChange,
   registerIslandSettingsBridge,
   readMediaWindowWidth,
@@ -155,6 +159,8 @@ export default function WidgetApp() {
   const [pendingMode, setPendingMode] = useState<{
     mode: 'music' | 'agent'
     source: 'user' | 'tool'
+    /** switch_to_music(play:true):切换后立即开始播放(2026-08-11) */
+    play?: boolean
   } | null>(null)
   // 最近一次应用的模式切换来源(供"切回音乐是否中止 Agent 轮次"判定;
   // 默认 'user':启动/手势/托盘均为用户主动)
@@ -192,6 +198,22 @@ export default function WidgetApp() {
       if (pendingMode.mode === 'agent') {
         if (externalActive) void system.control('pause')
         else player.pause()
+      }
+      // **清除视频续播标记(2026-08-11 用户要求"从别的模式切换回 Agent
+      // 不自动播放,除非从视频岛正在播放的视频切换回来")**:模式切换 =
+      // Agent 面板/视频岛卸载,播放停止——lastPlayingVideoSrc 残留会让
+      // 切回 Agent 展开面板时视频自动续播(实测:Agent 面板播视频 →
+      // 切音乐 → 切回展开,视频自动播)。清除后重挂载保持暂停;
+      // 视频岛在播 → 展开面板的路径(点小窗展开)不是模式切换,不受影响
+      clearAgentVideoResume()
+      // **LLM switch_to_music(play:true) 自动播放(2026-08-11 用户"让
+      // LLM 切换成音乐模式听歌,没有自动播放,只是单纯切换模式")**:
+      // 切换后立即开始播放——外部平台(SMTC,如 QQ音乐)接管时走系统
+      // 播放控制,否则本地播放器从当前曲目开始(播放列表为空时无操作,
+      // LLM 应先经 add_audio_to_playlist 添加歌曲)
+      if (pendingMode.mode === 'music' && pendingMode.play) {
+        if (externalActive) void system.control('play')
+        else player.play()
       }
       setWinSize(WINDOW_W, WINDOW_H)
     }, MODE_SWITCH_ANIMATE_MS)
@@ -281,14 +303,12 @@ export default function WidgetApp() {
         : modeRef.current === 'agent'
           ? lastAgentWindowSize.current.w || WINDOW_W
           : WINDOW_W
-    // Agent 设置视图(2026-08-07 用户要求"参考 Agent 展开的先变宽再变长
-    // 动画"):高度由 Agent 面板高度动画逐帧跟随(onAgentPanelSize 从当前
-    // 显示高度滑升到 580,窗口与岛体形变同步)——瞬设高度会"窗口先就位、
-    // 岛体还在长",底部露出空隙割裂;这里只同步宽度,高度保持当前
-    if (view === 'agent-settings') {
-      setWinSize(width, window.innerHeight)
-      return
-    }
+    // Agent 设置视图(2026-08-11 优化"加载动画卡"):高度由
+    // useAgentPanelLayout 一次性 resize(原实现这里保持当前高度 + 高度
+    // 动画逐帧 onAgentPanelSize 跟随 = 每帧 setSize 软件渲染全幅重绘,
+    // 卡顿根源)——统一走 VIEW_WINDOW_H 兜底 580,与 hook 的
+    // onAgentPanelSize(AGENT_SETTINGS_H + 40)同值,后发覆盖一致;
+    // 岛体滑升由 --agent-h 动画驱动,窗口透明区无视觉,不裁剪
     setWinSize(width, VIEW_WINDOW_H[view] ?? WINDOW_H)
   }, [setWinSize])
   const handleAgentPanelSize = useCallback((width: number, height: number) => {
@@ -320,10 +340,13 @@ export default function WidgetApp() {
   const handleAgentSwipeToMusic = useCallback(() => {
     window.desktop?.setMode?.('music')
   }, [])
-  // Agent 音频移交(2026-08-09 修复"收起切音乐模式后没正常播放"):
-  // 收起面板时对话音频接进本地播放器继续播——fetch 音频源 → File →
-  // addTracks(自动播放首曲,持久化进播放列表)→ 切音乐模式。失败也
-  // 切模式(至少不卡在 Agent 模式)。
+  // Agent 音频移交(2026-08-09 修复"收起切音乐模式后没正常播放";
+  // 2026-08-11 优化"不中断播放 + 同步进度/循环,参考视频岛切换逻辑"):
+  // 收起面板时对话音频接进本地播放器**继续播**——不再 fetch 转码等待
+  // (原实现 fetch 整首歌 → File → addTracks 从头播放:大文件等待数秒
+  // = 中断感,且进度丢失),改用 **addTrackUrl:直接以原始 src 立即播放**,
+  // position = 对话窗口播放进度(从该位置续播,不从头),loop = 循环同步
+  // 为单曲循环;本地文件由播放器内部后台持久化(刷新后播放列表恢复)。
   // **URL 归一化只做一次(2026-08-09 五轮修复"仍没加载播放"根因)**:
   // 上报 src 的形态不统一——MediaFrame 挂载上报原始路径、VoiceBubble
   // 播放上报**已解析的协议 URL**(island-media://local/...);若对已
@@ -333,25 +356,14 @@ export default function WidgetApp() {
   // 音频恰好走播放上报 = 已解析形态,实测一直失败)。已含协议/URL
   // 前缀的直接用,裸路径才解析
   const handleAgentAudioHandoff = useCallback(
-    (audio: { src: string; name?: string }) => {
+    (audio: { src: string; name?: string; position?: number; loop?: boolean }) => {
       const name = audio.name || '对话音频'
-      void (async () => {
-        try {
-          const url = /^(https?:|data:|blob:|island-media:)/i.test(audio.src)
-            ? audio.src
-            : resolveMediaSrc(audio.src)
-          const res = await fetch(url)
-          if (!res.ok) throw new Error(`fetch ${res.status}`)
-          const blob = await res.blob()
-          // 临时诊断(2026-08-09 排查移交,定位后删除)
-          console.log('[handoff] fetch ok, blob size:', blob.size, 'type:', blob.type)
-          const file = new File([blob], name, { type: inferAudioType(name, blob.type) })
-          player.addTracks([file])
-        } catch (err) {
-          console.error('[widget] agent audio handoff failed:', err)
-        }
-        window.desktop?.setMode?.('music')
-      })()
+      const url = /^(https?:|data:|blob:|island-media:)/i.test(audio.src)
+        ? audio.src
+        : resolveMediaSrc(audio.src)
+      // 立即播放(不 fetch 不等待):原始 src + 移交进度续播 + 循环同步
+      player.addTrackUrl(url, name, { position: audio.position, loop: audio.loop })
+      window.desktop?.setMode?.('music')
     },
     [player],
   )
@@ -489,6 +501,30 @@ export default function WidgetApp() {
     },
     [player],
   )
+  // LLM 工具 add_audio_to_playlist(2026-08-10):桥派发 island:playlist-import
+  // → 音频库条目导入播放列表(自动播首曲)+ 切音乐模式——用户能直接点播
+  // (import_audio_library 只进音频库,音乐模式播不了,是"LLM 说导入了
+  // 却无法播放"的根因修复)
+  useEffect(
+    () =>
+      onPlaylistImport((items) => {
+        void player.addLibraryTracks(
+          items.map((it) => ({ id: '', name: it.name, type: it.type, data: it.data, createdAt: 0 })),
+        )
+        window.desktop?.setMode?.('music')
+      }),
+    [player],
+  )
+  // LLM 工具 remove_playlist_item(2026-08-11):桥删 IndexedDB 后派发
+  // island:playlist-item-removed → player.removeTrackByStorageKey 同步
+  // 播放列表 state(删当前播放曲目自动切相邻)
+  useEffect(() => onPlaylistItemRemoved((key) => player.removeTrackByStorageKey(key)), [player])
+  // 窗口层级(2026-08-10 用户要求"除紧凑态外不再严格置顶"):DynamicIsland
+  // 展开/收起时上报形态——展开面板 = 不置顶,收起(紧凑态/多媒体岛)=
+  // 置顶。主进程尊重托盘"总在最前"开关
+  const handleExpandChange = useCallback((expanded: boolean) => {
+    window.desktop?.setTopmost?.(!expanded)
+  }, [])
 
   const [mediaWindowWidth, setMediaWindowWidth] = useState(() => readMediaWindowWidth())
   const handleMediaWindowWidthChange = useCallback((w: number) => {
@@ -846,6 +882,7 @@ export default function WidgetApp() {
           backgroundCrop={backgroundCropProp}
           onBackgroundChange={handleBackgroundChange}
           requestSettingsSeq={settingsSeq}
+          onExpandChange={handleExpandChange}
           onPanelViewChange={handlePanelViewChange}
           onAgentPanelSize={handleAgentPanelSize}
           onAgentPanelWidth={handleAgentPanelWidth}

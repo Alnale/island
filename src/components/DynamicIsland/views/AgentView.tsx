@@ -26,6 +26,7 @@ import {
 } from 'react'
 import type { AgentPanelProps, AgentToolInfo } from '../../../agent/types'
 import { stripMcpServiceLabel } from '../../../../electron/agent/constants'
+import { mediaKindOf } from './markdownParser'
 import { useLeavingList } from '../../../hooks/useLeavingList'
 import { QuickMenu } from './QuickMenu'
 import { Markdown, type AgentMediaReport } from './Markdown'
@@ -183,6 +184,11 @@ const QUICK_MENU_ICONS: Record<AgentMenuItemId, ReactNode> = {
  */
 const VIEW_LEAVE_MS = 200
 
+/** 输入草稿持久化键(2026-08-10 用户要求"切换窗口面板不丢失输入"):
+ * AgentView 卸载(收起面板/切多媒体库/设置视图/切音乐模式)后重挂载
+ * 恢复未发送的输入;发送成功即清除(已消费) */
+const AGENT_DRAFT_KEY = 'widget-agent-draft'
+
 /** 消息分批挂载每帧批大小(对话多时展开不卡,2026-08-08):每帧挂载
  * 一批消息(从最新往旧),React commit + Markdown 解析分散到多帧 */
 const BATCH_RENDER = 12
@@ -276,6 +282,24 @@ function scrollMessagesToBottom(
   }
 }
 
+/** 文本中**最后一个** markdown 媒体链接的媒体快照(2026-08-10,媒体岛
+ * 判定:LLM 回复常内嵌 ![名字](路径) 而非 media part——最后出现的
+ * 媒体 = 最新消息里的媒体;与 Markdown 组件渲染分派同款扩展名逻辑) */
+function findLastMdMedia(
+  text: string,
+): { kind: 'img' | 'video' | 'audio'; src: string; name?: string } | null {
+  const re = /!\[([^\]]*)\]\(([^)\s]+)\)/g
+  let last: { alt: string; url: string } | null = null
+  let m: RegExpExecArray | null
+  while ((m = re.exec(text ?? ''))) {
+    last = { alt: m[1], url: m[2] }
+  }
+  if (!last) return null
+  const kind = mediaKindOf(last.url)
+  if (!kind) return null
+  return { kind, src: last.url, name: last.alt || undefined }
+}
+
 /** 历史会话时间显示:今天 → HH:MM;昨天 → 昨天;更早 → M月D日 */
 function formatSessionTime(ts: number): string {
   const d = new Date(ts)
@@ -333,11 +357,16 @@ export function AgentView({
   mediaAutoPlayIds,
   onMediaAutoPlayed,
 }: AgentViewProps) {
-  // 对话最后媒体快照(2026-08-09):从消息**数据**取最后一条含 media
-  // part 的消息的最后一个媒体——数据顺序 = 消息顺序,不受消息列表
-  // 分批挂载(visibleCount)/重挂载影响(原挂载事件上报在大量历史消息
-  // 时最后上报的是中间批次的旧媒体,实测音频移交错取旧文件);收起
-  // 面板时 DynamicIsland 据此变形成媒体小窗/移交音频
+  // 对话最后媒体快照(2026-08-09):从消息**数据**取最后一条含媒体的
+  // 消息的最后一个媒体——数据顺序 = 消息顺序,不受消息列表分批挂载
+  // (visibleCount)/重挂载影响(原挂载事件上报在大量历史消息时最后上报
+  // 的是中间批次的旧媒体,实测音频移交错取旧文件);收起面板时
+  // DynamicIsland 据此变形成媒体小窗/移交音频。
+  // **markdown 内嵌媒体也算(2026-08-10 用户实测"最新消息为图片,收起
+  // 却不出图片岛"根因之一)**:LLM 常用回复内嵌 ![图](路径) 而非 media
+  // part——media part 与文本里的 markdown 媒体链接都算,取最后出现的
+  // (同一消息内 media part 优先于其后的 markdown 文本?不——按 parts
+  // 顺序逐条取最后媒体,与渲染顺序一致)
   const lastMedia = useMemo(() => {
     for (let i = messages.length - 1; i >= 0; i--) {
       const parts = messages[i].parts
@@ -347,6 +376,12 @@ export function AgentView({
         if (p.type === 'media') {
           return { kind: p.kind, src: p.url, name: p.name }
         }
+        if (p.type === 'text') {
+          // 文本里的 markdown 媒体链接:从后往前找第一个
+          // ![名字](路径)(与 Markdown 组件渲染分派同款正则)
+          const mdMedia = findLastMdMedia(p.text)
+          if (mdMedia) return mdMedia
+        }
       }
     }
     return null
@@ -354,7 +389,26 @@ export function AgentView({
   useEffect(() => {
     onMediaSnapshot?.(lastMedia)
   }, [lastMedia, onMediaSnapshot])
-  const [input, setInput] = useState('')
+  // 输入草稿(2026-08-10 用户要求"切换窗口面板不丢失已输入文本"):
+  // localStorage 持久化——收起面板/切多媒体库/切设置/切音乐模式
+  // (AgentView 卸载)后重挂载恢复;发送成功后清除(已消费)。
+  // 两个宿主(挂件/Web 演示)共用同一键,键名以 widget- 前缀与既有
+  // 设置键一致
+  const [input, setInput] = useState(() => {
+    try {
+      return localStorage.getItem(AGENT_DRAFT_KEY) ?? ''
+    } catch {
+      return ''
+    }
+  })
+  useEffect(() => {
+    try {
+      if (input) localStorage.setItem(AGENT_DRAFT_KEY, input)
+      else localStorage.removeItem(AGENT_DRAFT_KEY)
+    } catch {
+      // 存储失败忽略(隐私模式等)
+    }
+  }, [input])
   // / 与 @ 手动调用的候选列表(输入前缀时列出技能/MCP 工具)
   const [suggestions, setSuggestions] = useState<AgentToolInfo[]>([])
   const [suggestionIndex, setSuggestionIndex] = useState(0)
@@ -421,6 +475,20 @@ export function AgentView({
   const visibleCountRef = useRef(0)
   const visibleTotalRef = useRef(messages.length)
   visibleTotalRef.current = messages.length
+  // 2026-08-11 修复"头部媒体消息分批追平中卸载重挂,自动播放标记丢失":
+  // 消息数比上次渲染增加(运行时注入)→ **立即全量显示**(渲染期计算,
+  // 不等追平 effect)——slice(-visibleCount) 在 visibleCount < messages.length
+  // 时会切掉头部已挂载消息(DOM 卸载),追平后重挂的新实例读到**已消费**
+  // 的 mediaAutoPlay 标记不再自动播放(chat-media 巡检实测测试视频挂载
+  // 4 次全不播;真实 LLM 回复在尾部不受影响,但注入/恢复场景同样受益)。
+  // 展开瞬间(messages 不变)仍走分批:visibleCount 从 0 逐批增长,
+  // slice(-N) 从尾部(最新消息)往旧显示,分批语义不变;
+  // shownCount === 0 时显示空(消除 slice(-0)=slice(0)=全量的边界 bug)
+  const lastMsgLenRef = useRef(messages.length)
+  const msgGrew = messages.length > lastMsgLenRef.current
+  lastMsgLenRef.current = messages.length
+  const shownCount = msgGrew ? messages.length : visibleCount
+  const visibleMessages = shownCount > 0 ? messages.slice(-shownCount) : []
   // **useLayoutEffect 而不是 useEffect**(2026-08-08 修复"几条消息也卡"
   // 回归):effect 在 commit 后、paint 前同步 setVisibleCount → React
   // 同步 re-render,content 切换**首帧即渲染首批消息**——原 useEffect
@@ -779,10 +847,22 @@ export function AgentView({
   // 消息/流式变化时自动滚到底(用户上翻查看历史时不打扰;
   // content-visibility 下跳底需双 rAF 校正估算尺寸)。
   // visibleCount = 分批挂载:顶部追加旧消息会下推底部内容,保持底部
-  // (双 rAF 校正同款)
+  // (双 rAF 校正同款)。
+  // **延迟再校正一次(2026-08-11 修复"发送内容时偶现突然跳转到中间的
+  // 对话")**:>100 条时 content-visibility 的 scrollHeight 是估算值,
+  // 双 rAF 校正发生在真实化**之前**(估算只在校验/滚动时真实化,发送
+  // 瞬间估算 < 真实,校正读到的还是估算)——滚动位置停在估算底,
+  // CV 真实化后高度增长、scrollTop 不再更新 = 视觉跳到中间。150ms
+  // 后(CV 已真实化)按 atBottomRef(用户没上翻)再校正一次
   useEffect(() => {
     const el = scrollRef.current
-    if (el && atBottomRef.current) jumpToBottom(el)
+    if (el && atBottomRef.current) {
+      jumpToBottom(el)
+      const t = window.setTimeout(() => {
+        if (el.isConnected && atBottomRef.current) jumpToBottom(el)
+      }, 150)
+      return () => window.clearTimeout(t)
+    }
   }, [messages, streaming, status, lastError, visibleCount])
 
   const handleScroll = () => {
@@ -811,10 +891,26 @@ export function AgentView({
       // MORPH_ANIMATE_MS 400ms 同步——原滚动比高度动画晚 100ms,
       // 展开收尾滞涩)——宽度动画期间岛体还是 56 高宽条,滚动无意义
       // 且浪费;高度展开时伴随滚动到底(桌面挂件直接跳底零动画成本;
-      // Web 演示版保留平滑滚动)
+      // Web 演示版保留平滑滚动)。
+      // **等分批追平再跳底(2026-08-11 修复"偶尔切换回 Agent 跳转到
+      // 中间的历史记录")**:历史消息多时(>BATCH_RENDER)content 期分批
+      // 挂载(visibleCount 逐批 rAF 增长),固定延迟后跳底时 scrollHeight
+      // 还是估算/部分值(>100 条 content-visibility 估算 + 未挂载批),
+      // scrollTop 停在中间位置,后续分批的跳底校正依赖 atBottomRef
+      // 与滚动事件链,偶发失配(切换回 Agent 的进入滚动与分批竞态)——
+      // 改为**分批追平(visibleCountRef >= 消息数)后再跳底**,rAF 轮询
+      // 等待,分批完成瞬间的 scrollHeight 已真实(双 rAF 校正)
       const t = window.setTimeout(() => {
         const el2 = scrollRef.current
-        if (el2) scrollMessagesToBottom(el2, { blur: messagesLenRef.current > 0 })
+        if (!el2) return
+        const waitBatches = () => {
+          if (visibleCountRef.current < messagesLenRef.current) {
+            requestAnimationFrame(waitBatches)
+            return
+          }
+          scrollMessagesToBottom(el2, { blur: messagesLenRef.current > 0 })
+        }
+        waitBatches()
       }, AGENT_WIDTH_ANIMATE_MS)
       return () => window.clearTimeout(t)
     }
@@ -825,6 +921,12 @@ export function AgentView({
     if (!text || busy) return
     onSend(text)
     setInput('')
+    // 已发送 = 草稿已消费,清除持久化(防重挂载后旧草稿复活)
+    try {
+      localStorage.removeItem(AGENT_DRAFT_KEY)
+    } catch {
+      // 忽略
+    }
     // 发送后自绘非线性滚动到底(输入框高度可能变化;先加速再减速,
     // 平滑停止)。**不模糊**:对话中跳转最新消息的消息列表往往很短,
     // 模糊只服务于长列表滚动动画的性能优化,这里不需要(实测对话中
@@ -848,13 +950,14 @@ export function AgentView({
       return
     }
     const token = input.slice(1).split(/\s+/)[0].toLowerCase()
-    // 外部工具前缀:技能 skill_<slug>;MCP 工具 mcp_<服务>_<工具>(双下划线)——
-    // 内置工具 mcp_config 恰好以 mcp_ 开头,用"名称里存在第二个下划线"
-    // 区分(外部 MCP 工具名必有服务段与工具段,实测 @mcp_config 混入候选)
+    // 外部工具前缀:技能 skill_<slug>;MCP 工具 mcp_<服务>_<工具>——
+    // **显式排除内置工具 mcp_config**(2026-08-10:原"名称里存在第二个
+    // 下划线"区分约定过脆,任何命名变化都会让 MCP 工具混不进/混进
+    // 候选;显式排除 + mcp_ 前缀 = 全部外部 MCP 工具稳定显示)
     const all = tools.filter((t) =>
       prefix === '/'
         ? t.name.startsWith('skill_')
-        : t.name.startsWith('mcp_') && t.name.indexOf('_', 4) > 0,
+        : t.name.startsWith('mcp_') && t.name !== 'mcp_config',
     )
     // 全量匹配(不截断上限——用户技能不可能只有 6 个,实测被 slice 截断;
     // 超高由 max-height + overflow 滚动兜底,列表随岛体高度显示)
@@ -1228,7 +1331,7 @@ export function AgentView({
                 试试:「打开计算器」「查一下最近的新闻」「列出下载目录」
               </div>
             )}
-            {messages.slice(-visibleCount).map((m) =>
+            {visibleMessages.map((m) =>
               m.role === 'user' ? (
                 <UserBubble key={m.id} m={m} />
               ) : (
@@ -1292,8 +1395,17 @@ export function AgentView({
         >
           {pendingConfirm && (
             <div className="island-agent-confirm">
-              <span className="island-agent-confirm-title">允许执行命令?</span>
-              <code className="island-agent-confirm-cmd">{pendingConfirm.command}</code>
+              {/* 确认卡通用化(2026-08-10):exec_command 确认带 command 显示
+                  "允许执行命令?";bili 批量下载等动作确认带 title/detail
+                  显示动作标题 + 详情 */}
+              <span className="island-agent-confirm-title">
+                {pendingConfirm.title ?? '允许执行命令?'}
+              </span>
+              {pendingConfirm.detail ? (
+                <span className="island-agent-confirm-detail">{pendingConfirm.detail}</span>
+              ) : (
+                <code className="island-agent-confirm-cmd">{pendingConfirm.command}</code>
+              )}
               <div className="island-agent-confirm-actions">
                 <button
                   type="button"

@@ -593,6 +593,10 @@
      fit-content 让 wrap 收缩贴住媒体宽度,命中区 + grip 图标锚回
      气泡角点 */
   width: fit-content;
+  /* 2026-08-11 图片原图宽:frame 内联 width = naturalWidth(大图如
+     2000px)时超出消息列表/面板——max-width 100%(相对 flex 容器,
+     优先级高于内联 width)兜底压回面板宽,img width:100% 跟随 */
+  max-width: 100%;
   margin: 6px 0;
   padding: 0 16px 16px 0;
 }
@@ -1341,7 +1345,54 @@
   display: flex;
   flex-direction: column;
   gap: 4px;
-  min-width: 60px;
+  min-width: 100px;
+  max-width: 220px;
+}
+
+/* 歌名行(2026-08-11 用户要求"音频条显示歌名"):声波在歌名左侧,
+   播放时跳动;歌名超长省略 */
+.island-agent-voice-title-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.island-agent-voice-title {
+  font-size: 0.62rem;
+  line-height: 1.3;
+  color: var(--text-color, #fff);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+/* 循环按钮(2026-08-11 用户要求"支持切换播放模式(循环)"):淡色图标,
+   激活(looping)强调色高亮 + 浅底,与播放键主从层次 */
+.island-agent-voice-loop {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-dim, rgba(255, 255, 255, 0.45));
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.island-agent-voice-loop:hover {
+  color: var(--text-color, #fff);
+}
+
+.island-agent-voice.looping .island-agent-voice-loop {
+  background: var(--state-color, #4d6bfe);
+  color: #fff;
 }
 
 /* 动态声波:5 条竖条,播放时逐条跳动(QQ/微信语音图标观感) */
@@ -2711,6 +2762,138 @@
   color: var(--text-dim, rgba(255, 255, 255, 0.5));
 }
 
+/* ===== 账号卡片(2026-08-11 用户要求"Agent 设置添加账号余额查询,
+   API 配置集成到账号功能") ===== */
+.island-agent-account {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.island-agent-account-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 0.64rem;
+  color: var(--text-dim, rgba(255, 255, 255, 0.6));
+}
+
+.island-agent-account-actions {
+  display: flex;
+  gap: 6px;
+}
+
+/* 去充值按钮(2026-08-11 用户问"能否充值":DeepSeek 无充值 API,
+   跳转网页端充值中心;强调色实底,与刷新按钮的浅底形成主从层次) */
+.island-agent-account-topup {
+  flex: none;
+  padding: 3px 12px;
+  border-radius: 999px;
+  border: none;
+  background: var(--state-color, #4d6bfe);
+  color: #fff;
+  font-size: 0.6rem;
+  cursor: pointer;
+  transition: filter 0.2s, transform 0.15s;
+}
+
+.island-agent-account-topup:hover {
+  filter: brightness(1.15);
+}
+
+.island-agent-account-topup:active {
+  transform: scale(0.95);
+}
+
+.island-agent-account-refresh {
+  flex: none;
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.24);
+  background: rgba(255, 255, 255, 0.09);
+  color: var(--text-color, #fff);
+  font-size: 0.6rem;
+  cursor: pointer;
+  transition: background 0.2s, border-color 0.2s;
+}
+
+.island-agent-account-refresh:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.14);
+  border-color: rgba(255, 255, 255, 0.36);
+}
+
+.island-agent-account-refresh:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+/* 余额不足提示行(2026-08-11:醒目橙色,带充值引导) */
+.island-agent-account-lowtip {
+  padding-top: 4px;
+  border-top: 1px dashed rgba(255, 255, 255, 0.12);
+  font-size: 0.58rem;
+  line-height: 1.5;
+  color: #fbbf24;
+}
+
+.island-agent-account-error {
+  font-size: 0.6rem;
+  line-height: 1.5;
+  color: #f87171;
+  word-break: break-all;
+}
+
+.island-agent-account-bal {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.island-agent-account-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 0.64rem;
+  color: var(--text-color, #fff);
+}
+
+.island-agent-account-cur {
+  flex: none;
+  min-width: 30px;
+  font-size: 0.6rem;
+  color: var(--text-dim, rgba(255, 255, 255, 0.5));
+}
+
+.island-agent-account-total {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.island-agent-account-low {
+  margin-left: 6px;
+  font-style: normal;
+  font-size: 0.56rem;
+  font-weight: 400;
+  color: #f87171;
+}
+
+.island-agent-account-sub {
+  font-size: 0.58rem;
+  color: var(--text-dim, rgba(255, 255, 255, 0.45));
+  font-variant-numeric: tabular-nums;
+}
+
+.island-agent-account-empty {
+  font-size: 0.6rem;
+  line-height: 1.5;
+  color: var(--text-dim, rgba(255, 255, 255, 0.45));
+}
+
 .island-agent-form {
   flex: 1;
   min-height: 0;
@@ -3892,6 +4075,20 @@
   font-size: 0.64rem;
   line-height: 1.5;
   font-family: 'Cascadia Mono', 'JetBrains Mono', Consolas, monospace;
+  word-break: break-all;
+  user-select: text;
+}
+
+/* 确认卡详情(2026-08-10 通用化:bili 批量下载等动作确认的说明文本,
+   与命令代码块同款底,非等宽字体更自然) */
+.island-agent-confirm-detail {
+  display: block;
+  padding: 6px 8px;
+  border-radius: 7px;
+  background: rgba(0, 0, 0, 0.35);
+  color: var(--text-color, #fff);
+  font-size: 0.64rem;
+  line-height: 1.5;
   word-break: break-all;
   user-select: text;
 }

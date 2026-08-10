@@ -240,7 +240,9 @@ function runBiliBackground(args: string[]): string {
       `输出目录:${biliOutdir(args)}。` +
       '**这是长任务,通常 1-10 分钟,不要等待**:请立即告知用户"下载已开始,完成后会有系统通知";' +
       '完成/失败都会自动发系统通知,并在对话里告知结果,不需要反复查询。' +
-      '仅当用户主动询问下载进度时,才调用 bili saved 查询下载记录(下载进行中查不到记录是正常的)。'
+      '仅当用户主动询问下载进度时,才调用 bili saved 查询下载记录(下载进行中查不到记录是正常的)。' +
+      '**完成后若要播放,用 open_file 打开下载的文件——媒体会作为附件在对话窗口内直接播放**,' +
+      '不要切换音乐模式,也不要让用户去文件管理器里找。'
     )
   } catch (e) {
     throw new Error(`无法启动 bili-tool:${(e as Error).message}(二进制缺失:${BILI_BIN})`)
@@ -362,7 +364,12 @@ async function biliQuery(params: ToolParams): Promise<string | { text: string; i
       return runBiliBackground(dargs)
     }
     case 'download_up': {
-      // UP 主视频批量下载:后台启动,立即返回
+      // UP 主视频批量下载:后台启动,立即返回。
+      // **批量下载必须先征得用户同意(2026-08-10 用户要求)**:经
+      // confirmAction 确认门(与 exec_command 确认同款 UI 卡,标题 +
+      // 详情),拒绝 = 不启动,返回"用户拒绝"文本(LLM 可告知用户/
+      // 改单视频 download)。确认等待期间引擎兜底超时由 bili 工具
+      // timeoutMs 覆盖(130s > 确认 120s 超时)
       if (!query) throw new Error('download_up 需要 UP 主 mid')
       const dargs = ['download', query]
       if (params.limit) dargs.push('--limit', String(Number(params.limit) || 0))
@@ -372,6 +379,19 @@ async function biliQuery(params: ToolParams): Promise<string | { text: string; i
       if (params.quality) dargs.push('--quality', String(params.quality))
       if (params.outdir) dargs.push('--outdir', String(params.outdir))
       if (params.dry_run) dargs.push('--dry-run')
+      // 确认门(未注入 = 放行,测试/无 UI 环境):批量下载是占用磁盘与
+      // 带宽的动作,LLM 不能未经用户同意就启动
+      const confirmDeps = biliConfirmRef.current
+      if (confirmDeps) {
+        const label = `批量下载 UP 主 ${query} 的视频${params.limit ? `(最近 ${params.limit} 个)` : ''}`
+        const approved = await confirmDeps.confirmAction(
+          'B站批量下载',
+          `${label},将下载到 ${biliOutdir(dargs)}(可能消耗较多磁盘与带宽)。是否继续?`,
+        )
+        if (!approved) {
+          return '用户拒绝了批量下载。请告知用户"已取消批量下载";如需下载单个视频可用 download 指定 BV 号。'
+        }
+      }
       return runBiliBackground(dargs)
     }
     case 'danmaku': {
@@ -469,6 +489,15 @@ async function biliQuery(params: ToolParams): Promise<string | { text: string; i
       )
   }
   return runBili(args, 30000)
+}
+
+/**
+ * bili 批量下载确认门(2026-08-10):createTools 注入 deps.confirmAction
+ * (引擎 → 主进程 → tool-confirm-request → 渲染端确认卡);biliQuery 是
+ * 模块级函数,经 ref 读取当前注入的确认函数(未注入 = 不确认,测试环境)
+ */
+const biliConfirmRef: { current: { confirmAction: (title: string, detail: string) => Promise<boolean> } | null } = {
+  current: null,
 }
 
 /** DocFlow 服务进程(自动拉起后持有;disposeTools 关闭,防挂件退出残留) */
@@ -838,7 +867,8 @@ export function extractGuideSections(
 }
 
 export function createTools(deps: {
-  onSwitchToMusic(): void
+  /** play=true = 切换后立即开始播放当前播放列表(2026-08-11) */
+  onSwitchToMusic(play?: boolean): void
   /**
    * 后台任务进入终态回调(通用任务注册表,如 bili 下载/扫码登录):
    * 引擎转发为 background-done 事件 → 渲染端自动触发一轮对话,LLM
@@ -846,7 +876,14 @@ export function createTools(deps: {
    * 不依赖"发完通知就结束")
    */
   onBackgroundDone?(info: { title: string; message: string }): void
+  /**
+   * 通用动作确认门(2026-08-10):bili 批量下载启动前征求用户同意;
+   * 未注入 = 不确认(测试环境)
+   */
+  confirmAction?(title: string, detail: string): Promise<boolean>
 }): AgentTool[] {
+  // bili 批量下载确认门注入(模块级 ref,biliQuery 同步读取)
+  biliConfirmRef.current = deps.confirmAction ? { confirmAction: deps.confirmAction } : null
   // 通用任务注册表接线(替代原 bili 专用 bgDone 模块级回调):任何工具
   // 注册的任务进入终态(完成/失败/取消)都走这里 → background-done
   setTaskDoneHandler((task) => {
@@ -1140,11 +1177,24 @@ export function createTools(deps: {
     },
     {
       name: 'switch_to_music',
-      description: '把灵动岛挂件从 Agent 模式切回音乐播放器模式(岛体恢复歌曲/播放控制)。',
-      parameters: { type: 'object', properties: {} },
-      async execute() {
-        deps.onSwitchToMusic()
-        return '已切换到音乐模式'
+      description:
+        '把灵动岛挂件从 Agent 模式切回音乐播放器模式(岛体恢复歌曲/播放控制)。' +
+        '**用户要求"听歌/播放音乐"时必须带 play:true——切换后从当前播放列表开始播放**;' +
+        '仅切换模式(用户只想回音乐模式看状态)不带 play。' +
+        '播放列表为空时提示用户先添加歌曲,或用 list_audio_library + add_audio_to_playlist 把歌曲加入播放列表再切。',
+      parameters: {
+        type: 'object',
+        properties: {
+          play: {
+            type: 'boolean',
+            description: 'true = 切换到音乐模式后立即开始播放当前播放列表(用户要求听歌/播放时传)',
+          },
+        },
+      },
+      async execute(params: ToolParams) {
+        const play = params?.play === true
+        deps.onSwitchToMusic(play)
+        return play ? '已切换到音乐模式并开始播放' : '已切换到音乐模式'
       },
     },
     {
@@ -1221,18 +1271,24 @@ export function createTools(deps: {
     },
     {
       name: 'bili',
+      // 引擎兜底超时覆盖(2026-08-10):download_up 启动前需经确认门等待
+      // 用户选择(120s 超时),引擎默认 60s 会把确认等待中途杀掉
+      timeoutMs: 130_000,
       description:
         'B站数据查询与视频下载(调用本机 bili-tool,Rust 单二进制,免 Python)。' +
         '查询:up_info 查 UP 主信息(粉丝/关注/投稿/获赞) / up_videos 查 UP 主视频列表 / ' +
         'search 搜索视频/用户/番剧 / open 搜索并直接打开第一个结果(用户说"搜索XX打开第一个"时用它,一次完成;type=user 打开 UP 空间页) / trending 查热门榜(分区 rid:0全站 1动画 3音乐 4游戏 5娱乐 36科技 ' +
         '119鬼畜 129舞蹈 155生活 160时尚 167知识 181影视) / comments 查视频评论区。' +
-        '下载:download 下载单个视频 / download_up 批量下载 UP 主视频(可限最近 N 个/正则过滤,支持 --dry-run 先预览) / ' +
+        '下载:download 下载单个视频 / download_up 批量下载 UP 主视频(**必须先经用户确认,引擎会弹出确认请求**——' +
+        '用户拒绝就停止,改用 download 下载单个;可限最近 N 个/正则过滤,支持 --dry-run 先预览) / ' +
         'danmaku 下载弹幕(XML/ASS/TXT/JSON) / subtitle 下载 CC 字幕 / saved 查已下载记录。' +
         '**扫码登录(2026-08-07)**:login 生成登录二维码图片(对话消息里展示给用户,用户用 B 站手机 App 扫码确认;' +
         '**引擎自动在后台轮询确认,扫码成功/失败都会自动通知并在对话里告知结果,无需再调 whoami**)/ ' +
         'whoami 查询登录状态(登录可解锁高清/收藏夹/合集)。' +
         '**下载是后台长任务(通常 1-10 分钟)**:启动后立即返回并告知用户"下载已开始",**不要反复轮询 saved 等待**——' +
         '完成/失败会自动发系统通知;仅当用户主动询问进度时才调用 saved。' +
+        '**下载的音频/视频要播放时,用 open_file 打开输出文件——媒体会作为附件在对话窗口内直接播放**' +
+        '(不要切音乐模式,也不要让用户自己去找文件)。' +
         '清晰度建议:1080p 文件大下载慢,可优先 720p 或仅音频(audio=mp3)。' +
         '**B站 API 限制知识(查询失败时按此判断与答复用户)**:① 接口需要浏览器 UA 与 WBI/App 签名,' +
         '工具已内置(bili-tool 实现 WBI mixin 签名与移动端 appkey 签名);② 游客请求会触发风控——' +
