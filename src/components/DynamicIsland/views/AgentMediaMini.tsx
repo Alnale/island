@@ -251,9 +251,27 @@ export function AgentMediaMini({
             onEnded={() => {
               setPlaying(false)
               setCurrent(0)
+              // 播完清除播放状态同步(切回面板不自动重播)
+              dispatchAgentMedia('play', { kind: 'video', src: media.src, playing: false })
             }}
-            onPlay={() => setPlaying(true)}
-            onPause={() => setPlaying(false)}
+            onPlay={() => {
+              setPlaying(true)
+              // 立即上报播放状态同步(不等到 1Hz timeupdate:暂停后
+              // 重新播放立即切回面板的场景,lastPlayingVideoSrc 需即时恢复)
+              const v = videoRef.current
+              dispatchAgentMedia('play', {
+                kind: 'video',
+                src: media.src,
+                playing: true,
+                position: v ? v.currentTime : undefined,
+              })
+            }}
+            onPause={() => {
+              setPlaying(false)
+              // 暂停清除播放状态同步(2026-08-10:小窗暂停后切回面板
+              // 不应自动播放——面板挂载续播按 lastPlayingVideoSrc 判定)
+              dispatchAgentMedia('play', { kind: 'video', src: media.src, playing: false })
+            }}
           />
           {!playing && (
             <button
