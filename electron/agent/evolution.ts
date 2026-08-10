@@ -104,6 +104,19 @@ function clampScore(v: unknown): number {
   return Number.isFinite(n) ? Math.min(100, Math.max(0, Math.round(n))) : 0
 }
 
+/**
+ * 序号 → 当前列表条目映射(测试用导出):评审输出的 delete/update 的
+ * id 是 1 基序号(原条目在评审输入里的顺序)。**2026-08-10 修复
+ * "发现重复却没合并"**:原 delete 分支把序号当 key 直接传
+ * store.remove——store 按真实 UUID 或内容片段匹配,序号永远命中
+ * 不了 UUID(内容 includes 数字又可能误删)——建议落空、记忆原样、
+ * 复评同分、棘轮拒绝。序号合法且界内返回条目,否则 null
+ */
+export function mapSeqToEntry(fresh: MemoryEntry[], id: string | undefined): MemoryEntry | null {
+  const idx = Number(id)
+  return Number.isInteger(idx) && idx >= 1 && idx <= fresh.length ? fresh[idx - 1] : null
+}
+
 export function createEvolution(deps: {
   getConfig(): AgentConfig
   getStore(): MemoryStoreLike | null
@@ -247,8 +260,10 @@ export function createEvolution(deps: {
       '"id": "原条目序号(delete/update 必填)", "content": "内容", "type": "preference|fact|workflow|lesson", ' +
       '"hypothesis": "预测的改进效果"}]}。' +
       'change 规则:明显冗余/过时/错误的条目 delete;措辞可优化但内容有价值的 update;缺失的重要维度 add。' +
-      '**每条 change 必须带 hypothesis(预测改进后 Agent 行为/回答质量的具体变化)**——只加分析步骤、' +
-      '不预测行为变化的建议是无效改进,不要给出。只输出 JSON,不要解释。'
+      '**高度重复的条目(同一偏好/事实/工作流/教训的不同措辞,如"喜欢简洁"与"希望回答简短")' +
+      '必须合并:保留内容最完整的一条,其余按序号输出 delete——删除重复是显然的清理,不需要 hypothesis**。' +
+      '每条非 delete 的 change 必须带 hypothesis(预测改进后 Agent 行为/回答质量的具体变化)——' +
+      '只加分析步骤、不预测行为变化的建议是无效改进,不要给出。只输出 JSON,不要解释。'
     )
   }
 
@@ -260,26 +275,37 @@ export function createEvolution(deps: {
     )
   }
 
-  /** 应用一个候选的改进建议(单轮);返回应用的 change 数 */
+  /** 应用一个候选的改进建议(单轮);返回应用的 change 数。
+   * **2026-08-10 修复(用户实测"评审发现条目1、2、3高度重复却没合并")**:
+   * ① delete(删除冗余/过时条目)不再强制 hypothesis——它是确定性的清理
+   *   操作,LLM 常不为其写假说(日志实测"建议删除第2、3条"无假说被整体
+   *   忽略);add/update 保持强制(防无效建议);
+   * ② delete/update 的序号 → 真实条目映射(mapSeqToEntry)——原实现把
+   *   序号当 key 传 store.remove,按内容 includes 匹配删不中;
+   * ③ 多条建议顺序应用时列表会变化(删除后条目前移),每次操作前重读
+   *   最新列表再映射(原 listNow 快照索引过期) */
   async function applyChanges(changes: EvolutionChange[]): Promise<number> {
     const store = getStore()
     if (!store) return 0
     let changeCount = 0
-    const listNow = await store.list()
     for (const ch of changes) {
-      // 假说驱动:无假说的建议不采纳(只加分析不预测行为的无效改进)
-      if (!ch.hypothesis?.trim()) continue
+      // 假说驱动:add/update 必须带假说(预测行为变化);delete 例外(见上)
+      if (ch.op !== 'delete' && !ch.hypothesis?.trim()) continue
       try {
         if (ch.op === 'add' && ch.content?.trim()) {
           await store.add({ content: ch.content, type: ch.type ?? 'fact', source: 'evolution' })
           changeCount++
-        } else if (ch.op === 'delete') {
-          changeCount += await store.remove(ch.id ?? ch.content ?? '')
-        } else if (ch.op === 'update' && ch.id) {
-          // id 是评审输出里的序号(1 基),映射到当前列表
-          const idx = Number(ch.id)
-          const target = listNow[idx - 1]
-          if (target && ch.content?.trim()) {
+        } else if (ch.op === 'delete' || (ch.op === 'update' && ch.id)) {
+          const fresh = await store.list()
+          const target = mapSeqToEntry(fresh, ch.id)
+          if (ch.op === 'delete') {
+            if (target) {
+              changeCount += await store.remove(target.id)
+            } else if (ch.content?.trim()) {
+              // 兼容直接传内容片段(旧语义,评审偶发输出内容而非序号)
+              changeCount += await store.remove(ch.content)
+            }
+          } else if (target && ch.content?.trim()) {
             await store.update(target.id, { content: ch.content, type: ch.type })
             changeCount++
           }

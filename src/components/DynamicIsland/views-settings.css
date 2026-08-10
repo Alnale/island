@@ -1864,8 +1864,13 @@
 /* 图片右键菜单(2026-08-08):应用到紧凑态/展开态背景(中性胶囊浮层,
    与 QuickMenu 同款视觉)。**absolute 定位在面板内**(2026-08-08 修复
    "菜单看不见":fixed 会被岛体 transform 祖先错位,overflow:hidden
-   裁剪——面板 .island-panel-list 相对定位,菜单随岛体移动永不被裁) */
-.island-panel-list {
+   裁剪——**仅媒体库/图片库面板(island-lib-view)相对定位**,菜单随岛体
+   移动永不被裁;不能作用于全部 .island-panel-list——否则设置类面板
+   (Agent 设置等)被内容撑高(relative 不约束高度),内部滚动容器
+   (flex:1 + overflow-y:auto)高度 = 内容高度永不超高,内容超出岛体被
+   overflow:hidden 裁剪且无法滚动(2026-08-10 实测:记忆与进化 tab
+   记忆条目多时无法上下滚动,根因即此覆盖) */
+.island-panel-list.island-lib-view {
   position: relative;
 }
 

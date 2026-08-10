@@ -47,7 +47,7 @@ import {
   type AgentTask,
 } from '../electron/agent/tasks'
 import { createSettingsTools } from '../electron/agent/settingsTools'
-import { createEvolution } from '../electron/agent/evolution'
+import { createEvolution, mapSeqToEntry } from '../electron/agent/evolution'
 import type { AgentTool, McpServerConfig, MemoryEntry } from '../electron/agent/types'
 
 // 打包产物运行时路径会变(import.meta.url 指向 node_modules/.cache),
@@ -919,6 +919,23 @@ function makeEvolutionDeps() {
   return { store, evo, events }
 }
 
+await test('mapSeqToEntry:序号映射最新列表;越界/非法返回 null', () => {
+  // 2026-08-10 回归:评审输出的 delete/update id 是 1 基序号,原 delete
+  // 分支把序号当 key 传 store.remove(按内容 includes 匹配)删不中——
+  // "评审发现重复却没合并"的直接根因
+  const entries = [
+    { id: 'a', type: 'preference' as const, content: '条目1', source: 'manual' as const, createdAt: 1, updatedAt: 1 },
+    { id: 'b', type: 'fact' as const, content: '条目2', source: 'manual' as const, createdAt: 1, updatedAt: 1 },
+  ]
+  assert(mapSeqToEntry(entries, '1')?.id === 'a', '序号 1 → 首条')
+  assert(mapSeqToEntry(entries, '2')?.id === 'b', '序号 2 → 次条')
+  assert(mapSeqToEntry(entries, '3') === null, '越界返回 null')
+  assert(mapSeqToEntry(entries, '0') === null, '0 越界返回 null')
+  assert(mapSeqToEntry(entries, '-1') === null, '负数返回 null')
+  assert(mapSeqToEntry(entries, 'abc') === null, '非法返回 null')
+  assert(mapSeqToEntry(entries, undefined) === null, '缺省返回 null')
+})
+
 await test('无 API Key:进化后台启动 → 优雅失败(通知)', async () => {
   (globalThis as any).__notifications = []
   const { evo, events } = makeEvolutionDeps()
@@ -1655,6 +1672,60 @@ await test('set_video_config:透传音量/速度/循环/全屏/宽度;空参数�
   await assertRejects(() => tool!.execute({ speed: 5 }), 'speed 需要是 0.5-2', '越界 speed 应拒绝')
   // 空参数拒绝
   await assertRejects(() => tool!.execute({}), '至少提供一个参数', '空参数应拒绝')
+})
+
+await test('set_video_config:target 指定单视频(音量/速度/循环/播放暂停);playing 无 target 控制当前视频', async () => {
+  // 2026-08-10 二轮用户要求:同时播两个视频,能独立调整单个视频的
+  // 音量/播放模式/开关(播放暂停)
+  const calls: Array<{ op: string; args: unknown[] }> = []
+  const tools = createSettingsTools({
+    runIslandSettings: async (op, args) => {
+      calls.push({ op, args })
+      if (op === 'setVideoState') {
+        const input = (args[0] ?? {}) as { name?: string; volume?: number; playing?: boolean }
+        if (input.name === '不存在的.mp4') throw new Error('对话窗口没有名为「不存在的.mp4」的视频(用 list_conversation_media 查看可用的名字)')
+        return {
+          ok: true,
+          name: input.name,
+          volume: input.volume !== undefined ? Math.round(input.volume * 100) : 60,
+          speed: 1,
+          loop: false,
+          playing: input.playing ?? true,
+        }
+      }
+      if (op === 'setVideoPrefs') {
+        const patch = (args[0] ?? {}) as { volume?: number }
+        return { ok: true, volume: patch.volume ?? 1, speed: 1, loop: false, previous: { volume: 1, speed: 1, loop: false } }
+      }
+      return { ok: true }
+    },
+  })
+  const tool = tools.find((t) => t.name === 'set_video_config')
+  assert(tool, '应注册 set_video_config')
+  // target + 音量:调 setVideoState,不调 setVideoPrefs(个性化,不动全局)
+  const out1 = String(await tool!.execute({ target: '视频A.mp4', volume: 0.3 }))
+  const state = calls.filter((c) => c.op === 'setVideoState')
+  assert(state.length === 1 && (state[0].args[0] as { name?: string }).name === '视频A.mp4', '应调桥 setVideoState 且带 name')
+  assert(!calls.some((c) => c.op === 'setVideoPrefs'), 'target 指定时不应调全局 setVideoPrefs')
+  assert(out1.includes('视频A.mp4') && out1.includes('30'), '返回应含视频名与调整后音量')
+  // target + playing:false:暂停指定视频
+  calls.length = 0
+  const out2 = String(await tool!.execute({ target: '视频B.mp4', playing: false }))
+  const st2 = calls.find((c) => c.op === 'setVideoState')
+  assert(st2 && (st2.args[0] as { playing?: boolean }).playing === false, '应调桥 setVideoState 且 playing=false')
+  assert(out2.includes('暂停'), '返回应含暂停')
+  // playing 无 target:控制当前播放中的视频(桥 name 缺省语义)
+  calls.length = 0
+  const out3 = String(await tool!.execute({ playing: true }))
+  const st3 = calls.find((c) => c.op === 'setVideoState')
+  assert(st3 && (st3.args[0] as { name?: string }).name === undefined, '无 target 的 playing 不应带 name')
+  assert(out3.includes('播放'), '返回应含播放')
+  // 未知 target 时桥抛错(找不到视频)透传
+  await assertRejects(
+    () => tool!.execute({ target: '不存在的.mp4', volume: 0.5 }),
+    '没有名为「不存在的.mp4」的视频',
+    '未知 target 应报错',
+  )
 })
 
 await test('set_system_volume:注册与参数校验;不实际改系统音量', async () => {
