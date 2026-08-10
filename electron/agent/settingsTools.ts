@@ -42,6 +42,7 @@ export type IslandSettingsOp =
   | 'getVideoPrefs'
   | 'setVideoPrefs'
   | 'setFullscreen'
+  | 'setVideoState'
   | 'getConversationMedia'
   | 'deleteFontItem'
   | 'deleteLibraryImage'
@@ -618,22 +619,27 @@ export function createSettingsTools(deps: SettingsToolsDeps): AgentTool[] {
     {
       name: 'set_video_config',
       description:
-        '调整 Agent 对话窗口内视频播放的设置(立即生效;音量/速度/循环与' +
-        '视频岛、多媒体库**双向同步**):' +
+        '调整 Agent 对话窗口内视频播放的设置(立即生效):' +
+        '**target = 指定单个视频**(可选,名称为 list_conversation_media 返回的 ' +
+        'name;缺省 = 全局共享设置,影响所有视频的默认值);' +
         'volume = **灵动岛独立音量**(0-1,只影响岛内媒体播放,与系统音量互不影响——' +
-        '系统音量用 set_system_volume 工具调);' +
+        '系统音量用 set_system_volume 工具调;带 target 只调该视频,其它视频不变);' +
         'speed = 播放速度(0.5-2,如 1.5 = 1.5 倍速);' +
         'loop = 是否循环播放(true/false);' +
+        'playing = 播放/暂停开关(true = 播放,false = 暂停;带 target 控制指定视频,缺省控制当前正在播放的视频);' +
         'fullscreen = 进入/退出全屏(true = 把对话窗口里正在播放的视频全屏,false = 退出全屏);' +
         'width = 媒体窗口默认宽(160-800,新播放的图片/视频生效)。' +
         '参数全部可选、至少给一个。适合:用户说"视频慢一点/倍速播放/循环播放/全屏看/退出全屏/' +
-        '视频声音大一点/媒体窗口大一点"。修改前可先调 get_island_settings 看当前值。',
+        '视频声音大一点/把第二个视频暂停/这个视频音量调小一点"。修改前可先调 ' +
+        'list_conversation_media(查视频名字与当前状态)或 get_island_settings 看全局值。',
       parameters: {
         type: 'object',
         properties: {
+          target: { type: 'string', description: '目标视频名(list_conversation_media 返回的 name;可选,缺省 = 全局设置)' },
           volume: { type: 'number', description: '灵动岛独立音量 0-1,如 0.6(可选)' },
           speed: { type: 'number', description: '播放速度 0.5-2,如 1.5(可选)' },
           loop: { type: 'boolean', description: '是否循环播放(可选)' },
+          playing: { type: 'boolean', description: '播放/暂停:true = 播放,false = 暂停(可选)' },
           fullscreen: { type: 'boolean', description: 'true = 进入全屏,false = 退出全屏(可选)' },
           width: { type: 'number', description: '媒体窗口默认宽 160-800,如 480(可选)' },
         },
@@ -643,13 +649,15 @@ export function createSettingsTools(deps: SettingsToolsDeps): AgentTool[] {
         const hasVolume = params.volume !== undefined
         const hasSpeed = params.speed !== undefined
         const hasLoop = params.loop !== undefined
+        const hasPlaying = params.playing !== undefined
         const hasFs = params.fullscreen !== undefined
         const hasWidth = params.width !== undefined
-        if (!hasVolume && !hasSpeed && !hasLoop && !hasFs && !hasWidth) {
-          throw new Error('需要至少提供一个参数:volume / speed / loop / fullscreen / width')
+        const target = typeof params.target === 'string' && params.target.trim() ? params.target.trim() : undefined
+        if (!hasVolume && !hasSpeed && !hasLoop && !hasPlaying && !hasFs && !hasWidth) {
+          throw new Error('需要至少提供一个参数:target / volume / speed / loop / playing / fullscreen / width')
         }
         const parts: string[] = []
-        if (hasVolume || hasSpeed || hasLoop) {
+        if (hasVolume || hasSpeed || hasLoop || hasPlaying) {
           const vol = hasVolume ? Number(params.volume) : undefined
           if (hasVolume && (!Number.isFinite(vol) || vol! < 0 || vol! > 1)) {
             throw new Error('volume 需要是 0-1 的数字(如 0.6 = 60%)')
@@ -658,33 +666,72 @@ export function createSettingsTools(deps: SettingsToolsDeps): AgentTool[] {
           if (hasSpeed && (!Number.isFinite(spd) || spd! < 0.5 || spd! > 2)) {
             throw new Error('speed 需要是 0.5-2 的数字(如 1.5 = 1.5 倍速)')
           }
-          const res = (await run('setVideoPrefs', [
-            {
-              volume: hasVolume ? Math.min(1, Math.max(0, vol!)) : undefined,
-              speed: hasSpeed ? Math.min(2, Math.max(0.5, spd!)) : undefined,
-              loop: hasLoop ? Boolean(params.loop) : undefined,
-            },
-          ])) as {
-            ok?: boolean
-            volume?: number
-            speed?: number
-            loop?: boolean
-            previous?: { volume: number; speed: number; loop: boolean }
+          // 按单个视频控制(2026-08-10,target 指定):桥定位该视频,音量/
+          // 倍速/循环写该视频个性化(其它视频不变),playing 播放/暂停
+          if (target !== undefined) {
+            const res = (await run('setVideoState', [
+              {
+                name: target,
+                volume: hasVolume ? Math.min(1, Math.max(0, vol!)) : undefined,
+                speed: hasSpeed ? Math.min(2, Math.max(0.5, spd!)) : undefined,
+                loop: hasLoop ? Boolean(params.loop) : undefined,
+                playing: hasPlaying ? Boolean(params.playing) : undefined,
+              },
+            ])) as {
+              ok?: boolean
+              name?: string
+              volume?: number
+              speed?: number
+              loop?: boolean
+              playing?: boolean
+            }
+            const label = res?.name ? `「${res.name}」` : '视频'
+            if (hasVolume && res) parts.push(`${label}音量已设为 ${res.volume ?? 0}%`)
+            if (hasSpeed && res) parts.push(`${label}速度已设为 ${res.speed ?? 1}x`)
+            if (hasLoop && res) parts.push(`${label}循环播放${res.loop ? '已开启' : '已关闭'}`)
+            if (hasPlaying && res) {
+              parts.push(res.playing ? `已播放 ${label}` : `已暂停 ${label}`)
+              if (!hasVolume && !hasSpeed && !hasLoop) return parts.join(';')
+            }
+          } else if (hasPlaying) {
+            // 无 target 的 playing:控制当前正在播放的视频(桥 name 缺省语义)
+            const res = (await run('setVideoState', [{ playing: Boolean(params.playing) }])) as {
+              ok?: boolean
+              name?: string
+              playing?: boolean
+            }
+            parts.push(res?.playing ? '已播放当前视频' : '已暂停当前视频')
           }
-          const prev = res?.previous
-          const cur = res
-          if (hasVolume && prev) {
-            parts.push(prev.volume === cur?.volume ? `音量已是 ${Math.round((cur.volume ?? 0) * 100)}%` : `音量从 ${Math.round(prev.volume * 100)}% 调整为 ${Math.round((cur?.volume ?? 0) * 100)}%`)
-          } else if (hasVolume && cur) {
-            parts.push(`音量已设为 ${Math.round((cur.volume ?? 1) * 100)}%`)
-          }
-          if (hasSpeed && prev) {
-            parts.push(prev.speed === cur?.speed ? `速度已是 ${cur?.speed}x` : `速度从 ${prev.speed}x 调整为 ${cur?.speed}x`)
-          } else if (hasSpeed && cur) {
-            parts.push(`速度已设为 ${cur.speed ?? 1}x`)
-          }
-          if (hasLoop && cur) {
-            parts.push(`循环播放${cur.loop ? '已开启' : '已关闭'}`)
+          // 无 target 的 volume/speed/loop:全局共享设置(向后兼容)
+          if (target === undefined && (hasVolume || hasSpeed || hasLoop)) {
+            const res = (await run('setVideoPrefs', [
+              {
+                volume: hasVolume ? Math.min(1, Math.max(0, vol!)) : undefined,
+                speed: hasSpeed ? Math.min(2, Math.max(0.5, spd!)) : undefined,
+                loop: hasLoop ? Boolean(params.loop) : undefined,
+              },
+            ])) as {
+              ok?: boolean
+              volume?: number
+              speed?: number
+              loop?: boolean
+              previous?: { volume: number; speed: number; loop: boolean }
+            }
+            const prev = res?.previous
+            const cur = res
+            if (hasVolume && prev) {
+              parts.push(prev.volume === cur?.volume ? `音量已是 ${Math.round((cur.volume ?? 0) * 100)}%` : `音量从 ${Math.round(prev.volume * 100)}% 调整为 ${Math.round((cur?.volume ?? 0) * 100)}%`)
+            } else if (hasVolume && cur) {
+              parts.push(`音量已设为 ${Math.round((cur.volume ?? 1) * 100)}%`)
+            }
+            if (hasSpeed && prev) {
+              parts.push(prev.speed === cur?.speed ? `速度已是 ${cur?.speed}x` : `速度从 ${prev.speed}x 调整为 ${cur?.speed}x`)
+            } else if (hasSpeed && cur) {
+              parts.push(`速度已设为 ${cur.speed ?? 1}x`)
+            }
+            if (hasLoop && cur) {
+              parts.push(`循环播放${cur.loop ? '已开启' : '已关闭'}`)
+            }
           }
         }
         if (hasFs) {

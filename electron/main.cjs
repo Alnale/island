@@ -486,6 +486,8 @@ const ISLAND_SETTINGS_OPS = new Set([
   'playLibraryVideo',
   // 视频播放设置(2026-08-10,set_video_config 工具)
   'getVideoPrefs', 'setVideoPrefs', 'setFullscreen',
+  // 按视频名控制单个视频(2026-08-10 二轮,set_video_config target/playing)
+  'setVideoState',
   // 对话窗口媒体清单(2026-08-10,list_conversation_media 工具)
   'getConversationMedia',
 ])

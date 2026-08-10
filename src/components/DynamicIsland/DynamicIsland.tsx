@@ -1449,15 +1449,27 @@ export const DynamicIsland = memo(function DynamicIsland({
     if (panelView === 'agent-settings') agentConfigRef.current?.onRefresh?.()
   }, [panelView, onPanelViewChange])
 
-  // 媒体小窗窗口尺寸(2026-08-09):紧凑态小窗岛体 264×148,窗口 =
-  // 岛体 + 40(复用 onAgentPanelSize 约定)。声明在本 effect 之后:
-  // 收起时本 effect 晚于面板视图回落(handlePanelViewChange 先设常规
-  // 窗口),后发覆盖先发,窗口落到小窗尺寸。小窗无关闭键(2026-08-09
-  // 用户要求移除 ✕),退出 = 长按展开回面板(窗口由面板尺寸接管)
+  // 媒体小窗尺寸(2026-08-10 用户要求"根据对应媒体元素在对话窗口的
+  // 大小同步其大小,做成一模一样的小窗"):快照带 width/aspect(播放
+  // 报告透传,MediaFrame 拖拽缩放/切回面板均同步)时小窗 = 媒体元素
+  // 尺寸(宽 = width,高 = width / aspect);无尺寸(静态快照/图片)回退
+  // 默认 264×148。窗口 = 岛体 + 40(复用 onAgentPanelSize 约定)。
+  // 声明在本 effect 之后:收起时本 effect 晚于面板视图回落
+  // (handlePanelViewChange 先设常规窗口),后发覆盖先发,窗口落到小窗
+  // 尺寸。小窗无关闭键(2026-08-09 用户要求移除 ✕),退出 = 长按展开
+  // 回面板(窗口由面板尺寸接管)
+  const miniSize =
+    agentMini?.width && agentMini.aspect
+      ? {
+          w: Math.round(agentMini.width),
+          h: Math.round(agentMini.width / agentMini.aspect),
+        }
+      : { w: AGENT_MINI_W, h: AGENT_MINI_H }
   useEffect(() => {
     if (!expanded && agentActive && agentMini) {
-      onAgentPanelSize?.(AGENT_MINI_W, AGENT_MINI_H)
+      onAgentPanelSize?.(miniSize.w, miniSize.h)
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- miniSize 由 agentMini 派生
   }, [expanded, agentActive, agentMini, onAgentPanelSize])
 
   // 外部请求收起(宿主在模式切换等场景调用;seq 递增触发,仅展开态有效)
@@ -1601,8 +1613,11 @@ export const DynamicIsland = memo(function DynamicIsland({
               ? `${Math.round(expandedWidth * (agentScale / 100))}px`
               : `${expandedWidth}px`
             : miniActive
-              ? `${AGENT_MINI_W}px`
+              ? `${miniSize.w}px`
               : islandWidth,
+          // 媒体小窗高度(2026-08-10 尺寸同步):快照带尺寸时 = 宽/宽高比
+          // (与面板里媒体元素一模一样);行内覆盖 CSS 默认 148px
+          height: miniActive ? `${miniSize.h}px` : undefined,
           '--state-color': theme,
           // 字体颜色(主文字/次级文字),null 时 CSS fallback 白色系
           '--text-color': resolvedTextColor ?? undefined,

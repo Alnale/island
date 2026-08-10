@@ -46,12 +46,13 @@ export function AgentMediaMini({
   const wrapRef = useRef<HTMLDivElement>(null)
   const videoRef = useRef<HTMLVideoElement>(null)
   const barRef = useRef<HTMLDivElement>(null)
-  // 应用共享偏好(2026-08-10 双向同步:音量/倍速/循环与对话播放器/
-  // 多媒体库共享,挂载时读当前值应用到 video)
+  // 应用播放偏好(2026-08-10 双向同步:音量/倍速/循环与对话播放器/
+  // 多媒体库共享;**2026-08-10 二轮:key = 媒体名——与对话窗口同名的
+  // 播放器共享同一份个性化设置**,挂载时读当前值应用到 video)
   useEffect(() => {
     const v = videoRef.current
     if (!v) return
-    const p = loadVideoPrefs()
+    const p = loadVideoPrefs(media.name)
     v.volume = p.volume
     v.muted = p.volume === 0
     v.playbackRate = p.speed
@@ -137,12 +138,21 @@ export function AgentMediaMini({
   }
   // 小窗播放进度上报(2026-08-09 双向同步):timeupdate 经 dispatch
   // 更新位置缓存与 agentPlaying——展开回面板时 MediaFrame 从该位置
-  // 续播(节流 ~1Hz,与 MediaFrame onProgress 同款)
+  // 续播(节流 ~1Hz,与 MediaFrame onProgress 同款)。
+  // **2026-08-10 尺寸透传**:小窗尺寸 = 媒体元素尺寸(快照携带),播放
+  // 上报带 width/aspect 回写缓存——切回面板时 MediaFrame 读回同尺寸
   const lastReportRef = useRef(-1)
   const reportPosition = (position: number) => {
     if (Math.round(position) !== lastReportRef.current) {
       lastReportRef.current = Math.round(position)
-      dispatchAgentMedia('play', { kind: 'video', src: media.src, playing: true, position })
+      dispatchAgentMedia('play', {
+        kind: 'video',
+        src: media.src,
+        playing: true,
+        position,
+        width: media.width,
+        aspect: media.aspect,
+      })
     }
   }
   // 进度条自动隐藏(2026-08-10 用户要求"鼠标移开视频岛后过几秒自动
@@ -283,7 +293,7 @@ export function AgentMediaMini({
             </span>
             {/* 音量 + 更多(2026-08-10 用户要求:定制 UI,与对话播放器/
                 多媒体库双向同步) */}
-            <VideoExtras videoRef={videoRef} />
+            <VideoExtras videoRef={videoRef} videoKey={media.name} />
             {/* 全屏按钮(2026-08-10 用户要求:缩小对齐音量/更多键,放在
                 ⋯ 键右边,同排同高;容器级全屏,进度条行内 flex 流) */}
             <button

@@ -43,7 +43,8 @@ import {
   saveVideoItem,
 } from './media/libraryStore'
 // 视频播放偏好(2026-08-10,LLM 工具 set_video_config 的 volume/speed/loop:
-// 写共享偏好经 island:video-prefs 事件三处播放器即时同步)
+// 写共享偏好经 island:video-prefs 事件三处播放器即时同步;2026-08-10 二轮
+// 支持 key = 单个视频个性化,事件带 key 只影响匹配播放器)
 import { loadVideoPrefs, setVideoPrefs as saveVideoPrefs } from './media/videoPrefs'
 
 /** 主题色持久化键(与 WidgetApp 的 THEME_STORAGE_KEY 一致) */
@@ -156,6 +157,25 @@ export interface IslandSettingsBridge {
   /** 进入/退出全屏(enter=true 时把对话窗口内正在播放的视频容器全屏;
    * 无播放中的视频取最后挂载的;false 退出全屏) */
   setFullscreen(enter: boolean): Promise<{ ok: true; fullscreen: boolean }>
+  /** 按视频名控制**单个视频**(2026-08-10 多视频独立控制,LLM 工具
+   * set_video_config target 参数):音量/倍速/循环写该视频的个性化存储
+   * (只影响匹配的视频,其它视频不变),playing 直接播放/暂停。
+   * name 缺省 = 对话窗口里正在播放的第一个视频(无播放中的取最后挂载);
+   * 找不到抛错(LLM 可先 list_conversation_media 查名字) */
+  setVideoState(input: {
+    name?: string
+    volume?: number
+    speed?: number
+    loop?: boolean
+    playing?: boolean
+  }): Promise<{
+    ok: true
+    name?: string
+    playing: boolean
+    volume: number
+    speed: number
+    loop: boolean
+  }>
   /** 对话窗口媒体清单(2026-08-10,LLM 工具 list_conversation_media):
    * 遍历消息气泡 DOM 列出全部媒体附件(图片/视频/音频),视频带播放
    * 状态(播放中/音量/速度/循环/全屏/进度)——LLM 据此回答"对话里有
@@ -524,6 +544,51 @@ export function registerIslandSettingsBridge(): void {
       })
       const p = loadVideoPrefs()
       return { ok: true, volume: p.volume, speed: p.speed, loop: p.loop, previous }
+    },
+    // 按名字控制单个视频(2026-08-10 多视频独立控制):音量/倍速/循环
+    // 写该视频个性化存储(key = data-media-name,与 VideoPlayer videoKey
+    // 同源)→ island:video-prefs 事件(带 key)→ 匹配的播放器订阅应用,
+    // 其它视频不受影响;playing 直接操作 video 元素(play/pause 触发
+    // onPlay/onPause,组件播放状态自然同步)
+    async setVideoState(input) {
+      const frames = [...document.querySelectorAll<HTMLElement>('.island-media-frame')]
+        .map((frame) => ({ frame, video: frame.querySelector<HTMLVideoElement>('video') }))
+        .filter((x) => x.video)
+      if (frames.length === 0) {
+        throw new Error('对话窗口当前没有视频(用 list_conversation_media 查看)')
+      }
+      let target =
+        input.name !== undefined
+          ? frames.find((f) => (f.frame.getAttribute('data-media-name') ?? '') === input.name)
+          : frames.find((f) => !f.video!.paused) ?? frames[frames.length - 1]
+      if (!target) {
+        throw new Error(`对话窗口没有名为「${input.name}」的视频(用 list_conversation_media 查看可用的名字)`)
+      }
+      const v = target.video!
+      const key = target.frame.getAttribute('data-media-name') || undefined
+      const prefsPatch: { volume?: number; speed?: number; loop?: boolean } = {}
+      if (input.volume !== undefined) {
+        const vol = Number(input.volume)
+        if (!Number.isFinite(vol)) throw new Error('volume 需要是 0-1 的数字')
+        prefsPatch.volume = Math.min(1, Math.max(0, vol))
+      }
+      if (input.speed !== undefined) {
+        const spd = Number(input.speed)
+        if (!Number.isFinite(spd)) throw new Error('speed 需要是 0.5-2 的数字')
+        prefsPatch.speed = Math.min(2, Math.max(0.5, spd))
+      }
+      if (input.loop !== undefined) prefsPatch.loop = Boolean(input.loop)
+      if (Object.keys(prefsPatch).length > 0) saveVideoPrefs(prefsPatch, key)
+      if (input.playing === true) void v.play().catch(() => {})
+      else if (input.playing === false) v.pause()
+      return {
+        ok: true,
+        name: target.frame.getAttribute('data-media-name') || undefined,
+        playing: !v.paused,
+        volume: Math.round((v.volume || 0) * 100),
+        speed: v.playbackRate || 1,
+        loop: v.loop,
+      }
     },
     // 全屏切换(2026-08-10):enter=true 把对话窗口内**正在播放**的视频
     // 容器全屏(优先非 paused,无播放中的取最后挂载的);false 退出全屏

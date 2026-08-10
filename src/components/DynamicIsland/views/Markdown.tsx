@@ -439,6 +439,7 @@ function followMediaInView(frame: HTMLElement | null) {
 function VideoPlayer({
   src,
   cacheKey,
+  videoKey,
   autoPlay = false,
   onAspect,
   onError,
@@ -449,6 +450,10 @@ function VideoPlayer({
   /** 进度缓存 key = 消息里原始路径(2026-08-09 双向同步;src 是
    * resolved 协议 URL,与缓存 key 不一致) */
   cacheKey?: string
+  /** 每视频个性化 key(2026-08-10 多视频独立音量/播放模式;= 媒体的
+   * alt,与 data-media-name / 桥 getConversationMedia 的 name 一致;
+   * 缺省 = 共享偏好,仅响应全局设置) */
+  videoKey?: string
   /** 2026-08-10 用户要求"LLM 播放视频,加载出媒体元素后自动播放" */
   autoPlay?: boolean
   onAspect: (aspect: number) => void
@@ -553,12 +558,13 @@ function VideoPlayer({
     else v.addEventListener('loadedmetadata', start, { once: true })
     // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅挂载续播
   }, [])
-  // 应用共享偏好(2026-08-10 双向同步:音量/倍速/循环与视频岛/多媒体
-  // 库共享,挂载时读当前值应用到 video)
+  // 应用播放偏好(2026-08-10 双向同步:音量/倍速/循环与视频岛/多媒体
+  // 库共享;2026-08-10 二轮:videoKey 指定时读**该视频个性化**,缺省
+  // 回退共享——挂载时读当前值应用到 video)
   useEffect(() => {
     const v = videoRef.current
     if (!v) return
-    const p = loadVideoPrefs()
+    const p = loadVideoPrefs(videoKey)
     v.volume = p.volume
     v.muted = p.volume === 0
     v.playbackRate = p.speed
@@ -775,7 +781,7 @@ function VideoPlayer({
         </span>
         {/* 音量 + 更多(2026-08-10 用户要求:定制 UI,与视频岛/多媒体库
             双向同步) */}
-        <VideoExtras videoRef={videoRef} />
+        <VideoExtras videoRef={videoRef} videoKey={videoKey} />
         {/* 全屏按钮(2026-08-10 用户要求:缩小对齐音量/更多键,放在
             ⋯ 键右边,同排同高;控件层内 flex 流,全屏随容器进入全屏层) */}
         <button
@@ -830,13 +836,17 @@ const VIDEO_SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 2] as const
  */
 export function VideoExtras({
   videoRef,
+  videoKey,
 }: {
   videoRef: React.RefObject<HTMLVideoElement | null>
+  /** 每视频个性化 key(2026-08-10 多视频独立音量/播放模式;缺省 =
+   * 共享偏好,响应全局设置) */
+  videoKey?: string
 }) {
   const [muted, setMuted] = useState(false)
-  const [volume, setVolume] = useState(() => loadVideoPrefs().volume)
-  const [speed, setSpeed] = useState(() => loadVideoPrefs().speed)
-  const [loop, setLoop] = useState(() => loadVideoPrefs().loop)
+  const [volume, setVolume] = useState(() => loadVideoPrefs(videoKey).volume)
+  const [speed, setSpeed] = useState(() => loadVideoPrefs(videoKey).speed)
+  const [loop, setLoop] = useState(() => loadVideoPrefs(videoKey).loop)
   const [moreOpen, setMoreOpen] = useState(false)
   const [moreLeaving, setMoreLeaving] = useState(false)
   const moreRef = useRef<HTMLDivElement>(null)
@@ -846,10 +856,15 @@ export function VideoExtras({
   const volPopRef = useRef<HTMLSpanElement>(null)
   const volDraggingRef = useRef(false)
   useEffect(() => () => window.clearTimeout(moreLeaveTimerRef.current), [])
-  // 双向同步:外部(prefs 事件)改动 → 本地状态 + video 生效
+  // 双向同步:外部(prefs 事件)改动 → 本地状态 + video 生效。
+  // **按 key 过滤(2026-08-10 多视频独立控制)**:个性化事件(key)只对
+  // 匹配的视频生效;共享事件(无 key)只影响不带 videoKey 的播放器
+  // (多媒体库等)——调一个视频不影响其它视频的独立设置
   useEffect(
     () =>
       onVideoPrefsChange((p) => {
+        if (p.key && p.key !== videoKey) return
+        if (!p.key && videoKey) return
         setVolume(p.volume)
         setSpeed(p.speed)
         setLoop(p.loop)
@@ -860,7 +875,7 @@ export function VideoExtras({
           v.loop = p.loop
         }
       }),
-    [videoRef],
+    [videoRef, videoKey],
   )
   // 点外关闭 ⋯ 菜单(播离场动画后卸载;逻辑内联避免闭包依赖)
   useEffect(() => {
@@ -905,7 +920,7 @@ export function VideoExtras({
       el.volume = v
       el.muted = v === 0
     }
-    setVideoPrefs({ volume: v })
+    setVideoPrefs({ volume: v }, videoKey)
   }
   const toggleMute = () => {
     const nextMuted = !muted
@@ -917,21 +932,21 @@ export function VideoExtras({
       const target = volume > 0 ? volume : 0.8
       setVolume(target)
       if (el) el.volume = target
-      setVideoPrefs({ volume: target })
+      setVideoPrefs({ volume: target }, videoKey)
     }
   }
   const changeSpeed = (next: number) => {
     setSpeed(next)
     const el = videoRef.current
     if (el) el.playbackRate = next
-    setVideoPrefs({ speed: next })
+    setVideoPrefs({ speed: next }, videoKey)
   }
   const toggleLoop = () => {
     const next = !loop
     setLoop(next)
     const el = videoRef.current
     if (el) el.loop = next
-    setVideoPrefs({ loop: next })
+    setVideoPrefs({ loop: next }, videoKey)
   }
   return (
     // 拦截 pointerdown 冒泡(2026-08-10:视频岛进度条行 onPointerDown
@@ -1086,6 +1101,11 @@ export interface AgentMediaReport {
   playing?: boolean
   /** 播放进度秒(仅视频上报;节流 ~1Hz) */
   position?: number
+  /** 媒体元素当前显示宽度 px(2026-08-10 小窗尺寸同步:收起为多媒体岛
+   * 时小窗 = 对话窗口里媒体元素的尺寸,切回面板保持相同尺寸) */
+  width?: number
+  /** 宽高比(视频 = 真实比例,未知 16/9;图片 = 自然比) */
+  aspect?: number
 }
 // 媒体播放位置缓存(2026-08-09 双向同步):小窗/面板任一端的播放进度
 // 经 dispatchAgentMedia('play') 写入;另一端挂载时按 src 读回续播——
@@ -1100,6 +1120,14 @@ export function readAgentMediaPosition(src: string): number | undefined {
 // 显示。修复"视频岛切回对话窗口暂停":面板 MediaFrame 重挂载时
 // autoPlay 标记已被首次播放消费,原实现永远不自动播
 let lastPlayingVideoSrc: string | null = null
+// 媒体元素尺寸缓存(2026-08-10 小窗尺寸同步):面板 ↔ 小窗任一端的
+// 当前显示尺寸(宽 + 宽高比)经 dispatch('play') 写入;另一端挂载时
+// 按 src 读回——收起为多媒体岛时小窗 = 面板里媒体元素的尺寸,切回
+// 面板保持相同尺寸(用户要求"做成一模一样的小窗")
+const agentMediaSizes = new Map<string, { width: number; aspect: number }>()
+export function readAgentMediaSize(src: string): { width: number; aspect: number } | undefined {
+  return agentMediaSizes.get(src)
+}
 export function dispatchAgentMedia(type: 'mount' | 'play' | 'unmount', media: AgentMediaReport) {
   if (type === 'play' && Number.isFinite(media.position)) {
     agentMediaPositions.set(media.src, media.position as number)
@@ -1107,6 +1135,12 @@ export function dispatchAgentMedia(type: 'mount' | 'play' | 'unmount', media: Ag
   if (type === 'play' && media.kind === 'video') {
     if (media.playing) lastPlayingVideoSrc = media.src
     else if (lastPlayingVideoSrc === media.src) lastPlayingVideoSrc = null
+    if (typeof media.width === 'number' && Number.isFinite(media.width) && media.width > 0) {
+      agentMediaSizes.set(media.src, {
+        width: Math.round(media.width),
+        aspect: typeof media.aspect === 'number' && media.aspect > 0 ? media.aspect : 16 / 9,
+      })
+    }
   }
   document.dispatchEvent(new CustomEvent(AGENT_MEDIA_EVENT, { detail: { type, media } }))
 }
@@ -1151,8 +1185,14 @@ export function MediaFrame({
   // 时上报顺序 ≠ 消息顺序,最后上报的可能是中间批次的旧媒体(实测
   // 移交错取旧音频);小窗/移交候选改由 AgentView 从消息**数据**计算
   // (onMediaSnapshot),播放状态仍经事件上报(小窗续播标记)
-  // 拖拽尺寸:width null = 用默认设置;拖拽后按比例缩放
-  const [width, setWidth] = useState<number | null>(null)
+  // 拖拽尺寸:width null = 用默认设置;拖拽后按比例缩放。
+  // **2026-08-10 小窗尺寸同步:初始宽优先该媒体上次的显示尺寸**
+  // (小窗 → 面板切换保持相同尺寸,见 agentMediaSizes 缓存;无记录
+  // 才用媒体窗口默认设置)
+  const [width, setWidth] = useState<number | null>(() => {
+    const cached = src ? readAgentMediaSize(src) : undefined
+    return cached ? Math.round(cached.width) : null
+  })
   const [aspect, setAspect] = useState<number | null>(null)
   // 图片全屏状态(2026-08-10 用户要求:全屏图标切换;容器级全屏,
   // 范围 = Agent 对话窗口)
@@ -1210,6 +1250,24 @@ export function MediaFrame({
     if (width === null) return
     followMediaInView(frameRef.current)
   }, [width])
+  // 尺寸上报(2026-08-10 小窗尺寸同步):面板当前显示尺寸(宽 + 宽高比)
+  // 经 dispatch 写入 agentMediaSizes 缓存——收起为多媒体岛时小窗按此
+  // 尺寸生成,切回面板保持相同尺寸。宽度变化(拖拽缩放)在 React 提交
+  // 后布局已更新时上报(offsetWidth = 新宽,与 followMediaInView 同款
+  // 时序);播放进度上报(onProgress)顺带带尺寸
+  useEffect(() => {
+    if (kind !== 'video' || width === null) return
+    const v = frameRef.current?.querySelector('video')
+    dispatchAgentMedia('play', {
+      kind: 'video',
+      src,
+      name: alt,
+      playing: v ? !v.paused : false,
+      position: lastPosRef.current,
+      width,
+      aspect: aspect ?? 16 / 9,
+    })
+  }, [width, kind, src, alt, aspect])
   if (err) return <MediaError src={resolved} kind={kind} code={err.code} />
   // 音频 = 语音气泡(不参与拖拽缩放;LLM 播放的音频自动播放)
   if (kind === 'audio') return <VoiceBubble src={resolved} alt={alt} autoPlay={autoPlay} />
@@ -1281,18 +1339,37 @@ export function MediaFrame({
           <VideoPlayer
             src={resolved}
             cacheKey={src}
+            videoKey={alt}
             autoPlay={autoPlay}
             onAspect={setAspect}
             onError={(code) => setErr({ code })}
             onPlayingChange={(playing) =>
-              dispatchAgentMedia('play', { kind: 'video', src, name: alt, playing, position: lastPosRef.current })
+              dispatchAgentMedia('play', {
+                kind: 'video',
+                src,
+                name: alt,
+                playing,
+                position: lastPosRef.current,
+                // 尺寸同步(2026-08-10 小窗尺寸):offsetWidth 实时读(渲染
+                // 帧内布局已更新);aspect state 闭包取当前值
+                width: frameRef.current?.offsetWidth,
+                aspect: aspect ?? 16 / 9,
+              })
             }
             onProgress={(position) => {
               // 节流 ~1Hz:timeupdate 每 ~250ms 触发,每次 setAgentPlaying
               // 都会重渲染岛体,1s 粒度足够小窗续播定位
               if (Math.round(position) !== lastPosRef.current) {
                 lastPosRef.current = Math.round(position)
-                dispatchAgentMedia('play', { kind: 'video', src, name: alt, playing: true, position })
+                dispatchAgentMedia('play', {
+                  kind: 'video',
+                  src,
+                  name: alt,
+                  playing: true,
+                  position,
+                  width: frameRef.current?.offsetWidth,
+                  aspect: aspect ?? 16 / 9,
+                })
               }
             }}
           />
