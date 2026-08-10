@@ -129,7 +129,7 @@ dynamic-island/
 │   ├── xxt/                    # 超星答题(python 脚本)
 │   └── docflow/                # 文档转换 Flask 服务(python)
 ├── scripts/
-│   ├── test-agent-core.mjs     # 引擎核心测试入口(83 用例)
+│   ├── test-agent-core.mjs     # 引擎核心测试入口(93 用例)
 │   ├── test-agent-core.ts      # 引擎测试源码
 │   ├── test-markdown.mjs       # Markdown 解析器测试(39 断言)
 │   ├── test-agent/             # mock MCP 服务器等测试辅助
@@ -176,7 +176,7 @@ pnpm bridge          # 独立运行系统媒体桥接脚本(单独调试 SMTC)
 pnpm watch:electron  # 热重建 Agent 引擎/桥(监听 electron/agent/*.ts 与
                      # scripts/,自动 esbuild 重建 + 重启 electron;渲染端
                      # 仍用 dev:widget)
-node scripts/test-agent-core.mjs   # Agent 引擎核心测试(后端直测,83 用例)
+node scripts/test-agent-core.mjs   # Agent 引擎核心测试(后端直测,93 用例)
 pnpm test:markdown    # 消息气泡 Markdown 解析器测试(39 断言)
 ```
 
@@ -663,6 +663,14 @@ running(detail 带进程与输出目录),完成/失败进终态——**顺带修
 - 渲染端 mindGuess 状态(localStorage `widget-agent-mind`)与标题共用
   **泛化标签 runner**(createLabelRunner 工厂:入口守卫/排队追平/1.5s 重试/
   10s 补跑,总结标题与心理揣测各自独立 in-flight 状态)。
+- **静默记忆提取(2026-08-10 新增职能,用户要求"自动根据对话的整个上下文
+  提取适合作为记忆的内容入长期记忆,静默,仅主动陪伴开启时")**:
+  `extractMemories(messages)`——完整历史(最多 40 条,reasoning/工具结果/
+  工具参数压缩)→ JSON {memories:[{content,type}]}(preference/fact/
+  workflow/lesson,单次最多 10 条,每条 ≤200 字),系统提示含**现有记忆块**
+  防重复沉淀(读取失败静默跳过);main.cjs 在 agent:summarize 入口触发:
+  **仅 proactiveEnabled 且消息数变化才调**(防白花 token),后台异步不阻塞
+  IPC,经 store.add(source:'agent',内容级去重)写库,失败静默。
 
 ### 5.7 心理揣测 Sub Agent
 
@@ -682,6 +690,12 @@ running(detail 带进程与输出目录),完成/失败进终态——**顺带修
 - **文字区回退 Bug 修复**:loadSession 清 mindGuess 且 skipNextLabelRef
   跳过生成 → 文字区回退"最后回复预览";修复:skip 块**只跳过总结标题,
   心理揣测照跑**。
+- **用户风格分析(2026-08-10 新增职能,用户要求"主动回复有时模仿用户的
+  嘴癖和风格")**:`analyzeUserStyle(messages)`——最近 12 条 → JSON {style}
+  (≤120 字可模仿特征:口头禅/句式/称呼/emoji;无明显风格或语境严肃输出
+  空);main.cjs 主动陪伴调度与 judge **并行**调用(Promise.all,任一方失败
+  静默降级),风格描述拼进 hint 内部指令(措辞引导"偶尔模仿、自然融入不
+  刻意"),proactiveTurn 经 role:'system' 请求项注入。
 
 ### 5.8 主动陪伴(2026-08-07 用户要求"LLM 主动向用户发送消息")
 
@@ -763,6 +777,15 @@ running(detail 带进程与输出目录),完成/失败进终态——**顺带修
   接受后成为新 Reference。
 - **假说驱动**:评审的每条改进建议必须带 hypothesis(预测的可观察行为变化),
   无假说的建议一律不采纳;评估侧只给公开记忆内容,黑盒打分防自评偏差。
+  **delete 例外(2026-08-10 修复"评审发现条目1、2、3高度重复却没合并",
+  用户实测)**:删除冗余/过时条目是确定性清理,LLM 常不为其写假说(进化
+  日志实测"建议删除第2、3条"无假说被「无假说的建议已忽略」整批丢弃,
+  记忆原样 → 复评同分 → 棘轮拒绝 → 下一轮重复同一循环)——delete 建议
+  直接执行;同时修 **delete/update 的序号映射**(mapSeqToEntry:评审输出的
+  id 是 1 基序号,原 delete 分支把序号当 key 传 store.remove——按
+  UUID/内容片段匹配永远删不中;多条建议顺序应用列表会变化,每次操作前
+  重读最新列表再映射);评审 prompt 强化"高度重复条目必须合并(保留内容
+  最完整一条,其余按序号 delete,删除重复不需要 hypothesis)"。
 - **多轮候选循环**:每轮 评审(rubric = 冗余/一致/时效/可操作/价值,总分
   0-100)→ 确保 Reference 快照 → 应用候选 → 复评(独立调用)→ 棘轮(新分
   **严格高于**原分才接受:版本+1、立即存档、更新 state;否则从快照恢复)
@@ -981,20 +1004,41 @@ running(detail 带进程与输出目录),完成/失败进终态——**顺带修
 - **定制视频播放器 VideoPlayer**(不要原生控件):自定义控件层(底部渐变
   遮罩 + 圆形播放键 + 可拖动 seek 进度条 + 时间 + 全屏 + 音量/更多
   (VideoExtras));**封面抓帧**(2026-08-10:默认展示视频第一帧作封面,
-  黑色画面难辨认——跨域 canvas 需 crossOrigin,失败回退黑色);全屏 =
-  整个播放器容器 requestFullscreen(控件随容器进入全屏层)。
+  黑色画面难辨认——跨域 canvas 需 crossOrigin,失败回退黑色;**续播媒体
+  跳过抓帧**——抓帧 seek(0.05) 与续播 seek 竞态,restore 会把进度重置回 0,
+  实测);全屏 = 整个播放器容器 requestFullscreen(控件随容器进入全屏层;
+  **fullscreenchange 监听挂 document**——事件派发在全屏元素并冒泡到
+  document,挂 video 上永远收不到(它是容器的子元素),实测全屏后按钮
+  图标不变)。
+- **控件自动隐藏**(2026-08-10 用户要求"鼠标移开播放器后过几秒自动隐藏"):
+  **空闲计时驱动**——播放中任何交互(移入/移动/移出/拖进度结束)重启
+  2.5s 计时,超时控件层淡出(.ui-hidden:opacity 0 + pointer-events none
+  防误触);playing effect 兜底(挂载续播/切回面板时鼠标已在播放器上,
+  mouseleave 不触发——原实现只靠 leave 计时,切回后控件永不隐藏,交互
+  一下才触发,实测);暂停保持显示。视频岛进度条行同款空闲计时。
 - **VideoExtras 定制控件**(2026-08-10 用户要求"UI 不要原生要定制",三处
   共用——对话播放器/视频岛/多媒体库,**经 videoPrefs 共享模块双向同步**
   :音量(垂直 pop 自绘条 + 背景槽,`bottom: 100%` 贴按钮顶无间隙防 hover
   丢失,18px 宽 76px 高槽体)、更多菜单(倍速 0.5x-2x / 循环开关),偏好存
   localStorage `widget-video-prefs` + island:video-prefs 事件同步。
+  **每视频独立层(2026-08-10 二轮,用户要求"同时播两个视频,独立调整
+  单个视频的音量和播放模式")**:localStorage `widget-video-individual` =
+  {key: prefs}(key = 媒体名,与 data-media-name 同源),`loadVideoPrefs(key)`
+  /`setVideoPrefs(patch, key)` 缺省回退共享层,事件 detail 带 key、订阅方
+  按 key 过滤——调一个视频不影响其它;面板 VideoPlayer/视频岛传同一 key
+  (同一视频两端共享一份个性化)。
 - **播放失败按错误码区分文案 + 降级打开**:code 4(SRC_NOT_SUPPORTED)
   文案明确"该视频格式无法在窗口内播放(窗口内支持 mp4(H.264)/webm/ogg)",
   其余"无法播放该文件";MediaError 按钮 → IPC app:open-media-external
   (外部播放器仅为降级选择,正常播放全在窗口内)。
 - 初始宽 = 媒体窗口默认设置(localStorage `widget-media-window`,
   settingsBridge readMediaWindowWidth 单一来源,钳 160-800 缺省 320);
-  Agent 设置「媒体窗口默认宽」QuickMenu 档位 240/320/480/640 + 自定义。
+  Agent 设置「媒体窗口默认宽」QuickMenu 档位 240/320/480/640 + 自定义;
+  **重挂载优先该媒体上次显示尺寸**(agentMediaSizes 缓存,见 6.5)。
+- **自动播放只在元素第一次加载到对话窗口时触发**(2026-08-10 用户要求
+  "之后都不会"):当次对话流式落定消息的 mediaAutoPlay 标记(消费后清)
+  才自动播放;重挂载/视频岛切回**只 seek 同步进度,播放由用户手动触发**
+  (原 lastPlayingVideoSrc 自动续播已按用户要求移除)。
 
 ### 6.5 收起面板后的媒体小窗(AgentMediaMini)
 
@@ -1006,6 +1050,14 @@ running(detail 带进程与输出目录),完成/失败进终态——**顺带修
   切音乐模式并续播)。
 - UI = 灵动岛风格:媒体 contain 铺满岛体,边缘由岛体 22px 圆角 + overflow
   hidden 裁剪,**无 ✕ 关闭键**(退出 = 长按展开回面板);胶囊一体化无黑边。
+- **尺寸同步媒体元素(2026-08-10 用户要求"根据对应媒体元素在对话窗口的
+  大小同步其大小,做成一模一样的小窗;切回对话窗口时保持相同尺寸")**:
+  AgentMediaReport 加 width/aspect(媒体元素当前显示宽 + 宽高比);面板
+  MediaFrame 显示尺寸经 dispatch('play') 写入模块级 agentMediaSizes 缓存
+  (src 索引,宽拖拽缩放 effect 上报 + 播放进度上报顺带),MediaFrame 初始
+  宽优先读缓存;收起为多媒体岛时快照携带尺寸 → 岛体 = 宽 × 宽/高比(行内
+  style 覆盖 CSS 默认 148px,窗口经 onAgentPanelSize 同步),无尺寸回退
+  默认 264×148;小窗播放上报透传尺寸回写缓存 → 切回面板读回同尺寸。
 - **进度双向同步**:小窗 timeupdate 经 dispatchAgentMedia 更新位置缓存与
   agentPlaying(节流 ~1Hz)——展开回面板时 MediaFrame 从该位置续播;反之
   面板播放位置在收起时同步给小窗。
@@ -1208,6 +1260,11 @@ direction?('right'|'left'), wheelWhenOpen?}>`,四处复用:Agent 设置菜单 /
 | list/import/rename/remove_video_library | 视频库(import 校验扩展名/存在/≤10GB 记路径) |
 | play_library_video | **跳转多媒体库视频 tab 并立即播放指定视频**(2026-08-10) |
 | list_library_images / rename_library_image | 图片库列表/改名 |
+| set_video_config | 视频播放设置:**target** = 指定单个视频(名称,list_conversation_media 返回;缺省 = 全局共享)/ volume(0-1,灵动岛独立音量)/ speed(0.5-2)/ loop / **playing**(播放/暂停开关)/ fullscreen / width;带 target 只影响该视频(写个性化层),其它视频不变 |
+| list_conversation_media | 对话窗口媒体清单(图片/视频/音频),视频带播放状态(播放中/音量/速度/循环/全屏/进度/时长)——LLM 据此回答"对话里有什么媒体、哪个在播、音量多大",配合 set_video_config 调整 |
+| set_system_volume | 系统主音量(winmm waveOutGetVolume/SetVolume 脚本,0-100;与灵动岛独立音量互不影响) |
+| set_proactive_config | 主动陪伴开关/间隔/单位(LLM 自我配置) |
+| set_sub_agent_config | Sub Agent 文风/人格预设或自定义(总结标题/心理揣测) |
 
 - 文件读取/校验在工具层(扩展名/存在性/大小/hex/名称长度),桥错误统一
   {error} 抛给引擎按"工具执行失败"回填。
@@ -1223,7 +1280,7 @@ direction?('right'|'left'), wheelWhenOpen?}>`,四处复用:Agent 设置菜单 /
   Notification 记录到 global.__notifications 供断言),mock MCP 服务器
   (scripts/test-agent/):stdio(新行 JSON-RPC,含自杀/慢响应/错误/图像工具)
   + sse(GET 事件流 + POST 回传,含直接响应体与 bare 推送变体)。
-- **83 用例**,覆盖:记忆增删改查/去重/上限/串行写/并发互斥/导入合并
+- **93 用例**,覆盖:记忆增删改查/去重/上限/串行写/并发互斥/导入合并
   importEntries(去重/置顶/超限淘汰最旧)、MCP 双传输握手/命名/参数转换/
   isError/崩溃重启/并发 connect 单进程、skills 扫描/slug/重名/截断/执行、
   自我配置工具、进化快照/回滚防降级/无 Key 优雅失败、手动调用解析、设置
@@ -2089,7 +2146,7 @@ WidgetApp
 | 日常开发 | pnpm dev:widget(构建 + 启动,前置 build:electron) |
 | 只测 Web UI | pnpm dev(浏览器) |
 | 改引擎/桥热重建 | pnpm watch:electron |
-| 引擎测试 | node scripts/test-agent-core.mjs(83 用例) |
+| 引擎测试 | node scripts/test-agent-core.mjs(93 用例) |
 | Markdown 测试 | pnpm test:markdown(39 断言) |
 | 类型检查 | pnpm build(tsc -b + vite) |
 | lint | pnpm lint |
@@ -2807,7 +2864,7 @@ pnpm dev:widget      # 构建 + 启动挂件(默认完成标准)
 ```bash
 pnpm build            # tsc -b 双端类型
 pnpm lint
-node scripts/test-agent-core.mjs   # 83 用例
+node scripts/test-agent-core.mjs   # 93 用例
 pnpm test:markdown    # 39 断言
 ```
 
