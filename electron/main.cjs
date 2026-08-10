@@ -26,9 +26,12 @@ const {
   shell,
   safeStorage,
   Notification,
+  protocol,
 } = require('electron')
 const path = require('node:path')
 const fs = require('node:fs')
+const fsPromises = require('node:fs/promises')
+const { Readable } = require('node:stream')
 
 // Agent 引擎(由 scripts/build-electron.mjs 打包):DeepSeek Responses API
 // provider + 工具系统,主进程内运行(纯异步网络/文件 IO,无阻塞点)。
@@ -50,6 +53,17 @@ const { runScreenshotTests } = require('./screenshot-tests.cjs')
 // (岛体背景)的 alpha 偶发突变(闪全黑/全透明)。
 // 禁用硬件加速走软件渲染:小窗口 60fps 无压力,合成稳定
 app.disableHardwareAcceleration()
+// HEVC(H.265)硬解(2026-08-08,用户下载视频"无法播放该文件"):
+// Chromium 默认不支持 HEVC;系统装有「HEVC 视频扩展」(Win11 常见)
+// 时经 Media Foundation 硬解,对话窗口内即可播放 HEVC mp4——
+// 无扩展时此开关静默无效(仍走格式提示 + 系统播放器降级)
+app.commandLine.appendSwitch('enable-features', 'PlatformHEVCDecoderSupport')
+// 允许无手势自动播放(2026-08-10 修复"LLM 找歌来听没自动播放"):媒体
+// 自动播放发生在工具执行完成后(异步,脱离用户手势链)——Electron 默认
+// autoplay 策略(document-user-activation-required)对异步链路可能拦截
+// (实测音频自动播放被静默拒绝)。桌面个人助手语义:页面全部媒体播放
+// 都经代码控制(当次对话标记才自动播),放开策略无副作用
+app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required')
 
 // 未捕获异常兜底:退出/销毁竞态下窗口 IPC handler 抛异常时,Electron
 // 默认弹错误框甚至退进程——记录日志继续运行(挂件托盘常驻语义;
@@ -186,8 +200,9 @@ const AGENT_CONFIG_DEFAULTS = {
    * 主动回复(默认开启)
    */
   proactiveEnabled: true,
-  /** 主动陪伴间隔数值(钳制 5–480;用户发送或主动回复后重新计时) */
-  proactiveInterval: 60,
+  /** 主动陪伴间隔数值(钳制 5–480;用户发送或主动回复后重新计时;
+   * 2026-08-08 用户要求默认 15,单位分钟) */
+  proactiveInterval: 15,
   /** 主动陪伴间隔单位(s=秒 / m=分钟(默认)/ h=小时) */
   proactiveIntervalUnit: 'm',
   /** 总结标题文风(Sub Agent 设置:预设 id 或自定义 ≤100 字;空 = 默认) */
@@ -463,6 +478,16 @@ const ISLAND_SETTINGS_OPS = new Set([
   'getSettings', 'setThemeColor', 'setAgentScale', 'importFont', 'listFonts',
   'renameFont', 'importBackground', 'listLibraryImages', 'renameLibraryImage',
   'setFontColor', 'setBackgroundOpacity', 'deleteFontItem', 'deleteLibraryImage',
+  // 媒体窗口/多媒体库(2026-08-10 补:settingsTools.ts 已注册但白名单漏加,
+  // LLM 调用报"未知的设置操作"——实测 import_audio_library 等全部不可用)
+  'setMediaWindowSize', 'listAudioLibrary', 'importAudioLibrary',
+  'renameAudioLibrary', 'removeAudioLibrary', 'listVideoLibrary',
+  'importVideoLibrary', 'renameVideoLibrary', 'removeVideoLibrary',
+  'playLibraryVideo',
+  // 视频播放设置(2026-08-10,set_video_config 工具)
+  'getVideoPrefs', 'setVideoPrefs', 'setFullscreen',
+  // 对话窗口媒体清单(2026-08-10,list_conversation_media 工具)
+  'getConversationMedia',
 ])
 async function runIslandSettings(op, args) {
   if (!ISLAND_SETTINGS_OPS.has(op)) throw new Error(`未知的设置操作:${String(op)}`)
@@ -627,6 +652,8 @@ function createWindow() {
   // 浏览器,经 http/https 白名单;防 window.open 弹出裸窗口)
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
 
+  // 灵动岛默认悬浮在所有程序顶部(2026-08-09 用户要求恢复:始终置顶,
+  // 不再沉底)——托盘"总在最前"可关
   win.setAlwaysOnTop(settings.alwaysOnTop !== false, 'screen-saver')
   // 默认点击穿透;渲染端鼠标进入岛体后经 IPC 切换为可点击
   win.setIgnoreMouseEvents(true, { forward: true })
@@ -640,14 +667,38 @@ function createWindow() {
   }
 
   win.once('ready-to-show', () => win.show())
+  // 全屏尺寸锁定恢复(2026-08-09 三轮修复,用户实测"全屏拖拽窗口越来
+  // 越大"):set-size 零调用日志证明非 IPC 泄漏——Electron 透明窗口 +
+  // DOM 全屏 + 窗口移动时 Chromium 自行改窗口尺寸;全屏期间任何 resize
+  // 立即恢复到锁定尺寸(位置保持当前,防递归:恢复到锁定值不再触发)
+  win.on('resize', () => {
+    if (!widgetFullscreen || !fsLockedSize || win.isDestroyed()) return
+    const [w, h] = win.getSize()
+    // 2px 容差(2026-08-10:Windows 透明无边框窗口实际尺寸比请求值
+    // 大 ~1-2px(实测 1709 vs 1708),无容差会"纠正 → 取整 → 再纠正"
+    // 循环;用户"越来越大"是几十 px 级,2px 内不纠正)
+    if (
+      Math.abs(w - fsLockedSize[0]) <= 2 &&
+      Math.abs(h - fsLockedSize[1]) <= 2
+    ) {
+      return
+    }
+    const [x, y] = win.getPosition()
+    console.log(
+      '[widget] fullscreen resize corrected:',
+      w, h,
+      '→',
+      fsLockedSize[0], fsLockedSize[1],
+    )
+    win.setBounds({ x, y, width: fsLockedSize[0], height: fsLockedSize[1] })
+  })
   // 加载完成后广播当前模式(渲染端启动时也走 getMode 兜底)
   win.webContents.once('did-finish-load', () => {
     sendToWidget('widget:set-mode', { mode: currentMode(), source: 'user' })
-    // 初次安装:settings.json 不存在 → 落盘首启标记并自动打开帮助手册
-    // (教学引导;文件存在后下次启动不再弹出)
+    // 初次安装:settings.json 不存在 → 落盘首启标记(帮助手册引导已移除
+    // 2026-08-10 用户要求,仅保留 firstRun 标记)
     if (!fs.existsSync(settingsPath())) {
       saveSettings({ firstRun: true })
-      setTimeout(() => sendToWidget('widget:open-help'), 800)
     }
   })
 
@@ -723,14 +774,83 @@ ipcMain.on('widget:pointer', (_event, active) => {
   // 防原生层抛异常(实测退出瞬间 drag-move 的 setPosition 抛过
   // "conversion failure",win 已销毁时调用任何窗口方法都会抛)
   if (!win || win.isDestroyed()) return
+  // 穿透切换时间戳(2026-08-10 诊断:复现"清除数据后悬浮延迟"时核对
+  // 恢复时序——mouseleave 开穿透与轮询校正回接收的间隔即恢复延迟)
+  console.log('[pointer]', Date.now(), 'active:', active)
   // 点击穿透开关:true = 鼠标在岛上,正常接收事件;false = 穿透给下层窗口
   win.setIgnoreMouseEvents(!active, { forward: !active })
+  // 切接收时刷新页面 hover(2026-08-10 修复"收起后鼠标悬浮无响应"):
+  // 穿透死锁 = 穿透态下 OS 不投递鼠标事件,校正回接收后页面没有新的
+  // mousemove,Chromium 不重算 hover/mouseenter 不触发(实测移回岛体
+  // 后 hover 仍 false)——主进程按光标当前位置补发一次 mousemove,
+  // 页面立即重算 hover,悬浮/点击恢复;光标不在窗口内则跳过(移入时
+  // 的 mousemove 会自然触发)
+  if (active) {
+    try {
+      const c = screen.getCursorScreenPoint()
+      const b = win.getBounds()
+      if (c.x >= b.x && c.x <= b.x + b.width && c.y >= b.y && c.y <= b.y + b.height) {
+        win.webContents.sendInputEvent({ type: 'mouseMove', x: c.x - b.x, y: c.y - b.y })
+      }
+    } catch {
+      // 光标/边界读取失败(窗口销毁竞态)忽略,不影响穿透切换
+    }
+  }
+})
+// 穿透轮询校正(2026-08-10 修复"清除数据后收起,鼠标悬浮/点击无响应"):
+// mouseenter/leave 事件驱动穿透在窗口/岛体收缩(收起动画)时鼠标滑出岛体
+// → mouseleave → 穿透开启;穿透态下 OS 不再投递鼠标事件到窗口(forward
+// 转发的 mousemove 在 Windows 上不可靠),鼠标移回岛体时 mouseenter 永不
+// 触发 = 穿透死锁(用户实测)。渲染端每 600ms 轮询本通道:返回窗口屏幕
+// bounds + 光标屏幕位置,渲染端核对岛体 rect,状态不一致即校正穿透——
+// 完全绕开事件可靠性,轮询兜底(正常 mouseenter/leave 仍走事件,幂等)
+ipcMain.handle('widget:pointer-poll', () => {
+  if (!win || win.isDestroyed()) return null
+  try {
+    // 真实穿透状态(2026-08-10 校正依据:渲染端意图可能因事件/轮询竞态
+    // 与主进程实际状态脱节)——isIgnoreMouseEvents 部分 Electron 版本
+    // 不存在(实测 43 报 is not a function),单独容错返回 undefined,
+    // 渲染端回退"意图比较";bounds/cursor 始终可用
+    let ignoreMouseEvents
+    try {
+      ignoreMouseEvents =
+        typeof win.isIgnoreMouseEvents === 'function' ? win.isIgnoreMouseEvents() : undefined
+    } catch {
+      ignoreMouseEvents = undefined
+    }
+    return {
+      bounds: win.getBounds(),
+      cursor: screen.getCursorScreenPoint(),
+      ignoreMouseEvents,
+    }
+  } catch {
+    // 读取失败(窗口销毁竞态等)返回 null,渲染端跳过本轮
+    return null
+  }
 })
 
 // 消息气泡链接:系统浏览器打开(仅 http/https,防协议注入;
 // 渲染端 Markdown 渲染器也只把 http(s) 渲染为可点击链接)
 ipcMain.on('app:open-external', (_event, url) => {
   if (typeof url === 'string' && /^https?:\/\//i.test(url)) void shell.openExternal(url)
+})
+
+// 媒体降级打开(2026-08-08):岛内播放失败时用系统默认播放器打开
+// (外部播放器仅为降级选择,正常播放全在窗口内)。远程 URL 走系统
+// 浏览器(openExternal);本地路径经 island-media://local/<编码路径>
+// 解码后 shell.openPath,扩展名与协议读同款校验(仅媒体可访问)。
+// MEDIA_MIME_BY_EXT 声明在本文件后部,handler 运行时已初始化
+ipcMain.on('app:open-media-external', (_event, url) => {
+  if (typeof url !== 'string' || !url) return
+  if (/^https?:\/\//i.test(url)) {
+    void shell.openExternal(url)
+    return
+  }
+  const m = /^island-media:\/\/local\/(.+)$/i.exec(url)
+  const filePath = m ? decodeURIComponent(m[1]) : url
+  const ext = path.extname(filePath).toLowerCase()
+  if (!MEDIA_MIME_BY_EXT[ext]) return
+  void shell.openPath(filePath)
 })
 
 // 死通道清理(审计 P2-1):widget:hide / widget:quit / widget:topmost
@@ -759,15 +879,136 @@ function scheduleWindowResize(fn) {
 
 // 调整窗口尺寸(Agent 面板缩放:宽高按岛体视觉尺寸 + 余量;
 // 其余视图由 set-size 保持 520 宽;widget:set-height 死通道已删)。
-// 合理范围钳制,防脏数据
-ipcMain.on('widget:set-size', (_event, width, height) => {
+// 合理范围钳制,防脏数据。
+// **展开位置补偿(2026-08-08 修复"首次展开偏右")**:win.setSize 的
+// 锚点 = 左上角,变宽时窗口向右扩展 → 岛体视觉右偏(启动顶部居中的
+// 窗口展开最明显,实测需手动拖回)。补偿:宽度变化保持窗口中心 X
+// 不动(岛体左右对称展开,右扩变双扩),高度变化保持顶部不动
+// (岛体向下生长,挂件在屏幕上方展开符合直觉)。
+// **只按请求宽度变化补偿(2026-08-08 修复"展开向右位移")**:
+// Windows 透明无边框窗口的实际宽比请求宽大 ~2px(实测 1242 vs 1240),
+// 若每次 set-size(仅高度变化,如 Agent 面板高度渐进每帧上报)都按
+// (ow-cw)/2 补偿,宽度偏差会被当成真实宽度变化,每帧右移 1-9px,
+// 展开动画期间累积 80px+(实测 wx 从 237 漂到 318)。请求宽度未变
+// (2px 容差)时不做 X 补偿,窗口位置稳定。
+// **必须用 setBounds 而非 setSize(2026-08-08 修复"切音乐右漂")**:
+// `resizable: false` 的窗口在 Windows 上 `setSize` **大→小不生效**
+// (实测:520→1240 生效、1240→520 无效,窗口停在 1240)——此前
+// setSize(520) 无效但 setPosition 补偿生效,1242 宽的窗口整体右移
+// 361px,岛体(窗口内居中)跟着右漂 361(实测 after-pos size 仍
+// [1242,282])。setBounds 走 SetWindowPos 同机制且对不可调窗口
+// 生效,一次调用同时设位置+尺寸(无"先移后缩"中间态)
+let lastSetSizeW = 0
+// 全屏状态(2026-08-08 二轮修复"全屏时右键拖拽窗口越来越大"):渲染端
+// fullscreenchange 经 widget:fullscreen 上报,全屏期间 widget:set-size
+// **主进程兜底忽略**——渲染端 setWinSize 已有全屏守卫,但任何漏网
+// 路径(旧调度中残留的 set-size、守卫竞态等)一旦改窗口尺寸,全屏层
+// (100% viewport)就跟随放大 = "越来越大"。忽略同时打日志便于定位
+// 泄漏来源。
+// **全屏尺寸锁定(2026-08-09 三轮修复,用户实测日志确认)**:set-size
+// 零调用但窗口仍变大——Electron 透明窗口 + DOM 全屏 + 窗口移动时
+// Chromium 自行改变窗口尺寸(非 IPC 路径,getSize 实测)。全屏进入时
+// 记录锁定尺寸,win resize 事件(Chromium 改尺寸会触发)立即 setBounds
+// 恢复(位置保持,防递归:恢复到锁定尺寸后不再触发)
+let widgetFullscreen = false
+let fsLockedSize = null
+// 全屏前的窗口尺寸/位置(2026-08-10 用户"窗口太小":全屏层 = 100%
+// viewport = 窗口客户区,DOM 全屏在小窗 400×200 里 = 视频画面太小;
+// **媒体岛全屏**(isMini=true)进入时把窗口放大到**鼠标所在显示器
+// 工作区**(真全屏感),退出恢复全屏前位置+尺寸;对话窗口内媒体全屏
+// (isMini=false)不放大窗口——只覆盖 Agent 对话窗口,范围由用户要求
+// 收敛)
+let preFsBounds = null
+let preFsMini = false
+ipcMain.on('widget:fullscreen', (_event, fs, inMini) => {
+  widgetFullscreen = Boolean(fs)
+  const isMini = Boolean(inMini)
+  if (widgetFullscreen) {
+    preFsMini = isMini
+    if (win && !win.isDestroyed()) {
+      preFsBounds = { ...win.getBounds() }
+      if (isMini) {
+        // 放大到鼠标所在显示器工作区(排除任务栏;多显示器取当前显示器)
+        try {
+          const pt = screen.getCursorScreenPoint()
+          const { workArea } = screen.getDisplayNearestPoint(pt)
+          // 高 DPI 下 workArea 是逻辑坐标,setBounds 同样用逻辑坐标,直接透传
+          win.setBounds({
+            x: workArea.x,
+            y: workArea.y,
+            width: workArea.width,
+            height: workArea.height,
+          })
+        } catch (err) {
+          console.error('[widget] fullscreen expand failed:', err)
+        }
+      }
+    }
+    const [w, h] = win ? win.getSize() : [0, 0]
+    if (Number.isFinite(w) && Number.isFinite(h) && w > 0 && h > 0) {
+      fsLockedSize = [w, h]
+      console.log('[widget] fullscreen locked size:', w, h, 'mini=', isMini)
+    }
+  } else {
+    fsLockedSize = null
+    // 退出全屏:媒体岛全屏(放大过窗口)恢复全屏前窗口的**位置 + 尺寸**
+    // (2026-08-10 用户要求"缩回到原来展开时的小窗位置");对话窗口内
+    // 媒体全屏未放大窗口,无需恢复
+    if (preFsMini && preFsBounds && win && !win.isDestroyed()) {
+      win.setBounds(preFsBounds)
+    }
+    preFsBounds = null
+    preFsMini = false
+  }
+})
+// 窗口尺寸应用(共用):位置中心补偿 + setBounds(合帧调度与直通共用)
+function applyWindowSize(cw, ch) {
+  if (!win || win.isDestroyed()) return
+  const [wx, wy] = win.getPosition()
+  const [ow] = win.getSize()
+  // 补偿 = 仅请求宽度变化时保持窗口中心 X 不动(2px 容差防取整抖动)
+  const dx =
+    Number.isFinite(wx) && Number.isFinite(wy) && Number.isFinite(ow) && ow > 0 &&
+    Math.abs(cw - lastSetSizeW) >= 2
+      ? Math.round((ow - cw) / 2)
+      : 0
+  win.setBounds({
+    x: Number.isFinite(wx) ? wx + dx : wx,
+    y: Number.isFinite(wy) ? wy : wy,
+    width: cw,
+    height: ch,
+  })
+  lastSetSizeW = cw
+}
+ipcMain.on('widget:set-size', (_event, width, height, immediate) => {
   const w = Number(width)
   const h = Number(height)
   if (!Number.isFinite(w) || !Number.isFinite(h)) return
   const cw = Math.max(400, Math.min(1600, Math.round(w)))
   const ch = Math.max(200, Math.min(2000, Math.round(h)))
+  if (widgetFullscreen) {
+    console.log('[widget] set-size IGNORED (fullscreen):', cw, ch)
+    return
+  }
+  // 直通模式(2026-08-10 修复"设置↔帮助切换 UI 抖动"):帮助手册等
+  // 视图切换的窗口补间(rAF 每帧发尺寸)经 100ms trailing 合帧被压成
+  // ~10Hz 台阶,而岛体 CSS 过渡 60fps 平滑——窗口台阶滞后岛体,
+  // 高度/宽度被窗口切角(help-anim 巡检实测裁剪 8 帧最大 34px +
+  // 每 100ms 跳变)。补间调用 immediate=true 直接 setBounds 不合帧,
+  // 窗口与岛体同帧平滑
+  if (immediate === true) {
+    applyWindowSize(cw, ch)
+    return
+  }
   scheduleWindowResize(() => {
-    if (win && !win.isDestroyed()) win.setSize(cw, ch)
+    // 调度窗口期间进入全屏:残留的 set-size 同样丢弃
+    if (!win || win.isDestroyed() || widgetFullscreen) {
+      if (widgetFullscreen && !win?.isDestroyed?.()) {
+        console.log('[widget] set-size IGNORED (fullscreen, stale):', cw, ch)
+      }
+      return
+    }
+    applyWindowSize(cw, ch)
   })
 })
 
@@ -1075,6 +1316,180 @@ function safeHandle(channel, fn) {
 safeHandle('agent:evolution-rollback', async () => getEvolution().rollback())
 safeHandle('agent:evolution-reset', async () => getEvolution().resetAll())
 safeHandle('agent:tools', async () => getAgentEngine().listAllTools())
+// 清除数据(2026-08-10 用户要求,Agent 设置「数据管理」区):
+// - scope 'app'   = 灵动岛所有数据:记忆/进化版本/settings.json(含
+//   API Key/模型/模式)——渲染端已清 localStorage + IndexedDB,这里清
+//   userData 文件;删除后重置内存缓存(懒加载单例重建,不然旧缓存会在
+//   下次 save 复活;settingsCache 置 null,before-quit flush 变 no-op)
+// - scope 'tools' = 所有工具的下载记录及源文件:bili 下载目录与登录态、
+//   xxt 登录态与截图目录
+// 删除失败(文件被占用,如下载中)返回 {error},渲染端展示;force 忽略
+// 不存在,部分失败不中断其余删除
+safeHandle('agent:clear-data', async (scope) => {
+  const ud = app.getPath('userData')
+  const rm = (p) => fs.rmSync(p, { recursive: true, force: true })
+  if (scope === 'app') {
+    rm(path.join(ud, 'memory.json'))
+    rm(path.join(ud, 'memory-state.json'))
+    rm(path.join(ud, 'evolution.json'))
+    rm(path.join(ud, 'memory-snapshots'))
+    rm(path.join(ud, 'settings.json'))
+    memoryStore = null
+    evolutionHandle = null
+    resetSettingsCache()
+    return { ok: true }
+  }
+  if (scope === 'tools') {
+    // bili 下载与登录态(下载中文件被占用会抛错 → 返回错误,可稍后重试)
+    rm(path.join(ud, 'bili'))
+    rm(path.join(ud, 'xxt-profile'))
+    rm(path.join(ud, 'xxt-screenshots'))
+    return { ok: true }
+  }
+  return { error: `未知的清除范围:${String(scope)}` }
+})
+
+/** 媒体扩展名 → MIME(island-media 协议推断 Content-Type;与渲染端
+ * uploadStore 同款推断表,保持一致) */
+const MEDIA_MIME_BY_EXT = {
+  '.mp3': 'audio/mpeg',
+  '.wav': 'audio/wav',
+  '.flac': 'audio/flac',
+  '.ogg': 'audio/ogg',
+  '.oga': 'audio/ogg',
+  '.opus': 'audio/ogg',
+  '.m4a': 'audio/mp4',
+  '.aac': 'audio/aac',
+  '.mp4': 'video/mp4',
+  '.m4v': 'video/mp4',
+  '.mov': 'video/quicktime',
+  '.webm': 'video/webm',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.bmp': 'image/bmp',
+}
+/** 本地媒体大小上限(2026-08-08 用户要求,按类型):视频 10GB /
+ * 音频 1GB / 图片 10GB。**流式协议播放**(island-media://)——
+ * 主进程按 Range 流式返回,Chromium 媒体栈边下边播,不整体进内存
+ * (200MB 全量 Buffer + IPC 克隆会双倍占内存,10GB 直接 OOM,故不用
+ * IPC 读取方案) */
+const GB = 1024 * 1024 * 1024
+const MEDIA_LIMIT_BY_EXT = {
+  '.mp4': 10 * GB,
+  '.m4v': 10 * GB,
+  '.mov': 10 * GB,
+  '.webm': 10 * GB,
+  '.mp3': 1 * GB,
+  '.wav': 1 * GB,
+  '.flac': 1 * GB,
+  '.ogg': 1 * GB,
+  '.oga': 1 * GB,
+  '.opus': 1 * GB,
+  '.m4a': 1 * GB,
+  '.aac': 1 * GB,
+  '.png': 10 * GB,
+  '.jpg': 10 * GB,
+  '.jpeg': 10 * GB,
+  '.gif': 10 * GB,
+  '.webp': 10 * GB,
+  '.bmp': 10 * GB,
+}
+
+// 自定义媒体协议特权(流式 body + 标准 URL 解析 + 安全上下文):
+// 必须在 app ready 之前注册(registerSchemesAsPrivileged 的硬约束)
+// **corsEnabled(2026-08-09 修复音频移交"fetch 被 CORS 拦截"根因)**:
+// file:// 页面 fetch(island-media://) 是跨源请求,Chromium 只允许
+// chrome/data/http 等内置 scheme 的跨源 fetch——自定义 scheme 不注册
+// corsEnabled 时请求在网络层直接拒绝("Cross origin requests are only
+// supported for protocol schemes: ..."),响应里的 Access-Control-Allow-
+// Origin 头根本到不了 CORS 检查(实测:移交 fetch 一直 Failed to fetch,
+// 静默降级只切模式——此前 CSP/URL 归一化修复都拦在这一层之前)
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: 'island-media',
+    privileges: {
+      standard: true,
+      secure: true,
+      stream: true,
+      supportFetchAPI: true,
+      corsEnabled: true,
+    },
+  },
+])
+
+/**
+ * 本地媒体流式播放协议(2026-08-08,对话媒体窗口):
+ * `island-media://local/<encodeURIComponent(绝对路径)>` —— 渲染端
+ * MediaFrame 对本地路径直接映射此协议,img/video/audio 的 src 指向它;
+ * 主进程按扩展名校验(仅媒体可访问,防任意文件读取)与按类型大小上限
+ * (视频 10GB/音频 1GB/图片 10GB,超限 413)。
+ * **流式实现**:fs.createReadStream 转 Web ReadableStream 分块发送,
+ * 完整支持 Range 请求(206 + Content-Range,视频 seek 必需)——不用
+ * net.fetch(file://):Chromium 的 file:// 请求不带/不支持 Range,视频
+ * 播放器发 Range 会得到 416(实测 ERR_REQUEST_RANGE_NOT_SATISFIABLE)。
+ * 播放全程内存占用 ≈ 块大小,10GB 视频不整体进内存。
+ */
+function registerIslandMediaProtocol() {
+  protocol.handle('island-media', async (request) => {
+    try {
+      const url = new URL(request.url)
+      if (url.hostname !== 'local') {
+        return new Response('无效的媒体请求', { status: 400 })
+      }
+      const filePath = decodeURIComponent(url.pathname.replace(/^\//, ''))
+      const ext = path.extname(filePath).toLowerCase()
+      const mime = MEDIA_MIME_BY_EXT[ext]
+      if (!mime) {
+        return new Response('仅支持媒体文件(图片/视频/音频)', { status: 403 })
+      }
+      let stat
+      try {
+        stat = await fsPromises.stat(filePath)
+      } catch {
+        return new Response(`文件不存在:${filePath}`, { status: 404 })
+      }
+      if (!stat.isFile()) return new Response('不是文件', { status: 400 })
+      const limit = MEDIA_LIMIT_BY_EXT[ext]
+      if (stat.size > limit) {
+        const isAudio = ['.mp3', '.wav', '.flac', '.ogg', '.oga', '.opus', '.m4a', '.aac'].includes(ext)
+        return new Response(
+          `文件过大(${(stat.size / GB).toFixed(1)}GB,该类型上限 ${isAudio ? '1GB' : '10GB'})`,
+          { status: 413 },
+        )
+      }
+      // Range 请求(视频 seek/分片):bytes=start-end → 206 部分内容
+      const range = request.headers.get('range')
+      let status = 200
+      let start = 0
+      let end = stat.size - 1
+      if (range) {
+        const m = /^bytes=(\d*)-(\d*)$/.exec(range.trim())
+        if (m && (m[1] || m[2])) {
+          if (m[1]) start = Math.min(parseInt(m[1], 10), stat.size - 1)
+          if (m[2]) end = Math.min(parseInt(m[2], 10), stat.size - 1)
+          if (start > end) return new Response('Range Not Satisfiable', { status: 416 })
+          status = 206
+        }
+      }
+      const headers = {
+        'Content-Type': mime,
+        'Content-Length': String(end - start + 1),
+        'Accept-Ranges': 'bytes',
+        'Access-Control-Allow-Origin': '*',
+        'Cache-Control': 'no-store',
+      }
+      if (status === 206) headers['Content-Range'] = `bytes ${start}-${end}/${stat.size}`
+      // createReadStream 流式分块 → Web ReadableStream(内存安全)
+      const stream = Readable.toWeb(fs.createReadStream(filePath, { start, end }))
+      return new Response(stream, { status, headers })
+    } catch (err) {
+      return new Response(`媒体读取失败:${(err && err.message) || String(err)}`, { status: 500 })
+    }
+  })
+}
 
 /** 从 SKILL.md 文本提取 frontmatter 的 name(导入技能命名用) */
 function skillNameFromMd(text) {
@@ -1155,6 +1570,24 @@ ipcMain.on('widget:set-mode', (_event, mode) => {
   if (mode === 'agent' || mode === 'music') setWidgetMode(mode)
 })
 
+// 多媒体库视频导入:系统对话框选视频文件 → 返回 [{path, name, size}]
+// (视频库是路径引用,浏览器 File 无绝对路径,必须主进程 dialog;
+// 2026-08-08 多媒体库面板)
+ipcMain.handle('app:pick-media-files', async () => {
+  const { canceled, filePaths } = await dialog.showOpenDialog(win, {
+    title: '导入视频到多媒体库',
+    filters: [{ name: '视频文件', extensions: ['mp4', 'm4v', 'mov', 'webm'] }],
+    properties: ['openFile', 'multiSelections'],
+  })
+  if (canceled || filePaths.length === 0) return []
+  return await Promise.all(
+    filePaths.map(async (p) => {
+      const stat = await fsPromises.stat(p).catch(() => null)
+      return { path: p, name: path.basename(p), size: stat?.size ?? 0 }
+    }),
+  )
+})
+
 // Agent 工具清单(safeHandle 注册:名称/描述/参数 schema,供 UI 工具列表
 // 视图展示;异步:内置工具 + MCP 服务工具(未连接的服务启动失败即跳过)
 // + 技能)
@@ -1218,6 +1651,14 @@ function rebuildTrayMenu() {
           // 内含自定义图片背景 / 帮助手册 / 主题色 / Agent 设置入口)
           showWindow()
           win?.webContents.send('widget:open-settings')
+        },
+      },
+      {
+        // 多媒体库(2026-08-08):图片/音频/视频三库,渲染端展开岛体进入
+        label: '多媒体库…',
+        click: () => {
+          showWindow()
+          win?.webContents.send('widget:open-media-library')
         },
       },
       {
@@ -1289,6 +1730,8 @@ if (!gotLock) {
     // 心理嘀咕从未出现;evolution/notify 的通知同样受影响)。必须与
     // 打包后 electron-builder 的 appId 一致(无 build.appId 配置时用固定值)
     app.setAppUserModelId('com.dynamic-island.widget')
+    // 本地媒体流式播放协议(特权注册在 ready 前,handler 在此挂载)
+    registerIslandMediaProtocol()
     createWindow()
     createTray()
     startBridge()

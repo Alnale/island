@@ -704,7 +704,147 @@ async function webSearch(query: string, count: number): Promise<string> {
   }
 }
 
+/** 媒体扩展名 → 媒体类型(open_file / exec_command 媒体拦截共用,
+ * 2026-08-08) */
+function mediaKindForPath(target: string): 'img' | 'video' | 'audio' | null {
+  if (/\.(png|jpe?g|gif|webp|bmp)$/i.test(target)) return 'img'
+  if (/\.(mp4|m4v|mov|webm)$/i.test(target)) return 'video'
+  if (/\.(mp3|wav|flac|ogg|oga|opus|m4a|aac)$/i.test(target)) return 'audio'
+  return null
+}
+
+/**
+ * 从 `start` 命令提取媒体文件路径(2026-08-08,exec_command 媒体拦截):
+ * LLM 播放视频常用 `start "标题" "C:\x.mp4"`(cmd 引号语义:第一个引号
+ * 串是窗口标题)或 `start C:\x.mp4`(裸 token)。返回绝对路径(相对路径
+ * 按 cwd 解析);非 start 命令或提取不出媒体路径返回 null
+ */
+function extractMediaPathFromStart(command: string, cwd: string): string | null {
+  const m = /^start\s+/i.exec(command)
+  if (!m) return null
+  const rest = command.slice(m[0].length).trim()
+  if (!rest) return null
+  let target = ''
+  if (rest.startsWith('"')) {
+    // 引号形式:start "标题" "路径"(两段)或 start "路径"(单段——
+    // cmd 语义单段是标题,不打开文件,不拦截防误判)
+    const q1 = /^"([^"]*)"/.exec(rest)
+    if (q1) {
+      const after = rest.slice(q1[0].length).trim()
+      if (after.startsWith('"')) {
+        const q2 = /^"([^"]*)"/.exec(after)
+        if (q2) target = q2[1]
+      }
+    }
+  } else {
+    target = rest.split(/\s+/)[0]
+  }
+  if (!target) return null
+  return path.isAbsolute(target) ? target : path.resolve(cwd, target)
+}
+
 /** 模块化工具清单(每次注册都是独立对象,便于后续按需增删) */
+/**
+ * 功能引导文档路径(2026-08-10,get_feature_guide 工具):LLM 读取
+ * docs/TECH.md(第 11 章 = 功能清单与使用引导)向用户介绍灵动岛功能。
+ * - 打包版:extraResources → resources/docs/TECH.md(process.resourcesPath)
+ * - dev / 测试:项目根 docs/(cwd;与 toolsRoot() 同款双环境解析)
+ */
+function guideDocPath(): string {
+  const res = process.resourcesPath ? path.join(process.resourcesPath, 'docs', 'TECH.md') : ''
+  return res && existsSync(res) ? res : path.resolve(process.cwd(), 'docs', 'TECH.md')
+}
+
+/**
+ * 系统音量脚本路径(2026-08-10,set_system_volume 工具):winmm
+ * waveOutGetVolume/SetVolume 读/写系统主音量。
+ * - 打包版:extraResources → resources/bridge/system-volume.ps1
+ *   (与 smtc-reader.ps1 同款放 asar 外)
+ * - dev:electron/system-volume.ps1
+ */
+function volumeScriptPath(): string {
+  const res = process.resourcesPath ? path.join(process.resourcesPath, 'bridge', 'system-volume.ps1') : ''
+  return res && existsSync(res) ? res : path.resolve(process.cwd(), 'electron', 'system-volume.ps1')
+}
+
+/** 运行系统音量脚本(get 或 set),返回 stdout;失败抛中文错误(LLM 可自纠) */
+function runVolumeScript(args: string[]): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(
+      'powershell.exe',
+      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', volumeScriptPath(), ...args],
+      { windowsHide: true },
+    )
+    let out = ''
+    let err = ''
+    child.stdout.on('data', (d: Buffer) => {
+      out += d.toString()
+    })
+    child.stderr.on('data', (d: Buffer) => {
+      err += d.toString()
+    })
+    child.on('close', (code) => {
+      if (code !== 0) reject(new Error(err.trim() || out.trim() || `音量脚本退出码 ${code}`))
+      else resolve(out.trim())
+    })
+    child.on('error', (e) => reject(new Error(`无法启动音量脚本:${e.message}`)))
+  })
+}
+
+/**
+ * 引导文档章节提取(测试用导出):按 `## `(二级标题)切分章节,标题或正文
+ * 开头(前 400 字)含 topic 即命中;返回命中章节拼接(每节截 maxChars、
+ * 最多 maxSections 节、总长截 maxTotal,防大文档撑爆上下文)。
+ * 无 topic → 返回整篇标题树(目录,LLM 据此挑话题再查)。
+ */
+export function extractGuideSections(
+  text: string,
+  topic: string,
+  opts?: { maxChars?: number; maxSections?: number; maxTotal?: number },
+): string {
+  const maxChars = opts?.maxChars ?? 2500
+  const maxSections = opts?.maxSections ?? 5
+  const maxTotal = opts?.maxTotal ?? 8000
+  const lines = text.split('\n')
+  const sections: Array<{ chapter: string; header: string; body: string }> = []
+  const toc: string[] = []
+  let chapter = ''
+  let cur: { header: string; body: string[] } | null = null
+  for (const line of lines) {
+    if (line.startsWith('# ')) {
+      chapter = line.replace(/^#\s+/, '').trim()
+      toc.push(line.replace(/^#\s*/, '').trim())
+      continue
+    }
+    if (line.startsWith('## ')) {
+      if (cur) sections.push({ chapter, header: cur.header, body: cur.body.join('\n') })
+      cur = { header: line.replace(/^##\s+/, '').trim(), body: [] }
+      toc.push(line.replace(/^##\s*/, '').trim())
+      continue
+    }
+    if (cur) cur.body.push(line)
+  }
+  if (cur) sections.push({ chapter, header: cur.header, body: cur.body.join('\n') })
+
+  const t = topic.trim().toLowerCase()
+  if (!t) return toc.join('\n')
+
+  const hit = (s: { chapter: string; header: string; body: string }) =>
+    (s.chapter + s.header + s.body.slice(0, 400)).toLowerCase().includes(t)
+  const parts: string[] = []
+  for (const s of sections.filter(hit)) {
+    if (parts.length >= maxSections) break
+    const text2 = s.body.length > maxChars ? s.body.slice(0, maxChars) + '\n…(章节过长,已截断)' : s.body
+    parts.push(`【${s.chapter} > ${s.header}】\n${text2}`)
+  }
+  if (parts.length === 0) {
+    return `(未找到与「${topic}」相关的章节。可用话题:${toc.slice(0, 40).join(' / ')}…)`
+  }
+  let out = parts.join('\n\n')
+  if (out.length > maxTotal) out = out.slice(0, maxTotal) + '\n…(结果过长,已截断)'
+  return out
+}
+
 export function createTools(deps: {
   onSwitchToMusic(): void
   /**
@@ -728,7 +868,9 @@ export function createTools(deps: {
         '在本机执行 shell 命令(Windows:cmd.exe)。无沙箱限制,可操作本机任何内容。' +
         '命令输出会返回给你;非零退出码也会带输出返回。' +
         '适合:查进程、管理文件、运行脚本、系统维护、安装工具等。' +
-        '注意:危险命令(删除、格式化、改系统配置)请谨慎执行。',
+        '注意:危险命令(删除、格式化、改系统配置)请谨慎执行。' +
+        '媒体文件(图片/视频/音频)展示请勿用 start 打开外部播放器——' +
+        '媒体会作为附件直接展示在对话窗口内播放,回复时告知用户"已打开"即可。',
       parameters: {
         type: 'object',
         properties: {
@@ -743,6 +885,29 @@ export function createTools(deps: {
         if (!command) throw new Error('command 不能为空')
         const timeout = Math.min(Math.max(Number(params.timeout) || 30, 1), 300) * 1000
         const cwd = typeof params.cwd === 'string' && params.cwd ? params.cwd : os.homedir()
+        // 媒体文件拦截(2026-08-08 修复"LLM 说已开始播放但窗口看不到
+        // 气泡"):LLM 常用 `start <媒体文件>` 打开视频——不调外部播放器,
+        // 返回媒体附件(media part)窗口内直接播放;与 open_file 同款
+        const mediaTarget = extractMediaPathFromStart(command, cwd)
+        const mediaKind = mediaTarget ? mediaKindForPath(mediaTarget) : null
+        if (mediaKind) {
+          // 2026-08-09:start 解析出的媒体路径校验存在(文件名含空格/
+          // 引号时裸 token 解析会截断,路径不存在 → 协议 404 → 渲染端
+          // 假报"格式不支持")。不存在时抛错引导 LLM 用 open_file 传
+          // 完整路径,而不是下发 404 附件
+          if (!existsSync(mediaTarget as string)) {
+            throw new Error(
+              `文件不存在:${mediaTarget}(start 解析的路径可能因空格/引号被截断,` +
+                `请改用 open_file 工具传完整绝对路径打开该媒体文件)`,
+            )
+          }
+          return {
+            text:
+              `媒体文件已就绪(${path.basename(mediaTarget as string)}),已作为附件展示在对话窗口中,` +
+              `用户在窗口内直接观看/收听。请在回复中告知用户已打开。`,
+            media: [{ kind: mediaKind, url: mediaTarget as string, name: path.basename(mediaTarget as string) }],
+          }
+        }
         return runCommand(command, cwd, timeout)
       },
     },
@@ -822,7 +987,10 @@ export function createTools(deps: {
     },
     {
       name: 'open_file',
-      description: '用系统默认程序打开文件或文件夹(如图片、文档、目录)。',
+      description:
+        '用系统默认程序打开文件或文件夹(文档、目录等)。' +
+        '注意:图片/视频/音频等媒体文件**不会**打开外部播放器——' +
+        '媒体会作为附件直接展示在对话窗口内播放,回复时告知用户"已打开"即可。',
       parameters: {
         type: 'object',
         properties: {
@@ -833,6 +1001,28 @@ export function createTools(deps: {
       async execute(params: ToolParams) {
         const target = String(params.path ?? '')
         if (!target) throw new Error('path 不能为空')
+        // 媒体文件拦截(2026-08-08 用户要求"说打开视频看看,结果打开的是
+        // 外部播放器;LLM 回复已播放但窗口看不到视频气泡"):不调
+        // shell.openPath 弹外部播放器——返回**媒体附件**(media part),
+        // 引擎注入助手消息,渲染端 MediaFrame 窗口内直接播放(不依赖
+        // LLM 输出 markdown,实测 LLM 只回"已播放"而不展示)
+        const mediaKind = mediaKindForPath(target)
+        if (mediaKind) {
+          // 2026-08-09 修复"格式正确却报无法播放":LLM 拼路径差一个字
+          // (文件名含 ⚡✨""() 空格等特殊字符)时,不存在的路径下发附件
+          // → 协议 404 → Chromium 与格式不支持同码(code 4)→ 渲染端
+          // 假报"格式不支持"。此处先校验存在,不存在直接抛错回填
+          // (LLM 看到"缺什么"可自纠,不再产生 404 假阳性)
+          if (!existsSync(target)) {
+            throw new Error(`文件不存在:${target}(请先用 list_dir 确认真实文件名再打开,注意特殊字符与空格)`)
+          }
+          return {
+            text:
+              `媒体文件已就绪(${path.basename(target)}),已作为附件展示在对话窗口中,` +
+              `用户在窗口内直接观看/收听(可拖拽缩放)。请在回复中告知用户已打开。`,
+            media: [{ kind: mediaKind, url: target, name: path.basename(target) }],
+          }
+        }
         const errMsg = await shell.openPath(target)
         if (errMsg) throw new Error(`打开失败:${errMsg}`)
         return `已打开 ${target}`
@@ -851,6 +1041,63 @@ export function createTools(deps: {
       },
       async execute(params: ToolParams) {
         return webSearch(String(params.query ?? ''), Number(params.count) || 5)
+      },
+    },
+    {
+      name: 'get_feature_guide',
+      description:
+        '读取灵动岛(本程序)内置的功能引导文档,按话题返回相关章节——' +
+        '用户问「你有什么功能/你能干什么/这个岛能做什么/XX功能怎么用」时,**先调用本工具**' +
+        '了解功能与入口,再结合用户兴趣向用户介绍引导(挑 3-5 个重点,不要一口气列完)。' +
+        'topic 给功能/话题关键词(如 "音乐" "B站" "多媒体库" "记忆" "主动陪伴" "设置" "视频"),' +
+        '不给 topic 返回文档目录。注意:这是本程序的功能说明,不是外部知识。',
+      parameters: {
+        type: 'object',
+        properties: {
+          topic: { type: 'string', description: '可选:功能/话题关键词,如 "多媒体库"' },
+        },
+        required: [],
+      },
+      async execute(params: ToolParams) {
+        const topic = String(params.topic ?? '').trim()
+        const docPath = guideDocPath()
+        if (!existsSync(docPath)) {
+          return '(功能引导文档缺失,可向用户介绍:音乐控制 / Agent 对话与本机工具 / 多媒体库 / 个性化外观)'
+        }
+        const text = await fs.readFile(docPath, 'utf8')
+        return extractGuideSections(text, topic)
+      },
+    },
+    {
+      name: 'set_system_volume',
+      description:
+        '读取/设置**系统**主音量(0-100 整数,作用于整个系统,立即生效)。' +
+        'action=get 查询当前音量;action=set 设置音量(volume 必填 0-100)。' +
+        '适合:用户说"把系统音量调小/调到 50/静音"等。' +
+        '注意:这是**系统音量**(所有程序);灵动岛内媒体播放的独立音量' +
+        '用 set_video_config 的 volume 参数调(两者互不影响)。',
+      parameters: {
+        type: 'object',
+        properties: {
+          action: { type: 'string', enum: ['get', 'set'], description: 'get = 查询当前音量;set = 设置音量(默认 get)' },
+          volume: { type: 'number', description: '目标音量 0-100(set 必填),如 50' },
+        },
+        required: [],
+      },
+      async execute(params: ToolParams) {
+        const action = String(params.action ?? 'get')
+        if (action === 'get') {
+          const out = await runVolumeScript(['-Action', 'get'])
+          const m = /volume=(\d+)/.exec(out)
+          return m ? `当前系统音量:${m[1]}%` : `(音量读取异常:${out})`
+        }
+        if (action !== 'set') throw new Error('action 只能是 get 或 set')
+        const vol = Number(params.volume)
+        if (!Number.isFinite(vol)) throw new Error('volume 需要是数字(0-100)')
+        const v = Math.min(100, Math.max(0, Math.round(vol)))
+        const out = await runVolumeScript(['-Action', 'set', '-Value', String(v)])
+        const m = /volume=(\d+)/.exec(out)
+        return `已将系统音量设置为 ${m ? `${m[1]}%` : `${v}%`}`
       },
     },
     {

@@ -41,13 +41,21 @@ interface DesktopApi {
   pointer(active: boolean): void
   /** 托盘菜单"设置":订阅回调(渲染端在岛内展开设置视图);返回取消订阅函数 */
   onOpenSettings(callback: () => void): () => void
-  /** 初次安装引导:订阅回调(渲染端在岛内展开帮助手册);返回取消订阅函数 */
-  onOpenHelp(callback: () => void): () => void
   /** 打开外部链接(http/https 经主进程校验后 shell.openExternal) */
   openExternal(url: string): void
+  /** 媒体降级打开(岛内播放失败 → 系统默认播放器;本地路径经媒体扩展
+   * 名校验后 shell.openPath,远程 URL 走系统浏览器) */
+  openMediaExternal(url: string): void
   /** 调整窗口尺寸(Agent 面板缩放需要宽度;高度用于高空间视图;
-   * 死通道 hide/quit/setAlwaysOnTop/setWindowHeight 已删,审计 P2-1) */
-  setWindowSize(width: number, height: number): void
+   * 死通道 hide/quit/setAlwaysOnTop/setWindowHeight 已删,审计 P2-1)。
+   * immediate(2026-08-10):窗口补间直通 setBounds 跳过合帧,
+   * 防补间被压成 ~10Hz 台阶与岛体过渡不同步 */
+  setWindowSize(width: number, height: number, immediate?: boolean): void
+  /** 全屏状态上报(2026-08-08):主进程在全屏期间兜底忽略 set-size,
+   * 防全屏层(100% viewport)跟随窗口 resize 放大。
+   * inMini(2026-08-10):全屏元素是否在媒体岛内——岛全屏放大窗口到
+   * 显示器,对话窗口内媒体全屏只覆盖 Agent 窗口(不放大) */
+  setFullscreen(fs: boolean, inMini?: boolean): void
   /** 右键长按拖拽移动挂件:开始(记录基准位置) */
   dragStart(screenX: number, screenY: number): void
   /** 右键长按拖拽移动挂件:移动(指针屏幕坐标,与窗口同坐标系) */
@@ -135,6 +143,16 @@ interface DesktopApi {
   agentEvolutionRollback(): Promise<string | { error: string }>
   /** Agent:清除全部进化版本(回到初始状态)(失败返回 {error}) */
   agentEvolutionReset(): Promise<string | { error: string }>
+  /** Agent:清除数据(2026-08-10,Agent 设置「数据管理」区):
+   * 'app' = 灵动岛所有数据 / 'tools' = 工具下载记录及源文件 */
+  agentClearData(scope: 'app' | 'tools'): Promise<{ ok?: boolean; error?: string }>
+  /** 穿透轮询校正(2026-08-10):窗口屏幕 bounds + 光标屏幕位置 +
+   * 主进程真实穿透状态(渲染端核对岛体 rect 校正穿透,防穿透死锁) */
+  pointerPoll(): Promise<{
+    bounds: { x: number; y: number; width: number; height: number }
+    cursor: { x: number; y: number }
+    ignoreMouseEvents: boolean
+  } | null>
   /** Agent:导入技能(选择技能包文件夹或单个 .md 文件) */
   agentSkillImport(): Promise<{
     canceled: boolean
@@ -156,6 +174,10 @@ interface DesktopApi {
   setMode(mode: 'music' | 'agent'): void
   /** 启动时询问当前模式(音乐 / agent) */
   getMode(): Promise<'music' | 'agent'>
+  /** 多媒体库视频导入:系统对话框选视频文件 → [{path, name, size}] */
+  pickMediaFiles(): Promise<Array<{ path: string; name: string; size: number }>>
+  /** 托盘"多媒体库"菜单:订阅回调(展开岛体进入多媒体库视图);返回取消订阅函数 */
+  onOpenMediaLibrary(callback: () => void): () => void
 }
 
 declare global {

@@ -753,107 +753,7 @@
   text-align: center;
 }
 
-/* ===== 帮助手册视图(大尺寸教学手册) =====
-   岛体 800×640(缩放 200% 的大小,承载教学内容;窗口 820×680 跟随),
-   左上角模式标签(音乐 / Agent,点击或滚轮切换)+ 双列卡片网格。
-   基础 .island-demo 有 max-width: 500px,必须放开;
-   宽度用无过冲缓动:紧凑 100px → 800px 大跨度弹簧过冲在软件渲染下
-   抖动明显(与 agent 面板同策略) */
-.island-demo.expanded.island-help-view {
-  max-width: none;
-  height: 640px;
-  transition:
-    width 0.3s cubic-bezier(0.22, 1, 0.36, 1),
-    height 0.33s cubic-bezier(0.22, 1, 0.36, 1),
-    box-shadow 0.3s ease,
-    border-color 0.3s ease,
-    transform 0.35s cubic-bezier(0.34, 1.56, 0.64, 1);
-}
-
-/* 模式切换(左上角,2026-08-07 重构):复用通用 QuickMenu——整合按钮 +
-   同行联通展开 + 滚轮逐格循环切换 + 高亮滑块,默认音乐模式 */
-.island-help-mode-menu {
-  flex: none;
-  margin: 0 0 10px;
-  align-self: flex-start;
-}
-
-.island-help-mode-icon {
-  display: inline-flex;
-}
-
-/* 教学卡片网格:双列;内容超高时滚动(岛体高度固定,滚动不撑高) */
-.island-help-grid {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
-  align-content: start;
-  padding-right: 4px;
-  scrollbar-width: thin;
-  scrollbar-color: rgba(255, 255, 255, 0.15) transparent;
-  animation: island-ui-in 0.28s cubic-bezier(0.34, 1.56, 0.64, 1) both;
-}
-
-.island-help-card {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 10px 12px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.05);
-  transition:
-    background 0.15s ease,
-    border-color 0.15s ease;
-}
-
-.island-help-card:hover {
-  background: rgba(255, 255, 255, 0.09);
-  border-color: color-mix(in srgb, var(--state-color, #4d6bfe) 40%, transparent);
-}
-
-.island-help-card-icon {
-  flex: none;
-  width: 34px;
-  height: 34px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--state-color, #4d6bfe) 14%, transparent);
-  color: var(--state-color, #4d6bfe);
-}
-
-.island-help-svg {
-  width: 19px;
-  height: 19px;
-}
-
-.island-help-card-meta {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.island-help-card-title {
-  font-size: 0.78rem;
-  font-weight: 600;
-  color: var(--text-color, #fff);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.island-help-card-desc {
-  font-size: 0.64rem;
-  color: var(--text-dim, rgba(255, 255, 255, 0.5));
-  line-height: 1.45;
-}
+/* ===== 帮助手册视图已移除(2026-08-10 用户要求) ===== */
 
 /* 列表底部:上传音乐 + 返回 */
 .island-panel-list-foot {
@@ -1410,6 +1310,8 @@
 
 /* 行内操作按钮:编辑(悬停变白)/ 删除(悬停变红) */
 .island-lib-row-act {
+  /* position: relative 供叠放的播放/暂停图标 absolute 居中 */
+  position: relative;
   flex-shrink: 0;
   width: 28px;
   height: 28px;
@@ -1536,6 +1438,7 @@
   line-height: 1.3;
   /* 固定白字:跟随 --text-color 时深色字会使名称不可见 */
   color: #fff;
+  transition: color 0.25s ease;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1684,3 +1587,556 @@
 }
 
 /* ===== MCP 服务 + 技能目录区(Agent 设置视图) ===== */
+
+/* ===== 多媒体库面板(2026-08-08):库切换 + 行列表 + 批量操作 =====
+   独立菜单(用户要求:不属设置范畴,做成 Agent 设置面板大小)。
+   岛体 540(覆盖 island-lib-view 的 440,4 类名特异性更高)、
+   挂件窗口 580(VIEW_WINDOW_H 登记) */
+.island-demo.expanded.island-lib-view.island-media-lib-view {
+  height: 540px;
+}
+
+/* 库类型切换(2026-08-08 复用 QuickMenu,与 Agent 设置菜单同款):
+   左侧对齐 + 与搜索框的间距 */
+.island-media-lib-menu {
+  flex: none;
+  margin: 0 0 8px;
+  align-self: flex-start;
+}
+
+.island-media-lib-list {
+  flex: 1;
+  overflow-y: auto;
+  /* 与搜索栏同宽(2026-08-08 用户要求三库卡片对齐搜索栏;原 0 14px
+     让行比搜索栏窄 14px/边) */
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/* 库内容区(2026-08-10 用户要求 tab 切换动画):包住三个 tab 列表,
+   flex:1 承接滚动空间(子列表自身 flex:1 + overflow 在容器内生效);
+   入场 = island-ui-in(淡入+上移+微缩放回弹 0.34s,key 重挂载重放),
+   离场 = island-ui-out(上移淡出 0.24s,leaving 120ms 期间挂) */
+.island-media-lib-content {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  animation: island-ui-in 0.34s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+
+.island-media-lib-content.island-ui-out {
+  animation: island-ui-out 0.24s ease both;
+}
+
+.island-media-lib-row {
+  /* position: relative 供保存 ✓ 徽标绝对定位 */
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.05);
+  flex-wrap: wrap;
+  transition:
+    border-color 0.2s ease,
+    background 0.2s ease;
+}
+
+/* 编辑中 / 保存完成反馈(2026-08-08):编辑中强调色描边;
+   保存完成绿色提醒(2026-08-08 用户要求:移除 ✓ 徽标图标——徽标
+   插入 DOM 还让其后无 key 的 video 索引位移重挂载,视频重新加载
+   闪现"上下滚动的条";只保留绿色:行描边 + 名称文字变绿 600ms) */
+.island-media-lib-row.editing {
+  border-color: color-mix(in srgb, var(--state-color, #4d6bfe) 55%, transparent);
+}
+
+.island-media-lib-row.saved,
+.island-lib-card.saved {
+  border-color: rgba(74, 222, 128, 0.45);
+}
+
+.island-media-lib-row.saved .island-media-lib-name,
+.island-lib-card.saved .island-lib-card-name {
+  color: #4ade80;
+}
+
+/* 行内编辑输入(进入编辑回弹淡入;island-ui-enter 由 input 自带类) */
+.island-media-lib-row .island-lib-edit-input {
+  flex: 1 1 120px;
+}
+
+/* 试听/播放展开收起(2026-08-08 用户要求卡片展开/收起动画;2026-08-09
+   三轮修复"收起还是瞬间关闭"):原 grid-rows 0fr↔1fr 过渡,`.open` 类
+   曾由 showPreview 判定——收起瞬间 closingId 保留内容,类始终不移除
+   → 行高恒 1fr 纹丝不动,closing 结束内容卸载才瞬间归零(帧采样实测
+   h 恒 154 → 800ms 跳 0)。现改为**显式 height 过渡**(React style 写
+   px,浏览器必支持)+ 内容由 closingId 保留播完动画;高度由
+   ResizeObserver 跟随内容(视频元数据到达后高度变化平滑跟随)。
+   0.7s 为再次放慢后的速率(2026-08-08 用户连续两轮反馈太快:0.32 →
+   0.5 → 0.7s) */
+.island-media-preview {
+  display: block;
+  width: 100%;
+  height: 0;
+  overflow: hidden;
+  transition: height 0.7s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.island-media-preview-inner {
+  overflow: hidden;
+  padding-top: 0;
+}
+
+.island-media-preview.open .island-media-preview-inner {
+  animation: island-ui-in 0.28s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+
+/* 收起淡出(2026-08-09 统一一体节奏):grid 高度收缩(0.7s 无过冲)
+   全程内,内容以**同款曲线** 0.55s 淡出上移——与高度收缩同向同速,
+   收尾不脱节(原 0.5s ease 曲线/时长与收缩不同步,结尾空收一段);
+   与展开的 island-ui-in 对称。声音已停,画面柔化收进卡片 */
+.island-media-preview:not(.open) .island-media-preview-inner {
+  opacity: 0;
+  transform: translateY(-4px);
+  transition:
+    opacity 0.55s cubic-bezier(0.22, 1, 0.36, 1),
+    transform 0.55s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* 视频收起(2026-08-09 二轮修复"仍顿挫"):视频**不能随 grid 收缩全程
+   做 opacity 过渡**——软件渲染下每帧重绘大视频区域是卡顿(顿挫)
+   主因,也是 2026-08-08 记录过的坑(上轮改回保留 + 0.55s transition
+   恰好重新踩中)。改为:画面自身 **0.3s 快速淡出 + 微缩**(animation
+   播放期短暂重绘,`both` 终态 opacity:0 后 Chromium 跳过透明层
+   绘制,后续收缩期零重绘),行容器继续 0.7s 优雅收缩——画面柔化
+   收进卡片与高度收缩视觉一体,且全程流畅 */
+.island-media-preview.island-media-preview--video .island-media-preview-inner {
+  /* 视频不用 inner 整段淡出(0.55s 全程重绘视频区域)——淡出由
+     video 自身 0.3s animation 负责,inner 保持不透明被高度裁剪 */
+  opacity: 1;
+  transition: none;
+}
+
+.island-media-preview.island-media-preview--video:not(.open) .island-media-lib-preview {
+  animation: island-media-minimize 0.3s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes island-media-minimize {
+  from {
+    opacity: 1;
+    transform: scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: scale(0.96) translateY(-3px);
+  }
+}
+
+/* 定制音频播放条(2026-08-08 用户要求"播放条太丑",替代原生 audio
+   controls):圆形播放键 + 可拖动进度条 + 时间 */
+.island-media-playbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  margin-top: 2px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.island-media-playbar-btn {
+  /* position: relative 供叠放的播放/暂停图标 absolute 居中 */
+  position: relative;
+  flex: none;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 50%;
+  background: var(--state-color, #4d6bfe);
+  color: #fff;
+  cursor: pointer;
+  transition: transform 0.15s ease;
+}
+
+.island-media-playbar-btn:active {
+  transform: scale(0.9);
+}
+
+.island-media-playbar-track {
+  position: relative;
+  flex: 1;
+  height: 16px;
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+  touch-action: none;
+}
+
+.island-media-playbar-fill {
+  position: absolute;
+  left: 0;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--state-color, #4d6bfe);
+  pointer-events: none;
+}
+
+.island-media-playbar-track::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.island-media-playbar-thumb {
+  position: absolute;
+  top: 50%;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.45);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
+.island-media-playbar-time {
+  flex: none;
+  font-size: 0.62rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim, rgba(255, 255, 255, 0.55));
+}
+
+/* 播放/暂停图标形态切换(2026-08-09 用户要求"暂停动画像顿挫"):
+   三角与双杠叠放在按钮内,父元素挂 .is-playing 驱动**同向旋转交叉
+   淡入淡出**——旧图标顺时针转出(rotate 90 + 缩小)的同时新图标
+   转回原位,0.3s 回弹曲线,点击瞬间与内容退场一体联动。
+   首次挂载两图标直接处于终态,不播过渡(transition 只在类变化时
+   触发);收起瞬间 previewId 置 null → .is-playing 移除 → 立即反向 */
+.island-playpause {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  transition:
+    opacity 0.22s ease,
+    transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+/* 初始 = 待播放态:三角(播放键)显示、双杠旋转隐藏;
+   播放中(is-playing)= 双杠显示、三角隐藏。
+   **2026-08-10 修复语义反了(与注释矛盾)**:原 CSS 默认隐藏三角/显示
+   双杠——暂停状态按钮显示"暂停图标"、播放中显示"播放三角",
+   用户看到播放键"状态不对/丢失"(配合缺 position:relative 错位) */
+.island-playpause--play {
+  transform: none;
+  opacity: 1;
+}
+
+.is-playing .island-playpause--play {
+  transform: rotate(90deg) scale(0.4);
+  opacity: 0;
+}
+
+.island-playpause--pause {
+  transform: rotate(90deg) scale(0.4);
+  opacity: 0;
+}
+
+.is-playing .island-playpause--pause {
+  transform: none;
+  opacity: 1;
+}
+
+/* 图片右键菜单(2026-08-08):应用到紧凑态/展开态背景(中性胶囊浮层,
+   与 QuickMenu 同款视觉)。**absolute 定位在面板内**(2026-08-08 修复
+   "菜单看不见":fixed 会被岛体 transform 祖先错位,overflow:hidden
+   裁剪——面板 .island-panel-list 相对定位,菜单随岛体移动永不被裁) */
+.island-panel-list {
+  position: relative;
+}
+
+.island-ctx-menu {
+  position: absolute;
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.24);
+  background: rgba(18, 22, 30, 0.96);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
+  animation: island-ui-in 0.2s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+
+.island-ctx-menu button {
+  padding: 6px 14px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-color, #fff);
+  font-size: 0.7rem;
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s ease;
+}
+
+.island-ctx-menu button:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.island-ctx-menu-hint {
+  padding: 4px 14px 6px;
+  font-size: 0.58rem;
+  color: var(--text-dim, rgba(255, 255, 255, 0.4));
+  white-space: nowrap;
+}
+
+/* 勾选框(2026-08-08 定制:原生 checkbox 无勾选/取消动画——隐藏原生
+   input,视觉框 + 对勾 SVG 描线动画(勾选 = 对勾描出 + 背景填充 + 微
+   放大;取消 = 反向描回) */
+.island-media-lib-check {
+  display: flex;
+  align-items: center;
+  color: var(--text-dim, rgba(255, 255, 255, 0.5));
+  cursor: pointer;
+}
+
+.island-media-lib-check input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+}
+
+.island-media-lib-checkbox {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 15px;
+  height: 15px;
+  border-radius: 5px;
+  border: 1.5px solid rgba(255, 255, 255, 0.4);
+  background: transparent;
+  color: #0b0b0f;
+  transition:
+    background 0.2s ease,
+    border-color 0.2s ease,
+    transform 0.18s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.island-media-lib-checkbox svg {
+  width: 10px;
+  height: 10px;
+  stroke: currentColor;
+  fill: none;
+  /* 对勾描线动画:初始笔画隐藏(offset = 全长),勾选描出、取消描回 */
+  stroke-dasharray: 24;
+  stroke-dashoffset: 24;
+  transition: stroke-dashoffset 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.island-media-lib-check.on .island-media-lib-checkbox {
+  background: var(--state-color, #4d6bfe);
+  border-color: var(--state-color, #4d6bfe);
+  transform: scale(1.08);
+}
+
+.island-media-lib-check.on .island-media-lib-checkbox svg {
+  stroke-dashoffset: 0;
+}
+
+.island-media-lib-check:hover .island-media-lib-checkbox {
+  border-color: rgba(255, 255, 255, 0.65);
+}
+
+.island-media-lib-name {
+  flex: 1 1 120px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.68rem;
+  color: var(--text-color, #fff);
+  transition: color 0.25s ease;
+}
+
+.island-media-lib-size {
+  font-size: 0.6rem;
+  color: var(--text-dim, rgba(255, 255, 255, 0.4));
+  flex: none;
+}
+
+.island-media-lib-acts {
+  display: flex;
+  gap: 2px;
+  flex: none;
+}
+
+.island-media-lib-batch {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 2px;
+  font-size: 0.62rem;
+  color: var(--text-dim, rgba(255, 255, 255, 0.5));
+}
+
+.island-media-lib-batch .island-ctl {
+  padding: 4px 10px;
+  font-size: 0.62rem;
+  /* 亮起/熄灭过渡(2026-08-08):勾选变化时按钮背景/描边/发光平滑切换 */
+  transition:
+    background 0.25s ease,
+    border-color 0.25s ease,
+    box-shadow 0.25s ease,
+    opacity 0.25s ease;
+}
+
+.island-media-lib-batch .island-ctl:disabled {
+  opacity: 0.4;
+  cursor: default;
+  background: rgba(255, 255, 255, 0.09);
+  border-color: rgba(255, 255, 255, 0.24);
+  box-shadow: none;
+}
+
+/* 亮起(有勾选):强调色底 + 描边 + 柔和呼吸光,随勾选点亮 */
+.island-media-lib-batch .island-ctl:not(:disabled) {
+  background: color-mix(in srgb, var(--state-color, #4d6bfe) 22%, transparent);
+  border-color: color-mix(in srgb, var(--state-color, #4d6bfe) 65%, transparent);
+  color: var(--text-color, #fff);
+  animation: island-batch-glow 1.8s ease-in-out infinite;
+}
+
+@keyframes island-batch-glow {
+  0%,
+  100% {
+    box-shadow: 0 0 0 rgba(77, 107, 254, 0);
+  }
+  50% {
+    box-shadow: 0 0 10px color-mix(in srgb, var(--state-color, #4d6bfe) 45%, transparent);
+  }
+}
+
+.island-media-lib-preview {
+  width: 100%;
+  border-radius: 8px;
+  background: #000;
+}
+
+/* 定制播放器(2026-08-10 用户要求"UI 不要原生要定制"):视频 +
+   底部控件条(播放/进度/时间/音量/更多),替代原生 controls。
+   收起动画期间视频淡出过渡的 opacity 选择器(1725 行)仍生效 */
+.island-media-lib-player {
+  position: relative;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.island-media-lib-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 4px;
+}
+
+.island-media-lib-play {
+  /* position: relative 供叠放的播放/暂停图标 absolute 居中——2026-08-10
+     修复"播放键默认丢失":缺它时图标 absolute 到播放器容器(relative)
+     左上角被 video 盖住,按钮里看不到图标;点击瞬间 transition 动画里
+     才短暂可见(与 .island-media-playbar-btn 同款) */
+  position: relative;
+  flex: none;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+  cursor: pointer;
+  transition:
+    background 0.15s ease,
+    transform 0.15s ease;
+}
+
+.island-media-lib-play:hover {
+  background: rgba(255, 255, 255, 0.22);
+}
+
+.island-media-lib-play:active {
+  transform: scale(0.9);
+}
+
+.island-media-lib-bar {
+  position: relative;
+  flex: 1;
+  height: 16px;
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+  touch-action: none;
+}
+
+.island-media-lib-bar::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.22);
+}
+
+.island-media-lib-bar-fill {
+  position: absolute;
+  left: 0;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--state-color, #4d6bfe);
+  pointer-events: none;
+}
+
+.island-media-lib-bar-thumb {
+  position: absolute;
+  top: 50%;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
+.island-media-lib-time {
+  flex: none;
+  font-size: 0.6rem;
+  font-variant-numeric: tabular-nums;
+  color: rgba(255, 255, 255, 0.8);
+  white-space: nowrap;
+}

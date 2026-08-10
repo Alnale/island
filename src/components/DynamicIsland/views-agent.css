@@ -18,11 +18,14 @@
      在透明窗口软件渲染下抖动感明显(用户反馈展开卡顿) */
   max-width: none;
   height: var(--agent-h, 200px);
-  /* 高度由 JS 动画循环驱动(dynamicIsland 内 rAF + easeOutCubic),CSS
+  /* 高度由 JS 动画循环驱动(dynamicIsland 内 rAF + easeOutQuart),CSS
      不做高度过渡(并行动画方案在软件渲染下仍卡,2026-08-06 v1 回退);
-     宽度保留无过冲缓动,速率 0.3s → 0.24s(2026-08-06 用户要求稍快) */
+     宽度保留无过冲缓动,0.24s → 0.3s(2026-08-09 优化"展开不够平滑":
+     0.24s 大跨度(紧凑 150 → 展开 800×缩放)快速划过,观感机械急促;
+     0.3s 无过冲从容,且与 agentHReady 衔接(AGENT_WIDTH_ANIMATE_MS)
+     同步——宽度刚到位高度立即启动,无空等顿点) */
   transition:
-    width 0.24s cubic-bezier(0.22, 1, 0.36, 1),
+    width 0.3s cubic-bezier(0.22, 1, 0.36, 1),
     box-shadow 0.3s ease,
     border-color 0.3s ease,
     transform 0.35s cubic-bezier(0.34, 1.56, 0.64, 1);
@@ -369,6 +372,10 @@
   gap: 10px;
   padding-right: 4px;
   user-select: text;
+  /* 右侧预留滚动条槽位(2026-08-08 用户要求):滚动条出现/消失不改变
+     内容宽度(否则文字换行变化 → 高度变化 → 滚动条抖动——展开动画
+     结束高度刚好不够时滚动条消失/出现的切换最明显) */
+  scrollbar-gutter: stable;
   scrollbar-width: thin;
   scrollbar-color: rgba(255, 255, 255, 0.15) transparent;
   /* 骨架 → 内容切换的平滑淡入:骨架(120ms)替换为真实消息时,文字
@@ -376,6 +383,43 @@
      那一帧文字闪烁"(实测)——淡入后文字平滑出现,不再闪。
      动画仅在挂载时播放(消息更新不重挂载,不影响流式渲染) */
   animation: agent-content-in 0.26s ease both;
+}
+
+/* 长历史消息滚动性能(2026-08-08 用户要求"历史消息多时滚动越来越卡"):
+   `content-visibility: auto` 让浏览器跳过视口外消息的渲染/布局/绘制
+   (等效 CSS 级虚拟化,无需 JS 窗口化)——历史消息多时 DOM 巨大,滚动
+   每帧对屏外内容全量重排重绘是卡顿主因;`contain-intrinsic-size` 用
+   估算尺寸占位稳定滚动条。屏外消息不可交互/不可聚焦属预期(滚入视口
+   恢复正常)。注意:跳底(scrollTop = scrollHeight)首帧按估算尺寸,
+   AgentView 双 rAF 后用真实布局尺寸校正一次。
+   **估算精度(2026-08-09 修复"大量消息滚动条中间部分滚动抖动")**:
+   原固定 120px 与真实高度差异大(短文本 ~45px/长消息数百 px),滚动
+   中部时元素真实化 → scrollHeight 被持续修正(实测 60 条滚动 6 段
+   波动 412px)= thumb 跳动。改为 `var(--msg-h, 120px)`——AgentView
+   测量时顺带写每条消息的真实高度(见 measureHeight),估算 ≈ 真实
+   → 真实化零跳变;`auto` 保留(记住真实尺寸,图片异步加载等未刷新
+   场景二次滚动兜底) */
+/* 消息列表滚动性能/稳定权衡(2026-08-09 修复"大量消息滚动条中间部分
+   滚动抖动"):content-visibility 的估算机制在**滚动中必然修正
+   scrollHeight**(实测 60 条滚动 6 段波动 412px;估算精确到每条真实
+   高度也无效,Chromium 行为)——滚动条抖动无解;全量布局滚动条完全
+   稳定(drift 0,实测)。**默认全量布局(≤100 条,AgentView 按消息数
+   加 .cv 类);超过阈值(长历史)才启用 content-visibility 保滚动性能,
+   接受滚动条轻微修正**,估算用每条真实高度(--msg-h,measureMsgH 挂载
+   时强制布局测 + 宽度动画完成后重测)尽量减小修正幅度;auto 记住
+   真实尺寸兜底二次滚动 */
+.island-agent-messages > * {
+  content-visibility: visible;
+}
+
+/* 长历史(>100 条)启用 CSS 级虚拟化:跳过视口外消息的渲染/布局/绘制
+   (2026-08-08 用户要求"历史消息多时滚动越来越卡");contain-intrinsic
+   -size 用精确估算占位稳定滚动条。屏外消息不可交互/不可聚焦属预期。
+   注意:跳底(scrollTop = scrollHeight)首帧按估算尺寸,AgentView
+   双 rAF 后用真实布局尺寸校正一次 */
+.island-agent-messages.cv > * {
+  content-visibility: auto;
+  contain-intrinsic-size: auto var(--msg-h, 120px);
 }
 
 @keyframes agent-content-in {
@@ -529,6 +573,917 @@
   margin: 4px 0;
   border-radius: 10px;
   border: 1px solid rgba(255, 255, 255, 0.14);
+}
+
+/* 对话媒体窗口(2026-08-08):图片/视频 = **气泡 UI 包裹**(圆角卡片 +
+   描边 + 阴影,悬浮强调色光环);固定宽 + 自然比例高,内容 100% 填充。
+   外层 wrap 相对定位承载右下角拖拽手柄(2026-08-08 用户要求"手柄移到
+   气泡外面"——frame overflow:hidden 会裁掉凸出的手柄)。
+   **右侧/底部 padding 留出手柄空间(2026-08-08 二轮修复"手柄被裁切")**:
+   手柄若凸出 wrap 的 content box,会被消息列表滚动容器(overflow-y:
+   auto)垂直裁切——padding 让手柄落在 wrap 的 content box 内,任何
+   容器都不裁 */
+.island-media-wrap {
+  position: relative;
+  display: block;
+  /* 2026-08-08 修复"圆角边缘不能拖拽":wrap 原为块级(占满气泡宽),
+     而 frame 只有媒体宽(如 320px)靠左——拖拽命中区(absolute 锚定
+     wrap padding-box 右缘)锚在**容器右缘**而非媒体气泡角点,媒体
+     窄于气泡时命中区漂在气泡右侧几十~上百像素,气泡圆角边缘拖不到。
+     fit-content 让 wrap 收缩贴住媒体宽度,命中区 + grip 图标锚回
+     气泡角点 */
+  width: fit-content;
+  margin: 6px 0;
+  padding: 0 16px 16px 0;
+}
+
+.island-media-frame {
+  position: relative;
+  display: block;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  overflow: hidden;
+  background: rgba(0, 0, 0, 0.5);
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.35);
+  user-select: none;
+  transition:
+    border-color 0.2s ease,
+    box-shadow 0.2s ease;
+}
+
+.island-media-frame:hover,
+.island-media-frame.resizing {
+  border-color: rgba(255, 255, 255, 0.34);
+  box-shadow:
+    0 0 0 2px color-mix(in srgb, var(--state-color, #4d6bfe) 35%, transparent),
+    0 2px 12px rgba(0, 0, 0, 0.35);
+}
+
+.island-media-frame img,
+.island-media-frame video {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #000;
+}
+
+/* 右下角拖拽命中区(2026-08-08 修复"拖拽功能丢失"):z 9 在视频控件层
+   (z 8)之上——移动到气泡右下角(含 frame 内角部 + 凸出区)即显示 ↘
+   光标,按下即可拖拽(水平 1:1 跟手)。44×44 中心贴气泡角:frame 内
+   覆盖 22px、凸出 22px。**grip 图标(斜线箭头 + 深色圆底)悬浮浮现**
+   (2026-08-08:原"纯透明无图标"命中区用户找不到拖拽点)——气泡内
+   任意位置悬浮即浮现,拖拽中保持;图标仅 13px 居中在气泡角点,不与
+   右下角的全屏按钮(28×28,角点内侧 10px 起)重叠 */
+.island-media-resize {
+  position: absolute;
+  right: -6px;
+  bottom: -6px;
+  z-index: 9;
+  width: 44px;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: nwse-resize;
+  touch-action: none;
+  background: transparent;
+}
+
+/* grip 图标圆底(白描边箭头在浅色气泡/深色视频上都要可见) */
+.island-media-resize svg {
+  padding: 2px;
+  border-radius: 50%;
+  background: rgba(10, 12, 16, 0.55);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.island-media-wrap:hover .island-media-resize svg,
+.island-media-wrap.resizing .island-media-resize svg {
+  opacity: 1;
+}
+
+/* ===== 定制视频播放器(2026-08-08 用户要求"不要原生控件") =====
+   自定义控件层:底部渐变遮罩 + 圆形播放键 + 可拖动进度条 + 时间 +
+   全屏按钮;全屏 = 整个播放器容器 requestFullscreen(控件随容器进入
+   全屏层);进入/退出全屏有过渡动画 */
+.island-video-player {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #000;
+}
+
+.island-video-player video {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+
+/* 视频封面(2026-08-10 用户要求"默认展示第一帧作为封面"):未播放时
+   覆盖在 video 上的第一帧截屏;object-fit contain 与 video 一致,
+   pointer-events none 点击穿透(点击播放/暂停不受影响),控件层
+   (z 8)在其上正常可点 */
+.island-video-poster {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #000;
+  pointer-events: none;
+  user-select: none;
+}
+
+.island-video-controls {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  /* z-index 8:低于右下角拖拽命中区(9)——命中区盖住控件层右下角
+     (进度条/时间之后的渐变区,无交互元素);
+     padding-right 12px(2026-08-10 全屏键上移到控件行上方,角位不再
+     有按钮,预留收窄让音量/更多靠右) */
+  z-index: 8;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 18px 12px 7px 10px;
+  background: linear-gradient(to top, rgba(0, 0, 0, 0.7), transparent);
+}
+
+.island-video-play,
+.island-video-fs {
+  /* 圆形胶囊按钮公共视觉(2026-08-08 修复:播放键与全屏键原先共用
+     absolute right:10 bottom:56 定位,叠在同一位置全屏键盖住播放键
+     ——分组只留视觉样式,定位各自声明:播放键留在控件层流内最左,
+     全屏键 absolute 右下角) */
+  flex: none;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.16);
+  color: #fff;
+  cursor: pointer;
+  transition:
+    background 0.15s ease,
+    transform 0.15s ease;
+}
+
+/* 全屏按钮(2026-08-10 用户要求"缩小对齐其它两个按键,放在播放
+   速度按键右边"):控件层内 flex 流(音量/更多键之后),24px 同排同高,
+   与 .island-video-vol-btn / more-btn 同款中性圆钮视觉;全屏时随
+   容器进入全屏层 */
+.island-video-fs {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.85);
+  cursor: pointer;
+  transition:
+    background 0.15s ease,
+    color 0.15s ease,
+    transform 0.15s ease;
+}
+
+.island-video-play:hover,
+.island-video-fs:hover {
+  background: rgba(255, 255, 255, 0.28);
+}
+
+.island-video-play:active,
+.island-video-fs:active {
+  transform: scale(0.9);
+}
+
+.island-video-bar {
+  position: relative;
+  flex: 1;
+  height: 16px;
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+  touch-action: none;
+}
+
+.island-video-bar::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.22);
+}
+
+.island-video-bar-fill {
+  position: absolute;
+  left: 0;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--state-color, #4d6bfe);
+  pointer-events: none;
+}
+
+.island-video-bar-thumb {
+  position: absolute;
+  top: 50%;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
+.island-video-time {
+  flex: none;
+  font-size: 0.62rem;
+  font-variant-numeric: tabular-nums;
+  color: rgba(255, 255, 255, 0.85);
+}
+
+/* 定制视频扩展控件(2026-08-10 用户要求:音量 + 更多选项,替代原生
+   controls;对话播放器 / 视频岛 / 多媒体库共用,偏好双向同步) */
+.island-video-extras {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+/* 音量:喇叭按钮 + 悬停滑杆 */
+.island-video-vol {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.island-video-vol-btn,
+.island-video-more-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.85);
+  cursor: pointer;
+  transition:
+    background 0.15s ease,
+    color 0.15s ease;
+}
+
+.island-video-vol-btn:hover,
+.island-video-more-btn:hover {
+  background: rgba(255, 255, 255, 0.18);
+  color: #fff;
+}
+
+/* 音量条(2026-08-10 用户要求"完全在音量键上方,从音量键延伸的
+   UI";二轮:"加入背景 UI + 修复还没移动到音量条上就消失"):
+   **深色圆角槽背景**(18px 宽 76px 高,大命中区——原 4px 窄条鼠标
+   稍偏即丢 hover,条消失;槽是 vol 子元素,hover 保持在槽上),
+   **槽底贴按钮顶**(bottom: 100%,无间隙——原 3px 间隙鼠标从按钮
+   移向条时路径中断丢 hover);scaleY 从按钮生长动画(呼出 0.22s
+   无过冲 / 消失缩回),与按钮同轴居中 */
+.island-video-vol-pop {
+  position: absolute;
+  left: 50%;
+  bottom: 100%;
+  transform: translateX(-50%) scaleY(0);
+  transform-origin: bottom;
+  width: 18px;
+  height: 76px;
+  border-radius: 10px;
+  background: rgba(8, 10, 14, 0.88);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  touch-action: none;
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    opacity 0.18s ease,
+    transform 0.22s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.island-video-vol:hover .island-video-vol-pop {
+  opacity: 1;
+  transform: translateX(-50%) scaleY(1);
+  pointer-events: auto;
+}
+
+/* 槽内轨道(4px)+ 强调色填充 */
+.island-video-vol-pop-track {
+  position: relative;
+  width: 4px;
+  height: calc(100% - 14px);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.28);
+  overflow: hidden;
+}
+
+.island-video-vol-pop-fill {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  width: 100%;
+  height: 0%;
+  border-radius: 999px;
+  background: var(--state-color, #4d6bfe);
+  pointer-events: none;
+}
+
+/* 更多(⋯)菜单:倍速档位 + 循环,点外关闭 */
+.island-video-more {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.island-video-more-menu {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 6px);
+  min-width: 148px;
+  padding: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 10px;
+  background: rgba(14, 17, 23, 0.96);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  z-index: 12;
+  animation: island-ui-in 0.24s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+  transform-origin: bottom right;
+}
+
+/* 消失动画(2026-08-10 用户要求):播 island-ui-out 上移淡出后卸载 */
+.island-video-more-menu.leaving {
+  animation: island-ui-out 0.16s ease both;
+}
+
+.island-video-more-label {
+  font-size: 0.6rem;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.island-video-more-speeds {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.island-video-more-item {
+  padding: 3px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 6px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.8);
+  font-size: 0.62rem;
+  cursor: pointer;
+  transition:
+    background 0.15s ease,
+    border-color 0.15s ease,
+    color 0.15s ease;
+}
+
+.island-video-more-item:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.island-video-more-item.on {
+  border-color: var(--state-color, #4d6bfe);
+  color: var(--state-color, #4d6bfe);
+  background: color-mix(in srgb, var(--state-color, #4d6bfe) 14%, transparent);
+}
+
+.island-video-more-loop {
+  align-self: flex-start;
+}
+
+/* 全屏(容器级):铺满 + 黑底 + 进入淡入缩放动画 */
+.island-video-player:fullscreen {
+  background: #000;
+  animation: media-fs-in 0.3s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.island-video-player:fullscreen::backdrop {
+  background: #000;
+  animation: media-fs-backdrop-in 0.3s ease;
+}
+
+.island-video-player:fullscreen video {
+  height: 100%;
+  width: 100%;
+}
+
+/* 退出全屏缩回动画(JS 加 class,播完移除) */
+.island-video-player.leaving-fullscreen {
+  animation: media-fs-out 0.2s ease both;
+}
+
+/* 图片全屏(2026-08-10 用户要求"Agent 对话窗口图片全屏"):容器级
+   全屏(frame = .island-media-frame),范围 = Agent 对话窗口(非媒体岛,
+   主进程不放大窗口);黑底 + 图片 contain 铺满 + 进入淡入 */
+.island-media-frame:fullscreen {
+  background: #000;
+  animation: media-fs-in 0.3s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.island-media-frame:fullscreen::backdrop {
+  background: #000;
+}
+
+.island-media-frame:fullscreen img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+@keyframes media-fs-in {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes media-fs-backdrop-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* ===== Agent 对话媒体小窗(2026-08-09 用户要求"灵动岛包裹的小窗")=====
+   收起 Agent 面板后岛体变形成媒体小窗(视频续播 / 图片缩略图):
+   岛体 264×148 圆角矩形(基础胶囊 → 圆角矩形,宽度/高度过渡弹簧
+   复用基础 transition)。
+   **胶囊一体化(2026-08-09 二轮设计,用户选定:无黑边)**——媒体
+   contain 铺满岛体、边缘直接由岛体 22px 圆角 + overflow hidden 裁剪
+   (基础 .island-demo 自带 1px 细白描边与分层柔化阴影保留,给出
+   胶囊轮廓观感);contain 露出区为黑底,与视频黑边无缝。
+   **无 ✕ 关闭键**(用户要求移除,退出 = 长按展开回面板) */
+.island-demo.island-agent-mini {
+  height: 148px;
+  border-radius: 22px;
+  padding: 0;
+}
+
+.island-agent-mini {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* 铺满容器(无包边);contain 露出区黑底,与视频内容无缝 */
+  background: #000;
+}
+
+/* 媒体内容:直接铺满,由岛体胶囊圆角裁剪(无自身圆角) */
+.island-agent-mini video,
+.island-agent-mini img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+  border-radius: 0;
+  background: #000;
+  cursor: pointer;
+  user-select: none;
+}
+
+/* 进度条 + 时间(2026-08-09 用户要求"视频岛没有进度条"):底部渐变
+   遮罩条(参照消息气泡控件层);播放键居中 z 1、全屏键右下角上方 z 4
+   (2026-08-10 上移加大,角位不再有按钮,padding-right 收窄让音量/
+   更多靠右)、进度条 z 3——互不重叠 */
+.island-agent-mini-bar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 16px 12px 5px 10px;
+  background: linear-gradient(to top, rgba(0, 0, 0, 0.72), transparent);
+  cursor: pointer;
+  touch-action: none;
+}
+
+.island-agent-mini-track {
+  position: relative;
+  flex: 1;
+  height: 16px;
+  display: flex;
+  align-items: center;
+}
+
+/* 4px 圆角条(与消息气泡播放器同款) */
+.island-agent-mini-track::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.22);
+}
+
+.island-agent-mini-fill {
+  position: absolute;
+  left: 0;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--state-color, #4d6bfe);
+  pointer-events: none;
+}
+
+.island-agent-mini-thumb {
+  position: absolute;
+  top: 50%;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
+.island-agent-mini-time {
+  flex: none;
+  font-size: 0.58rem;
+  font-variant-numeric: tabular-nums;
+  color: rgba(255, 255, 255, 0.85);
+  white-space: nowrap;
+}
+
+/* 播放键(暂停态悬浮,与消息气泡播放键同款圆形胶囊) */
+.island-agent-mini-play {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 38px;
+  height: 38px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.45);
+  color: #fff;
+  cursor: pointer;
+  transition:
+    background 0.15s ease,
+    transform 0.15s ease;
+}
+
+.island-agent-mini-play:hover {
+  background: rgba(0, 0, 0, 0.6);
+}
+
+.island-agent-mini-play:active {
+  transform: translate(-50%, -50%) scale(0.9);
+}
+
+/* 全屏按钮(2026-08-10 用户要求"缩小对齐其它两个按键,放在播放
+   速度按键右边"):进度条行内 flex 流(音量/更多键之后),24px 同排
+   同高,与音量/更多键同款中性圆钮视觉;容器级全屏 */
+.island-agent-mini-fs {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.85);
+  cursor: pointer;
+  transition:
+    background 0.15s ease,
+    color 0.15s ease,
+    transform 0.15s ease;
+}
+
+.island-agent-mini-fs:hover {
+  background: rgba(255, 255, 255, 0.28);
+}
+
+.island-agent-mini-fs:active {
+  transform: scale(0.9);
+}
+
+/* 全屏(容器级,2026-08-09 二轮优化"全屏 UI";三轮 2026-08-09 用户
+   要求"移除外侧的黑色矩形"):**媒体直接铺满全屏边缘**——去 14px 黑色
+   包边、去媒体圆角与白描边,视频画面四角直达屏幕边缘;容器 #000 仅
+   作 contain 露出区底色(视频比例不满屏时的黑边),不是 UI 包边。
+   **进入/返回动效(2026-08-09 二轮,用户要求"与岛体相同 3D 压感和
+   动画曲线")**:同款回弹弹簧曲线 cubic-bezier(0.34,1.56,0.64,1)
+   + perspective 3D 压感——进入:scale 0.92→1 + rotateX -6°→0 淡入
+   (按入回弹);返回:scale 1→0.88 + rotateX 0°→8° 淡出(按压释放,
+   JS 加 leaving-fullscreen class,播完移除) */
+.island-agent-mini:fullscreen {
+  background: #000;
+  animation: agent-mini-fs-in 0.32s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.island-agent-mini.fullscreen {
+  padding: 0;
+}
+
+.island-agent-mini.fullscreen video,
+.island-agent-mini.fullscreen img {
+  border-radius: 0;
+  border: none;
+}
+
+.island-agent-mini.leaving-fullscreen {
+  animation: agent-mini-fs-out 0.32s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+
+@keyframes agent-mini-fs-in {
+  from {
+    opacity: 0;
+    transform: perspective(700px) scale(0.92) rotateX(-6deg);
+  }
+  to {
+    opacity: 1;
+    transform: perspective(700px) scale(1) rotateX(0deg);
+  }
+}
+
+@keyframes agent-mini-fs-out {
+  from {
+    opacity: 1;
+    transform: perspective(700px) scale(1) rotateX(0deg);
+  }
+  to {
+    opacity: 0;
+    transform: perspective(700px) scale(0.88) rotateX(8deg);
+  }
+}
+
+@keyframes media-fs-out {
+  from {
+    opacity: 1;
+    transform: scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+}
+
+/* ===== 语音消息气泡(2026-08-08,参考 QQ/微信语音气泡) =====
+   胶囊横条 + 圆形播放键 + 动态声波 + 进度 + 时长;点击整条切换
+   播放/暂停;音频不做拖拽缩放 */
+.island-agent-voice {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 6px 0;
+  padding: 6px 12px 6px 6px;
+  border-radius: 16px 16px 16px 4px;
+  background: rgba(255, 255, 255, 0.09);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  color: var(--text-color, #fff);
+  max-width: 100%;
+  cursor: pointer;
+  user-select: none;
+  transition:
+    background 0.15s ease,
+    border-color 0.15s ease;
+}
+
+.island-agent-voice:hover {
+  background: rgba(255, 255, 255, 0.12);
+  border-color: rgba(255, 255, 255, 0.24);
+}
+
+.island-agent-voice-play {
+  flex: none;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 50%;
+  background: var(--state-color, #4d6bfe);
+  color: #fff;
+  cursor: pointer;
+  transition: transform 0.15s ease;
+}
+
+.island-agent-voice-play:active {
+  transform: scale(0.9);
+}
+
+.island-agent-voice-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 60px;
+}
+
+/* 动态声波:5 条竖条,播放时逐条跳动(QQ/微信语音图标观感) */
+.island-agent-voice-wave {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  height: 18px;
+}
+
+.island-agent-voice-wave span {
+  width: 3px;
+  height: 6px;
+  border-radius: 2px;
+  background: currentColor;
+}
+
+.island-agent-voice.playing .island-agent-voice-wave span {
+  animation: voice-wave 0.9s ease-in-out infinite;
+  animation-delay: calc(var(--i) * 0.12s);
+}
+
+@keyframes voice-wave {
+  0%,
+  100% {
+    height: 5px;
+  }
+  50% {
+    height: 16px;
+  }
+}
+
+/* 播放进度细条(2026-08-08 用户要求"音频气泡支持拖拽进度";UI 参考
+   音乐模式进度条:4px 圆角条 + 强调色渐变填充)点击/拖动 seek;
+   悬停/拖拽显示圆点 thumb */
+.island-agent-voice-progress {
+  position: relative;
+  display: block;
+  width: 92px;
+  height: 14px;
+  cursor: pointer;
+  touch-action: none;
+}
+
+/* 轨道线(4px 圆角,点击区是整条 14px)——音乐进度条同款灰色轨道 */
+.island-agent-voice-progress::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: 4px;
+  transform: translateY(-50%);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+/* 填充:强调色渐变(音乐模式 .island-progress-fill 同款:
+   90deg 强调色 → 强调色 55% 混黑) */
+.island-agent-voice-fill {
+  position: absolute;
+  left: 0;
+  top: 50%;
+  height: 4px;
+  transform: translateY(-50%);
+  border-radius: 999px;
+  background: linear-gradient(
+    90deg,
+    var(--state-color, #4d6bfe),
+    color-mix(in srgb, var(--state-color, #4d6bfe) 55%, #000)
+  );
+  pointer-events: none;
+}
+
+/* 拖拽圆点(悬停/拖拽中浮现) */
+.island-agent-voice-thumb {
+  position: absolute;
+  top: 50%;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.island-agent-voice-progress:hover .island-agent-voice-thumb,
+.island-agent-voice-progress:active .island-agent-voice-thumb {
+  opacity: 1;
+}
+
+.island-agent-voice-dur {
+  flex: none;
+  font-size: 0.68rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim, rgba(255, 255, 255, 0.65));
+}
+
+/* 用户气泡(强调色深底)内的语音气泡:深色系适配(与复制按钮同款) */
+.island-agent-msg-user .island-agent-voice {
+  background: rgba(11, 11, 15, 0.85);
+  border-color: rgba(11, 11, 15, 0.2);
+  color: #fff;
+}
+
+.island-agent-msg-user .island-agent-voice:hover {
+  background: rgba(11, 11, 15, 0.95);
+}
+
+/* 多媒体库音频试听(原生 audio controls;对话内音频已改语音气泡,
+   仅多媒体库面板仍用原生控件) */
+.island-agent-md-audio {
+  display: block;
+  margin: 4px 0 2px;
+  height: 36px;
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.35);
+}
+
+/* 媒体播放失败提示 + 降级打开按钮(外部播放器仅为降级选择) */
+.island-agent-media-loading,
+.island-agent-media-err {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 6px 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 0.66rem;
+  color: var(--text-dim, rgba(255, 255, 255, 0.55));
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.island-agent-media-external {
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.24);
+  background: rgba(255, 255, 255, 0.09);
+  color: var(--text-color, #fff);
+  font-size: 0.64rem;
+  font-family: inherit;
+  cursor: pointer;
+  transition:
+    background 0.15s ease,
+    border-color 0.15s ease;
+}
+
+.island-agent-media-external:hover {
+  background: rgba(255, 255, 255, 0.14);
+  border-color: rgba(255, 255, 255, 0.34);
+}
+
+.island-agent-media-err {
+  color: #f87171;
 }
 
 .island-agent-md p {
@@ -1618,6 +2573,18 @@
   transition-delay: 0.25s;
 }
 
+/* 2026-08-10 修复"收起为多媒体岛没有入场动画":⋯ 菜单最多 8 项
+   (停止生成/新对话/历史/工具/多媒体库/设置/收起为灵动岛/收起为多媒体
+   岛),delay 只枚举到 6 → 第 7、8 项 delay 为 0,展开瞬间提前到位,
+   与前面错峰项脱节(观感=最后两项没有滑入动画) */
+.island-quick-menu.open .island-quick-menu-item:nth-of-type(7) {
+  transition-delay: 0.3s;
+}
+
+.island-quick-menu.open .island-quick-menu-item:nth-of-type(8) {
+  transition-delay: 0.35s;
+}
+
 .island-quick-menu-item:hover {
   background: rgba(255, 255, 255, 0.1);
   color: var(--text-color, #fff);
@@ -1736,6 +2703,8 @@
   gap: 9px;
   overflow-y: auto;
   padding-right: 2px;
+  /* 滚动条槽位预留(2026-08-08,与消息列表同款防宽度抖动) */
+  scrollbar-gutter: stable;
   scrollbar-width: thin;
   scrollbar-color: rgba(255, 255, 255, 0.15) transparent;
 }
@@ -1820,98 +2789,38 @@
   background: color-mix(in srgb, var(--state-color, #4d6bfe) 15%, transparent);
 }
 
-/* 自定义缩放步进器(替代原生 number 上下箭头——系统 spinners 无法定制
-   样式):值徽标 + 上下箭头;步进/滚轮切换复用 WheelSwap 内容交换动画,
-   .tick 仅在步进后加(首帧挂载不闪),边框柔和强调(与记忆类型按钮同款) */
-.island-scale-stepper {
-  display: flex;
-  align-items: stretch;
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.07);
-  overflow: hidden;
-}
-
-.island-scale-stepper:focus-within {
-  border-color: color-mix(in srgb, var(--state-color, #4d6bfe) 65%, transparent);
-}
-
-.island-scale-stepper-value {
-  width: 46px;
-  padding: 5px 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid transparent;
-  background: transparent;
-  color: var(--text-color, #fff);
-  font-size: 0.68rem;
-  font-family: inherit;
-  cursor: pointer;
-  user-select: none;
-}
-
-.island-scale-stepper-value:hover {
-  background: rgba(255, 255, 255, 0.06);
-}
-
-/* 步进瞬间边框柔和强调(透明边框只在动画期间显色,不占布局) */
-.island-scale-stepper-value.tick {
-  animation: agent-quick-flash-dim 0.3s ease;
-}
-
-/* 内联编辑输入(替代值徽标;容器 focus-within 显示焦点) */
-.island-scale-stepper input {
-  width: 46px;
-  padding: 0;
-  border: none;
-  background: transparent;
-  color: var(--text-color, #fff);
-  font-size: 0.68rem;
-  font-family: inherit;
-  text-align: center;
-  outline: none;
-  user-select: text;
-}
-
-.island-scale-stepper-arrows {
-  display: flex;
-  flex-direction: column;
-  border-left: 1px solid rgba(255, 255, 255, 0.1);
-}
-
-.island-scale-stepper-arrows button {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 18px;
-  padding: 0;
-  border: none;
-  background: transparent;
-  color: var(--text-dim, rgba(255, 255, 255, 0.5));
-  cursor: pointer;
-  transition:
-    background 0.12s ease,
-    color 0.12s ease;
-}
-
-.island-scale-stepper-arrows button:hover {
-  background: rgba(255, 255, 255, 0.1);
-  color: var(--text-color, #fff);
-}
-
-.island-scale-stepper-arrows button:active {
-  background: rgba(255, 255, 255, 0.16);
-}
-
-.island-scale-stepper-arrows button + button {
-  border-top: 1px solid rgba(255, 255, 255, 0.08);
-}
-
 .island-agent-scale-hint {
   font-size: 0.66rem;
   color: var(--text-dim, rgba(255, 255, 255, 0.5));
+}
+
+/* 快捷按钮内联编辑输入(2026-08-08 QuickMenu allowCustom:输出预算 /
+   主动陪伴间隔 / 界面放大点击快捷按钮输入自定义值;原 ScaleStepper
+   已随四控件 QuickMenu 化删除)。
+   2026-08-09 修复"点击数字漂移 + 编辑截断":
+   ① 漂移:原 width:auto(min 3.5em / max 7em)+ text-align:center——
+      input 元素按 size 属性取宽被钳到 ~7em(≈76px),远超按钮内标签
+      槽位,点击进入编辑时数字跳到输入框中心;输入过程中每键入一次
+      重新居中。
+   ② 截断:前一轮修复改 flex:1 钉死槽位,输入超过标签宽被内部滚动
+      截断(用户实测)。
+   终稿:宽度 = 内联 ch(QuickMenu 按 draft 字数设置,数字 ≈1ch,
+   0.5ch 余量放光标),flex:none 不吃 flex 拉伸/收缩;按钮宽度 effect
+   编辑态测量输入框 → 按钮随内容展开/收缩(0.28s 宽度过渡保留);
+   左对齐锚定标签同一 x(数字不跳位,宽度变化只动右缘);字号随按钮
+   继承(0.68rem 比标签 0.7rem 差 3% 亚像素偏移) */
+.island-quick-menu-btn input {
+  flex: none;
+  max-width: none;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--text-color, #fff);
+  font-size: inherit;
+  font-family: inherit;
+  text-align: left;
+  outline: none;
+  user-select: text;
 }
 
 /* 保存行:强调色按钮 + 已保存提示 */
@@ -1982,6 +2891,23 @@
 
 .island-mcp-remove:hover {
   background: rgba(244, 63, 94, 0.12);
+}
+
+/* 数据管理清除按钮(2026-08-10 用户要求,Agent 设置「数据管理」区):
+   危险色;两段式确认态 = 实底红 + 描边加深(第二次点击执行) */
+.island-agent-scale-btn.island-data-clear {
+  border-color: rgba(244, 63, 94, 0.45);
+  color: rgba(244, 63, 94, 0.92);
+}
+
+.island-agent-scale-btn.island-data-clear:hover {
+  background: rgba(244, 63, 94, 0.12);
+}
+
+.island-agent-scale-btn.island-data-clear.confirming {
+  background: rgba(244, 63, 94, 0.22);
+  border-color: rgba(244, 63, 94, 0.75);
+  color: #fecdd3;
 }
 
 .island-agent-scale-btn:disabled {
@@ -2581,6 +3507,8 @@
   flex-direction: column;
   gap: 8px;
   padding-right: 4px;
+  /* 滚动条槽位预留(2026-08-08,与消息列表同款防宽度抖动) */
+  scrollbar-gutter: stable;
   scrollbar-width: thin;
   scrollbar-color: rgba(255, 255, 255, 0.15) transparent;
 }

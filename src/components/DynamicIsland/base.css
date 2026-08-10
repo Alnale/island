@@ -246,6 +246,14 @@
   }
 }
 
+/* 通用入场动画类(Bug 修复 2026-08-08:此前只有引用没有本规则,
+   `.island-ui-enter` 全部静默失效——记忆/技能/进化/多媒体库编辑框的
+   入场动画都没播,用户反馈"编辑框瞬间弹出没有动画";补定义后既有
+   使用全部恢复) */
+.island-ui-enter {
+  animation: island-ui-in 0.28s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+
 @keyframes spin {
   to {
     transform: rotate(360deg);
@@ -299,6 +307,17 @@
   pointer-events: none;
   /* 展开方向:内容立即淡出(无延迟) */
   transition-delay: 0s;
+}
+
+/* 串行展开(2026-08-08 修复"展开动画图中 UI 透明"):agent 展开且高度
+   动画未就绪(宽度动画期间,AgentView 面板未挂载)时,紧凑内容**保持
+   可见**——面板未挂载、岛体 56 高宽条内只有紧凑内容,若按 expanded
+   规则淡出 = 宽条岛体内容全透明(用户实测) */
+.island-demo.expanded.island-agent-view:not(.agent-height-ready) .island-content {
+  opacity: 1;
+  transform: none;
+  filter: none;
+  pointer-events: auto;
 }
 
 /* 收起方向:等岛体收缩接近完成(弹簧 0.33s)再让内容流回原位,

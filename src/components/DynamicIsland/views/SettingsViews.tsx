@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   LYRIC_PROVIDERS,
   loadLyricAuto,
@@ -8,297 +8,12 @@ import {
   type LyricProvider,
 } from '../../../media/lyricProviders'
 import { BackFoot, PanelHead } from './shared'
-import { QuickMenu } from './QuickMenu'
 
-/** 帮助手册条目:简约线框图标 + 标题 + 一句话说明 */
-interface HelpEntry {
-  icon: ReactNode
-  title: string
-  desc: string
-}
 
-/** 简约线框图标统一属性(描边风格,currentColor 跟随) */
-const HELP_ICON = {
-  className: 'island-help-svg',
-  width: 19,
-  height: 19,
-  viewBox: '0 0 24 24',
-  fill: 'none',
-  stroke: 'currentColor',
-  strokeWidth: 1.8,
-  strokeLinecap: 'round',
-  strokeLinejoin: 'round',
-} as const
-
-/** 音乐模式手册(12 条:基本手势 + 面板控件 + 托盘) */
-const MUSIC_HELP_ITEMS: HelpEntry[] = [
-  {
-    icon: (
-      <svg {...HELP_ICON}>
-        <path d="M4 3l7 17 2.4-6.6L20 11z" />
-      </svg>
-    ),
-    title: '悬停岛体',
-    desc: '露出进度条,查看播放进度',
-  },
-  {
-    icon: (
-      <svg {...HELP_ICON}>
-        <path d="M12 4v10m0 0l-3.5-3.5M12 14l3.5-3.5" />
-        <path d="M5 17v1a2 2 0 002 2h10a2 2 0 002-2v-1" />
-      </svg>
-    ),
-    title: '长按岛体',
-    desc: '展开控制面板',
-  },
-  {
-    icon: (
-      <svg {...HELP_ICON}>
-        <path d="M4 3l7 17 2.4-6.6L20 11z" />
-        <circle cx="12" cy="12" r="1" fill="currentColor" stroke="none" />
-      </svg>
-    ),
-    title: '单击岛体',
-    desc: '收起面板,回到胶囊',
-  },
-  {
-    icon: (
-      <svg {...HELP_ICON}>
-        <path d="M5 8l4 4-4 4M12 8l4 4-4 4" />
-      </svg>
-    ),
-    title: '双击文字',
-    desc: '播放 / 暂停',
-  },
-  {
-    icon: (
-      <svg {...HELP_ICON}>
-        <path d="M8 3L4 7l4 4" />
-        <path d="M4 7h16" />
-        <path d="M16 21l4-4-4-4" />
-        <path d="M20 17H4" />
-      </svg>
-    ),
-    title: '左右滑动文字',
-    desc: '上一首 / 下一首',
-  },
-  {
-    icon: (
-      <svg {...HELP_ICON}>
-        <path d="M4 8h10M18 8h2M4 16h2M10 16h10" />
-        <circle cx="16" cy="8" r="2" />
-        <circle cx="8" cy="16" r="2" />
-      </svg>
-    ),
-    title: '拖动进度条',
-    desc: '跳转播放位置,时间粒子反馈',
-  },
-  {
-    icon: (
-      <svg {...HELP_ICON}>
-        <path d="M9 18V5l12-2v13" />
-        <circle cx="6" cy="18" r="3" />
-        <circle cx="18" cy="16" r="3" />
-      </svg>
-    ),
-    title: '点击音乐图标',
-    desc: '切换系统监听 / 本地播放器',
-  },
-  {
-    icon: (
-      <svg {...HELP_ICON}>
-        <path d="M17 2l4 4-4 4" />
-        <path d="M3 11v-1a4 4 0 014-4h14" />
-        <path d="M7 22l-4-4 4-4" />
-        <path d="M21 13v1a4 4 0 01-4 4H3" />
-      </svg>
-    ),
-    title: '播放模式按钮',
-    desc: '顺序 / 单曲循环 / 随机',
-  },
-  {
-    icon: (
-      <svg {...HELP_ICON}>
-        <path d="M5 9l-3 3 3 3M19 9l3 3-3 3M9 5l3-3 3 3M9 19l3 3 3-3" />
-      </svg>
-    ),
-    title: '右键长按拖动',
-    desc: '移动挂件位置',
-  },
-  {
-    icon: (
-      <svg {...HELP_ICON}>
-        <rect x="2" y="4" width="20" height="12" rx="2" />
-        <path d="M2 16l4 4h12l4-4" />
-        <path d="M10 12h4" />
-      </svg>
-    ),
-    title: '托盘菜单',
-    desc: '设置 / 置顶 / 开机自启 / 模式',
-  },
-  {
-    icon: (
-      <svg {...HELP_ICON}>
-        <path d="M4 6h16M4 12h16M4 18h10" />
-      </svg>
-    ),
-    title: '歌词字幕',
-    desc: '展开自动显示,当前句高亮',
-  },
-  {
-    icon: (
-      <svg {...HELP_ICON}>
-        <path d="M12 15V4m0 0L7.5 8.5M12 4l4.5 4.5" />
-        <path d="M4 20h16" />
-      </svg>
-    ),
-    title: '上传音乐',
-    desc: '空列表时直接上传本地音乐',
-  },
-]
-
-/** Agent 模式手册(12 条:切换 / 对话 / 菜单 / 记忆与进化) */
-const AGENT_HELP_ITEMS: HelpEntry[] = [
-  {
-    icon: (
-      <svg {...HELP_ICON}>
-        <path d="M12 2l2.5 7.5L22 12l-7.5 2.5L12 22l-2.5-7.5L2 12l7.5-2.5z" />
-      </svg>
-    ),
-    title: '切换到 Agent',
-    desc: '托盘 → 模式 → Agent 模式',
-  },
-  {
-    icon: (
-      <svg {...HELP_ICON}>
-        <rect x="3" y="3" width="18" height="18" rx="2" />
-        <path d="M3 9h18" />
-      </svg>
-    ),
-    title: '长按展开',
-    desc: '打开对话面板',
-  },
-  {
-    icon: (
-      <svg {...HELP_ICON}>
-        <rect x="2" y="6" width="20" height="12" rx="2" />
-        <path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M6 14h12" />
-      </svg>
-    ),
-    title: '输入对话',
-    desc: 'Enter 发送,Shift+Enter 换行',
-  },
-  {
-    icon: (
-      <svg {...HELP_ICON}>
-        <rect x="6" y="6" width="12" height="12" rx="2" />
-      </svg>
-    ),
-    title: '停止生成',
-    desc: '运行中按钮或 ⋯ 菜单',
-  },
-  {
-    icon: (
-      <svg {...HELP_ICON}>
-        <circle cx="5" cy="12" r="1.7" />
-        <circle cx="12" cy="12" r="1.7" />
-        <circle cx="19" cy="12" r="1.7" />
-      </svg>
-    ),
-    title: '⋯ 菜单',
-    desc: '新对话 / 历史 / 工具列表 / 收起',
-  },
-  {
-    icon: (
-      <svg {...HELP_ICON}>
-        <rect x="7" y="2" width="10" height="20" rx="5" />
-        <path d="M12 6v4" />
-      </svg>
-    ),
-    title: '快捷切换按钮',
-    desc: '悬浮 ⋯ 左侧,滚轮切换入口',
-  },
-  {
-    icon: (
-      <svg {...HELP_ICON}>
-        <circle cx="12" cy="12" r="9" />
-        <path d="M15 9.5a3.5 3.5 0 100 5" />
-        <path d="M16 12v1.5a2.5 2.5 0 01-5 0V9" />
-      </svg>
-    ),
-    title: '/技能 @MCP',
-    desc: '手动调用技能与 MCP 工具',
-  },
-  {
-    icon: (
-      <svg {...HELP_ICON}>
-        <path d="M6 3h12v18l-6-4-6 4z" />
-      </svg>
-    ),
-    title: '长期记忆',
-    desc: '说「记住:…」自动沉淀',
-  },
-  {
-    icon: (
-      <svg {...HELP_ICON}>
-        <path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z" />
-      </svg>
-    ),
-    title: '自我进化',
-    desc: '设置里运行记忆进化',
-  },
-  {
-    icon: (
-      <svg {...HELP_ICON}>
-        <path d="M9 2v6M15 2v6M6 8h12v4a6 6 0 01-12 0z" />
-        <path d="M12 18v4" />
-      </svg>
-    ),
-    title: 'MCP 与技能',
-    desc: '设置里接入服务与技能目录',
-  },
-  {
-    icon: (
-      <svg {...HELP_ICON}>
-        <circle cx="11" cy="11" r="7" />
-        <path d="M21 21l-4.3-4.3" />
-        <path d="M11 8v6M8 11h6" />
-      </svg>
-    ),
-    title: '界面放大',
-    desc: 'Agent 设置,100%–300%',
-  },
-  {
-    icon: (
-      <svg {...HELP_ICON}>
-        <path d="M19 12H5M11 18l-6-6 6-6" />
-      </svg>
-    ),
-    title: '切回音乐',
-    desc: '托盘 → 模式 → 音乐模式',
-  },
-]
-
-/** 模式标签图标(左上角切换器) */
-const HELP_TAB_ICONS: Record<'music' | 'agent', ReactNode> = {
-  music: (
-    <svg {...HELP_ICON}>
-      <path d="M9 18V5l12-2v13" />
-      <circle cx="6" cy="18" r="3" />
-      <circle cx="18" cy="16" r="3" />
-    </svg>
-  ),
-  agent: (
-    <svg {...HELP_ICON}>
-      <path d="M12 2l2.5 7.5L22 12l-7.5 2.5L12 22l-2.5-7.5L2 12l7.5-2.5z" />
-    </svg>
-  ),
-}
 
 export interface SettingsViewProps {
   /** 宿主支持背景编辑时显示"自定义图片背景"入口 */
   onOpenBackground?: () => void
-  onOpenHelp: () => void
   /** 宿主支持主题色时显示"主题色"入口 */
   onOpenTheme?: () => void
   /** 宿主支持字体时显示"字体"入口 */
@@ -312,10 +27,12 @@ export interface SettingsViewProps {
 }
 
 /** 设置视图(托盘菜单入口,岛内打开):设置类功能的总入口,
- *  自定义背景 / 帮助手册 / 主题色按宿主能力显隐 */
+ *  自定义背景 / 主题色 / 字体按宿主能力显隐。
+ *  帮助手册入口已移除(2026-08-10 用户要求);多媒体库入口已移除
+ *  (2026-08-08 用户要求:独立菜单,不属设置范畴,入口在托盘菜单与
+ *  Agent 对话 ⋯ 菜单) */
 export function SettingsView({
   onOpenBackground,
-  onOpenHelp,
   onOpenTheme,
   onOpenFont,
   onOpenAgent,
@@ -353,31 +70,6 @@ export function SettingsView({
             <span>自定义图片背景</span>
           </button>
         )}
-        <button
-          type="button"
-          className="island-settings-item"
-          onClick={(event) => {
-            event.stopPropagation()
-            onOpenHelp()
-          }}
-        >
-          <svg
-            className="island-ctl-svg"
-            width="16"
-            height="16"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth={2}
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          >
-            <circle cx="12" cy="12" r="10" />
-            <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" />
-            <line x1="12" y1="17" x2="12.01" y2="17" />
-          </svg>
-          <span>帮助手册</span>
-        </button>
         {onOpenTheme && (
           <button
             type="button"
@@ -490,10 +182,6 @@ export function SettingsView({
       <BackFoot onBack={onBack} />
     </div>
   )
-}
-
-export interface HelpViewProps {
-  onBack: () => void
 }
 
 export interface LyricApiViewProps {
@@ -609,56 +297,3 @@ export function LyricApiView({ onBack }: LyricApiViewProps) {
   )
 }
 
-/**
- * 帮助手册视图(托盘菜单入口 / 初次安装自动打开,岛内显示):
- * - **大尺寸承载教学内容**(200% 缩放的大小,岛体 800×640,窗口跟随);
- * - **左上角模式标签**:复用通用 QuickMenu(整合按钮 + 同行联通展开 +
- *   滚轮逐格循环切换 + 高亮滑块 + 宽度过渡,与 Agent 设置菜单同款),
- *   **默认选中的类型是音乐模式**(用户要求);
- * - **教学布局**:简约线框图标 + 标题 + 一句话说明,双列卡片网格。
- */
-export function HelpView({ onBack }: HelpViewProps) {
-  const [manual, setManual] = useState<'music' | 'agent'>('music')
-  const entries = manual === 'music' ? MUSIC_HELP_ITEMS : AGENT_HELP_ITEMS
-  // 模式按钮内容(图标 + 名称):QuickMenu 按钮 WheelSwap 与菜单项共用
-  const manualLabel = (m: 'music' | 'agent') => (m === 'music' ? '音乐模式' : 'Agent 模式')
-  const manualNode = (m: 'music' | 'agent') => (
-    <>
-      <span className="island-help-mode-icon" aria-hidden="true">
-        {HELP_TAB_ICONS[m]}
-      </span>
-      <span>{manualLabel(m)}</span>
-    </>
-  )
-  return (
-    <div className="island-panel-list island-help-view">
-      <PanelHead title="帮助手册" count={manualLabel(manual)} />
-      {/* 左上角模式切换:通用 QuickMenu(悬浮展开两项 / 滚轮逐格切换 /
-          单击菜单项切换;默认音乐模式);每格手册内容重放淡入 */}
-      <QuickMenu
-        items={(['music', 'agent'] as const)}
-        value={manual}
-        onChange={(m) => setManual(m)}
-        getLabel={manualNode}
-        title="点击或滚轮切换"
-        className="island-help-mode-menu"
-        wheelWhenOpen
-      />
-      {/* 教学卡片网格:简约图标 + 标题 + 说明;每格切换重放淡入 */}
-      <div key={manual} className="island-help-grid">
-        {entries.map((item) => (
-          <div key={item.title} className="island-help-card">
-            <span className="island-help-card-icon" aria-hidden="true">
-              {item.icon}
-            </span>
-            <span className="island-help-card-meta">
-              <span className="island-help-card-title">{item.title}</span>
-              <span className="island-help-card-desc">{item.desc}</span>
-            </span>
-          </div>
-        ))}
-      </div>
-      <BackFoot onBack={onBack} />
-    </div>
-  )
-}

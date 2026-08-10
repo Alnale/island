@@ -31,7 +31,7 @@ const result = await build({
 })
 const code = result.outputFiles[0].text
 const mod = await import('data:text/javascript;base64,' + Buffer.from(code).toString('base64'))
-const { parseMarkdown, parseInlines } = mod
+const { parseMarkdown, parseInlines, firstMediaKindInText } = mod
 
 let passed = 0
 let failed = 0
@@ -291,9 +291,45 @@ checkEq(
 )
 
 checkEq(
-  '图片 → 链接',
+  '图片(2026-08-08 媒体窗口):![alt](https://...png) → img 节点',
   parseInlines('![图](https://a.com/i.png)'),
-  [{ t: 'a', h: 'https://a.com/i.png', c: [{ t: 'text', s: '图' }] }],
+  [{ t: 'img', s: 'https://a.com/i.png', a: '图' }],
+)
+
+checkEq(
+  '视频:![alt](url.mp4) → video 节点',
+  parseInlines('![视频](https://a.com/v.mp4)'),
+  [{ t: 'video', s: 'https://a.com/v.mp4', a: '视频' }],
+)
+
+checkEq(
+  '音频:![alt](本地路径.mp3) → audio 节点(本地路径经 IPC 读取)',
+  parseInlines('![歌](C:\\\\music\\\\a.mp3)'),
+  [{ t: 'audio', s: 'C:\\\\music\\\\a.mp3', a: '歌' }],
+)
+
+checkEq(
+  'data URL 图片仍为 img 节点',
+  parseInlines('![q](data:image/png;base64,AAA)'),
+  [{ t: 'img', s: 'data:image/png;base64,AAA', a: 'q' }],
+)
+
+checkEq(
+  '非媒体扩展名链接仍为链接节点',
+  parseInlines('![doc](https://a.com/a.pdf)'),
+  [{ t: 'a', h: 'https://a.com/a.pdf', c: [{ t: 'text', s: 'doc' }] }],
+)
+
+check(
+  'mediaKindOf:图片/视频/音频/未知分派',
+  mod.mediaKindOf('https://a.com/x.png') === 'img' &&
+    mod.mediaKindOf('https://a.com/x.webp') === 'img' &&
+    mod.mediaKindOf('C:/v/x.mp4') === 'video' &&
+    mod.mediaKindOf('https://a.com/x.mov') === 'video' &&
+    mod.mediaKindOf('C:/m/x.flac') === 'audio' &&
+    mod.mediaKindOf('https://a.com/x.m4a') === 'audio' &&
+    mod.mediaKindOf('https://a.com/x.pdf') === null &&
+    mod.mediaKindOf('https://a.com/x') === null,
 )
 
 check(
@@ -311,6 +347,29 @@ checkEq(
   '__粗体(双下划线)',
   parseInlines('__b__'),
   [{ t: 'b', c: [{ t: 'text', s: 'b' }] }],
+)
+
+// 2026-08-10 自动播权分派(firstMediaKindInText:文本段第一个 markdown
+// 媒体链接的类型;LLM 回复内嵌 ![歌名](路径) 场景)
+check(
+  'firstMediaKindInText:音频链接',
+  firstMediaKindInText('为你找到一首歌:![D大调卡农](C:/music/canon.mp3)') === 'audio',
+)
+check(
+  'firstMediaKindInText:视频链接',
+  firstMediaKindInText('![视频](D:/v/clip.mp4) 前面有文字') === 'video',
+)
+check(
+  'firstMediaKindInText:图片不算音视频',
+  firstMediaKindInText('![封面](a.png)') === 'img',
+)
+check(
+  'firstMediaKindInText:无媒体链接',
+  firstMediaKindInText('纯文本没有链接') === null,
+)
+check(
+  'firstMediaKindInText:只取第一个',
+  firstMediaKindInText('![a](a.mp3) ![b](b.mp4)') === 'audio',
 )
 
 // 回归:共享 /g 正则 lastIndex 被递归内层重置 → 外层从 0 重扫 = 死循环 OOM。

@@ -34,6 +34,17 @@ export interface ToolResultPart {
   durationMs: number
 }
 
+/** 媒体附件(工具结果注入对话气泡,2026-08-08):kind + url(本地绝对
+ * 路径或远程 URL)+ 可选名称。渲染端 MediaFrame 窗口内直接播放
+ * (本地路径映射 island-media:// 流式协议)——LLM 说"打开视频看看"
+ * 时由 open_file 拦截注入,不再依赖 LLM 输出 markdown(实测 LLM
+ * 只回复"已播放"而不展示,窗口看不到视频气泡) */
+export interface MediaAttachment {
+  kind: 'img' | 'video' | 'audio'
+  url: string
+  name?: string
+}
+
 /** 消息 part(opencode MessagePart 的子集) */
 export type AgentPart =
   | { type: 'text'; text: string }
@@ -41,6 +52,7 @@ export type AgentPart =
   | ToolCallPart
   | ToolResultPart
   | { type: 'image'; dataUrl: string }
+  | { type: 'media'; kind: 'img' | 'video' | 'audio'; url: string; name?: string }
 
 /** 一条消息:user(整条文本)或 assistant(parts 序列) */
 export interface AgentMessage {
@@ -213,12 +225,13 @@ export interface AgentTool {
   /**
    * 执行结果:字符串 = 纯文本(回填 LLM);
    * 对象 = 文本 + 图片附件(data URL,引擎注入助手消息 image part 供
-   * 渲染端展示——如 bili 登录二维码,不依赖 LLM 复述长 base64)
+   * 渲染端展示——如 bili 登录二维码,不依赖 LLM 复述长 base64)+
+   * 媒体附件(2026-08-08:media part,渲染端 MediaFrame 窗口内播放)
    */
   execute(
     params: Record<string, unknown>,
     ctx?: ToolExecCtx,
-  ): Promise<string | { text: string; image?: string }>
+  ): Promise<string | { text: string; image?: string; media?: MediaAttachment[] }>
   /**
    * 技能来源分区(设置界面三区展示):
    * created = 灵动岛创建(引擎 create / 自然语言,userData/skills 无导入标记);

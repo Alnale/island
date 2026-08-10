@@ -105,7 +105,9 @@ export interface AgentController {
   currentTitle: string | null
   /** 心理揣测(独立 Sub Agent 每轮回复后静默更新;紧凑态文字区优先展示) */
   mindGuess: string | null
-  send(text: string): void
+  /** 发送一轮对话。opts.silent = 系统提示静默模式(不进渲染端历史,
+   * 仅作引擎本轮输入——background-done 等系统通知用) */
+  send(text: string, opts?: { silent?: boolean }): void
   abort(): void
   /** exec_command 确认门:回传用户选择(引擎在等待 tool-confirm-request) */
   confirmTool(approved: boolean): void
@@ -117,6 +119,11 @@ export interface AgentController {
   saveConfig(patch: Partial<AgentConfig>): Promise<void>
   /** 重新拉取配置(LLM 自我配置后设置界面需刷新) */
   refreshConfig(): void
+  /** 本会话流式落定且未自动播放过的消息 id(2026-08-10:媒体自动播放
+   * 只限"当次对话";引用稳定,渲染时读 has) */
+  mediaAutoPlayIds: ReadonlySet<string>
+  /** 消费自动播放标记(消息首条媒体已自动播放过) */
+  consumeMediaAutoPlay(id: string): void
 }
 
 export function useAgent(opts?: { allowProactive?: boolean }): AgentController {
@@ -153,6 +160,10 @@ export function useAgent(opts?: { allowProactive?: boolean }): AgentController {
   // 注意:send 不递增——连续对话时每轮总结基于最新消息,旧总结结果
   // 主题一致仍有效,递增会把总结全部作废(文字区永远等不到标题)
   const sessionVersionRef = useRef(0)
+  // 2026-08-10 自动播放标记:本会话**流式落定**且尚未自动播放过的助手
+  // 消息 id——LLM 播放视频/音频只在"当次对话"(本轮落定)自动播放一次;
+  // 历史会话加载/重挂载(收起再展开)读到已消费 → 不再自动播放
+  const mediaAutoPlayRef = useRef(new Set<string>())
   // 加载历史后跳过下一次后台标签生成(历史已有标题/心理,无需重新生成)
   const skipNextLabelRef = useRef(false)
   // 主动陪伴(2026-08-07):上次"有操作"时刻(用户发送/清空/切换会话/
@@ -247,6 +258,9 @@ export function useAgent(opts?: { allowProactive?: boolean }): AgentController {
           // 权威落定:以引擎回传的 parts 替换流式累积(附 token 用量);
           // 静默总结由下方 effect 在 status idle 后统一触发
           resetStreaming()
+          // 2026-08-10 自动播放:落定的消息 id 入"可自动播放"集合——
+          // 本轮渲染时首条媒体附件自动播放;消费后移除(见 consumeMediaAutoPlay)
+          mediaAutoPlayRef.current.add(event.message.id)
           setMessages((prev) => [...prev, { ...event.message, usage: event.usage }])
           setLastError(null)
           // 主动陪伴:主动回复落定 = 一次"有操作"(重置 idle 时钟——
@@ -267,10 +281,12 @@ export function useAgent(opts?: { allowProactive?: boolean }): AgentController {
           // 后台长任务完成(如 bili 下载):自动触发一轮对话——LLM 基于
           // 系统提示的状态块主动告知用户结果,无需用户主动提问
           // (实测:下载完成后用户不提问就不知道结果)。
-          // 复用 send:busy 时忽略(对话中的状态块已覆盖),idle 时发送;
-          // send 引用稳定(useCallback []),事件订阅闭包安全
+          // 复用 send 的 silent 模式(2026-08-08 用户要求):系统提示
+          // 不作为用户消息气泡出现在对话窗口(通知由主进程 Windows
+          // 通知展示),LLM 回复照常落定。busy 时忽略(对话中的状态块
+          // 已覆盖);send 引用稳定(useCallback []),事件订阅闭包安全
           const text = `【系统通知】${event.title}:${event.message}。请根据当前任务状态,用一两句话主动告知用户结果。`
-          send(text)
+          send(text, { silent: true })
           break
         }
         case 'mind-proactive': {
@@ -518,7 +534,7 @@ export function useAgent(opts?: { allowProactive?: boolean }): AgentController {
     // 间隔 = 数值 × 单位换算(2026-08-07 单位选择:s=秒 / m=分钟 / h=小时)
     const unitSecs =
       config.proactiveIntervalUnit === 's' ? 1 : config.proactiveIntervalUnit === 'h' ? 3600 : 60
-    const intervalMs = Math.max(1, config.proactiveInterval ?? 60) * unitSecs * 1000
+    const intervalMs = Math.max(1, config.proactiveInterval ?? 15) * unitSecs * 1000
     const timer = window.setInterval(() => {
       if (proactiveInFlightRef.current) return
       if (statusRef.current !== 'idle') return
@@ -540,7 +556,7 @@ export function useAgent(opts?: { allowProactive?: boolean }): AgentController {
     return () => window.clearInterval(timer)
   }, [config?.proactiveEnabled, config?.proactiveInterval, config?.proactiveIntervalUnit, opts?.allowProactive])
 
-  const send = useCallback((text: string) => {
+  const send = useCallback((text: string, opts?: { silent?: boolean }) => {
     const trimmed = text.trim()
     if (!trimmed) return
     if (statusRef.current === 'thinking' || statusRef.current === 'running') return
@@ -549,24 +565,13 @@ export function useAgent(opts?: { allowProactive?: boolean }): AgentController {
     lastUserSendRef.current = Date.now()
     const prev = messagesRef.current
     const last = prev[prev.length - 1]
-    // 上一轮被中止/失败(未落定助手消息,历史以 user 消息结尾):把新输入
-    // 合并进该消息——避免连续两条 user 消息(LLM 会把上一轮未答复的
-    // 请求当"仍待执行"重复执行 = 上下文污染,实测:switch_to_music
-    // 被重复调用,导致"打开B站"时又被自动切回音乐模式;此处合并后
-    // 两段请求同一轮内一并答复)
-    if (last && last.role === 'user') {
-      const merged: AgentMessage = {
-        ...last,
-        parts: [...last.parts, { type: 'text', text: trimmed }],
-      }
-      const next = [...prev.slice(0, -1), merged]
-      messagesRef.current = next
-      setMessages(next)
-      setLastError(null)
-      // 引擎无状态:回传完整历史(末尾即当前轮的用户消息,引擎不再追加)
-      window.desktop?.agentSend?.(trimmed, next)
-      return
-    }
+    // 上一轮被中止/失败(未落定助手消息,历史以 user 消息结尾):该轮
+    // 请求未得到答复,保留只会被 LLM 当"仍待执行"重复执行(上下文污染,
+    // 实测:switch_to_music 被重复调用,导致"打开B站"时又被自动切回
+    // 音乐模式)。**新输入替换该未完成消息、独立成条**(2026-08-08 用户
+    // 要求:原合并实现把新输入并进旧消息,旧请求内容已过时还占上下文;
+    // 替换后 LLM 只答复新请求,历史干净)
+    const base = last && last.role === 'user' ? prev.slice(0, -1) : prev
     // 注意:不递增会话版本(连续对话时总结基于最新消息,旧结果主题一致
     // 仍有效;递增会把每轮总结都作废,标题永远等不到)
     const userMessage: AgentMessage = {
@@ -574,7 +579,18 @@ export function useAgent(opts?: { allowProactive?: boolean }): AgentController {
       role: 'user',
       parts: [{ type: 'text', text: trimmed }],
     }
-    const next = [...prev, userMessage]
+    const next = [...base, userMessage]
+    if (opts?.silent) {
+      // 静默模式(2026-08-08 用户要求:background-done 等系统提示不作为
+      // 用户气泡):**不落渲染端历史**(对话窗口不出现"【系统通知】…"
+      // 气泡,通知由主进程 Windows 通知展示),仅作为本轮输入进引擎
+      // 历史——LLM 据此回复,回复照常落定
+      messagesRef.current = prev
+      setLastError(null)
+      // 引擎无状态:回传完整历史(末尾 = 系统通知,引擎不再追加)
+      window.desktop?.agentSend?.(trimmed, next)
+      return
+    }
     // 同步更新引用:连续 send 之间(React 尚未渲染)也能拿到最新历史,
     // 避免第二次 send 基于旧消息覆盖第一次(最新一轮用户消息消失)
     messagesRef.current = next
@@ -605,6 +621,8 @@ export function useAgent(opts?: { allowProactive?: boolean }): AgentController {
     // 新对话:当前对话(非空)存档到历史,再清空。
     // 标题用实时总结(每轮回复后已静默更新,无需再次调用 LLM)
     sessionVersionRef.current += 1
+    // 自动播放标记随会话清空(历史/新会话不自动播)
+    mediaAutoPlayRef.current.clear()
     const current = messagesRef.current
     if (current.length > 0) {
       const title = currentTitleRef.current?.trim() || '对话'
@@ -631,6 +649,8 @@ export function useAgent(opts?: { allowProactive?: boolean }): AgentController {
     // 加载 = 替换当前对话;从历史移除(当前会话继续由 HISTORY_KEY 持久化);
     // 标题/心理重置并跳过下一次自动生成(历史消息不该被重新总结)
     sessionVersionRef.current += 1
+    // 自动播放标记随会话切换清空(加载的历史消息不自动播放)
+    mediaAutoPlayRef.current.clear()
     skipNextLabelRef.current = true
     setMessages(target.messages)
     setSessions((prev) => prev.filter((s) => s.id !== id))
@@ -653,6 +673,12 @@ export function useAgent(opts?: { allowProactive?: boolean }): AgentController {
 
   const refreshConfig = loadConfigAndTools
 
+  // 消费自动播放标记(2026-08-10):AssistantBlock 渲染并自动播放首条媒体
+  // 后调用——从 Set 移除,该消息重挂载(收起再展开/历史恢复)不再自动播
+  const consumeMediaAutoPlay = useCallback((id: string) => {
+    mediaAutoPlayRef.current.delete(id)
+  }, [])
+
   return {
     status,
     messages,
@@ -665,6 +691,10 @@ export function useAgent(opts?: { allowProactive?: boolean }): AgentController {
     tools,
     currentTitle,
     mindGuess,
+    /** 本会话流式落定且未自动播放过的消息 id(引用稳定,渲染时读 has) */
+    mediaAutoPlayIds: mediaAutoPlayRef.current,
+    /** 消费自动播放标记(媒体已自动播放过) */
+    consumeMediaAutoPlay,
     send,
     abort,
     clear,

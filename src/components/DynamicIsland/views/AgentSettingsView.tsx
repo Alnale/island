@@ -8,15 +8,12 @@
  * 保存经 onSave 走主进程 settings.json(agent 段),记忆与进化走独立 IPC。
  */
 
-import { useCallback, useEffect, useRef, useState, type WheelEvent } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { AgentConfig, AgentToolInfo, McpServerConfig, MemoryEntry } from '../../../agent/types'
 import { MIND_PERSONAS, SUMMARY_STYLES, providerLabel } from '../../../../electron/agent/constants'
 import { useLeavingList } from '../../../hooks/useLeavingList'
-import { useWheelSteps } from '../../../hooks/useWheelSteps'
-import { useWheelSwap } from '../../../hooks/useWheelSwap'
 import { BackFoot, PanelHead } from './shared'
 import { QuickMenu } from './QuickMenu'
-import { WheelSwap } from './WheelSwap'
 
 export interface AgentSettingsViewProps {
   config: AgentConfig | null
@@ -26,6 +23,10 @@ export interface AgentSettingsViewProps {
   /** 界面缩放(百分比 100-300,最低 100%) */
   scale: number
   onScaleChange: (scale: number) => void
+  /** 媒体窗口默认宽(对话图片/视频窗口初始宽;localStorage 即时生效,
+   * 2026-08-08) */
+  mediaWindowWidth: number
+  onMediaWindowWidthChange: (width: number) => void
   onBack: () => void
 }
 
@@ -33,7 +34,7 @@ export interface AgentSettingsViewProps {
  * 由整合按钮悬浮展开切换;保存脚全局共用。第 5 组「Sub Agent」=
  * 总结标题文风 + 心理揣测人格设置)。渲染用通用 QuickMenu 组件
  * (整合按钮 + 同行联通展开 + 滚轮 + 高亮滑块 + 宽度过渡,同款设计) */
-const SETTINGS_TABS = ['连接', '行为与界面', '工具与能力', '记忆与进化', 'Sub Agent'] as const
+const SETTINGS_TABS = ['连接', '行为与界面', '工具与能力', '记忆与进化', 'Sub Agent', '数据管理'] as const
 
 /** MCP 服务表单行(参数/环境变量以逐行文本编辑,保存时转换) */
 interface McpServerForm {
@@ -240,218 +241,48 @@ function MemoryTypeSelect({
   )
 }
 
-/**
- * 定制步进器(替代原生 number 输入的上下箭头——系统 spinners 无法定制
- * 样式,与岛体风格不搭):值徽标 + 上下箭头,步进/滚轮切换**复用
- * WheelSwap 内容交换动画**(与记忆类型按钮同款:旧值滑出淡出、新值回弹
- * 滑入,方向随切换方向);按住箭头连续步进(首步播动画,连步直接换值
- * 不重播——持续重挂载动画会闪);点击值徽标进入内联编辑(Enter/失焦
- * 提交并钳制 min–max,Esc 取消)。2026-08-07 参数化:界面放大
- * (100–300 步 1)与主动陪伴间隔(5–480 步 5)共用
- */
-function ScaleStepper({
-  value,
-  onChange,
-  min = 100,
-  max = 300,
-  stepSize = 1,
-  upLabel = '增加',
-  downLabel = '减少',
-}: {
-  value: number
-  onChange: (v: number) => void
-  /** 最小值(默认 100) */
-  min?: number
-  /** 最大值(默认 300) */
-  max?: number
-  /** 步进量(默认 1;注意与内部 step 函数区分,故命名 stepSize) */
-  stepSize?: number
-  /** 上箭头提示文案(缩放用「放大」,间隔用「增加」) */
-  upLabel?: string
-  /** 下箭头提示文案(缩放用「缩小」,间隔用「减少」) */
-  downLabel?: string
-}) {
-  const MIN = min
-  const MAX = max
-  // 步进动画状态(审计 P1:useWheelSwap 收敛 tick/prev/dir 舞蹈)
-  const swap = useWheelSwap<number>()
-  // 内联编辑:点击值徽标进入;Enter/失焦提交,Esc 取消
-  const [editing, setEditing] = useState(false)
-  const [draft, setDraft] = useState(String(value))
-  // 按住连步:interval 闭包读 ref 拿最新值(避免过期 prop 导致连步卡死)
-  const valueRef = useRef(value)
-  useEffect(() => {
-    valueRef.current = value
-  }, [value])
-  const holdRef = useRef<{ delay: number; interval: number } | null>(null)
-  // 卸载时清理连步定时器
-  useEffect(
-    () => () => {
-      if (holdRef.current) {
-        if (holdRef.current.delay) window.clearTimeout(holdRef.current.delay)
-        if (holdRef.current.interval) window.clearInterval(holdRef.current.interval)
-      }
-    },
-    [],
-  )
-  const stopHold = () => {
-    if (!holdRef.current) return
-    if (holdRef.current.delay) window.clearTimeout(holdRef.current.delay)
-    if (holdRef.current.interval) window.clearInterval(holdRef.current.interval)
-    holdRef.current = null
-  }
-  const step = (d: 1 | -1, animate: boolean): boolean => {
-    const old = valueRef.current
-    const next = Math.min(MAX, Math.max(MIN, old + d * stepSize))
-    if (next === old) return false
-    valueRef.current = next
-    onChange(next)
-    if (animate) swap.step(old, d)
-    return true
-  }
-  // 按住连步:380ms 长按判定后每 110ms 一步;边界自动停止
-  const startHold = (d: 1 | -1) => {
-    // 编辑中点击箭头:先提交草稿再步进(pointerdown preventDefault
-    // 后 blur 不会触发,草稿若不提交会被丢弃)
-    if (editing) commitEdit()
-    stopHold()
-    if (!step(d, true)) return
-    const delay = window.setTimeout(() => {
-      holdRef.current = {
-        delay: 0,
-        interval: window.setInterval(() => {
-          if (!step(d, false)) stopHold()
-        }, 110),
-      }
-    }, 380)
-    holdRef.current = { delay, interval: 0 }
-  }
-  const commitEdit = () => {
-    const v = Number(draft)
-    const clamped = Number.isFinite(v) ? Math.min(MAX, Math.max(MIN, Math.round(v))) : value
-    valueRef.current = clamped
-    setDraft(String(clamped))
-    setEditing(false)
-    onChange(clamped)
-  }
-  const cancelEdit = () => {
-    setDraft(String(value))
-    setEditing(false)
-  }
-  // 内联编辑输入自动聚焦并全选
-  const editRef = useRef<HTMLInputElement>(null)
-  useEffect(() => {
-    if (editing) {
-      editRef.current?.focus()
-      editRef.current?.select()
-    }
-  }, [editing])
-  // 原生非 passive 滚轮监听:悬浮在步进器上滚轮时吞掉默认滚动行为
-  // (React onWheel 为 passive 监听,preventDefault 无效;设置页是滚动
-  // 容器,不吞会整页跟着滚);编辑态放行(滚轮属于输入交互面)
-  const wrapRef = useRef<HTMLDivElement>(null)
-  const editingRef = useRef(editing)
-  editingRef.current = editing
-  useEffect(() => {
-    const el = wrapRef.current
-    if (!el) return
-    const onNativeWheel = (event: globalThis.WheelEvent) => {
-      if (!editingRef.current) event.preventDefault()
-    }
-    el.addEventListener('wheel', onNativeWheel, { passive: false })
-    return () => el.removeEventListener('wheel', onNativeWheel)
-  }, [])
-  // 滚轮切换:值徽标上滚动逐格 ±1(与箭头一致;与记忆类型按钮共用
-  // useWheelSteps,手感一致)
-  const wheelSteps = useWheelSteps()
-  const handleValueWheel = (event: WheelEvent<HTMLButtonElement>) => {
-    const s = wheelSteps(event)
-    if (!s) return
-    step(s, true)
-  }
-  const chevron = (up: boolean) => (
-    <svg
-      width="10"
-      height="10"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={2.5}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <polyline points={up ? '6 15 12 9 18 15' : '6 9 12 15 18 9'} />
-    </svg>
-  )
-  return (
-    <div className="island-scale-stepper" ref={wrapRef}>
-      {editing ? (
-        <input
-          ref={editRef}
-          type="text"
-          inputMode="numeric"
-          value={draft}
-          spellCheck={false}
-          onChange={(event) => setDraft(event.target.value)}
-          onBlur={commitEdit}
-          onKeyDown={(event) => {
-            if (event.key === 'Enter') commitEdit()
-            if (event.key === 'Escape') cancelEdit()
-          }}
-        />
-      ) : (
-        <button
-          key={swap.tick}
-          type="button"
-          className={`island-scale-stepper-value${swap.tick > 0 ? ' tick' : ''}`}
-          onWheel={handleValueWheel}
-          title="点击输入自定义值"
-          onClick={(event) => {
-            event.stopPropagation()
-            setDraft(String(value))
-            setEditing(true)
-          }}
-        >
-          <WheelSwap tick={swap.tick} dir={swap.dir} prev={swap.prev != null ? String(swap.prev) : null}>
-            {String(value)}
-          </WheelSwap>
-        </button>
-      )}
-      <span className="island-scale-stepper-arrows">
-        <button
-          type="button"
-          aria-label={`${upLabel}(+${stepSize})`}
-          title={`${upLabel}(+${stepSize})`}
-          onPointerDown={(event) => {
-            event.preventDefault()
-            event.stopPropagation()
-            startHold(1)
-          }}
-          onPointerUp={stopHold}
-          onPointerLeave={stopHold}
-          onPointerCancel={stopHold}
-        >
-          {chevron(true)}
-        </button>
-        <button
-          type="button"
-          aria-label={`${downLabel}(-${stepSize})`}
-          title={`${downLabel}(-${stepSize})`}
-          onPointerDown={(event) => {
-            event.preventDefault()
-            event.stopPropagation()
-            startHold(-1)
-          }}
-          onPointerUp={stopHold}
-          onPointerLeave={stopHold}
-          onPointerCancel={stopHold}
-        >
-          {chevron(false)}
-        </button>
-      </span>
-    </div>
-  )
+/** 输出预算 2 的幂预设(2026-08-08 定制步进器):与 set_output_budget
+ * 工具同范围,常用档位一键设置;缺省 8192 即在预设中 */
+const BUDGET_PRESETS = [8192, 16384, 32768, 65536, 131072, 262144]
+
+/* ---- 2026-08-08 QuickMenu 化(用户要求:均采用 Agent 设置面板左上角
+   快捷菜单的选取与滚轮切换;自定义值参考输出预算按钮,内联输入) ---- */
+
+/** 思考强度档位(默认高):none 关闭思考模式,low/medium/high 递增强度 */
+const REASONING_OPTIONS = ['none', 'low', 'medium', 'high'] as const
+const REASONING_LABELS: Record<string, string> = {
+  none: '关',
+  low: '低(快)',
+  medium: '中',
+  high: '高(深)',
+}
+
+/** 主动陪伴触发间隔预设(默认 15,分钟单位;可自定义 5-480) */
+const PROACTIVE_PRESETS = [15, 30, 60, 120]
+/** 主动陪伴间隔单位(秒/分钟/小时;默认分钟,**数值不变仅换单位**) */
+const PROACTIVE_UNITS = ['s', 'm', 'h'] as const
+const PROACTIVE_UNIT_LABELS: Record<string, string> = { s: '秒', m: '分钟', h: '小时' }
+
+/** 界面放大档位(默认 200;可自定义 100-300,仅面板/窗口尺寸放大,
+ *  UI 元素不缩放) */
+const SCALE_PRESETS = [100, 150, 200, 300]
+
+/** Sub Agent 档位:默认(空串)+ 预设 id;自定义 ≤100 字直接存文本
+ *  (值不在档位时按钮显示文本、无高亮,滚轮不切换) */
+const SUMMARY_STYLE_ITEMS: string[] = ['', ...SUMMARY_STYLES.map((s) => s.id)]
+const summaryStyleLabel = (id: string) =>
+  id ? SUMMARY_STYLES.find((s) => s.id === id)?.name ?? id : '默认'
+const MIND_PERSONA_ITEMS: string[] = ['', ...MIND_PERSONAS.map((p) => p.id)]
+const mindPersonaLabel = (id: string) =>
+  id ? MIND_PERSONAS.find((p) => p.id === id)?.name ?? id : '默认'
+
+/** 媒体窗口默认宽档位(2026-08-08):QuickMenu 悬浮展开,可自定义 160-800 */
+const MEDIA_WINDOW_PRESETS = [240, 320, 480, 640]
+
+/** 预算显示格式:整 K 显示 8K/256K(按钮与菜单项用;编辑态仍原始数字) */
+function formatBudget(v: number): string {
+  if (v % 1024 === 0) return `${Math.round(v / 1024)}K`
+  return String(v)
 }
 
 /** 技能行(设置技能区;移除 = 加入排除列表;leaving = 离场动画中) */
@@ -578,7 +409,16 @@ function fromConfigServer(s: McpServerConfig): McpServerForm {
   }
 }
 
-export function AgentSettingsView({ config, onSave, tools, scale, onScaleChange, onBack }: AgentSettingsViewProps) {
+export function AgentSettingsView({
+  config,
+  onSave,
+  tools,
+  scale,
+  onScaleChange,
+  mediaWindowWidth,
+  onMediaWindowWidthChange,
+  onBack,
+}: AgentSettingsViewProps) {
   const [form, setForm] = useState({
     apiKey: '',
     baseURL: 'https://api.deepseek.com',
@@ -588,10 +428,11 @@ export function AgentSettingsView({ config, onSave, tools, scale, onScaleChange,
     // 主对话输出预算(2026-08-08):缺省 8192(与 main 默认一致;
     // 预算只是上限,LLM 任务巨大时经 set_output_budget 按需调大)
     maxOutputTokens: 8192,
-    // 主动陪伴(2026-08-07):默认开启、间隔 60、单位分钟(与 main 默认
-    // 一致;单位选择:数值不变仅换单位;exec_command 确认门设置已移除)
+    // 主动陪伴(2026-08-07):默认开启;间隔 15、单位分钟(2026-08-08
+    // 用户要求默认 15 分钟,与 main 默认一致;单位选择:数值不变仅换
+    // 单位;exec_command 确认门设置已移除)
     proactiveEnabled: true,
-    proactiveInterval: 60,
+    proactiveInterval: 15,
     proactiveIntervalUnit: 'm' as 's' | 'm' | 'h',
     // Sub Agent 设置(2026-08-07):文风/人格预设 id 或自定义 ≤100 字
     summaryStyle: '',
@@ -674,6 +515,65 @@ export function AgentSettingsView({ config, onSave, tools, scale, onScaleChange,
   const [evolving, setEvolving] = useState(false)
   const [evolutionLog, setEvolutionLog] = useState<Array<{ at: number; version: number; before: number; after: number; applied: boolean; summary: string }>>([])
   const [evolutionMsg, setEvolutionMsg] = useState('')
+  // 数据管理(2026-08-10 用户要求):清除数据两段式确认——第一次点击
+  // 进入确认态(3.5s 无操作自动复位),再次点击执行;scope = 'app' 灵动岛
+  // 所有数据 / 'tools' 工具下载记录及源文件
+  const [confirmClear, setConfirmClear] = useState<'app' | 'tools' | null>(null)
+  const [clearMsg, setClearMsg] = useState('')
+  const clearConfirmTimerRef = useRef(0)
+  useEffect(() => () => window.clearTimeout(clearConfirmTimerRef.current), [])
+  const requestClear = (scope: 'app' | 'tools') => {
+    if (confirmClear !== scope) {
+      setConfirmClear(scope)
+      setClearMsg('')
+      window.clearTimeout(clearConfirmTimerRef.current)
+      clearConfirmTimerRef.current = window.setTimeout(() => setConfirmClear(null), 3500)
+      return
+    }
+    window.clearTimeout(clearConfirmTimerRef.current)
+    setConfirmClear(null)
+    void doClear(scope)
+  }
+  const doClear = async (scope: 'app' | 'tools') => {
+    try {
+      // 渲染端数据:localStorage(widget-* 全部:主题/缩放/背景/字体/歌词/
+      // 消息/会话/标题/揣测/视频偏好/seek 记忆…) + IndexedDB 五个库
+      // (上传音乐/背景与图片库/字体库/音频库/视频库)。
+      // 删除请求在 blocked(页面自身连接)时直接放行——reload 销毁连接后
+      // 浏览器自动完成删除;localStorage.clear 同步生效
+      try {
+        localStorage.clear()
+      } catch {
+        // 清除失败忽略(部分隐私模式)
+      }
+      const DB_NAMES = [
+        'island-uploads',
+        'island-background',
+        'island-font',
+        'island-audio-library',
+        'island-video-library',
+      ]
+      for (const db of DB_NAMES) {
+        await new Promise<void>((resolve) => {
+          const req = indexedDB.deleteDatabase(db)
+          req.onsuccess = () => resolve()
+          req.onerror = () => resolve()
+          req.onblocked = () => resolve() // reload 销毁连接后浏览器续删
+        })
+      }
+      // 主进程文件(main.cjs agent:clear-data):app = 记忆/进化/settings.json;
+      // tools = bili 下载与登录态 / xxt 登录态与截图
+      const res = await window.desktop?.agentClearData?.(scope)
+      if (res && typeof res === 'object' && typeof res.error === 'string') {
+        setClearMsg(`清除失败:${res.error}(文件可能被占用,如 B站下载中——稍后重试)`)
+        return
+      }
+      setClearMsg('已清除,正在重启界面…')
+      window.setTimeout(() => window.location.reload(), 800)
+    } catch {
+      setClearMsg('清除失败,请重试')
+    }
+  }
   // 配置到达后填充表单(config 未变时不覆盖用户正在编辑的内容)
   useEffect(() => {
     if (config) {
@@ -684,9 +584,9 @@ export function AgentSettingsView({ config, onSave, tools, scale, onScaleChange,
         systemPrompt: config.systemPrompt,
         reasoningEffort: config.reasoningEffort || 'high',
         maxOutputTokens: config.maxOutputTokens ?? 8192,
-        // 主动陪伴:旧 settings.json 无字段时按默认(true/60/分钟)兜底
+        // 主动陪伴:旧 settings.json 无字段时按默认(true/15/分钟)兜底
         proactiveEnabled: config.proactiveEnabled !== false,
-        proactiveInterval: config.proactiveInterval ?? 60,
+        proactiveInterval: config.proactiveInterval ?? 15,
         proactiveIntervalUnit: config.proactiveIntervalUnit ?? 'm',
         // Sub Agent 设置:旧配置无字段 → 空(默认文风/人格)
         summaryStyle: config.summaryStyle ?? '',
@@ -1055,46 +955,40 @@ export function AgentSettingsView({ config, onSave, tools, scale, onScaleChange,
                 onChange={(event) => setForm((f) => ({ ...f, model: event.target.value }))}
               />
             </label>
+        {/* 思考强度(2026-08-08 QuickMenu 化):默认高;none 关闭思考模式
+            (设置页思考强度新增"关") */}
         <div className="island-agent-field">
           <span>思考强度(深度思考 vs 速度)</span>
           <div className="island-agent-scale-row">
-            {(
-              [
-                ['none', '关'],
-                ['low', '低(快)'],
-                ['medium', '中'],
-                ['high', '高(深)'],
-              ] as const
-            ).map(([v, label]) => (
-              <button
-                key={v}
-                type="button"
-                className={`island-agent-scale-btn${form.reasoningEffort === v ? ' on' : ''}`}
-                onClick={(event) => {
-                  event.stopPropagation()
-                  setForm((f) => ({ ...f, reasoningEffort: v }))
-                }}
-              >
-                {label}
-              </button>
-            ))}
+            <QuickMenu<string>
+              items={REASONING_OPTIONS}
+              value={form.reasoningEffort}
+              onChange={(v) => setForm((f) => ({ ...f, reasoningEffort: v }))}
+              getLabel={(v) => REASONING_LABELS[v]}
+              title="思考强度(滚轮切换)"
+              wheelWhenOpen
+            />
           </div>
         </div>
         {/* 输出预算(2026-08-08):主对话 max_output_tokens,含思维链;
-            LLM 对话中也可经 set_output_budget 工具自主调整 */}
+            LLM 对话中也可经 set_output_budget 工具自主调整。
+            单一 QuickMenu(与设置菜单同款):悬浮展开 2 的幂预设档位
+            (一体胶囊 + 高亮滑块 + 错峰滑入,展开时滚轮照常逐格切换);
+            单击按钮 = 内联编辑自定义值(Enter/失焦提交,Esc 取消);
+            值不在档位时滚轮经 compare 切到相邻档位 */}
         <label className="island-agent-field">
           <span>输出预算(含思维链,4096-262144)</span>
-          <input
-            type="number"
+          <QuickMenu<number>
+            items={BUDGET_PRESETS}
+            value={form.maxOutputTokens}
+            onChange={(v) => setForm((f) => ({ ...f, maxOutputTokens: v }))}
+            getLabel={formatBudget}
+            title="预设档位(悬浮展开;点击输入自定义)"
+            wheelWhenOpen
+            allowCustom
             min={4096}
             max={262144}
-            step={1024}
-            value={form.maxOutputTokens}
-            onChange={(e) => {
-              const v = Number(e.target.value)
-              if (Number.isFinite(v)) setForm((f) => ({ ...f, maxOutputTokens: v }))
-            }}
-            placeholder="8192"
+            compare={(a, b) => a - b}
           />
         </label>
           </>
@@ -1134,82 +1028,78 @@ export function AgentSettingsView({ config, onSave, tools, scale, onScaleChange,
         <div className={`island-proactive-config${form.proactiveEnabled ? ' open' : ''}`}>
           <div className="island-proactive-config-inner">
           <div className="island-agent-field">
+          {/* 触发间隔 + 单位(2026-08-08 QuickMenu 化,两个独立快捷按钮):
+              间隔默认 15,单位默认分钟;**数值不变仅换单位**——切换只改
+              单位状态,保存时按当前数值 × 单位换算落盘;自定义值参考
+              输出预算按钮(点击快捷按钮内联输入,5-480 钳制) */}
           <span>触发间隔(Agent 判断是否需要主动开口)</span>
-          {/* 单位选择(2026-08-07):秒/分钟/小时,**数值不变仅换单位**;
-              切换只改单位状态,保存时按当前数值 × 单位换算落盘 */}
           <div className="island-agent-scale-row">
-            {(
-              [
-                ['s', '秒'],
-                ['m', '分钟'],
-                ['h', '小时'],
-              ] as const
-            ).map(([u, label]) => (
-              <button
-                key={u}
-                type="button"
-                className={`island-agent-scale-btn${form.proactiveIntervalUnit === u ? ' on' : ''}`}
-                onClick={(event) => {
-                  event.stopPropagation()
-                  setForm((f) => ({ ...f, proactiveIntervalUnit: u }))
-                }}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-          <div className="island-agent-scale-row">
-            {[15, 30, 60, 120].map((v) => (
-              <button
-                key={v}
-                type="button"
-                className={`island-agent-scale-btn${form.proactiveInterval === v ? ' on' : ''}`}
-                onClick={(event) => {
-                  event.stopPropagation()
-                  setForm((f) => ({ ...f, proactiveInterval: v }))
-                }}
-              >
-                {v}
-              </button>
-            ))}
-            <ScaleStepper
+            <QuickMenu<number>
+              items={PROACTIVE_PRESETS}
               value={form.proactiveInterval}
               onChange={(v) => setForm((f) => ({ ...f, proactiveInterval: v }))}
+              getLabel={(v) => `${v}`}
+              title="触发间隔(悬浮展开档位;点击输入自定义)"
+              wheelWhenOpen
+              allowCustom
               min={5}
               max={480}
-              stepSize={form.proactiveIntervalUnit === 'h' ? 1 : 5}
-              upLabel="增加"
-              downLabel="减少"
+              compare={(a, b) => a - b}
+            />
+            <QuickMenu<'s' | 'm' | 'h'>
+              items={PROACTIVE_UNITS}
+              value={form.proactiveIntervalUnit}
+              onChange={(u) => setForm((f) => ({ ...f, proactiveIntervalUnit: u }))}
+              getLabel={(u) => PROACTIVE_UNIT_LABELS[u]}
+              title="间隔单位(滚轮切换)"
+              wheelWhenOpen
             />
             <span className="island-agent-scale-hint">
-              {form.proactiveIntervalUnit === 's'
-                ? '秒'
-                : form.proactiveIntervalUnit === 'h'
-                  ? '小时'
-                  : '分钟'}
+              当前 {form.proactiveInterval} {PROACTIVE_UNIT_LABELS[form.proactiveIntervalUnit]}
             </span>
           </div>
           </div>
           </div>
         </div>
+        {/* 界面放大(2026-08-08 QuickMenu 化):默认 200;自定义值参考
+            输出预算按钮(点击快捷按钮内联输入,100-300 钳制) */}
         <div className="island-agent-field">
           <span>界面放大(仅面板尺寸,文字按钮不变)</span>
           <div className="island-agent-scale-row">
-            {[100, 150, 200].map((v) => (
-              <button
-                key={v}
-                type="button"
-                className={`island-agent-scale-btn${scale === v ? ' on' : ''}`}
-                onClick={(event) => {
-                  event.stopPropagation()
-                  onScaleChange(v)
-                }}
-              >
-                {v}%
-              </button>
-            ))}
-            <ScaleStepper value={scale} onChange={onScaleChange} upLabel="放大" downLabel="缩小" />
-            <span className="island-agent-scale-hint">%</span>
+            <QuickMenu<number>
+              items={SCALE_PRESETS}
+              value={scale}
+              onChange={onScaleChange}
+              getLabel={(v) => `${v}%`}
+              title="界面放大(悬浮展开档位;点击输入自定义)"
+              wheelWhenOpen
+              allowCustom
+              min={100}
+              max={300}
+              compare={(a, b) => a - b}
+            />
+            <span className="island-agent-scale-hint">仅面板/窗口尺寸</span>
+          </div>
+        </div>
+        {/* 媒体窗口默认宽(2026-08-08):对话图片/视频窗口初始宽,即时生效
+            (localStorage widget-media-window);LLM 对话中也可经
+            set_media_window_size 工具调整 */}
+        <div className="island-agent-field">
+          <span>媒体窗口默认宽(图片/视频,拖拽可临时缩放)</span>
+          <div className="island-agent-scale-row">
+            <QuickMenu<number>
+              items={MEDIA_WINDOW_PRESETS}
+              value={mediaWindowWidth}
+              onChange={onMediaWindowWidthChange}
+              getLabel={(v) => `${v}px`}
+              title="媒体窗口默认宽(悬浮展开档位;点击输入自定义)"
+              wheelWhenOpen
+              allowCustom
+              min={160}
+              max={800}
+              compare={(a, b) => a - b}
+            />
+            <span className="island-agent-scale-hint">初始宽,拖拽右下角缩放</span>
           </div>
         </div>
           </>
@@ -1546,30 +1436,17 @@ export function AgentSettingsView({ config, onSave, tools, scale, onScaleChange,
               <span className="island-agent-section-hint">
                 每轮回复后静默生成对话标题;文风影响标题的措辞风格
               </span>
+              {/* 总结文风(2026-08-08 QuickMenu 化):默认 = 默认;
+                  自定义文风在下方输入框(输入即切自定义) */}
               <div className="island-agent-scale-row">
-                <button
-                  type="button"
-                  className={`island-agent-scale-btn${!form.summaryStyle ? ' on' : ''}`}
-                  onClick={(event) => {
-                    event.stopPropagation()
-                    setForm((f) => ({ ...f, summaryStyle: '' }))
-                  }}
-                >
-                  默认
-                </button>
-                {SUMMARY_STYLES.map((s) => (
-                  <button
-                    key={s.id}
-                    type="button"
-                    className={`island-agent-scale-btn${form.summaryStyle === s.id ? ' on' : ''}`}
-                    onClick={(event) => {
-                      event.stopPropagation()
-                      setForm((f) => ({ ...f, summaryStyle: s.id }))
-                    }}
-                  >
-                    {s.name}
-                  </button>
-                ))}
+                <QuickMenu<string>
+                  items={SUMMARY_STYLE_ITEMS}
+                  value={form.summaryStyle}
+                  onChange={(v) => setForm((f) => ({ ...f, summaryStyle: v }))}
+                  getLabel={summaryStyleLabel}
+                  title="总结文风(滚轮切换)"
+                  wheelWhenOpen
+                />
               </div>
               <label className="island-agent-field">
                 <span>自定义文风(≤100 字;留空 = 用预设/默认)</span>
@@ -1588,30 +1465,17 @@ export function AgentSettingsView({ config, onSave, tools, scale, onScaleChange,
               <span className="island-agent-section-hint">
                 每轮回复后揣测助手心态,显示在紧凑态文字区与主动陪伴系统通知
               </span>
+              {/* 心理揣测人格(2026-08-08 QuickMenu 化):默认 = 默认;
+                  自定义人格在下方输入框(输入即切自定义) */}
               <div className="island-agent-scale-row">
-                <button
-                  type="button"
-                  className={`island-agent-scale-btn${!form.mindPersona ? ' on' : ''}`}
-                  onClick={(event) => {
-                    event.stopPropagation()
-                    setForm((f) => ({ ...f, mindPersona: '' }))
-                  }}
-                >
-                  默认
-                </button>
-                {MIND_PERSONAS.map((p) => (
-                  <button
-                    key={p.id}
-                    type="button"
-                    className={`island-agent-scale-btn${form.mindPersona === p.id ? ' on' : ''}`}
-                    onClick={(event) => {
-                      event.stopPropagation()
-                      setForm((f) => ({ ...f, mindPersona: p.id }))
-                    }}
-                  >
-                    {p.name}
-                  </button>
-                ))}
+                <QuickMenu<string>
+                  items={MIND_PERSONA_ITEMS}
+                  value={form.mindPersona}
+                  onChange={(v) => setForm((f) => ({ ...f, mindPersona: v }))}
+                  getLabel={mindPersonaLabel}
+                  title="揣测人格(滚轮切换)"
+                  wheelWhenOpen
+                />
               </div>
               <label className="island-agent-field">
                 <span>自定义人格(≤100 字;留空 = 用预设/默认)</span>
@@ -1625,6 +1489,55 @@ export function AgentSettingsView({ config, onSave, tools, scale, onScaleChange,
                 />
               </label>
             </div>
+          </>
+        )}
+        {tab === 5 && (
+          <>
+            {/* 数据管理(2026-08-10 用户要求):清除灵动岛所有数据 / 所有
+                工具的下载记录及源文件。危险操作:两段式确认(第一次点击
+                进入确认态,3.5s 无操作复位;再次点击执行),执行后清
+                localStorage + IndexedDB + userData 文件并重启界面 */}
+            <div className="island-agent-section">
+              <span className="island-agent-section-title">清除灵动岛数据</span>
+              <span className="island-agent-section-hint">
+                主题色/背景/字体/歌词/界面设置、播放列表与上传音乐、多媒体库、对话历史与会话、长期记忆与进化版本、Agent 配置(API Key/模型/提示词)全部重置——操作不可恢复
+              </span>
+              <div className="island-agent-scale-row">
+                <button
+                  type="button"
+                  className={`island-agent-scale-btn island-data-clear${confirmClear === 'app' ? ' confirming' : ''}`}
+                  onClick={(event) => {
+                    event.stopPropagation()
+                    requestClear('app')
+                  }}
+                >
+                  {confirmClear === 'app' ? '再次点击确认清除' : '清除灵动岛数据'}
+                </button>
+              </div>
+            </div>
+            <div className="island-agent-section">
+              <span className="island-agent-section-title">清除工具数据(下载记录及源文件)</span>
+              <span className="island-agent-section-hint">
+                B站下载的文件与登录态、超星答题登录态与截图等工具产物全部删除(不影响灵动岛本体数据)——操作不可恢复
+              </span>
+              <div className="island-agent-scale-row">
+                <button
+                  type="button"
+                  className={`island-agent-scale-btn island-data-clear${confirmClear === 'tools' ? ' confirming' : ''}`}
+                  onClick={(event) => {
+                    event.stopPropagation()
+                    requestClear('tools')
+                  }}
+                >
+                  {confirmClear === 'tools' ? '再次点击确认清除' : '清除工具数据'}
+                </button>
+              </div>
+            </div>
+            {clearMsg ? (
+              <span className={`island-mcp-test-result ${clearMsg.startsWith('清除失败') ? 'fail' : 'ok'} island-ui-enter`}>
+                {clearMsg}
+              </span>
+            ) : null}
           </>
         )}
       </div>

@@ -28,6 +28,10 @@ extraResources:
     to: bridge/smtc-reader.ps1
   - from: electron/smtc-bridge.cs
     to: bridge/smtc-bridge.cs
+  # 系统音量脚本(2026-08-10,set_system_volume 工具;winmm waveOut,
+  # 与 smtc-reader.ps1 同款放 asar 外由 powershell 直接执行)
+  - from: electron/system-volume.ps1
+    to: bridge/system-volume.ps1
   # 内置工具(2026-08-07 随包发行):**仅 bili-tool 打进安装包**(用户要求;
   # xxt/DocFlow 不随包,引擎在打包版缺失时回退 dev 源码 + 系统 Python)。
   # bili 是纯 Rust 单二进制零依赖,放 asar 外——引擎 spawn 可执行文件,
@@ -35,6 +39,10 @@ extraResources:
   # userData(安装目录只读,base_dir 已支持环境变量覆盖)
   - from: tools/bili
     to: tools/bili
+  # 功能引导文档(2026-08-10):get_feature_guide 工具读取(TECH.md 第 11
+  # 章 = 功能清单与使用引导);引擎按 resourcesPath/docs/TECH.md 解析
+  - from: docs/TECH.md
+    to: docs/TECH.md
 
 # 直接复用本地已解压的 Electron(跳过 zip 下载/解压;
 # 安全软件实时监控会锁住新解压的 electron.exe 导致目录重命名失败)

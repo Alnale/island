@@ -84,6 +84,8 @@ export interface AgentPanelProps {
   onClear(): void
   /** 打开 Agent 设置视图(⋯ 菜单"设置"入口) */
   onOpenSettings?(): void
+  /** 打开多媒体库视图(⋯ 菜单"多媒体库"入口,2026-08-08) */
+  onOpenMediaLibrary?(): void
   /** 已禁用工具名(工具列表视图禁用;引擎下一轮起不注入) */
   excludedTools?: string[]
   /** 更新禁用工具列表(工具列表视图禁用 / 恢复) */
@@ -92,6 +94,11 @@ export interface AgentPanelProps {
   pendingConfirm: { command: string } | null
   /** 回传确认结果(允许 / 拒绝) */
   onConfirmTool(approved: boolean): void
+  /** 本会话流式落定且未自动播放过的消息 id(2026-08-10:媒体自动播放
+   * 只限"当次对话"——LLM 播放的那一轮才自动播,历史/重挂载不播) */
+  mediaAutoPlayIds?: ReadonlySet<string>
+  /** 消费自动播放标记(消息首条媒体已自动播放过) */
+  onMediaAutoPlayed?(id: string): void
 }
 
 /** MCP 服务端配置(与引擎同构,re-export) */

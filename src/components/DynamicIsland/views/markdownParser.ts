@@ -25,6 +25,8 @@ export type MdInline =
   | { t: 'code'; s: string }
   | { t: 'a'; h: string; c: MdInline[] }
   | { t: 'img'; s: string; a?: string }
+  | { t: 'video'; s: string; a?: string }
+  | { t: 'audio'; s: string; a?: string }
 
 /** 列表项:主体行内内容 + 后续子块(嵌套列表/段落) */
 export type MdListItem = { c: MdInline[]; sub: MdBlock[] }
@@ -54,7 +56,7 @@ export type MdBlock =
  * 匹配 = 死循环 OOM(实测 `~~s~~` 链接分支复现)
  */
 const INLINE_TOKEN =
-  /(`{1,2})([^`\n]+)\1|(?:\*\*)(.+?)(?:\*\*)|(?:__)(.+?)(?:__)|(?:\*)(.+?)(?:\*)|(?:_)([^_\n]+?)(?:_)|(?:~~)(.+?)(?:~~)|!\[([^\]]*)\]\(([^)\s]+)[^)]*\)|\[([^\]]+)\]\(([^)\s]+)[^)]*\)|(https?:\/\/[^\s<>"')\]]+)|(\\)([\\`*_[\]{}()#+\-.!|>])/g
+  /(`{1,2})([^`\n]+)\1|(?:\*\*)(.+?)(?:\*\*)|(?:__)(.+?)(?:__)|(?:\*)(.+?)(?:\*)|(?:_)([^_\n]+?)(?:_)|(?:~~)(.+?)(?:~~)|!\[([^\]]*)\]\(((?:[^()\n]|\([^()]*\))+)\s*\)|\[([^\]]+)\]\(((?:[^()\n]|\([^()]*\))+)\s*\)|(https?:\/\/[^\s<>"')\]]+)|(\\)([\\`*_[\]{}()#+\-.!|>])/g
 
 /** 行内文本两侧的"词字符"(下划线强调判定用:CJK 也算词) */
 const WORD_RE = /[\w一-鿿]/
@@ -117,6 +119,40 @@ function cleanUrl(raw: string): string {
   return raw.trim().replace(URL_TRAIL, '')
 }
 
+/** 常见媒体扩展名(2026-08-08 对话媒体窗口:图片/视频/音频按扩展名分派) */
+const MEDIA_EXT_RE =
+  /\.(png|jpe?g|gif|webp|bmp|mp4|m4v|mov|webm|mp3|wav|flac|ogg|oga|opus|m4a|aac)$/i
+
+/** markdown 媒体链接 ![alt](url) 正则(匹配 URL 部分;媒体窗口分派用) */
+const MD_IMAGE_RE = /!\[[^\]]*\]\(([^)\s]+)\)/
+
+/** 文本中**第一个** markdown 媒体链接的类型(2026-08-10 自动播权分派:
+ * AssistantBlock 据此判断该文本段是否含音频/视频媒体,决定自动播权
+ * 给谁;无媒体链接返回 null)。复用 mediaKindOf 同一扩展名逻辑 */
+export function firstMediaKindInText(text: string): 'img' | 'video' | 'audio' | null {
+  const m = MD_IMAGE_RE.exec(text ?? '')
+  if (!m) return null
+  return mediaKindOf(m[1])
+}
+
+/** URL → 媒体类型:图片/视频/音频扩展名返回对应类型,其余 null(转链接)。
+ * 支持 https/data:/blob:(远程/内嵌)与 file: 或本地路径(渲染端经
+ * agent:read-media 读取)。data:image/ 无扩展名,按前缀判定 */
+export function mediaKindOf(url: string): 'img' | 'video' | 'audio' | null {
+  if (url.startsWith('data:image/')) return 'img'
+  const m = MEDIA_EXT_RE.exec(url)
+  if (!m) return null
+  const ext = m[1].toLowerCase()
+  if (ext === 'mp4' || ext === 'm4v' || ext === 'mov' || ext === 'webm') {
+    // .webm 也可是音频(WebM 容器),按媒体窗口优先视频(常见场景)
+    return 'video'
+  }
+  if (ext === 'mp3' || ext === 'wav' || ext === 'flac' || ext === 'ogg' || ext === 'oga' || ext === 'opus' || ext === 'm4a' || ext === 'aac') {
+    return 'audio'
+  }
+  return 'img'
+}
+
 /** 行内解析:matchAll 全串扫描 + 递归(粗体里嵌斜体等) */
 export function parseInlines(text: string): MdInline[] {
   const out: MdInline[] = []
@@ -139,14 +175,15 @@ export function parseInlines(text: string): MdInline[] {
       }
     } else if (m[7] !== undefined) out.push({ t: 's', c: parseInlines(m[7]) })
     else if (m[8] !== undefined) {
-      // 图片:data: 内嵌图片(工具生成的二维码等,可信)渲染为 <img>;
-      // 远程 http(s) 不加载(岛内不加载远程图片策略),仍给可点击链接
+      // 媒体(2026-08-08 对话媒体窗口):![alt](url) 按扩展名分派——
+      // 图片/视频/音频渲染为可缩放媒体窗口(data:/https:/blob: 直接加载,
+      // file:/本地路径经 agent:read-media 读取);无媒体扩展名仍转链接
       const imgUrl = cleanUrl(m[9])
-      if (imgUrl.startsWith('data:image/')) {
-        out.push({ t: 'img', s: imgUrl, a: m[8] || undefined })
-      } else {
-        out.push({ t: 'a', h: imgUrl, c: [{ t: 'text', s: m[8] || m[9] }] })
-      }
+      const kind = mediaKindOf(imgUrl)
+      if (kind === 'img') out.push({ t: 'img', s: imgUrl, a: m[8] || undefined })
+      else if (kind === 'video') out.push({ t: 'video', s: imgUrl, a: m[8] || undefined })
+      else if (kind === 'audio') out.push({ t: 'audio', s: imgUrl, a: m[8] || undefined })
+      else out.push({ t: 'a', h: imgUrl, c: [{ t: 'text', s: m[8] || m[9] }] })
     } else if (m[10] !== undefined) out.push({ t: 'a', h: cleanUrl(m[11]), c: parseInlines(m[10]) })
     else if (m[12] !== undefined) {
       const url = cleanUrl(m[12])

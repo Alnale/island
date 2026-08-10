@@ -46,6 +46,10 @@ export const TRACK_CYCLE_MS = 9000
 export const LONG_PRESS_MS = 450
 // 长按判定允许的指针位移(px):移动超过该值视为滑动/拖动,取消长按
 export const LONG_PRESS_SLOP_PX = 8
+// 文字区滑动手势时间窗(ms,2026-08-08 修复"长按边缘误切换音乐模式"):
+// swipe 是快速滑动——按下后须在该时间内达到位移阈值才算手势,
+// 长按(450ms)取消后的慢速位移/手抖不触发
+export const SWIPE_TIME_MS = 300
 // 展开后的岛宽(px):胶囊形变为更大的圆角矩形
 export const EXPANDED_WIDTH_PX = 400
 // 展开岛宽距视口左右的最小边距(px)
@@ -67,20 +71,26 @@ export const COLLAPSE_HIDE_MS = 320
 export const SUPPRESS_CLICK_MS = 600
 // 形变动画期间关闭毛玻璃的时长(ms),略长于宽度/高度弹簧过渡(1.5 倍速)
 export const MORPH_ANIMATE_MS = 400
+// Agent 展开宽度动画时长(ms,2026-08-09 优化"展开不够平滑"):与
+// views-agent.css 的 width 过渡同步——agentHReady(串行展开的第二段
+// 高度动画门闩)在此刻触发,宽度刚到位高度立即开始,**消除原 400ms
+// 计时 vs 240ms 宽度过渡之间 160ms 的空等顿点**
+export const AGENT_WIDTH_ANIMATE_MS = 300
 // 播放模式图标"线条重组"动画时长(ms),含涟漪清理
 export const MODE_ICON_MORPH_MS = 420
 
-/** 面板视图(渲染哪个面板分支);宿主据此调整窗口高度 */
+/** 面板视图(渲染哪个面板分支);宿主据此调整窗口高度。
+ * help 已移除(2026-08-10 用户要求) */
 export type PanelView =
   | 'control'
   | 'list'
   | 'theme'
   | 'background'
-  | 'help'
   | 'font'
   | 'font-color'
   | 'font-library'
   | 'image-library'
+  | 'media-library'
   | 'settings'
   | 'agent'
   | 'agent-settings'

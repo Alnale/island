@@ -196,21 +196,45 @@ export function saveImageItem(item: ImageLibraryItem): Promise<void> {
   return runLib('readwrite', (s) => s.put(item, item.id))
 }
 
-/** 读取全部图片库条目(按创建时间升序) */
+/** 读取全部图片库条目(按创建时间升序)。
+ * **逐条容错(2026-08-08 修复"图片库永远空")**:原 getAll 一把梭——
+ * library store 里有一条损坏记录(blob 文件丢失,Chromium 报
+ * NotReadableError "Data lost due to missing file",实测)时,整个
+ * 事务失败 → loadImageItems 恒返回 [] → 多媒体库图片 tab 永远空 →
+ * "初次进入无法右键"。改为:先取键列表(不碰值),再逐条独立事务
+ * get——坏记录只失败自身,其余正常;失败条目尝试删除(数据已不可
+ * 恢复,移除毒瘤防继续毒害,下次读取自愈) */
 export async function loadImageItems(): Promise<ImageLibraryItem[]> {
   try {
     const db = await openDb()
-    const result = await idbRun(db, LIB_STORE, 'readonly', (s) => s.getAll())
-    return (result as unknown[])
-      .filter(
-        (v): v is ImageLibraryItem =>
+    const keys = await idbRun<IDBValidKey[]>(db, LIB_STORE, 'readonly', (s) => s.getAllKeys())
+    const items: ImageLibraryItem[] = []
+    for (const key of keys) {
+      try {
+        const v = await idbRun(db, LIB_STORE, 'readonly', (s) => s.get(key))
+        if (v == null) continue
+        if (
+          v &&
           typeof v === 'object' &&
-          v !== null &&
           typeof (v as ImageLibraryItem).id === 'string' &&
-          typeof (v as ImageLibraryItem).dataUrl === 'string',
-      )
-      .sort((a, b) => a.createdAt - b.createdAt)
-  } catch {
+          typeof (v as ImageLibraryItem).dataUrl === 'string'
+        ) {
+          items.push(v as ImageLibraryItem)
+        }
+      } catch {
+        // 坏记录(blob 丢失):数据不可恢复,尝试删除防继续毒害
+        try {
+          await idbRun(db, LIB_STORE, 'readwrite', (s) => s.delete(key))
+        } catch {
+          // 删除也失败则忽略(下次读取再试)
+        }
+      }
+    }
+    return items.sort((a, b) => a.createdAt - b.createdAt)
+  } catch (err) {
+    // 读取失败不静默(2026-08-08:静默返回空让用户看到"图片库空"却
+    // 不知原因——多媒体库初次进入无法右键的隐藏根因之一;暴露真实错误)
+    console.error('[backgroundStore] loadImageItems failed:', err)
     return []
   }
 }

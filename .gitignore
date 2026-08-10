@@ -32,6 +32,12 @@ electron/bridge.cjs
 # 本地验证临时目录 / 测试下载
 .tmp
 downloads
+.tmp-chat-media
+.tmp-lib
+# 本地验证截图(巡检/调试输出,不入库)
+help-anim.png
+mini-test.png
+test-check.png
 
 # 双岛巡检截图输出(WIDGET_SCREENSHOT 目录)
 .dual-shots/

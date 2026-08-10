@@ -1,0 +1,297 @@
+import { useEffect, useRef, useState, type MouseEvent, type PointerEvent as ReactPointerEvent } from 'react'
+import { dispatchAgentMedia, resolveMediaSrc, type AgentMediaReport } from './Markdown'
+import { VideoExtras } from './Markdown'
+import { loadVideoPrefs } from '../../../media/videoPrefs'
+
+/**
+ * 对话媒体小窗(2026-08-09 用户要求"灵动岛包裹的小窗"):收起 Agent
+ * 面板后岛体变形成媒体小窗——
+ * - **视频 = 迷你播放器**:原面板播放中 → 挂载自动续播(用户此前已点过
+ *   播放,同页手势放行;被自动播放策略拦截则回退显示播放键);点击
+ *   播放/暂停;**底部进度条 + 时间(2026-08-09 用户要求"视频岛没有
+ *   进度条"**:可拖拽 seek,与消息气泡播放器同款 4px 圆角条 + 强调色
+ *   填充 + 白圆点 thumb);**右下角全屏按钮**(2026-08-09 用户要求,
+ *   容器级 requestFullscreen,与消息气泡全屏同款);
+ * - **图片 = 缩略图**:点击展开回对话面板;
+ * - **音频不在此**(收起自动切音乐模式并续播,见 DynamicIsland
+ *   doCollapse + onAgentAudioHandoff)。
+ * UI = 灵动岛风格:**胶囊一体化(2026-08-09 二轮设计,用户选定:无
+ * 黑边)**——媒体 contain 铺满岛体,边缘由岛体 22px 圆角 + overflow
+ * hidden 裁剪,**无 ✕ 关闭键**(退出 = 长按展开回面板)。
+ */
+
+/** 时间格式 m:ss(与消息气泡播放器同款) */
+function fmtMiniTime(sec: number): string {
+  if (!Number.isFinite(sec) || sec < 0) return '0:00'
+  const s = Math.round(sec)
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
+}
+export function AgentMediaMini({
+  media,
+  onExpand,
+}: {
+  media: AgentMediaReport
+  onExpand: () => void
+}) {
+  const src = resolveMediaSrc(media.src)
+  const [playing, setPlaying] = useState(Boolean(media.playing))
+  const [fullscreen, setFullscreen] = useState(false)
+  // 进度条(2026-08-09 用户要求):当前/总时长 + 拖拽 seek
+  const [current, setCurrent] = useState(0)
+  const [duration, setDuration] = useState(0)
+  const scrubbingRef = useRef(false)
+  // 退出全屏缩回动画(2026-08-09 全屏 ↔ 小窗过渡):播完移除 class
+  const [leavingFs, setLeavingFs] = useState(false)
+  const fsLeaveTimerRef = useRef(0)
+  const wrapRef = useRef<HTMLDivElement>(null)
+  const videoRef = useRef<HTMLVideoElement>(null)
+  const barRef = useRef<HTMLDivElement>(null)
+  // 应用共享偏好(2026-08-10 双向同步:音量/倍速/循环与对话播放器/
+  // 多媒体库共享,挂载时读当前值应用到 video)
+  useEffect(() => {
+    const v = videoRef.current
+    if (!v) return
+    const p = loadVideoPrefs()
+    v.volume = p.volume
+    v.muted = p.volume === 0
+    v.playbackRate = p.speed
+    v.loop = p.loop
+  }, [])
+  // 原面板播放中 → 小窗挂载自动续播(仅挂载时一次)。
+  // **先 seek 到面板内的最近进度再 play(2026-08-09 修复"收起变多媒体
+  // 岛从头播放")**:position 由 MediaFrame 节流上报 → agentPlaying →
+  // 收起快照;currentTime 需元数据就绪(readyState >= 1)才可设置,
+  // 未就绪等 loadedmetadata(仅监听一次)
+  useEffect(() => {
+    const v = videoRef.current
+    if (!v) return
+    const start = () => {
+      if (media.position && Number.isFinite(media.position) && media.position > 0) {
+        try {
+          v.currentTime = media.position
+        } catch {
+          // seek 失败忽略(继续播放兜底)
+        }
+      }
+      if (playing) {
+        const p = v.play()
+        if (p) void p.catch(() => setPlaying(false))
+      }
+    }
+    if (v.readyState >= 1) start()
+    else v.addEventListener('loadedmetadata', start, { once: true })
+    return () => v.removeEventListener('loadedmetadata', start)
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅挂载续播
+  }, [])
+  // 全屏状态跟踪(与消息气泡 VideoPlayer 同款:容器级全屏,控件随容器);
+  // 退出全屏播缩回动画(agent-mini-fs-out,3D 压感回弹 0.32s)后移除
+  // class——计时与动画时长对齐(0.32s + 余量)
+  useEffect(() => {
+    const onChange = () => {
+      const fs = document.fullscreenElement === wrapRef.current
+      setFullscreen(fs)
+      if (!fs) {
+        setLeavingFs(true)
+        window.clearTimeout(fsLeaveTimerRef.current)
+        fsLeaveTimerRef.current = window.setTimeout(() => setLeavingFs(false), 340)
+      }
+    }
+    document.addEventListener('fullscreenchange', onChange)
+    return () => {
+      document.removeEventListener('fullscreenchange', onChange)
+      window.clearTimeout(fsLeaveTimerRef.current)
+    }
+  }, [])
+  const toggle = () => {
+    const v = videoRef.current
+    if (!v) return
+    if (v.paused) void v.play().catch(() => {})
+    else v.pause()
+  }
+  const toggleFullscreen = (event: MouseEvent) => {
+    event.stopPropagation()
+    const wrap = wrapRef.current
+    if (!wrap) return
+    if (document.fullscreenElement) void document.exitFullscreen().catch(() => {})
+    else void wrap.requestFullscreen().catch(() => {})
+  }
+  // 进度条拖拽 seek(2026-08-09 用户要求):与消息气泡播放器同款——
+  // pointer capture,按下即 seek,拖动连续更新;时长未知(流式/未加载)
+  // 时禁用。
+  // **只认 track 内点击(2026-08-09 修复"点右下角/进度条外把进度拉到
+  // 尽头")**:事件绑在 .island-agent-mini-bar 容器上(含渐变区 + 44px
+  // 全屏键预留角位),点击容器但不在 track 内时 clientX 在 track rect
+  // 之外,ratio 被 clamp 成 0/1 = 进度跳头/跳尾——按下点不在 track
+  // 内直接忽略
+  const seekFromPointer = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const bar = barRef.current
+    const v = videoRef.current
+    if (!bar || !v || !(duration > 0) || !Number.isFinite(duration)) return
+    const rect = bar.getBoundingClientRect()
+    if (event.clientX < rect.left || event.clientX > rect.right) return
+    const ratio = Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width))
+    v.currentTime = ratio * duration
+    setCurrent(v.currentTime)
+    // 双向同步(2026-08-09):seek 立即上报,展开回面板时同 src 续播
+    dispatchAgentMedia('play', { kind: 'video', src: media.src, playing: !v.paused, position: v.currentTime })
+  }
+  // 小窗播放进度上报(2026-08-09 双向同步):timeupdate 经 dispatch
+  // 更新位置缓存与 agentPlaying——展开回面板时 MediaFrame 从该位置
+  // 续播(节流 ~1Hz,与 MediaFrame onProgress 同款)
+  const lastReportRef = useRef(-1)
+  const reportPosition = (position: number) => {
+    if (Math.round(position) !== lastReportRef.current) {
+      lastReportRef.current = Math.round(position)
+      dispatchAgentMedia('play', { kind: 'video', src: media.src, playing: true, position })
+    }
+  }
+  const pct = duration > 0 && Number.isFinite(duration) ? Math.min(100, (current / duration) * 100) : 0
+  return (
+    <div
+      ref={wrapRef}
+      className={`island-agent-mini${fullscreen ? ' fullscreen' : ''}${leavingFs ? ' leaving-fullscreen' : ''}`}
+    >
+      {media.kind === 'img' ? (
+        <>
+          <img
+            src={src}
+            alt={media.name ?? ''}
+            draggable={false}
+            onClick={(event) => {
+              event.stopPropagation()
+              onExpand()
+            }}
+          />
+          {/* 全屏按钮(2026-08-09):图片岛同样可全屏(双键缩放适用场景) */}
+          <button
+            type="button"
+            className="island-agent-mini-fs"
+            aria-label={fullscreen ? '退出全屏' : '全屏'}
+            onClick={toggleFullscreen}
+          >
+            {fullscreen ? (
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.4} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M8 3v3a2 2 0 0 1-2 2H3" />
+                <path d="M21 8h-3a2 2 0 0 1-2-2V3" />
+                <path d="M3 16h3a2 2 0 0 1 2 2v3" />
+                <path d="M16 21v-3a2 2 0 0 1 2-2h3" />
+              </svg>
+            ) : (
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.4} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M8 3H5a2 2 0 0 0-2 2v3" />
+                <path d="M21 8V5a2 2 0 0 0-2-2h-3" />
+                <path d="M3 16v3a2 2 0 0 0 2 2h3" />
+                <path d="M16 21h3a2 2 0 0 0 2-2v-3" />
+              </svg>
+            )}
+          </button>
+        </>
+      ) : (
+        <>
+          <video
+            ref={videoRef}
+            src={src}
+            onClick={(event) => {
+              event.stopPropagation()
+              toggle()
+            }}
+            onLoadedMetadata={(event) => {
+              const d = event.currentTarget.duration
+              setDuration(Number.isFinite(d) ? d : 0)
+            }}
+            onDurationChange={(event) => {
+              const d = event.currentTarget.duration
+              setDuration(Number.isFinite(d) ? d : 0)
+            }}
+            onTimeUpdate={(event) => {
+              setCurrent(event.currentTarget.currentTime)
+              reportPosition(event.currentTarget.currentTime)
+            }}
+            onEnded={() => {
+              setPlaying(false)
+              setCurrent(0)
+            }}
+            onPlay={() => setPlaying(true)}
+            onPause={() => setPlaying(false)}
+          />
+          {!playing && (
+            <button
+              type="button"
+              className="island-agent-mini-play"
+              aria-label="播放"
+              onClick={(event) => {
+                event.stopPropagation()
+                toggle()
+              }}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                <path d="M7 4.5v15l13-7.5z" />
+              </svg>
+            </button>
+          )}
+          {/* 进度条 + 时间(2026-08-09 用户要求):底部渐变遮罩条,
+              padding-right 预留全屏按钮角位(参照消息气泡控件层) */}
+          <div
+            className="island-agent-mini-bar"
+            onPointerDown={(event) => {
+              if (event.button !== 0) return
+              event.preventDefault()
+              event.stopPropagation()
+              scrubbingRef.current = true
+              event.currentTarget.setPointerCapture(event.pointerId)
+              seekFromPointer(event)
+            }}
+            onPointerMove={(event) => {
+              if (scrubbingRef.current) seekFromPointer(event)
+            }}
+            onPointerUp={() => {
+              scrubbingRef.current = false
+            }}
+            onPointerCancel={() => {
+              scrubbingRef.current = false
+            }}
+          >
+            <div ref={barRef} className="island-agent-mini-track" aria-hidden="true">
+              <div className="island-agent-mini-fill" style={{ width: `${pct}%` }} />
+              <span className="island-agent-mini-thumb" style={{ left: `${pct}%` }} />
+            </div>
+            <span className="island-agent-mini-time">
+              {fmtMiniTime(current)} / {fmtMiniTime(duration)}
+            </span>
+            {/* 音量 + 更多(2026-08-10 用户要求:定制 UI,与对话播放器/
+                多媒体库双向同步) */}
+            <VideoExtras videoRef={videoRef} />
+            {/* 全屏按钮(2026-08-10 用户要求:缩小对齐音量/更多键,放在
+                ⋯ 键右边,同排同高;容器级全屏,进度条行内 flex 流) */}
+            <button
+              type="button"
+              className="island-agent-mini-fs"
+              aria-label={fullscreen ? '退出全屏' : '全屏'}
+              onPointerDown={(event) => event.stopPropagation()}
+              onClick={(event) => {
+                event.stopPropagation()
+                toggleFullscreen(event)
+              }}
+            >
+              {fullscreen ? (
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.4} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M8 3v3a2 2 0 0 1-2 2H3" />
+                  <path d="M21 8h-3a2 2 0 0 1-2-2V3" />
+                  <path d="M3 16h3a2 2 0 0 1 2 2v3" />
+                  <path d="M16 21v-3a2 2 0 0 1 2-2h3" />
+                </svg>
+              ) : (
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.4} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M8 3H5a2 2 0 0 0-2 2v3" />
+                  <path d="M21 8V5a2 2 0 0 0-2-2h-3" />
+                  <path d="M3 16v3a2 2 0 0 0 2 2h3" />
+                  <path d="M16 21h3a2 2 0 0 0 2-2v-3" />
+                </svg>
+              )}
+            </button>
+          </div>
+        </>
+      )}
+    </div>
+  )
+}

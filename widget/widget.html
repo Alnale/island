@@ -4,12 +4,16 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <!-- CSP:挂件页无远程内容,default-src 'self' 兜底;connect-src 放行
-         本地 SMTC 桥/歌词 API/dev HMR;style-src unsafe-inline 为 React
-         内联 style 与 mermaid 注入必需;img/font 仅 data:(file:// 下
-         'self' 不匹配,资源均以 data URL 内联) -->
+         本地 SMTC 桥/歌词 API/dev HMR + **island-media: 协议(2026-08-09
+         修复音频移交"没加载播放":移交 fetch(island-media://) 走
+         connect-src,此前未放行被 CSP 拦截,媒体元素走 media-src 不受
+         影响——气泡能播但 fetch 失败,移交静默降级只切模式)**;
+         style-src unsafe-inline 为 React 内联 style 与 mermaid 注入必需;
+         img/font 仅 data:(file:// 下 'self' 不匹配,资源均以 data URL
+         内联) -->
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' http://127.0.0.1:8765 ws://127.0.0.1:* http://127.0.0.1:* https://*; object-src 'none'; base-uri 'none'"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://* island-media:; media-src 'self' data: blob: https://* island-media:; font-src 'self' data:; connect-src 'self' http://127.0.0.1:8765 ws://127.0.0.1:* http://127.0.0.1:* https://* island-media:; object-src 'none'; base-uri 'none'"
     />
     <title>灵动岛挂件</title>
   </head>

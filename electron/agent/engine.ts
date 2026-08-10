@@ -31,6 +31,7 @@ import type {
   AgentTool,
   EngineDeps,
   McpServerConfig,
+  MediaAttachment,
   ToolParams,
 } from './types'
 
@@ -114,7 +115,11 @@ const BUDGET_TRUNCATE_HINT =
 const PROACTIVE_INSTRUCTION =
   '【系统主动任务,不是用户输入】用户已有一段时间没有与助手互动。' +
   '请基于当前对话语境、长期记忆与你的性格,主动说一两句自然、简短的话,开启或延续对话。' +
-  '像真实的朋友那样,不要提及这是系统任务,不要长篇大论,不要解释你的行为。'
+  '像真实的朋友那样——人是会用工具的:如果话题需要真实信息(后台任务进度、扫码登录等' +
+  '等待状态、实时事件),就主动调用工具查证或顺手把事办了(web_search、查询后台任务状态、' +
+  '用灵动岛设置工具帮用户调整挂件等),不要凭空猜测;但不要为了用工具而用工具,' +
+  '把话说短、说自然,行动融入对话而不是罗列工具。' +
+  '不要提及这是系统任务,不要长篇大论,不要解释你的行为。'
 
 /**
  * 工具执行兜底超时(测试用导出):promise 与超时赛跑,超时/中止后拒绝
@@ -658,7 +663,15 @@ export function createAgentEngine(deps: EngineDeps): AgentEngine {
     confirmGate?: (name: string, args: Record<string, unknown>) => Promise<boolean>,
     signal?: AbortSignal,
   ): Promise<
-    Array<{ id: string; name: string; ok: boolean; out: string; durationMs: number; image?: string }>
+    Array<{
+      id: string
+      name: string
+      ok: boolean
+      out: string
+      durationMs: number
+      image?: string
+      media?: MediaAttachment[]
+    }>
   > {
     return Promise.all(
       batch.map(async ({ id, name, args }) => {
@@ -667,6 +680,7 @@ export function createAgentEngine(deps: EngineDeps): AgentEngine {
         let out: string
         let ok: boolean
         let image: string | undefined
+        let media: MediaAttachment[] | undefined
         if (!tool) {
           out = `未知工具:${name}(可用工具:${list.map((t) => t.name).join('、')})`
           ok = false
@@ -695,10 +709,12 @@ export function createAgentEngine(deps: EngineDeps): AgentEngine {
                   name,
                   signal,
                 )
-                // 对象返回 = 文本 + 图片附件(如 bili 登录二维码)
+                // 对象返回 = 文本 + 图片附件 + 媒体附件(open_file 媒体
+                // 拦截注入,2026-08-08)
                 if (typeof raw === 'object') {
                   out = raw.text
                   image = raw.image
+                  media = raw.media
                 } else {
                   out = raw
                 }
@@ -710,7 +726,7 @@ export function createAgentEngine(deps: EngineDeps): AgentEngine {
             ok = false
           }
         }
-        return { id, name, ok, out, image, durationMs: Date.now() - started }
+        return { id, name, ok, out, media, image, durationMs: Date.now() - started }
       }),
     )
   }
@@ -811,6 +827,7 @@ export function createAgentEngine(deps: EngineDeps): AgentEngine {
       let ok = true
       let out = ''
       let outImage: string | undefined
+      let outMedia: MediaAttachment[] | undefined
       try {
         // 参数校验(与 executeToolBatch 同款:缺必需参数 → 结构化错误
         // 回填 LLM 自纠,不执行;手动调用空参同样得到可读提示)
@@ -827,6 +844,7 @@ export function createAgentEngine(deps: EngineDeps): AgentEngine {
         if (typeof raw === 'object') {
           out = raw.text
           outImage = raw.image
+          outMedia = raw.media
         } else {
           out = raw
         }
@@ -839,6 +857,11 @@ export function createAgentEngine(deps: EngineDeps): AgentEngine {
       // 工具图片附件(bili 登录二维码等):注入助手消息 image part,
       // 渲染端消息气泡直接展示——不依赖 LLM 复述长 base64
       if (outImage) msgParts.push({ type: 'image', dataUrl: outImage })
+      // 工具媒体附件(open_file 媒体拦截):注入 media part,渲染端
+      // MediaFrame 窗口内直接播放(不依赖 LLM 输出 markdown)
+      if (outMedia && outMedia.length > 0) {
+        for (const m of outMedia) msgParts.push({ type: 'media', kind: m.kind, url: m.url, name: m.name })
+      }
       // 手动调用的执行结果入历史(在用户消息之后),LLM 第一步即看到
       historyIn.push({ id: randomUUID(), role: 'assistant', parts: msgParts.slice(0) })
       pushedParts = msgParts.length
@@ -926,7 +949,15 @@ export function createAgentEngine(deps: EngineDeps): AgentEngine {
       // 并行执行:DeepSeek 并行工具调用始终开启,互不依赖的调用并发跑
       // (多个 delegate 即并行子代理);结果按调用顺序回填。
       // 截断且无工具调用时跳过本分支(不误发 running 状态)
-      let results: Array<{ id: string; name: string; ok: boolean; out: string; durationMs: number; image?: string }> = []
+      let results: Array<{
+        id: string
+        name: string
+        ok: boolean
+        out: string
+        durationMs: number
+        image?: string
+        media?: MediaAttachment[]
+      }> = []
       if (calls.length > 0) {
         onEvent({ type: 'status', status: 'running' })
         const batch: Array<{ id: string; name: string; args: Record<string, unknown> }> = []
@@ -959,6 +990,10 @@ export function createAgentEngine(deps: EngineDeps): AgentEngine {
         // 工具图片附件(如 bili 登录二维码):注入助手消息 image part,
         // 渲染端消息气泡直接展示——不依赖 LLM 复述长 base64
         if (r.image) msgParts.push({ type: 'image', dataUrl: r.image })
+        // 工具媒体附件(open_file 媒体拦截):注入 media part,窗口内播放
+        if (r.media && r.media.length > 0) {
+          for (const m of r.media) msgParts.push({ type: 'media', kind: m.kind, url: m.url, name: m.name })
+        }
       }
 
       // 把本轮新增的助手 parts(思维链 + 文本 + 调用 + 结果)回填历史,

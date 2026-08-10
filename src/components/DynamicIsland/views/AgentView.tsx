@@ -16,6 +16,7 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type KeyboardEvent,
@@ -27,20 +28,29 @@ import type { AgentPanelProps, AgentToolInfo } from '../../../agent/types'
 import { stripMcpServiceLabel } from '../../../../electron/agent/constants'
 import { useLeavingList } from '../../../hooks/useLeavingList'
 import { QuickMenu } from './QuickMenu'
-import { Markdown } from './Markdown'
+import { Markdown, type AgentMediaReport } from './Markdown'
 import { AssistantBlock, ToolSummary, UserBubble } from './AgentMessages'
 import {
   AGENT_PANEL_FIXED_H,
   AGENT_PANEL_MAX_H,
   AGENT_PANEL_MIN_H,
   AGENT_PHASE_IN_MS,
+  AGENT_WIDTH_ANIMATE_MS,
 } from '../layout'
 
 /** 面板子视图:聊天 / 对话历史 / 工具列表 */
 type AgentViewKind = 'chat' | 'history' | 'tools'
 
 /** 头部下拉菜单项 id:⋯ 弹出菜单与快捷切换按钮共用 */
-type AgentMenuItemId = 'stop' | 'clear' | 'history' | 'tools' | 'settings' | 'collapse'
+type AgentMenuItemId =
+  | 'stop'
+  | 'clear'
+  | 'history'
+  | 'tools'
+  | 'media-library'
+  | 'settings'
+  | 'collapse'
+  | 'collapse-media'
 
 /** 快捷按钮图标(stroke 风格,与头部其他 ctl 按钮一致) */
 const QUICK_MENU_ICONS: Record<AgentMenuItemId, ReactNode> = {
@@ -114,6 +124,7 @@ const QUICK_MENU_ICONS: Record<AgentMenuItemId, ReactNode> = {
       <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 11-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 110-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 114 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 110 4h-.09a1.65 1.65 0 00-1.51 1z" />
     </svg>
   ),
+  // 收起为灵动岛(2026-08-10 用户要求):收缩成紧凑岛(无媒体小窗)
   collapse: (
     <svg
       className="island-ctl-svg"
@@ -129,6 +140,41 @@ const QUICK_MENU_ICONS: Record<AgentMenuItemId, ReactNode> = {
       <polyline points="6 9 12 15 18 9" />
     </svg>
   ),
+  // 收起为多媒体岛(2026-08-10 用户要求):媒体小窗/音频移交
+  'collapse-media': (
+    <svg
+      className="island-ctl-svg"
+      width="11"
+      height="11"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <polyline points="6 15 12 9 18 15" />
+      <rect x="3" y="4" width="18" height="16" rx="3" />
+    </svg>
+  ),
+  'media-library': (
+    <svg
+      className="island-ctl-svg"
+      width="11"
+      height="11"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <rect x="3" y="3" width="7" height="7" rx="1" />
+      <rect x="14" y="3" width="7" height="7" rx="1" />
+      <rect x="3" y="14" width="7" height="7" rx="1" />
+      <rect x="14" y="14" width="7" height="7" rx="1" />
+    </svg>
+  ),
 }
 /**
  * 视图切换离场副本卸载延时(ms):必须大于 CSS 离场动画时长(0.15s),
@@ -136,6 +182,19 @@ const QUICK_MENU_ICONS: Record<AgentMenuItemId, ReactNode> = {
  * 在动画中途突然消失,是切换闪烁的常见原因
  */
 const VIEW_LEAVE_MS = 200
+
+/** 消息分批挂载每帧批大小(对话多时展开不卡,2026-08-08):每帧挂载
+ * 一批消息(从最新往旧),React commit + Markdown 解析分散到多帧 */
+const BATCH_RENDER = 12
+
+/** 消息列表启用 content-visibility 的条数阈值(2026-08-09 修复"大量
+ * 消息滚动条中间部分滚动抖动"):实测 content-visibility 的估算机制在
+ * 滚动中必然修正 scrollHeight(60 条滚动 6 段波动 412px,估算精确到
+ * 每条真实高度也一样,Chromium 行为)——滚动条抖动无解;而全量布局
+ * 滚动条完全稳定(drift 0,实测)。阈值:≤100 条全量布局(文本消息
+ * 布局成本低,滚动流畅);超过(长历史)才启用 content-visibility 保
+ * 证滚动性能,接受滚动条轻微修正 */
+const AGENT_MSG_CV_THRESHOLD = 100
 
 /**
  * 平滑滚动到目标位置(自绘 rAF 插值,非线性):
@@ -190,6 +249,18 @@ function smoothScrollTo(el: HTMLElement, target: number, durationMs = 800, blur 
   requestAnimationFrame(step)
 }
 
+/** 跳底(桌面挂件):content-visibility 下 scrollHeight 首帧按估算尺寸,
+ * 双 rAF 后用真实布局尺寸校正一次(底部队列消息渲染完成)——不校正
+ * 长历史首屏会停在估算位置,最后几条不可见(2026-08-08) */
+function jumpToBottom(el: HTMLElement) {
+  el.scrollTop = el.scrollHeight
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      if (el.isConnected) el.scrollTop = el.scrollHeight
+    })
+  })
+}
+
 /** 滚动消息列表到底部:桌面挂件直接跳底(软件渲染逐帧 scrollTop + 全幅
  * 重绘 ≈5-15ms/帧,动画太贵),Web 演示版保留平滑滚动(GPU);
  * blur = 启用动态高斯模糊(长列表滚动动画的性能优化,对话中跳转的
@@ -199,7 +270,7 @@ function scrollMessagesToBottom(
   opts: { durationMs?: number; blur?: boolean } = {},
 ) {
   if (window.desktop) {
-    el.scrollTop = el.scrollHeight
+    jumpToBottom(el)
   } else {
     smoothScrollTo(el, el.scrollHeight, opts.durationMs ?? 800, opts.blur ?? false)
   }
@@ -219,13 +290,22 @@ function formatSessionTime(ts: number): string {
 }
 
 export interface AgentViewProps extends AgentPanelProps {
-  /** 收起岛体(头部"收起"按钮) */
+  /** 收起为多媒体岛(视频/图片冻结为媒体小窗;音频播放中移交音乐模式) */
   onCollapse: () => void
+  /** 收起为灵动岛(2026-08-10 用户要求:收起成 Agent 紧凑态,不生成
+   * 媒体岛) */
+  onCollapseMini: () => void
   /**
    * 岛体高度自适应回调:内容变化时上报目标高度(px),
    * DynamicIsland 写入 --agent-h 驱动岛体高度
    */
   onHeightChange?: (height: number) => void
+  /**
+   * 对话最后媒体快照(2026-08-09):收起面板时媒体小窗/音频移交的候选
+   * ——从消息**数据**取最后一条含 media part 的消息的最后一个媒体
+   * (数据顺序 = 消息顺序,不受分批挂载影响)
+   */
+  onMediaSnapshot?: (media: AgentMediaReport | null) => void
 }
 
 export function AgentView({
@@ -241,13 +321,39 @@ export function AgentView({
   onAbort,
   onClear,
   onOpenSettings,
+  onOpenMediaLibrary,
   onExcludedToolsChange,
   excludedTools,
   pendingConfirm,
   onConfirmTool,
   onCollapse,
+  onCollapseMini,
   onHeightChange,
+  onMediaSnapshot,
+  mediaAutoPlayIds,
+  onMediaAutoPlayed,
 }: AgentViewProps) {
+  // 对话最后媒体快照(2026-08-09):从消息**数据**取最后一条含 media
+  // part 的消息的最后一个媒体——数据顺序 = 消息顺序,不受消息列表
+  // 分批挂载(visibleCount)/重挂载影响(原挂载事件上报在大量历史消息
+  // 时最后上报的是中间批次的旧媒体,实测音频移交错取旧文件);收起
+  // 面板时 DynamicIsland 据此变形成媒体小窗/移交音频
+  const lastMedia = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const parts = messages[i].parts
+      if (!Array.isArray(parts)) continue
+      for (let j = parts.length - 1; j >= 0; j--) {
+        const p = parts[j]
+        if (p.type === 'media') {
+          return { kind: p.kind, src: p.url, name: p.name }
+        }
+      }
+    }
+    return null
+  }, [messages])
+  useEffect(() => {
+    onMediaSnapshot?.(lastMedia)
+  }, [lastMedia, onMediaSnapshot])
   const [input, setInput] = useState('')
   // / 与 @ 手动调用的候选列表(输入前缀时列出技能/MCP 工具)
   const [suggestions, setSuggestions] = useState<AgentToolInfo[]>([])
@@ -292,13 +398,60 @@ export function AgentView({
   // 视图切换过渡:先切主实例(新视图进场动画),旧视图副本盖在上层
   // 播放离场动画后卸载 —— 交叉过渡,无硬切;back = 返回 chat 方向
   const [leaving, setLeaving] = useState<{ view: AgentViewKind; back: boolean } | null>(null)
-  // 展开首帧两阶段:先渲染轻量骨架占位(形变动画期间 DOM 极小,展开顺),
-  // 短暂延迟后挂载真实消息内容(依次加载)
-  const [phase, setPhase] = useState<'skeleton' | 'content'>('skeleton')
+  // 展开首帧两阶段:消息多(>一批)时先渲染轻量骨架占位(形变动画期间
+  // DOM 极小,展开顺),延迟后挂载真实消息内容;消息少(≤一批)时**直接
+  // 渲染内容**——单次形变、测量一次到位,避免"先展开到下限再拉长"的
+  // 二次跳变观感(2026-08-08 用户反馈"几条消息也卡",实测卡的主感是
+  // 骨架期高度停在下限、content 切换后再形变一次)
+  const [phase, setPhase] = useState<'skeleton' | 'content'>(() =>
+    messages.length > BATCH_RENDER ? 'skeleton' : 'content',
+  )
   useEffect(() => {
+    if (phase !== 'skeleton') return
     const timer = window.setTimeout(() => setPhase('content'), AGENT_PHASE_IN_MS)
     return () => window.clearTimeout(timer)
-  }, [])
+  }, [phase])
+  // 消息分批挂载(2026-08-08 用户要求"对话一多展开就卡"):内容期一次性
+  // 挂载全部消息时,几百条消息的 React commit + Markdown 解析 + DOM
+  // 创建阻塞主线程数百毫秒(形变刚结束、窗口 resize 同步进行 = 卡顿)。
+  // 分批:每帧挂载一批(从最新消息往旧),commit 分散到多帧,展开流畅;
+  // 分批期间高度测量跟随(窗口平滑增长),滚动保持底部。消息少(≤一批)
+  // 时一次挂载,无感
+  const [visibleCount, setVisibleCount] = useState(0)
+  const visibleCountRef = useRef(0)
+  const visibleTotalRef = useRef(messages.length)
+  visibleTotalRef.current = messages.length
+  // **useLayoutEffect 而不是 useEffect**(2026-08-08 修复"几条消息也卡"
+  // 回归):effect 在 commit 后、paint 前同步 setVisibleCount → React
+  // 同步 re-render,content 切换**首帧即渲染首批消息**——原 useEffect
+  // 先提交一帧 visibleCount=0 的空列表,测量把岛体高度压到下限、窗口
+  // resize 一次,下一帧消息渲染再测量再 resize = 高度二次跳变 + 双
+  // resize,展开动画卡(几条消息也走此路径,实测)
+  useLayoutEffect(() => {
+    if (phase !== 'content') return
+    const total = visibleTotalRef.current
+    if (visibleCountRef.current >= total) return // 已挂载(追平后进入)
+    visibleCountRef.current = Math.min(BATCH_RENDER, total)
+    setVisibleCount(visibleCountRef.current)
+    if (total <= BATCH_RENDER) return
+    let raf = 0
+    const step = () => {
+      const next = Math.min(visibleTotalRef.current, visibleCountRef.current + BATCH_RENDER)
+      visibleCountRef.current = next
+      setVisibleCount(next)
+      if (next < visibleTotalRef.current) raf = requestAnimationFrame(step)
+    }
+    raf = requestAnimationFrame(step)
+    return () => cancelAnimationFrame(raf)
+  }, [phase])
+  // 新消息落定(流式/历史加载):分批结束后追平,新消息不等分批
+  // (分批进行中由循环天然追到最新总数,无需打断)
+  useEffect(() => {
+    if (visibleCountRef.current < messages.length) {
+      visibleCountRef.current = messages.length
+      setVisibleCount(messages.length)
+    }
+  }, [messages])
   // 卸载时清理候选收起计时器(动画未完成即卸载不残留)
   useEffect(() => () => window.clearTimeout(suggestCloseTimerRef.current), [])
   // 输入框引用:LLM 回复完成后自动聚焦,直接可输入
@@ -308,15 +461,19 @@ export function AgentView({
   const busy = status === 'thinking' || status === 'running'
   // 快捷菜单项(2026-08-07 重构:通用 QuickMenu 取代 ⋯ 弹出菜单):
   // 条件项随状态(停止生成仅运行中、新对话仅非空历史)。**默认选中
-  // "新对话"**(用户要求);收起面板恒为末项(历史为空时的回退默认)
+  // "新对话"**(用户要求);收起恒为末项(历史为空时的回退默认)。
+  // **收起拆分(2026-08-10 用户要求)**:收起为灵动岛(紧凑态,不生成
+  // 媒体岛)/ 收起为多媒体岛(视频/图片冻结媒体小窗,音频移交)
   const menuItems: Array<{ id: AgentMenuItemId; label: string; danger?: boolean }> = []
   if (busy) menuItems.push({ id: 'stop', label: '停止生成', danger: true })
   if (messages.length > 0) menuItems.push({ id: 'clear', label: '新对话' })
   menuItems.push(
     { id: 'history', label: '对话历史' },
     { id: 'tools', label: '工具列表' },
+    { id: 'media-library', label: '多媒体库' },
     { id: 'settings', label: '设置' },
-    { id: 'collapse', label: '收起面板' },
+    { id: 'collapse', label: '收起为灵动岛' },
+    { id: 'collapse-media', label: '收起为多媒体岛' },
   )
   // LLM 回复完成(运行中 → 空闲)自动聚焦输入框,直接可输入
   const wasBusyRef = useRef(busy)
@@ -339,12 +496,44 @@ export function AgentView({
   const measureTimerRef = useRef(0)
   const streamingRef = useRef(streaming)
   streamingRef.current = streaming
+  // **消息真实高度测量(2026-08-09 修复"大量消息滚动条中间部分滚动
+  // 抖动")**:content-visibility 屏外消息的 offsetHeight 返回**估算值**
+  // (跳过布局,实测 Chromium 不强制定位),直接读写 --msg-h 无效——
+  // 需**临时禁用跳过强制真实布局**测一次(挂载后每条仅一次,
+  // data-msg-h-measured 标记;容器 resize = 宽度/缩放变化时 force 重测
+  // 全部)。真实高度写入 --msg-h → contain-intrinsic-size 估算 ≈ 真实
+  // → 滚动中部真实化零跳变(scrollHeight 不再反复修正,实测 60 条
+  // 单向滚动 6 段波动 412px → 修复后应 ≈ 0)
+  // 全量布局(≤阈值,无 content-visibility)不需要 --msg-h 估算——跳过
+  // 强制布局测高(避免每条消息挂载时白做一次强制布局)
+  const useCv = messages.length > AGENT_MSG_CV_THRESHOLD
+  const useCvRef = useRef(useCv)
+  useCvRef.current = useCv
+  const measureMsgH = (child: HTMLElement, force: boolean) => {
+    if (!force && child.dataset.msgHMeasured) return
+    if (!useCvRef.current) return
+    child.dataset.msgHMeasured = '1'
+    const prev = child.style.contentVisibility
+    let h: number
+    if (prev !== 'visible') {
+      // 禁用跳过 → 强制真实布局测高 → 恢复(继续享受屏外跳过优化)
+      child.style.contentVisibility = 'visible'
+      h = child.offsetHeight
+      child.style.contentVisibility = prev || ''
+    } else {
+      h = child.offsetHeight
+    }
+    if (h > 0) child.style.setProperty('--msg-h', `${h}px`)
+  }
   const measureHeight = useCallback(() => {
     const doMeasure = (el: HTMLElement) => {
       let contentH = 0
       const children = el.children
       for (let i = 0; i < children.length; i++) {
-        contentH += (children[i] as HTMLElement).offsetHeight
+        const child = children[i] as HTMLElement
+        contentH += child.offsetHeight
+        // 未测过(新挂载)才强制布局测一次;已测过直接用
+        measureMsgH(child, false)
       }
       if (children.length > 1) {
         // 列表 gap 从运行时样式读取(聊天 10px / 历史、工具 8px,自动跟随)
@@ -480,12 +669,20 @@ export function AgentView({
         case 'settings':
           onOpenSettings?.()
           break
+        case 'media-library':
+          onOpenMediaLibrary?.()
+          break
         case 'collapse':
+          // 收起为灵动岛(紧凑态,不生成媒体岛)
+          onCollapseMini()
+          break
+        case 'collapse-media':
+          // 收起为多媒体岛(媒体小窗/音频移交)
           onCollapse()
           break
       }
     },
-    [onAbort, onClear, onCollapse, onOpenSettings, switchView],
+    [onAbort, onClear, onCollapse, onCollapseMini, onOpenSettings, onOpenMediaLibrary, switchView],
   )
 
   // 菜单项内容(图标 + 标签):QuickMenu 的按钮 WheelSwap 与菜单项共用
@@ -503,17 +700,26 @@ export function AgentView({
   }
 
   // 内容变化(消息/流式/状态)时重测(rAF 延迟一帧:面板首帧挂载不阻塞
-  // 展开动画布局,测量结果下一帧生效,展开更顺)
+  // 展开动画布局,测量结果下一帧生效,展开更顺)。visibleCount = 分批
+  // 挂载进度,每批后测量 → 窗口平滑跟随消息增长
   useLayoutEffect(() => {
     const raf = requestAnimationFrame(measureHeight)
     return () => cancelAnimationFrame(raf)
-  }, [measureHeight, messages, streaming, status, lastError, phase])
+  }, [measureHeight, messages, streaming, status, lastError, phase, visibleCount])
 
-  // ResizeObserver 兜底:字体/岛宽变化导致换行数变化时,列表高度随之变化
+  // ResizeObserver 兜底:字体/岛宽变化导致换行数变化时,列表高度随之变化;
+  // **容器尺寸变化(缩放/宽度)会改变所有消息的换行高度(2026-08-09)——
+  // 清空已测标记强制重测全部 --msg-h,否则屏外估算用旧高度仍会跳**
   useLayoutEffect(() => {
     const el = scrollRef.current
     if (!el || !onHeightChange) return
-    const observer = new ResizeObserver(measureHeight)
+    const observer = new ResizeObserver(() => {
+      const list = scrollRef.current
+      if (list) {
+        for (const c of list.children) delete (c as HTMLElement).dataset.msgHMeasured
+      }
+      measureHeight()
+    })
     observer.observe(el)
     return () => observer.disconnect()
   }, [measureHeight, onHeightChange])
@@ -531,14 +737,53 @@ export function AgentView({
     return () => observer.disconnect()
   }, [measureHeight, onHeightChange])
 
+  // 注:消息级 ResizeObserver 方案已删(2026-08-09 实测弃用)——屏外
+  // 消息(content-visibility 跳过布局)的 contentRect 是**估算值**,observe
+  // 初始回调把估算高度写回 --msg-h,**覆盖 measureMsgH 的精确值**(实测
+  // 写入日志 >36... 而 style 值 20px),滚动估算反而更差。精确值由
+  // measureMsgH 管理(挂载/宽度动画后重测),滚动场景由 content-
+  // visibility 的 auto 记住尺寸兜底(真实化一次后屏外估算 = 真实)
+
+  // **宽度动画完成后 force 重测全部 --msg-h(2026-08-09,抖动修复的
+  // 关键一环)**:分批挂载发生在展开宽度动画期间(骨架 120ms + 5 批 ×
+  // 每帧,宽度到 120-250ms 处仍在动画中)——挂载时强制布局测到的是
+  // "动画中间宽度"下的高度(实测 user 消息 20px,最终宽度下真实 36px)。
+  // 屏外消息被 content-visibility 跳过布局,ResizeObserver 观察不到
+  // 估算尺寸变化 → --msg-h 永不刷新 → 滚动中部真实化时 20→36 跳变。
+  // 分批结束(visibleCount 追平)后 500ms(宽度动画 0.3s 已完成)清
+  // 标记 force 重测一次——屏外估算 = 最终宽度下的真实高度,首次
+  // 真实化零跳变;此后滚动场景由 auto 记住尺寸兜底
+  // 宽度重测只执行一次(分批结束 500ms);新消息落定(visibleCount 追平
+  // 变化)不重复重测——否则每轮对话都强制布局全部消息(卡顿)。AgentView
+  // 卸载重挂载时 ref 重置,再次展开重新测
+  const widthSettleMeasuredRef = useRef(false)
+  useEffect(() => {
+    if (phase !== 'content') return
+    if (widthSettleMeasuredRef.current) return
+    const t = window.setTimeout(() => {
+      widthSettleMeasuredRef.current = true
+      const el = scrollRef.current
+      if (!el) return
+      // 巡检诊断标记(2026-08-09:验证宽度动画后重测执行)
+      el.dataset.msgHSettled = '1'
+      for (const c of el.children) delete (c as HTMLElement).dataset.msgHMeasured
+      measureHeight()
+    }, 500)
+    return () => window.clearTimeout(t)
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 分批结束(visibleCount 追平)后重测一次
+  }, [phase, visibleCount])
+
   // 卸载时清理测量节流计时器
   useEffect(() => () => window.clearTimeout(measureTimerRef.current), [])
 
-  // 消息/流式变化时自动滚到底(用户上翻查看历史时不打扰)
+  // 消息/流式变化时自动滚到底(用户上翻查看历史时不打扰;
+  // content-visibility 下跳底需双 rAF 校正估算尺寸)。
+  // visibleCount = 分批挂载:顶部追加旧消息会下推底部内容,保持底部
+  // (双 rAF 校正同款)
   useEffect(() => {
     const el = scrollRef.current
-    if (el && atBottomRef.current) el.scrollTop = el.scrollHeight
-  }, [messages, streaming, status, lastError])
+    if (el && atBottomRef.current) jumpToBottom(el)
+  }, [messages, streaming, status, lastError, visibleCount])
 
   const handleScroll = () => {
     const el = scrollRef.current
@@ -560,10 +805,18 @@ export function AgentView({
     const el = scrollRef.current
     if (el) {
       atBottomRef.current = true
-      // 桌面挂件:滚动动画逐帧 scrollTop + 软件渲染全幅重绘仍然贵
-      // (750×500 文本区 ≈ 5-15ms/帧),直接跳底零动画成本;
-      // Web 演示版保留平滑滚动(GPU,长列表模糊是性能优化)
-      scrollMessagesToBottom(el, { blur: messagesLenRef.current > 0 })
+      // 串行展开(2026-08-08 用户要求:先宽 → 后高 → 伴随滚动):
+      // 进入面板的滚动延迟到高度动画开始时(AGENT_WIDTH_ANIMATE_MS,
+      // 与 useAgentPanelLayout 的 agentHReady 同拍,2026-08-09 由
+      // MORPH_ANIMATE_MS 400ms 同步——原滚动比高度动画晚 100ms,
+      // 展开收尾滞涩)——宽度动画期间岛体还是 56 高宽条,滚动无意义
+      // 且浪费;高度展开时伴随滚动到底(桌面挂件直接跳底零动画成本;
+      // Web 演示版保留平滑滚动)
+      const t = window.setTimeout(() => {
+        const el2 = scrollRef.current
+        if (el2) scrollMessagesToBottom(el2, { blur: messagesLenRef.current > 0 })
+      }, AGENT_WIDTH_ANIMATE_MS)
+      return () => window.clearTimeout(t)
     }
   }, [view, phase])
 
@@ -930,7 +1183,8 @@ export function AgentView({
           </span>
           <span className="island-agent-status">{statusText}</span>
           {/* 右上角快捷菜单(2026-08-07 重构:通用 QuickMenu,默认"新对话";
-              左侧展开,悬浮/滚轮/点击切换,单击菜单项执行) */}
+              左侧展开,悬浮/滚轮/点击切换,单击菜单项执行;收起为灵动岛/
+              收起为多媒体岛均为菜单项,2026-08-10 用户要求独立按钮移除) */}
           <QuickMenu
             items={menuItems}
             value={quickItem}
@@ -962,7 +1216,11 @@ export function AgentView({
             <div className="island-agent-skeleton-item assistant short" />
           </div>
         ) : (
-          <div className="island-agent-messages" ref={listRef} onScroll={handleScroll}>
+          <div
+            className={`island-agent-messages${messages.length > AGENT_MSG_CV_THRESHOLD ? ' cv' : ''}`}
+            ref={listRef}
+            onScroll={handleScroll}
+          >
             {messages.length === 0 && !streaming && !lastError && (
               <div className="island-agent-welcome">
                 我是岛灵,可以帮你执行本机操作。
@@ -970,11 +1228,19 @@ export function AgentView({
                 试试:「打开计算器」「查一下最近的新闻」「列出下载目录」
               </div>
             )}
-            {messages.map((m) =>
+            {messages.slice(-visibleCount).map((m) =>
               m.role === 'user' ? (
                 <UserBubble key={m.id} m={m} />
               ) : (
-                <AssistantBlock key={m.id} parts={m.parts} usage={m.usage} />
+                <AssistantBlock
+                  key={m.id}
+                  parts={m.parts}
+                  usage={m.usage}
+                  // 2026-08-10 自动播放只限"当次对话":本会话流式落定且
+                  // 未消费的消息才自动播;历史/重挂载读到 false 不播
+                  mediaAutoPlay={mediaAutoPlayIds?.has(m.id) ?? false}
+                  onMediaAutoPlayed={() => onMediaAutoPlayed?.(m.id)}
+                />
               ),
             )}
             {/* 流式中的助手回复:工具实时并入同一汇总列表(收纳态只有

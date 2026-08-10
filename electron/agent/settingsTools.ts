@@ -29,6 +29,20 @@ export type IslandSettingsOp =
   | 'renameLibraryImage'
   | 'setFontColor'
   | 'setBackgroundOpacity'
+  | 'setMediaWindowSize'
+  | 'listAudioLibrary'
+  | 'importAudioLibrary'
+  | 'renameAudioLibrary'
+  | 'removeAudioLibrary'
+  | 'listVideoLibrary'
+  | 'importVideoLibrary'
+  | 'renameVideoLibrary'
+  | 'removeVideoLibrary'
+  | 'playLibraryVideo'
+  | 'getVideoPrefs'
+  | 'setVideoPrefs'
+  | 'setFullscreen'
+  | 'getConversationMedia'
   | 'deleteFontItem'
   | 'deleteLibraryImage'
 
@@ -56,6 +70,26 @@ const IMAGE_EXTENSIONS: Record<string, string> = {
   '.gif': 'image/gif',
   '.webp': 'image/webp',
   '.bmp': 'image/bmp',
+}
+
+/* 多媒体库(2026-08-08):音频库导入的扩展名 → data URL MIME(上限 200MB) */
+const AUDIO_LIB_EXTENSIONS: Record<string, string> = {
+  '.mp3': 'audio/mpeg',
+  '.wav': 'audio/wav',
+  '.flac': 'audio/flac',
+  '.ogg': 'audio/ogg',
+  '.oga': 'audio/ogg',
+  '.opus': 'audio/ogg',
+  '.m4a': 'audio/mp4',
+  '.aac': 'audio/aac',
+}
+const MAX_AUDIO_LIB_BYTES = 200 * 1024 * 1024
+/** 视频库导入允许的扩展名(路径引用,仅校验,无 MIME 需要) */
+const VIDEO_LIB_EXTENSIONS: Record<string, boolean> = {
+  '.mp4': true,
+  '.m4v': true,
+  '.mov': true,
+  '.webm': true,
 }
 
 /** 读取文件转 data URL(校验扩展名与大小上限;失败抛中文错误供 LLM 自纠) */
@@ -114,8 +148,11 @@ function formatSettings(s: unknown): string {
     fontColorValue?: string | null
     currentFontName?: string | null
     backgroundOpacity?: { expanded?: number; compact?: number }
+    mediaWindowWidth?: number
+    video?: { volume?: number; speed?: number; loop?: boolean; fullscreen?: boolean }
   }
   const opacity = d.backgroundOpacity ?? {}
+  const video = d.video ?? {}
   return [
     '当前灵动岛设置:',
     `- 主题色:${d.themeColor ? ` ${d.themeColor}` : ' 未设置(默认)'}`,
@@ -123,6 +160,8 @@ function formatSettings(s: unknown): string {
     `- 文字颜色:${d.fontColorMode === 'custom' && d.fontColorValue ? ` 自定义 ${d.fontColorValue}` : ' 自动(按背景亮度黑白)'}`,
     `- 背景不透明度:展开 ${opacity.expanded ?? 0.4} / 紧凑 ${opacity.compact ?? 0.4}(0-1,1 = 完全不透明)`,
     `- 当前字体:${d.currentFontName ? `「${d.currentFontName}」` : ' 无(系统默认)'}`,
+    `- 媒体窗口默认宽:${typeof d.mediaWindowWidth === 'number' ? ` ${d.mediaWindowWidth}px` : ' 未设置(默认 320px)'}`,
+    `- 视频播放:音量 ${Math.round((video.volume ?? 1) * 100)}% / 速度 ${video.speed ?? 1}x / 循环${video.loop ? '开' : '关'} / ${video.fullscreen ? '全屏中' : '非全屏'}`,
   ].join('\n')
 }
 
@@ -135,7 +174,8 @@ export function createSettingsTools(deps: SettingsToolsDeps): AgentTool[] {
       name: 'get_island_settings',
       description:
         '读取灵动岛**当前**的界面设置快照(主题色 / 界面缩放百分比 / 文字颜色模式与值 / ' +
-        '背景不透明度(展开/紧凑)/ 当前字体)。**修改任何设置前先调用本工具确认当前值**——' +
+        '背景不透明度(展开/紧凑)/ 当前字体 / 媒体窗口默认宽 / 视频播放设置(音量/速度/循环/是否全屏))。' +
+        '**修改任何设置前先调用本工具确认当前值**——' +
         '用户说「调到 200%」「换个颜色」时,先知道现在是 300% 还是 100%、当前色是什么,才能' +
         '准确执行并回复「从 300% 调整为 200%」;若当前已是目标值则无需修改,直接告知用户。',
       parameters: { type: 'object', properties: {} },
@@ -365,6 +405,357 @@ export function createSettingsTools(deps: SettingsToolsDeps): AgentTool[] {
           hasCompact ? `紧凑 ${next?.compact ?? patches.compact}` : '',
         ].filter(Boolean)
         return `已将背景不透明度调整为:${parts.join(' / ')}(原为:展开 ${prevLabel(prev?.expanded)} / 紧凑 ${prevLabel(prev?.compact)})`
+      },
+    },
+    {
+      name: 'set_media_window_size',
+      description:
+        '设置对话里**媒体窗口的默认宽度**(图片/视频在消息里的初始显示宽度,立即生效,' +
+        '160-800 像素,如 480)。用户说「媒体窗口大一点/小一点」「图片显示太小吃不下」时用本工具。' +
+        '适合:Agent 回复里的图片/视频窗口默认大小调整。',
+      parameters: {
+        type: 'object',
+        properties: {
+          width: { type: 'number', description: '媒体窗口默认宽(160-800 像素)' },
+        },
+        required: ['width'],
+      },
+      async execute(params: ToolParams) {
+        const w = Number(params.width)
+        if (!Number.isFinite(w)) throw new Error('width 需要是数字(160-800)')
+        const width = Math.min(800, Math.max(160, Math.round(w)))
+        const res = (await run('setMediaWindowSize', [width])) as {
+          ok?: boolean
+          width?: number
+          previous?: number
+        }
+        if (res?.width === res?.previous) {
+          return `媒体窗口默认宽已是 ${res.width}px,无需修改`
+        }
+        return `已将媒体窗口默认宽从 ${res?.previous ?? '?'}px 调整为 ${res?.width ?? width}px(新消息里的图片/视频生效)`
+      },
+    },
+    /* ---- 多媒体库(2026-08-08):音频库(ArrayBuffer)/ 视频库(路径引用) ---- */
+    {
+      name: 'list_audio_library',
+      description:
+        '列出多媒体库音频库的全部歌曲(id + 名称 + 大小)。管理音频库前先查 id。' +
+        '适合:用户问"库里有什么歌"、改名/移除前查询。',
+      parameters: { type: 'object', properties: {} },
+      async execute() {
+        const items = (await run('listAudioLibrary', [])) as Array<{ id: string; name: string; size: number }>
+        if (!Array.isArray(items) || items.length === 0) return '(音频库为空)'
+        return items.map((it) => `- ${it.id} ${it.name}(${(it.size / 1024 / 1024).toFixed(1)}MB)`).join('\n')
+      },
+    },
+    {
+      name: 'import_audio_library',
+      description:
+        '导入本地音频文件到多媒体库音频库(立即生效,可再从音频库导入播放列表)。' +
+        '支持 mp3/wav/flac/ogg/m4a/aac 等,上限 200MB。适合:用户给音频文件路径要求存入多媒体库。',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: '音频文件绝对路径' },
+          name: { type: 'string', description: '可选:库内显示名称,缺省用文件名' },
+        },
+        required: ['path'],
+      },
+      async execute(params: ToolParams) {
+        const { dataUrl, name } = await fileToDataUrl(
+          String(params.path ?? ''),
+          AUDIO_LIB_EXTENSIONS,
+          MAX_AUDIO_LIB_BYTES,
+          '音频文件',
+        )
+        const display = String(params.name ?? '').trim() || name
+        const res = (await run('importAudioLibrary', [dataUrl, parseItemName(display)])) as {
+          id?: string
+          name?: string
+        }
+        return `已将「${res?.name ?? display}」导入音频库(可用 list_audio_library 查看)`
+      },
+    },
+    {
+      name: 'rename_audio_library',
+      description: '修改多媒体库音频库中某首歌的名称(立即生效;id 用 list_audio_library 查询)。',
+      parameters: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', description: '音频条目 id' },
+          name: { type: 'string', description: '新名称(≤100 字)' },
+        },
+        required: ['id', 'name'],
+      },
+      async execute(params: ToolParams) {
+        const id = String(params.id ?? '').trim()
+        if (!id) throw new Error('id 不能为空')
+        const name = parseItemName(params.name)
+        await run('renameAudioLibrary', [id, name])
+        return `已把音频 ${id} 改名为「${name}」`
+      },
+    },
+    {
+      name: 'remove_audio_library',
+      description: '从多媒体库音频库移除一首歌(立即生效;**不影响播放列表**——播放列表有自己的存储)。',
+      parameters: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', description: '音频条目 id(list_audio_library 查询)' },
+        },
+        required: ['id'],
+      },
+      async execute(params: ToolParams) {
+        const id = String(params.id ?? '').trim()
+        if (!id) throw new Error('id 不能为空')
+        await run('removeAudioLibrary', [id])
+        return `已从音频库移除 ${id}`
+      },
+    },
+    {
+      name: 'list_video_library',
+      description: '列出多媒体库视频库的全部视频(id + 名称 + 大小 + 路径)。管理视频库前先查 id。',
+      parameters: { type: 'object', properties: {} },
+      async execute() {
+        const items = (await run('listVideoLibrary', [])) as Array<{ id: string; name: string; size: number; path: string }>
+        if (!Array.isArray(items) || items.length === 0) return '(视频库为空)'
+        return items.map((it) => `- ${it.id} ${it.name}(${(it.size / 1024 / 1024).toFixed(1)}MB,${it.path})`).join('\n')
+      },
+    },
+    {
+      name: 'import_video_library',
+      description:
+        '导入本地视频文件到多媒体库视频库(路径引用:记录文件路径,对话媒体窗口经流式协议播放;' +
+        '上限 10GB)。支持 mp4/m4v/mov/webm。适合:用户给视频文件路径要求存入多媒体库。',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: '视频文件绝对路径' },
+          name: { type: 'string', description: '可选:库内显示名称,缺省用文件名' },
+        },
+        required: ['path'],
+      },
+      async execute(params: ToolParams) {
+        const p = String(params.path ?? '').trim()
+        if (!p) throw new Error('视频路径不能为空')
+        const ext = path.extname(p).toLowerCase()
+        if (!VIDEO_LIB_EXTENSIONS[ext]) throw new Error(`不支持的文件类型 "${ext}",仅支持:mp4/m4v/mov/webm`)
+        const stat = await fs.stat(p).catch(() => null)
+        if (!stat || !stat.isFile()) throw new Error(`文件不存在:${p}`)
+        if (stat.size > 10 * 1024 * 1024 * 1024) {
+          throw new Error(`文件过大:${(stat.size / 1024 / 1024 / 1024).toFixed(1)}GB,上限 10GB`)
+        }
+        const name = String(params.name ?? '').trim() || path.basename(p)
+        const res = (await run('importVideoLibrary', [p, parseItemName(name), stat.size])) as {
+          id?: string
+          name?: string
+        }
+        return `已将「${res?.name ?? name}」导入视频库(路径:${p})`
+      },
+    },
+    {
+      name: 'rename_video_library',
+      description: '修改多媒体库视频库中某个视频的名称(立即生效;id 用 list_video_library 查询)。',
+      parameters: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', description: '视频条目 id' },
+          name: { type: 'string', description: '新名称(≤100 字)' },
+        },
+        required: ['id', 'name'],
+      },
+      async execute(params: ToolParams) {
+        const id = String(params.id ?? '').trim()
+        if (!id) throw new Error('id 不能为空')
+        const name = parseItemName(params.name)
+        await run('renameVideoLibrary', [id, name])
+        return `已把视频 ${id} 改名为「${name}」`
+      },
+    },
+    {
+      name: 'remove_video_library',
+      description: '从多媒体库视频库移除一个视频(立即生效;只删库记录,**不删除源文件**)。',
+      parameters: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', description: '视频条目 id(list_video_library 查询)' },
+        },
+        required: ['id'],
+      },
+      async execute(params: ToolParams) {
+        const id = String(params.id ?? '').trim()
+        if (!id) throw new Error('id 不能为空')
+        await run('removeVideoLibrary', [id])
+        return `已从视频库移除 ${id}`
+      },
+    },
+    {
+      name: 'play_library_video',
+      description:
+        '跳转到多媒体库的视频 tab 并**立即播放指定视频**(展开面板 + 自动开始播放,2026-08-10)。' +
+        'id 用 list_video_library 查询(名称可能重复,id 唯一)。' +
+        '适合:用户说"把视频库里的 XX 放给我看""帮我打开播放 XX 视频"——' +
+        '注意与 open_file 的区别:open_file 把视频作为对话媒体附件播放,' +
+        '本工具从多媒体库视频库播放(用户能在多媒体库面板看到该视频)。',
+      parameters: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', description: '视频库条目 id(list_video_library 查询)' },
+        },
+        required: ['id'],
+      },
+      async execute(params: ToolParams) {
+        const id = String(params.id ?? '').trim()
+        if (!id) throw new Error('id 不能为空')
+        const res = (await run('playLibraryVideo', [id])) as {
+          ok?: boolean
+          id?: string
+          name?: string
+        }
+        return `已跳转到多媒体库播放「${res?.name ?? id}」`
+      },
+    },
+    {
+      name: 'set_video_config',
+      description:
+        '调整 Agent 对话窗口内视频播放的设置(立即生效;音量/速度/循环与' +
+        '视频岛、多媒体库**双向同步**):' +
+        'volume = **灵动岛独立音量**(0-1,只影响岛内媒体播放,与系统音量互不影响——' +
+        '系统音量用 set_system_volume 工具调);' +
+        'speed = 播放速度(0.5-2,如 1.5 = 1.5 倍速);' +
+        'loop = 是否循环播放(true/false);' +
+        'fullscreen = 进入/退出全屏(true = 把对话窗口里正在播放的视频全屏,false = 退出全屏);' +
+        'width = 媒体窗口默认宽(160-800,新播放的图片/视频生效)。' +
+        '参数全部可选、至少给一个。适合:用户说"视频慢一点/倍速播放/循环播放/全屏看/退出全屏/' +
+        '视频声音大一点/媒体窗口大一点"。修改前可先调 get_island_settings 看当前值。',
+      parameters: {
+        type: 'object',
+        properties: {
+          volume: { type: 'number', description: '灵动岛独立音量 0-1,如 0.6(可选)' },
+          speed: { type: 'number', description: '播放速度 0.5-2,如 1.5(可选)' },
+          loop: { type: 'boolean', description: '是否循环播放(可选)' },
+          fullscreen: { type: 'boolean', description: 'true = 进入全屏,false = 退出全屏(可选)' },
+          width: { type: 'number', description: '媒体窗口默认宽 160-800,如 480(可选)' },
+        },
+        required: [],
+      },
+      async execute(params: ToolParams) {
+        const hasVolume = params.volume !== undefined
+        const hasSpeed = params.speed !== undefined
+        const hasLoop = params.loop !== undefined
+        const hasFs = params.fullscreen !== undefined
+        const hasWidth = params.width !== undefined
+        if (!hasVolume && !hasSpeed && !hasLoop && !hasFs && !hasWidth) {
+          throw new Error('需要至少提供一个参数:volume / speed / loop / fullscreen / width')
+        }
+        const parts: string[] = []
+        if (hasVolume || hasSpeed || hasLoop) {
+          const vol = hasVolume ? Number(params.volume) : undefined
+          if (hasVolume && (!Number.isFinite(vol) || vol! < 0 || vol! > 1)) {
+            throw new Error('volume 需要是 0-1 的数字(如 0.6 = 60%)')
+          }
+          const spd = hasSpeed ? Number(params.speed) : undefined
+          if (hasSpeed && (!Number.isFinite(spd) || spd! < 0.5 || spd! > 2)) {
+            throw new Error('speed 需要是 0.5-2 的数字(如 1.5 = 1.5 倍速)')
+          }
+          const res = (await run('setVideoPrefs', [
+            {
+              volume: hasVolume ? Math.min(1, Math.max(0, vol!)) : undefined,
+              speed: hasSpeed ? Math.min(2, Math.max(0.5, spd!)) : undefined,
+              loop: hasLoop ? Boolean(params.loop) : undefined,
+            },
+          ])) as {
+            ok?: boolean
+            volume?: number
+            speed?: number
+            loop?: boolean
+            previous?: { volume: number; speed: number; loop: boolean }
+          }
+          const prev = res?.previous
+          const cur = res
+          if (hasVolume && prev) {
+            parts.push(prev.volume === cur?.volume ? `音量已是 ${Math.round((cur.volume ?? 0) * 100)}%` : `音量从 ${Math.round(prev.volume * 100)}% 调整为 ${Math.round((cur?.volume ?? 0) * 100)}%`)
+          } else if (hasVolume && cur) {
+            parts.push(`音量已设为 ${Math.round((cur.volume ?? 1) * 100)}%`)
+          }
+          if (hasSpeed && prev) {
+            parts.push(prev.speed === cur?.speed ? `速度已是 ${cur?.speed}x` : `速度从 ${prev.speed}x 调整为 ${cur?.speed}x`)
+          } else if (hasSpeed && cur) {
+            parts.push(`速度已设为 ${cur.speed ?? 1}x`)
+          }
+          if (hasLoop && cur) {
+            parts.push(`循环播放${cur.loop ? '已开启' : '已关闭'}`)
+          }
+        }
+        if (hasFs) {
+          const fsRes = (await run('setFullscreen', [Boolean(params.fullscreen)])) as {
+            ok?: boolean
+            fullscreen?: boolean
+          }
+          parts.push(params.fullscreen ? (fsRes?.fullscreen ? '已进入全屏' : '已请求进入全屏(无可播放视频时忽略)') : '已退出全屏')
+        }
+        if (hasWidth) {
+          const w = Number(params.width)
+          if (!Number.isFinite(w)) throw new Error('width 需要是数字(160-800)')
+          const width = Math.min(800, Math.max(160, Math.round(w)))
+          const res = (await run('setMediaWindowSize', [width])) as {
+            ok?: boolean
+            width?: number
+            previous?: number
+          }
+          parts.push(
+            res?.width === res?.previous
+              ? `媒体窗口默认宽已是 ${res?.width}px`
+              : `媒体窗口默认宽从 ${res?.previous ?? '?'}px 调整为 ${res?.width ?? width}px`,
+          )
+        }
+        return parts.join(';')
+      },
+    },
+    {
+      name: 'list_conversation_media',
+      description:
+        '列出 Agent 对话窗口内**作为附件展示**的多媒体元素(图片/视频/音频,' +
+        '含 LLM 在回复里 markdown 内嵌的 ![名字](路径));' +
+        '视频带详细播放状态:是否正在播放、音量(0-100%)、播放速度(x)、' +
+        '是否循环播放、是否全屏、播放进度。' +
+        '适合:用户问"对话里有什么媒体""现在播的是什么""视频声音多大/几倍速/全屏没"' +
+        '等;配合 set_video_config 调整(如用户说"把声音调大"先查当前音量)。',
+      parameters: { type: 'object', properties: {} },
+      async execute() {
+        const items = (await run('getConversationMedia', [])) as Array<{
+          kind: 'img' | 'video' | 'audio'
+          name?: string
+          playing?: boolean
+          volume?: number
+          speed?: number
+          loop?: boolean
+          fullscreen?: boolean
+          position?: number
+          duration?: number | null
+        }>
+        if (!Array.isArray(items) || items.length === 0) {
+          return '(对话窗口当前没有媒体附件)'
+        }
+        const label = (n?: string) => (n ? `「${n}」` : '(未命名)')
+        return items
+          .map((it) => {
+            if (it.kind === 'video') {
+              const dur = typeof it.duration === 'number' && it.duration > 0 ? it.duration : null
+              const fmt = (s: number) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
+              return (
+                `- 视频 ${label(it.name)}:${it.playing ? ' 正在播放' : ' 已暂停'}` +
+                `,音量 ${it.volume ?? '?'}%,速度 ${it.speed ?? 1}x,循环${it.loop ? '开' : '关'}` +
+                `,${it.fullscreen ? '全屏中' : '非全屏'}` +
+                (dur ? `,进度 ${fmt(it.position ?? 0)} / ${fmt(dur)}` : '')
+              )
+            }
+            if (it.kind === 'audio') {
+              return `- 音频 ${label(it.name)}:${it.playing ? ' 正在播放' : ' 已暂停'}`
+            }
+            return `- 图片 ${label(it.name)}`
+          })
+          .join('\n')
       },
     },
     {

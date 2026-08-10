@@ -19,6 +19,7 @@ import { createMemoryStore, formatMemoryBlock } from '../electron/agent/memory'
 import { createMCPManager } from '../electron/agent/mcp'
 import { createSkillLoader } from '../electron/agent/skills'
 import { createAgentEngine, createConfigTools, parseManualCall, findManualTool, compressArgs, parseTitleJson, extractJsonTitle, validateRequiredArgs } from '../electron/agent/engine'
+import { createTools } from '../electron/agent/tools'
 import { streamResponse } from '../electron/agent/deepseek'
 import {
   getTasksStatusBlock,
@@ -1337,11 +1338,11 @@ await test('预算不足提示:截断(response.incomplete)→ 下一轮请求注
 
 console.log('\n=== 灵动岛设置工具(createSettingsTools) ===')
 
-await test('设置工具:未注入桥时不注册;注入后 8 个工具齐', () => {
+await test('设置工具:未注入桥时不注册;注入后 23 个工具齐', () => {
   assert(createSettingsTools({}).length === 0, '无 runIslandSettings 不应注册')
   const tools = createSettingsTools({ runIslandSettings: async () => ({ ok: true }) })
   const names = tools.map((t) => t.name)
-  assert(names.length === 11, `应有 11 个工具,实际 ${names.length}:${names.join(',')}`)
+  assert(names.length === 23, `应有 23 个工具,实际 ${names.length}:${names.join(',')}`)
   for (const n of [
     'set_theme_color',
     'set_agent_scale',
@@ -1351,9 +1352,92 @@ await test('设置工具:未注入桥时不注册;注入后 8 个工具齐', () 
     'import_background',
     'list_library_images',
     'rename_library_image',
+    'set_media_window_size',
+    'list_audio_library',
+    'import_audio_library',
+    'rename_audio_library',
+    'remove_audio_library',
+    'list_video_library',
+    'import_video_library',
+    'rename_video_library',
+    'remove_video_library',
   ]) {
     assert(names.includes(n), `应含工具 ${n}`)
   }
+})
+
+await test('多媒体库工具:音频导入(扩展名/大小校验 + data URL 传递)/ 视频导入(路径校验)', async () => {
+  const calls: Array<{ op: string; args: unknown[] }> = []
+  const tools = createSettingsTools({
+    runIslandSettings: async (op, args) => {
+      calls.push({ op, args })
+      return { ok: true, id: 'x-1', name: String(args[1] ?? '') }
+    },
+  })
+  const tmpAudio = path.join(tmp, 'lib-test.mp3')
+  await fs.writeFile(tmpAudio, Buffer.from('fake-mp3-bytes'))
+  // 音频导入:data URL 传递
+  const ia = tools.find((t) => t.name === 'import_audio_library')!
+  const out = String(await ia.execute({ path: tmpAudio }))
+  assert(out.includes('导入音频库'), `应成功,实际:${out}`)
+  assert(
+    typeof calls[0]?.args[0] === 'string' && (calls[0].args[0] as string).startsWith('data:audio/mpeg;base64,'),
+    '应传 audio/mpeg data URL',
+  )
+  // 音频:非法扩展名拒绝
+  const bad = path.join(tmp, 'lib-test.xyz')
+  await fs.writeFile(bad, 'x')
+  await assertRejects(() => ia.execute({ path: bad }), '不支持', '非法扩展名应拒绝')
+  // 音频:文件不存在拒绝
+  await assertRejects(() => ia.execute({ path: path.join(tmp, 'nope.mp3') }), '不存在', '不存在应拒绝')
+  // 视频导入:路径 + 大小传递
+  const tmpVideo = path.join(tmp, 'lib-test.mp4')
+  await fs.writeFile(tmpVideo, Buffer.from('fake-video'))
+  const iv = tools.find((t) => t.name === 'import_video_library')!
+  const vout = String(await iv.execute({ path: tmpVideo }))
+  assert(vout.includes('导入视频库'), `应成功,实际:${vout}`)
+  assert(calls[1]?.op === 'importVideoLibrary' && calls[1]?.args[0] === tmpVideo, '应传路径')
+  // 视频:非法扩展名拒绝
+  await assertRejects(() => iv.execute({ path: bad }), '不支持', '视频非法扩展名应拒绝')
+  // 列表/改名/移除走桥
+  const la = tools.find((t) => t.name === 'list_audio_library')!
+  assert(String(await la.execute({})).includes('为空'), '空库提示')
+  const lv = tools.find((t) => t.name === 'list_video_library')!
+  assert(String(await lv.execute({})).includes('为空'), '空视频库提示')
+  const ra = tools.find((t) => t.name === 'rename_audio_library')!
+  await ra.execute({ id: 'a-1', name: '新名字' })
+  assert(calls.some((c) => c.op === 'renameAudioLibrary' && c.args[0] === 'a-1' && c.args[1] === '新名字'), '改名应调桥')
+  const rm = tools.find((t) => t.name === 'remove_audio_library')!
+  await rm.execute({ id: 'a-1' })
+  assert(calls.some((c) => c.op === 'removeAudioLibrary' && c.args[0] === 'a-1'), '移除应调桥')
+})
+
+await test('set_media_window_size:钳制 160-800 + previous 原值 + 已是目标值提示', async () => {
+  const calls: Array<{ op: string; args: unknown[] }> = []
+  const tools = createSettingsTools({
+    runIslandSettings: async (op, args) => {
+      calls.push({ op, args })
+      if (op === 'setMediaWindowSize') return { ok: true, width: Number(args[0]), previous: 320 }
+      return { ok: true }
+    },
+  })
+  const tool = tools.find((t) => t.name === 'set_media_window_size')!
+  // 正常调整
+  const out = String(await tool.execute({ width: 480 }))
+  assert(out.includes('480') && out.includes('320'), `输出应含新旧值,实际:${out}`)
+  assert(calls[0]?.op === 'setMediaWindowSize' && calls[0]?.args[0] === 480, '应调桥且传宽')
+  // 钳制:超出范围
+  await tool.execute({ width: 9999 })
+  assert(calls[1]?.args[0] === 800, `应钳制到 800,实际 ${String(calls[1]?.args[0])}`)
+  await tool.execute({ width: 10 })
+  assert(calls[2]?.args[0] === 160, `应钳制到 160,实际 ${String(calls[2]?.args[0])}`)
+  // 非数字拒绝
+  await assertRejects(() => tool.execute({ width: 'abc' }), '数字', '非数字应拒绝')
+  // 已是目标值提示(桥返回 width === previous)
+  const same = createSettingsTools({
+    runIslandSettings: async () => ({ ok: true, width: 320, previous: 320 }),
+  }).find((t) => t.name === 'set_media_window_size')!
+  assert(String(await same.execute({ width: 320 })).includes('无需修改'), '已是目标值应提示无需修改')
 })
 
 await test('set_theme_color:hex 校验与归一化', async () => {
@@ -1461,6 +1545,104 @@ await test('list/rename:列表格式化与名称校验', async () => {
   const renameFont = tools.find((t) => t.name === 'rename_font')!
   await renameFont.execute({ id: 'f-1', name: '字体甲新' })
   assert(calls.some((c) => c.op === 'renameFont' && c.args[1] === '字体甲新'), '字体改名应调桥')
+})
+
+await test('set_video_config:透传音量/速度/循环/全屏/宽度;空参数拒绝', async () => {
+  // 2026-08-10 用户要求:调整对话窗口内正在观看视频的设置(播放速度/
+  // 循环/全屏/媒体窗口默认宽)+ 灵动岛独立音量(与系统音量分离)
+  const calls: Array<{ op: string; args: unknown[] }> = []
+  const tools = createSettingsTools({
+    runIslandSettings: async (op, args) => {
+      calls.push({ op, args })
+      if (op === 'setVideoPrefs') {
+        const patch = (args[0] ?? {}) as { volume?: number; speed?: number; loop?: boolean }
+        return {
+          ok: true,
+          volume: patch.volume ?? 1,
+          speed: patch.speed ?? 1,
+          loop: patch.loop ?? false,
+          previous: { volume: 1, speed: 1, loop: false },
+        }
+      }
+      if (op === 'setFullscreen') return { ok: true, fullscreen: Boolean(args[0]) }
+      if (op === 'setMediaWindowSize') return { ok: true, width: Number(args[0]), previous: 320 }
+      return { ok: true }
+    },
+  })
+  const tool = tools.find((t) => t.name === 'set_video_config')
+  assert(tool, '应注册 set_video_config')
+  const out = String(
+    await tool!.execute({ volume: 0.6, speed: 1.5, loop: true, fullscreen: true, width: 480 }),
+  )
+  const svp = calls.find((c) => c.op === 'setVideoPrefs')
+  assert(svp, '应调桥 setVideoPrefs')
+  const patch = (svp!.args[0] ?? {}) as { volume?: number; speed?: number; loop?: boolean }
+  assert(patch.volume === 0.6 && patch.speed === 1.5 && patch.loop === true, '音量/速度/循环应透传')
+  assert(calls.some((c) => c.op === 'setFullscreen' && c.args[0] === true), '应调桥 setFullscreen(true)')
+  assert(calls.some((c) => c.op === 'setMediaWindowSize' && c.args[0] === 480), '应调桥 setMediaWindowSize(480)')
+  assert(out.includes('音量') && out.includes('速度') && out.includes('循环') && out.includes('全屏'), '返回应列出各项变化')
+  // 越界拒绝(LLM 自纠语义,与设置工具既有校验一致)
+  await assertRejects(() => tool!.execute({ volume: 2 }), 'volume 需要是 0-1', '越界 volume 应拒绝')
+  await assertRejects(() => tool!.execute({ speed: 5 }), 'speed 需要是 0.5-2', '越界 speed 应拒绝')
+  // 空参数拒绝
+  await assertRejects(() => tool!.execute({}), '至少提供一个参数', '空参数应拒绝')
+})
+
+await test('set_system_volume:注册与参数校验;不实际改系统音量', async () => {
+  // 2026-08-10 用户要求"支持调整系统音量":winmm waveOut 脚本。
+  // 测试只校验注册与错误路径(成功路径会真实改系统音量,不测)
+  const tools = createTools({ onSwitchToMusic: () => {} })
+  const tool = tools.find((t) => t.name === 'set_system_volume')
+  assert(tool, '应注册 set_system_volume')
+  const desc = tool!.description
+  assert(desc.includes('系统') && desc.includes('set_video_config'), '描述应说明系统音量与独立音量的区分')
+  await assertRejects(() => tool!.execute({ action: 'bogus' }), 'action 只能是 get 或 set', '非法 action 应拒绝')
+  await assertRejects(() => tool!.execute({ action: 'set' }), 'volume 需要是数字', 'set 缺 volume 应拒绝')
+  await assertRejects(() => tool!.execute({ action: 'set', volume: 'abc' }), 'volume 需要是数字', '非数字 volume 应拒绝')
+})
+
+await test('list_conversation_media:格式化视频播放状态;空清单兜底', async () => {
+  // 2026-08-10 用户要求:LLM 能查对话窗口有哪些媒体附件、哪个在播放、
+  // 视频的音量/速度/循环/全屏状态
+  const tools = createSettingsTools({
+    runIslandSettings: async (op) => {
+      if (op === 'getConversationMedia') {
+        return [
+          { kind: 'video', name: '演唱会.mp4', playing: true, volume: 60, speed: 1.5, loop: true, fullscreen: false, position: 83, duration: 225 },
+          { kind: 'audio', name: 'demo.mp3', playing: false },
+          { kind: 'img', name: '封面.png' },
+        ]
+      }
+      return { ok: true }
+    },
+  })
+  const tool = tools.find((t) => t.name === 'list_conversation_media')
+  assert(tool, '应注册 list_conversation_media')
+  const out = String(await tool!.execute({}))
+  assert(out.includes('正在播放') && out.includes('音量 60%') && out.includes('速度 1.5x'), '视频应带播放状态/音量/速度')
+  assert(out.includes('循环开') && out.includes('非全屏') && out.includes('1:23 / 3:45'), '视频应带循环/全屏/进度')
+  assert(out.includes('已暂停') && out.includes('图片'), '音频与图片应列出')
+  const empty = createSettingsTools({ runIslandSettings: async () => [] })
+  assert(
+    String(await empty.find((t) => t.name === 'list_conversation_media')!.execute({})).includes('没有媒体附件'),
+    '空清单应有兜底',
+  )
+})
+
+await test('play_library_video:透传 id 并返回播放文本;空 id 拒绝', async () => {
+  const calls: Array<{ op: string; args: unknown[] }> = []
+  const tools = createSettingsTools({
+    runIslandSettings: async (op, args) => {
+      calls.push({ op, args })
+      return op === 'playLibraryVideo' ? { ok: true, id: String(args[0]), name: '我的视频' } : { ok: true }
+    },
+  })
+  const play = tools.find((t) => t.name === 'play_library_video')!
+  assert(play, '应注册 play_library_video')
+  const out = String(await play.execute({ id: 'v-1' }))
+  assert(calls.some((c) => c.op === 'playLibraryVideo' && c.args[0] === 'v-1'), '应调桥 playLibraryVideo')
+  assert(out.includes('我的视频'), '返回文本应含视频名称')
+  await assertRejects(() => play.execute({ id: '' }), 'id 不能为空', '空 id 应拒绝')
 })
 
 // ---------------------------------------------------------------------------
@@ -1772,6 +1954,240 @@ await test('maxOutputTokens 覆盖传入请求体(任意值透传)', async () =>
     assert(body.max_output_tokens === 8192, `应传 8192,实际 ${String(body.max_output_tokens)}`)
   } finally {
     globalThis.fetch = origFetch
+  }
+})
+
+await test('open_file:媒体文件拦截返回媒体附件(窗口内播放,不弹外部播放器)', async () => {
+  // 2026-08-08:用户"说打开视频看看,结果打开的是外部播放器;LLM 回复
+  // 已播放但窗口看不到视频气泡"——open_file 对媒体扩展名返回
+  // { text, media } 附件,引擎注入 media part → 渲染端 MediaFrame
+  // 窗口内播放;非媒体文件仍走 shell.openPath(stub 返回 '')
+  // 2026-08-09:媒体拦截前校验文件存在(LLM 拼路径差一个字 → 协议 404
+  // → 渲染端假报"格式不支持"),路径不存在直接抛错让 LLM 自纠
+  const mediaDir = path.join(tmp, 'media-tools')
+  await fs.mkdir(mediaDir, { recursive: true })
+  const vid = path.join(mediaDir, 'clip.mp4')
+  const aud = path.join(mediaDir, 'song.mp3')
+  const img = path.join(mediaDir, 'photo.png')
+  const txt = path.join(mediaDir, 'readme.txt')
+  for (const f of [vid, aud, img, txt]) await fs.writeFile(f, 'x')
+  const tools = createTools({ onSwitchToMusic: () => {} })
+  const openFile = tools.find((t) => t.name === 'open_file')
+  assert(openFile, 'open_file 工具应存在')
+  const r1 = await openFile!.execute({ path: vid })
+  assert(
+    typeof r1 === 'object' && r1.media && r1.media[0]?.kind === 'video' && r1.media[0].url === vid,
+    '视频应返回 video 媒体附件',
+  )
+  assert(typeof r1 === 'object' && r1.text.includes('附件'), '引导文本应提示已作为附件展示')
+  const r2 = await openFile!.execute({ path: aud })
+  assert(typeof r2 === 'object' && r2.media?.[0]?.kind === 'audio', '音频应返回 audio 媒体附件')
+  const r3 = await openFile!.execute({ path: img })
+  assert(typeof r3 === 'object' && r3.media?.[0]?.kind === 'img', '图片应返回 img 媒体附件')
+  const r4 = await openFile!.execute({ path: txt })
+  assert(typeof r4 === 'string' && r4.includes('已打开'), '非媒体文件应正常打开(走 shell.openPath)')
+  // 2026-08-09:媒体扩展名但文件不存在 → 抛错(不下发 404 附件)
+  await assertRejects(
+    () => openFile!.execute({ path: path.join(mediaDir, '不存在但.mp4') }),
+    '文件不存在',
+    '不存在的媒体路径应抛错(含「文件不存在」)',
+  )
+})
+
+await test('exec_command:start 打开媒体文件 → 拦截返回媒体附件(不弹外部播放器)', async () => {
+  // 2026-08-08:LLM 播放视频常用 start 命令而非 open_file——exec_command
+  // 对 `start "标题" "路径"` / `start 路径` 提取媒体路径返回附件
+  // 2026-08-09:start 解析出的媒体路径同样校验存在(不存在 = 空格/引号
+  // 截断,抛错引导 LLM 改用 open_file 传完整路径)
+  const mediaDir = path.join(tmp, 'media-start')
+  await fs.mkdir(mediaDir, { recursive: true })
+  const vid = path.join(mediaDir, 'clip.mp4')
+  const aud = path.join(mediaDir, 'song.mp3')
+  for (const f of [vid, aud]) await fs.writeFile(f, 'x')
+  const tools = createTools({ onSwitchToMusic: () => {} })
+  const exec = tools.find((t) => t.name === 'exec_command')
+  assert(exec, 'exec_command 工具应存在')
+  const r1 = await exec!.execute({ command: `start "" "${vid}"` })
+  assert(
+    typeof r1 === 'object' && r1.media?.[0]?.kind === 'video' && r1.media[0].url === vid,
+    `双引号形式应拦截返回 video 附件,实际 ${JSON.stringify(r1)}`,
+  )
+  const r2 = await exec!.execute({ command: `start ${aud}` })
+  assert(typeof r2 === 'object' && r2.media?.[0]?.kind === 'audio', '裸 token 形式应返回 audio 附件')
+  // 相对路径按 cwd 解析(path.resolve 在 Windows 返回反斜杠,归一化比较)
+  const r3 = await exec!.execute({ command: 'start clip.mp4', cwd: mediaDir })
+  assert(
+    typeof r3 === 'object' && r3.media?.[0]?.url?.replaceAll('\\', '/') === mediaDir.replaceAll('\\', '/') + '/clip.mp4',
+    `相对路径应按 cwd 解析,实际 ${JSON.stringify(typeof r3 === 'object' ? r3.media : r3)}`,
+  )
+  // 非媒体/非 start:正常执行(stub shell 返回空)
+  const r4 = await exec!.execute({ command: 'dir' })
+  assert(typeof r4 === 'string', '普通命令应正常执行')
+  // 单引号串(纯标题,cmd 不打开文件):不拦截
+  const r5 = await exec!.execute({ command: 'start "some title"' })
+  assert(typeof r5 === 'string', '单引号串(纯标题)不应拦截')
+  // 2026-08-09:媒体扩展名但路径不存在 → 抛错(含 open_file 引导;
+  // 双引号两段形式才会拦截,单引号串 = 纯标题不拦截)
+  await assertRejects(
+    () => exec!.execute({ command: 'start "" "不存在但.mp4"' }),
+    'open_file',
+    'start 解析的媒体路径不存在应抛错(含 open_file 引导)',
+  )
+})
+
+await test('get_feature_guide:读真实引导文档;话题过滤与目录;纯函数提取', async () => {
+  // 2026-08-10:LLM 功能引导工具——读取 docs/TECH.md(仓库内,打包版
+  // resources/docs/TECH.md),按话题返回章节,无 topic 返回目录
+  const tools = createTools({ onSwitchToMusic: () => {} })
+  const guide = tools.find((t) => t.name === 'get_feature_guide')
+  assert(guide, 'get_feature_guide 工具应注册')
+  // 无 topic → 目录(标题树)
+  const toc = String(await guide!.execute({}))
+  assert(toc.includes('第 1 章') || toc.includes('第 11 章'), `目录应含章节标题,实际前 80 字:${toc.slice(0, 80)}`)
+  // 话题过滤 → 命中章节(多媒体库在功能引导第 11 章)
+  const out = String(await guide!.execute({ topic: '多媒体库' }))
+  assert(out.includes('多媒体库'), '按话题应返回含关键词的章节')
+  assert(out.length > 50, '返回内容不应过短')
+  // 空话题与无匹配的兜底
+  const miss = String(await guide!.execute({ topic: '不存在的功能xyz' }))
+  assert(miss.includes('未找到') && miss.includes('话题'), '无匹配应给可读兜底')
+  // 纯函数:小样本切分/过滤/截断
+  const { extractGuideSections } = await import('../electron/agent/tools')
+  const sample = [
+    '# 章A',
+    '## 节1 音乐',
+    '音乐模式说明正文内容比较长',
+    '## 节2 视频',
+    '视频模式说明正文内容比较长',
+    '# 章B',
+    '## 节3 其他',
+    '别的正文',
+  ].join('\n')
+  const hit1 = extractGuideSections(sample, '音乐')
+  assert(hit1.includes('节1') && !hit1.includes('节2'), '应按话题精确命中章节')
+  const hit2 = extractGuideSections(sample, '视频', { maxChars: 10 })
+  assert(hit2.includes('已截断'), '章节过长应截断')
+  const toc2 = extractGuideSections(sample, '')
+  assert(toc2.includes('章A') && toc2.includes('节3'), '空话题应返回标题树')
+})
+
+await test('open_file 媒体拦截端到端:引擎执行后 message parts 含 media(窗口内播放)', async () => {
+  // 2026-08-08 用户"要播放视频,LLM 总说已开始播放但看不到气泡":
+  // 完整引擎链路——mock LLM 调 open_file(视频)→ 引擎执行返回媒体附件
+  // → 注入 msgParts → message 事件 parts 应含 {type:'media', kind:'video'}
+  // 2026-08-09:媒体路径须真实存在(工具层先校验,不存在抛错)
+  const e2eDir = path.join(tmp, 'media-e2e')
+  await fs.mkdir(e2eDir, { recursive: true })
+  const e2eVideo = path.join(e2eDir, 'clip.mp4')
+  await fs.writeFile(e2eVideo, 'x')
+  const messages: Array<{ parts: Array<{ type: string; kind?: string; url?: string }> }> = []
+  const engine = createAgentEngine({
+    getConfig: () => ({
+      apiKey: 'k',
+      baseURL: 'https://api.deepseek.com',
+      model: 'deepseek-v4-flash',
+      reasoningEffort: 'high',
+      systemPrompt: '',
+      mcpServers: [],
+      skillsDirs: [],
+    }),
+    onEvent: (event) => {
+      if (event.type === 'message') messages.push(event.message as never)
+    },
+    onSwitchToMusic: () => {},
+  })
+  const origFetch = globalThis.fetch
+  let count = 0
+  globalThis.fetch = async (_url: string | URL | Request, _opts?: RequestInit) => {
+    count++
+    if (count === 1) {
+      const args = JSON.stringify({ path: e2eVideo })
+      return sseResponse([
+        { type: 'response.created', response: { id: 'r1' } },
+        { type: 'response.output_item.added', output_index: 0, item: { type: 'function_call', id: 'item_1', call_id: 'call_1', name: 'open_file', arguments: '' } },
+        { type: 'response.function_call_arguments.done', item_id: 'item_1', arguments: args },
+        { type: 'response.output_item.done', output_index: 0, item: { type: 'function_call', id: 'item_1', call_id: 'call_1', name: 'open_file', arguments: args } },
+        { type: 'response.completed', response: { usage: { input_tokens: 10, output_tokens: 5 } } },
+      ])
+    }
+    return sseResponse([
+      { type: 'response.created', response: { id: 'r2' } },
+      { type: 'response.output_item.added', output_index: 0, item: { type: 'message', id: 'item_2' } },
+      { type: 'response.output_text.delta', output_index: 0, delta: '好的' },
+      { type: 'response.output_item.done', output_index: 0, item: { type: 'message', id: 'item_2' } },
+      { type: 'response.completed', response: { usage: { input_tokens: 10, output_tokens: 5 } } },
+    ])
+  }
+  try {
+    engine.send('播放视频', [])
+    await waitFor(() => messages.length >= 1 && !engine.busy, 10000, 'message 落定')
+    const mediaParts = messages[0]?.parts?.filter((p) => p.type === 'media')
+    assert(
+      mediaParts && mediaParts.length === 1 && mediaParts[0].kind === 'video' && mediaParts[0].url === e2eVideo,
+      `应注入 video media part,实际 ${JSON.stringify(messages[0]?.parts ?? null)}`,
+    )
+  } finally {
+    globalThis.fetch = origFetch
+    engine.dispose()
+  }
+})
+
+await test('exec_command start 拦截端到端:引擎执行后 message parts 含 media', async () => {
+  // 与上一条同链路,但 LLM 用 start 命令打开视频
+  // 2026-08-09:start 解析的媒体路径须真实存在
+  const e2eDir2 = path.join(tmp, 'media-e2e2')
+  await fs.mkdir(e2eDir2, { recursive: true })
+  const e2eVideo2 = path.join(e2eDir2, 'clip.mp4')
+  await fs.writeFile(e2eVideo2, 'x')
+  const messages: Array<{ parts: Array<{ type: string; kind?: string; url?: string }> }> = []
+  const engine = createAgentEngine({
+    getConfig: () => ({
+      apiKey: 'k',
+      baseURL: 'https://api.deepseek.com',
+      model: 'deepseek-v4-flash',
+      reasoningEffort: 'high',
+      systemPrompt: '',
+      mcpServers: [],
+      skillsDirs: [],
+    }),
+    onEvent: (event) => {
+      if (event.type === 'message') messages.push(event.message as never)
+    },
+    onSwitchToMusic: () => {},
+  })
+  const origFetch = globalThis.fetch
+  let count = 0
+  globalThis.fetch = async (_url: string | URL | Request, _opts?: RequestInit) => {
+    count++
+    if (count === 1) {
+      const args = JSON.stringify({ command: `start "" "${e2eVideo2}"` })
+      return sseResponse([
+        { type: 'response.created', response: { id: 'r1' } },
+        { type: 'response.output_item.added', output_index: 0, item: { type: 'function_call', id: 'item_1', call_id: 'call_1', name: 'exec_command', arguments: '' } },
+        { type: 'response.function_call_arguments.done', item_id: 'item_1', arguments: args },
+        { type: 'response.output_item.done', output_index: 0, item: { type: 'function_call', id: 'item_1', call_id: 'call_1', name: 'exec_command', arguments: args } },
+        { type: 'response.completed', response: { usage: { input_tokens: 10, output_tokens: 5 } } },
+      ])
+    }
+    return sseResponse([
+      { type: 'response.created', response: { id: 'r2' } },
+      { type: 'response.output_item.added', output_index: 0, item: { type: 'message', id: 'item_2' } },
+      { type: 'response.output_text.delta', output_index: 0, delta: '好的' },
+      { type: 'response.output_item.done', output_index: 0, item: { type: 'message', id: 'item_2' } },
+      { type: 'response.completed', response: { usage: { input_tokens: 10, output_tokens: 5 } } },
+    ])
+  }
+  try {
+    engine.send('播放视频', [])
+    await waitFor(() => messages.length >= 1 && !engine.busy, 10000, 'message 落定')
+    const mediaParts = messages[0]?.parts?.filter((p) => p.type === 'media')
+    assert(
+      mediaParts && mediaParts.length === 1 && mediaParts[0].kind === 'video',
+      `start 拦截应注入 video media part,实际 ${JSON.stringify(messages[0]?.parts ?? null)}`,
+    )
+  } finally {
+    globalThis.fetch = origFetch
+    engine.dispose()
   }
 })
 

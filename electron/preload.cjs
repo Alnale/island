@@ -20,19 +20,30 @@ contextBridge.exposeInMainWorld('desktop', {
     return () => ipcRenderer.removeListener('widget:open-settings', listener)
   },
   /** 初次安装引导:订阅回调(渲染端在岛内展开帮助手册) */
-  onOpenHelp(callback) {
-    const listener = () => callback()
-    ipcRenderer.on('widget:open-help', listener)
-    return () => ipcRenderer.removeListener('widget:open-help', listener)
-  },
   /** 消息气泡链接:用系统浏览器打开(不新建 Electron 窗口) */
   openExternal(url) {
     ipcRenderer.send('app:open-external', String(url))
   },
+  /** 媒体降级打开(2026-08-08):岛内播放失败时用系统默认播放器打开
+   * (island-media://local/ 或 http/https URL;主进程按媒体扩展名校验) */
+  openMediaExternal(url) {
+    ipcRenderer.send('app:open-media-external', String(url))
+  },
   /** 调整窗口尺寸(Agent 面板缩放需要宽度;高度用于高空间视图;
-   * widget:set-height 死通道已删,统一走 set-size) */
-  setWindowSize(width, height) {
-    ipcRenderer.send('widget:set-size', Number(width), Number(height))
+   * widget:set-height 死通道已删,统一走 set-size)。
+   * immediate(2026-08-10):窗口补间直通主进程 setBounds,跳过 100ms
+   * 合帧(合帧把补间压成 ~10Hz 台阶,与岛体平滑过渡不同步 = 抖动) */
+  setWindowSize(width, height, immediate) {
+    ipcRenderer.send('widget:set-size', Number(width), Number(height), immediate === true)
+  },
+  /** 全屏状态上报(2026-08-08):fullscreenchange 时通知主进程,主进程
+   * 在全屏期间兜底忽略 widget:set-size——全屏层(100% viewport)跟随
+   * 窗口 resize 放大 = "全屏界面越来越大",渲染端守卫之外的漏网路径
+   * 由主进程兜底。
+   * inMini(2026-08-10):全屏元素是否在媒体岛内——岛全屏放大窗口到
+   * 显示器,对话窗口内媒体全屏只覆盖 Agent 窗口(不放大) */
+  setFullscreen(fs, inMini) {
+    ipcRenderer.send('widget:fullscreen', Boolean(fs), Boolean(inMini))
   },
   /** 右键长按拖拽移动挂件:开始(记录基准位置;数值兜底防异常参数) */
   dragStart(screenX, screenY) {
@@ -112,6 +123,18 @@ contextBridge.exposeInMainWorld('desktop', {
   agentEvolutionReset() {
     return ipcRenderer.invoke('agent:evolution-reset')
   },
+  /** Agent:清除数据(2026-08-10,Agent 设置「数据管理」区)
+   * scope 'app' = 灵动岛所有数据(记忆/进化/settings.json);
+   * scope 'tools' = 所有工具的下载记录及源文件(bili 下载与登录态、
+   * xxt 登录态与截图)。渲染端已清 localStorage + IndexedDB */
+  agentClearData(scope) {
+    return ipcRenderer.invoke('agent:clear-data', scope)
+  },
+  /** 穿透轮询校正(2026-08-10):返回窗口屏幕 bounds + 光标屏幕位置,
+   * 渲染端核对岛体 rect 校正穿透状态(防 mouseleave 后穿透死锁) */
+  pointerPoll() {
+    return ipcRenderer.invoke('widget:pointer-poll')
+  },
   /** Agent:导入技能(选择技能包文件夹或单个 .md 文件) */
   agentSkillImport() {
     return ipcRenderer.invoke('agent:skill-import')
@@ -147,5 +170,17 @@ contextBridge.exposeInMainWorld('desktop', {
   /** 启动时询问当前模式(音乐 / agent) */
   getMode() {
     return ipcRenderer.invoke('widget:get-mode')
+  },
+  /** 多媒体库视频导入:系统对话框选视频文件 → [{path, name, size}]
+   * (视频库路径引用,浏览器 File 无绝对路径,必须经主进程 dialog) */
+  pickMediaFiles() {
+    return ipcRenderer.invoke('app:pick-media-files')
+  },
+  /** 托盘"多媒体库"菜单:订阅回调(渲染端展开岛体进入多媒体库视图)。
+   * 返回取消订阅函数(与 onOpenSettings 同款) */
+  onOpenMediaLibrary(callback) {
+    const listener = () => callback()
+    ipcRenderer.on('widget:open-media-library', listener)
+    return () => ipcRenderer.removeListener('widget:open-media-library', listener)
   },
 })

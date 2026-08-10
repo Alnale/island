@@ -6,10 +6,11 @@
  * 状态(列表/测量/输入/菜单)留在 AgentView。
  */
 
-import { memo, useState } from 'react'
+import { memo, useEffect, useState } from 'react'
 import type { AgentMessage, AgentPart } from '../../../agent/types'
 import { textFromMessage, textFromParts } from '../../../agent/text'
-import { AgentImage, CopyButton, Markdown } from './Markdown'
+import { firstMediaKindInText } from './markdownParser'
+import { AgentImage, CopyButton, Markdown, MediaFrame } from './Markdown'
 
 /** 用户消息气泡:右侧强调色,Markdown 文本(plainMermaid:用户贴的
  * mermaid 源码按普通代码块显示,图表深色主题进浅色气泡不可读) + 复制按钮。
@@ -167,10 +168,24 @@ export const ToolSummary = memo(function ToolSummary({ items }: { items: ToolCal
 export const AssistantBlock = memo(function AssistantBlock({
   parts,
   usage,
+  mediaAutoPlay = false,
+  onMediaAutoPlayed,
 }: {
   parts: AgentMessage['parts']
   usage?: AgentMessage['usage']
+  /** 2026-08-10 自动播放只限"当次对话":本会话流式落定且未消费的消息才
+   * true(LLM 播放的那一轮自动播一次);历史/重挂载读到 false */
+  mediaAutoPlay?: boolean
+  /** 消费标记(自动播放已发生,该消息重挂载不再播) */
+  onMediaAutoPlayed?: () => void
 }) {
+  // 消费自动播放标记:渲染后立即从 Set 移除——之后重挂载(收起再展开/
+  // 历史恢复)渲染时读到 false,不再自动播放;消费幂等(Set.delete 重复
+  // 调用无害)
+  useEffect(() => {
+    if (mediaAutoPlay) onMediaAutoPlayed?.()
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅标记翻转时
+  }, [mediaAutoPlay])
   // 文本段按原顺序渲染;工具调用全量收集(调用 + 结果配对;顺序即执行
   // 顺序,过程可知)
   const textParts: Array<Extract<AgentPart, { type: 'text' }>> = []
@@ -197,11 +212,31 @@ export const AssistantBlock = memo(function AssistantBlock({
       durationMs: r?.durationMs,
     })
   })
+  // 媒体附件(带原 parts 索引,自动播权分派用)
+  const mediaParts: Array<{ p: Extract<AgentPart, { type: 'media' }>; idx: number }> = []
+  parts.forEach((part, i) => {
+    if (part.type === 'media') mediaParts.push({ p: part, idx: i })
+  })
+  // 自动播权分派(2026-08-10 三轮修复"LLM 找歌来听没自动播放"):按原
+  // parts 顺序找**第一个**音频/视频媒体——markdown 内嵌 ![歌名](路径)
+  // (LLM 常用回复内嵌而非工具拦截)或 media part;获权者自动播放,其余
+  // 保持被动。mediaAutoPlay(当次对话标记)为 false 时全部不播
+  let grantTextIdx: number | null = null
+  let grantMediaIdx: number | null = null
+  for (let i = 0; i < parts.length && grantTextIdx === null && grantMediaIdx === null; i++) {
+    const p = parts[i]
+    if (p.type === 'text') {
+      const k = firstMediaKindInText(p.text)
+      if (k === 'audio' || k === 'video') grantTextIdx = textParts.indexOf(p)
+    } else if (p.type === 'media' && (p.kind === 'audio' || p.kind === 'video')) {
+      grantMediaIdx = i
+    }
+  }
   return (
     <div className="island-agent-msg-assistant">
       {textParts.map((p, i) => (
         <div key={`t-${i}`} className="island-agent-text">
-          <Markdown text={p.text} />
+          <Markdown text={p.text} mediaAutoPlay={mediaAutoPlay && i === grantTextIdx} />
         </div>
       ))}
       {/* 工具图片附件(如 bili 登录二维码):引擎注入的 image part,
@@ -209,6 +244,25 @@ export const AssistantBlock = memo(function AssistantBlock({
       {parts
         .filter((p): p is Extract<AgentPart, { type: 'image' }> => p.type === 'image')
         .map((p, i) => <AgentImage key={`img-${i}`} src={p.dataUrl} alt="工具图片" />)}
+      {/* 工具媒体附件(2026-08-08,open_file 媒体拦截):引擎注入的 media
+          part,MediaFrame 窗口内直接播放——LLM 说"打开视频看看"不再走
+          外部播放器,也不依赖 LLM 输出 markdown(实测只回"已播放"不展示)
+          **自动播放(2026-08-10 用户要求)**:LLM 播放视频/音频 → 媒体
+          元素加载出后自动播放(i === 0 只自动播第一条——一条回复多个
+          附件不全响,其余点一下播放);被自动播放策略拦截静默回退封面/
+          播放键 */}
+      {mediaParts.map(({ p, idx }) => (
+        <MediaFrame
+          key={`media-${idx}`}
+          kind={p.kind}
+          src={p.url}
+          alt={p.name}
+          // 只自动播该消息第一个音频/视频媒体(markdown 内嵌或 media
+          // part 谁先谁获权;多条不全响);仅当次对话的流式落定消息
+          // (mediaAutoPlay)才自动播——历史/重挂载不播
+          autoPlay={mediaAutoPlay && idx === grantMediaIdx}
+        />
+      ))}
       {toolCalls.length > 0 && <ToolSummary items={toolCalls} />}
       {/* 气泡脚注:复制按钮(复制本条回复文本)+ token 用量 */}
       <div className="island-agent-msg-foot">

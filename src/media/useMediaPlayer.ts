@@ -2,7 +2,15 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { TrackInfo } from '../data/islandStates'
 import type { PlaybackMode } from './playbackModes'
 import { loadTracks } from './tracks'
-import { loadUploads, removeUpload, saveUpload } from './uploadStore'
+import { loadUploads, removeUpload, saveUpload, saveUploadData } from './uploadStore'
+// 播放列表 ↔ 音频库同步(2026-08-08):上传歌曲到播放列表时自动补录
+// 音频库(同名不重复导入);多媒体库音频 tab 可导入播放列表
+import {
+  findAudioByName,
+  genLibraryId,
+  saveAudioItem,
+  type AudioLibraryItem,
+} from './libraryStore'
 
 /** 播放器阶段:加载中 / 播放中 / 已暂停 */
 export type PlayerPhase = 'idle' | 'loading' | 'playing'
@@ -34,6 +42,9 @@ export interface MediaPlayer {
   playIndex(index: number): void
   /** 上传音频文件加入播放列表(自动播放第一首新曲) */
   addTracks(files: File[]): void
+  /** 从音频库导入播放列表(2026-08-08,单个/批量;自动播放第一首新曲;
+      不重复入库——音频库已是来源) */
+  addLibraryTracks(items: AudioLibraryItem[]): void
   /** 删除列表曲目(仅上传曲目可删);删除当前播放曲目则切到相邻曲目 */
   removeTrack(index: number): void
   /** 跳转进度(秒),由灵动岛进度条拖动回传 */
@@ -166,10 +177,32 @@ export function useMediaPlayer(): MediaPlayer {
     async (files: File[]) => {
       const uploaded = await Promise.all(
         files
-          .filter((f) => f.type.startsWith('audio/'))
+          // File.type 可能为空(部分系统/拖拽文件),按扩展名兜底——
+          // 否则合法音频被静默过滤,"上传了但列表没有"(2026-08-08)
+          .filter(
+            (f) =>
+              f.type.startsWith('audio/') ||
+              /\.(mp3|wav|flac|ogg|oga|opus|m4a|aac|webm)$/i.test(f.name),
+          )
           .map(async (f) => {
             const url = URL.createObjectURL(f)
             blobUrlsRef.current.add(url)
+            // 自动补录音频库(2026-08-08,参考图片库导入机制):播放列表
+            // 上传的歌曲若音频库**没有同名记录**则自动入库;已有则不
+            // 重复导入(多媒体库是播放列表的持久化扩展,删库条目不影响
+            // 播放列表本身)
+            const existing = await findAudioByName(f.name).catch(() => null)
+            if (!existing) {
+              await saveAudioItem({
+                id: genLibraryId('audio'),
+                name: f.name.slice(0, 100),
+                type: f.type,
+                data: await f.arrayBuffer(),
+                createdAt: Date.now(),
+              }).catch(() => {
+                // 音频库写入失败(配额等)不影响播放列表上传
+              })
+            }
             return {
               title: f.name.replace(/\.[^.]+$/, ''),
               artist: '本地音乐',
@@ -181,6 +214,34 @@ export function useMediaPlayer(): MediaPlayer {
           }),
       )
       if (uploaded.length === 0) return
+      const next = [...tracksRef.current, ...uploaded]
+      tracksRef.current = next // 先同步 ref,playTrack 立即用新列表
+      setTracks(next)
+      playTrack(next.length - uploaded.length) // 播放第一首新曲
+    },
+    [playTrack],
+  )
+
+  /** 从音频库导入播放列表(2026-08-08):条目 data → Blob URL + 持久化
+   * island-uploads(播放列表重启恢复);与 addTracks 同路径,但**不重复
+   * 入库音频库**(来源即音频库);自动播放第一首新曲 */
+  const addLibraryTracks = useCallback(
+    async (items: AudioLibraryItem[]) => {
+      if (items.length === 0) return
+      const uploaded = await Promise.all(
+        items.map(async (it) => {
+          const url = URL.createObjectURL(new Blob([it.data], { type: it.type }))
+          blobUrlsRef.current.add(url)
+          return {
+            title: it.name.replace(/\.[^.]+$/, ''),
+            artist: '本地音乐',
+            duration: 0,
+            url,
+            source: 'uploaded' as const,
+            storageKey: await saveUploadData(it.name, it.type, it.data).catch(() => undefined),
+          }
+        }),
+      )
       const next = [...tracksRef.current, ...uploaded]
       tracksRef.current = next // 先同步 ref,playTrack 立即用新列表
       setTracks(next)
@@ -385,6 +446,7 @@ export function useMediaPlayer(): MediaPlayer {
     previous,
     playIndex,
     addTracks,
+    addLibraryTracks,
     removeTrack,
     seek,
   }

@@ -32,17 +32,40 @@ import {
   saveFontSettings,
   type FontLibraryItem,
 } from './media/fontStore'
+// 多媒体库(2026-08-08):LLM 设置工具的 audio/video 库操作入口
+import {
+  genLibraryId,
+  loadAudioLibrary,
+  loadVideoLibrary,
+  removeAudioItem,
+  removeVideoItem,
+  saveAudioItem,
+  saveVideoItem,
+} from './media/libraryStore'
+// 视频播放偏好(2026-08-10,LLM 工具 set_video_config 的 volume/speed/loop:
+// 写共享偏好经 island:video-prefs 事件三处播放器即时同步)
+import { loadVideoPrefs, setVideoPrefs as saveVideoPrefs } from './media/videoPrefs'
 
 /** 主题色持久化键(与 WidgetApp 的 THEME_STORAGE_KEY 一致) */
 export const THEME_STORAGE_KEY = 'widget-theme-color'
 /** Agent 界面缩放持久化键(单一来源;useAgentPanelLayout 反向导入,
  * 审计 P2 #3 修过时注释) */
 export const AGENT_SCALE_STORAGE_KEY = 'widget-agent-scale'
+/** 媒体窗口默认宽持久化键(2026-08-08 单一来源;MediaFrame 反向导入,
+ * 与 AGENT_SCALE_STORAGE_KEY 同款) */
+export const MEDIA_WINDOW_STORAGE_KEY = 'widget-media-window'
 // 背景参数键与读取在 backgroundStore 共享(不透明度/裁切,含旧版迁移)
 /** 设置变更事件名(桥写完存储后派发,UI 监听重读) */
 export const ISLAND_SETTINGS_EVENT = 'island-settings-changed'
 /** 变更涉及的状态域(监听方按域重读对应状态) */
-export type IslandSettingsScope = 'theme' | 'scale' | 'font' | 'background' | 'imageLibrary'
+export type IslandSettingsScope =
+  | 'theme'
+  | 'scale'
+  | 'font'
+  | 'background'
+  | 'imageLibrary'
+  | 'mediaWindow'
+  | 'mediaLibrary'
 
 /** 桥方法(主进程 executeJavaScript 调用;方法名与 settingsTools 的 op 一致) */
 export interface IslandSettingsBridge {
@@ -55,6 +78,10 @@ export interface IslandSettingsBridge {
     currentFontId: string | null
     currentFontName: string | null
     backgroundOpacity: { expanded: number; compact: number }
+    /** 媒体窗口默认宽(2026-08-10 补进快照:LLM 改前先查当前值) */
+    mediaWindowWidth: number
+    /** 视频播放设置(2026-08-10 补进快照:音量/速度/循环 + 是否全屏) */
+    video: { volume: number; speed: number; loop: boolean; fullscreen: boolean }
   }>
   setThemeColor(color: string): Promise<{ ok: true; color: string; previous: string | null }>
   setAgentScale(percent: number): Promise<{ ok: true; scale: number; previous: number }>
@@ -86,6 +113,70 @@ export interface IslandSettingsBridge {
     opacity: { expanded: number; compact: number }
     previous: { expanded: number; compact: number }
   }>
+  /** 设置媒体窗口默认宽(160-800;对话图片/视频初始宽);
+      返回 previous 供 LLM 回复原值 */
+  setMediaWindowSize(width: number): Promise<{ ok: true; width: number; previous: number }>
+  /* ---- 多媒体库(2026-08-08):音频库(ArrayBuffer)/ 视频库(路径引用) ---- */
+  listAudioLibrary(): Promise<Array<{ id: string; name: string; size: number }>>
+  /** 导入音频(data URL 经 executeJavaScript 传入,桥解码为 ArrayBuffer 存库) */
+  importAudioLibrary(dataUrl: string, name: string): Promise<{ ok: true; id: string; name: string }>
+  renameAudioLibrary(id: string, name: string): Promise<{ ok: true; id: string; name: string }>
+  removeAudioLibrary(id: string): Promise<{ ok: true }>
+  listVideoLibrary(): Promise<Array<{ id: string; name: string; size: number; path: string }>>
+  /** 导入视频(路径引用:校验在工具层,桥只记路径,播放经 island-media 流式) */
+  importVideoLibrary(path: string, name: string, size: number): Promise<{ ok: true; id: string; name: string }>
+  renameVideoLibrary(id: string, name: string): Promise<{ ok: true; id: string; name: string }>
+  removeVideoLibrary(id: string): Promise<{ ok: true }>
+  /** 跳转多媒体库视频 tab 并播放指定视频(2026-08-10,LLM 工具
+   * play_library_video:校验条目存在后派发 island:media-library-play
+   * 事件,WidgetApp 监听展开面板,MediaLibraryView 定位该视频自动播放) */
+  playLibraryVideo(id: string): Promise<{ ok: true; id: string; name: string }>
+  /* ---- 视频播放设置(2026-08-10,LLM 工具 set_video_config)---- */
+  /** 读取当前视频播放设置(音量/速度/循环 + 媒体窗口默认宽 + 是否全屏) */
+  getVideoPrefs(): Promise<{
+    volume: number
+    speed: number
+    loop: boolean
+    mediaWindowWidth: number
+    fullscreen: boolean
+  }>
+  /** 修改视频播放设置(音量/速度/循环,经 videoPrefs 事件三处播放器
+   * 即时同步;返回 previous 供 LLM 回复原值) */
+  setVideoPrefs(patch: {
+    volume?: number
+    speed?: number
+    loop?: boolean
+  }): Promise<{
+    ok: true
+    volume: number
+    speed: number
+    loop: boolean
+    previous: { volume: number; speed: number; loop: boolean }
+  }>
+  /** 进入/退出全屏(enter=true 时把对话窗口内正在播放的视频容器全屏;
+   * 无播放中的视频取最后挂载的;false 退出全屏) */
+  setFullscreen(enter: boolean): Promise<{ ok: true; fullscreen: boolean }>
+  /** 对话窗口媒体清单(2026-08-10,LLM 工具 list_conversation_media):
+   * 遍历消息气泡 DOM 列出全部媒体附件(图片/视频/音频),视频带播放
+   * 状态(播放中/音量/速度/循环/全屏/进度)——LLM 据此回答"对话里有
+   * 什么媒体、哪个在播放、视频音量多大" */
+  getConversationMedia(): Promise<
+    Array<
+      | { kind: 'img'; name?: string }
+      | { kind: 'audio'; name?: string; playing: boolean }
+      | {
+          kind: 'video'
+          name?: string
+          playing: boolean
+          volume: number
+          speed: number
+          loop: boolean
+          fullscreen: boolean
+          position: number
+          duration: number | null
+        }
+    >
+  >
   /** 删除字体库条目(巡检清理用;不暴露给 LLM 工具) */
   deleteFontItem(id: string): Promise<{ ok: true }>
   /** 删除图片库条目(巡检清理用;不暴露给 LLM 工具) */
@@ -95,6 +186,27 @@ export interface IslandSettingsBridge {
 /** 派发设置变更事件(桥写完存储后调用;UI 监听方按 scope 重读) */
 export function emitSettingsChange(scopes: IslandSettingsScope[]): void {
   window.dispatchEvent(new CustomEvent(ISLAND_SETTINGS_EVENT, { detail: { scopes } }))
+}
+
+/** 多媒体库"播放指定视频"事件(2026-08-10,LLM 工具 play_library_video):
+ * 桥校验条目存在后派发,WidgetApp 监听 → 展开多媒体库面板 + 把视频 id
+ * 传给 MediaLibraryView 定位自动播放。与 island-settings-changed 分离:
+ * 前者是"存储已变请重读",这里是"跳转并播放"的动作指令 */
+export const MEDIA_LIBRARY_PLAY_EVENT = 'island:media-library-play'
+
+/** 派发多媒体库播放请求(带视频条目 id) */
+export function emitMediaLibraryPlay(id: string): void {
+  window.dispatchEvent(new CustomEvent(MEDIA_LIBRARY_PLAY_EVENT, { detail: { id } }))
+}
+
+/** 订阅多媒体库播放请求(返回取消订阅函数) */
+export function onMediaLibraryPlay(cb: (id: string) => void): () => void {
+  const onEvent = (event: Event) => {
+    const id = (event as CustomEvent<{ id?: unknown }>).detail?.id
+    if (typeof id === 'string' && id) cb(id)
+  }
+  window.addEventListener(MEDIA_LIBRARY_PLAY_EVENT, onEvent)
+  return () => window.removeEventListener(MEDIA_LIBRARY_PLAY_EVENT, onEvent)
 }
 
 /**
@@ -141,6 +253,22 @@ export function readAgentScale(): number {
   return 200
 }
 
+/** 读取媒体窗口默认宽(localStorage;钳制 160-800,缺省 320)。
+ * 设置桥(set_media_window_size 工具读现值)/ WidgetApp / MediaFrame
+ * 共用,与 readAgentScale 同款单一来源 */
+export function readMediaWindowWidth(): number {
+  try {
+    const raw = localStorage.getItem(MEDIA_WINDOW_STORAGE_KEY)
+    if (raw) {
+      const n = Number(raw)
+      if (Number.isFinite(n)) return Math.min(800, Math.max(160, Math.round(n)))
+    }
+  } catch {
+    // 读取失败按默认
+  }
+  return 320
+}
+
 export function registerIslandSettingsBridge(): void {
   if (window.__islandSettings) return
   const bridge: IslandSettingsBridge = {
@@ -166,6 +294,11 @@ export function registerIslandSettingsBridge(): void {
         // 与 WidgetApp 共用同一读取(含旧版单数值/单独键迁移,旧数据下
         // LLM 不会读到 0.4 默认值而 UI 显示真实值)
         backgroundOpacity: readBackgroundParams().opacity,
+        mediaWindowWidth: readMediaWindowWidth(),
+        video: {
+          ...loadVideoPrefs(),
+          fullscreen: Boolean(document.fullscreenElement),
+        },
       }
     },
     // 主题色:写 localStorage,UI 经事件重读(WidgetApp setCustomTheme)
@@ -293,6 +426,182 @@ export function registerIslandSettingsBridge(): void {
       saveBackgroundParams({ ...previous, opacity })
       notify(['background'])
       return { ok: true, opacity, previous: previous.opacity }
+    },
+    /* ---- 多媒体库(2026-08-08) ---- */
+    async listAudioLibrary() {
+      const items = await loadAudioLibrary()
+      return items.map((it) => ({ id: it.id, name: it.name, size: it.data.byteLength }))
+    },
+    async importAudioLibrary(dataUrl, name) {
+      const item = {
+        id: genLibraryId('audio'),
+        name: String(name ?? '导入音频').slice(0, 100),
+        type: dataUrl.slice(5, dataUrl.indexOf(';')) || 'audio/mpeg',
+        // data URL → ArrayBuffer(base64 解码;executeJavaScript 只能传 JSON)
+        data: (() => {
+          const base64 = dataUrl.slice(dataUrl.indexOf(',') + 1)
+          const bin = atob(base64)
+          const buf = new Uint8Array(bin.length)
+          for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i)
+          return buf.buffer
+        })(),
+        createdAt: Date.now(),
+      }
+      await saveAudioItem(item)
+      notify(['mediaLibrary'])
+      return { ok: true, id: item.id, name: item.name }
+    },
+    async renameAudioLibrary(id, name) {
+      const items = await loadAudioLibrary()
+      const item = items.find((it) => it.id === id)
+      if (!item) throw new Error(`音频不存在:${id}`)
+      await saveAudioItem({ ...item, name: String(name ?? '').trim().slice(0, 100) })
+      notify(['mediaLibrary'])
+      return { ok: true, id, name: item.name }
+    },
+    async removeAudioLibrary(id) {
+      await removeAudioItem(id)
+      notify(['mediaLibrary'])
+      return { ok: true }
+    },
+    async listVideoLibrary() {
+      const items = await loadVideoLibrary()
+      return items.map((it) => ({ id: it.id, name: it.name, size: it.size, path: it.path }))
+    },
+    async importVideoLibrary(path, name, size) {
+      const item = {
+        id: genLibraryId('video'),
+        name: String(name ?? '导入视频').slice(0, 100),
+        path: String(path),
+        size: Number(size) || 0,
+        createdAt: Date.now(),
+      }
+      await saveVideoItem(item)
+      notify(['mediaLibrary'])
+      return { ok: true, id: item.id, name: item.name }
+    },
+    async renameVideoLibrary(id, name) {
+      const items = await loadVideoLibrary()
+      const item = items.find((it) => it.id === id)
+      if (!item) throw new Error(`视频不存在:${id}`)
+      await saveVideoItem({ ...item, name: String(name ?? '').trim().slice(0, 100) })
+      notify(['mediaLibrary'])
+      return { ok: true, id, name: item.name }
+    },
+    async removeVideoLibrary(id) {
+      await removeVideoItem(id)
+      notify(['mediaLibrary'])
+      return { ok: true }
+    },
+    // 跳转多媒体库播放指定视频(2026-08-10):校验条目存在(不存在抛错,
+    // LLM 可自纠)后派发事件,UI 侧展开面板 + 定位播放
+    async playLibraryVideo(id) {
+      const items = await loadVideoLibrary()
+      const item = items.find((it) => it.id === id)
+      if (!item) throw new Error(`视频不存在:${id}(用 list_video_library 查 id)`)
+      emitMediaLibraryPlay(id)
+      return { ok: true, id: item.id, name: item.name }
+    },
+    // 视频播放设置(2026-08-10,LLM 工具 set_video_config):
+    // 音量/速度/循环经 videoPrefs 共享模块写入 → island:video-prefs 事件
+    // → 三处播放器(VideoPlayer/视频岛/多媒体库)订阅实时应用
+    async getVideoPrefs() {
+      const p = loadVideoPrefs()
+      return {
+        volume: p.volume,
+        speed: p.speed,
+        loop: p.loop,
+        mediaWindowWidth: readMediaWindowWidth(),
+        fullscreen: Boolean(document.fullscreenElement),
+      }
+    },
+    async setVideoPrefs(patch) {
+      const previous = loadVideoPrefs()
+      saveVideoPrefs({
+        volume: patch.volume !== undefined ? Number(patch.volume) : undefined,
+        speed: patch.speed !== undefined ? Number(patch.speed) : undefined,
+        loop: patch.loop !== undefined ? Boolean(patch.loop) : undefined,
+      })
+      const p = loadVideoPrefs()
+      return { ok: true, volume: p.volume, speed: p.speed, loop: p.loop, previous }
+    },
+    // 全屏切换(2026-08-10):enter=true 把对话窗口内**正在播放**的视频
+    // 容器全屏(优先非 paused,无播放中的取最后挂载的);false 退出全屏
+    async setFullscreen(enter) {
+      if (enter && !document.fullscreenElement) {
+        const videos = [...document.querySelectorAll<HTMLVideoElement>('.island-media-frame video')]
+        const v = videos.find((el) => !el.paused) ?? videos[videos.length - 1]
+        const frame = v?.closest<HTMLElement>('.island-media-frame')
+        if (frame) void frame.requestFullscreen().catch(() => {})
+      } else if (!enter && document.fullscreenElement) {
+        void document.exitFullscreen().catch(() => {})
+      }
+      return { ok: true, fullscreen: Boolean(document.fullscreenElement) }
+    },
+    // 对话窗口媒体清单(2026-08-10):遍历消息气泡 DOM(媒体附件都在
+    // .island-media-frame 或 .island-agent-voice 内;视频岛/多媒体库的
+    // 播放器不在这些容器里,不列入——语义 = 对话窗口内的附件)
+    async getConversationMedia() {
+      const items: Array<
+        | { kind: 'img'; name?: string }
+        | { kind: 'audio'; name?: string; playing: boolean }
+        | {
+            kind: 'video'
+            name?: string
+            playing: boolean
+            volume: number
+            speed: number
+            loop: boolean
+            fullscreen: boolean
+            position: number
+            duration: number | null
+          }
+      > = []
+      for (const frame of document.querySelectorAll<HTMLElement>('.island-media-frame')) {
+        const video = frame.querySelector('video')
+        const img = frame.querySelector('img')
+        const name = frame.getAttribute('data-media-name') || undefined
+        if (video) {
+          items.push({
+            kind: 'video',
+            name,
+            playing: !video.paused,
+            volume: Math.round((video.volume || 0) * 100),
+            speed: video.playbackRate || 1,
+            loop: video.loop,
+            fullscreen: Boolean(
+              document.fullscreenElement === frame ||
+                document.fullscreenElement?.contains(video),
+            ),
+            position: Math.round(video.currentTime || 0),
+            duration: Number.isFinite(video.duration) ? Math.round(video.duration) : null,
+          })
+        } else if (img) {
+          items.push({ kind: 'img', name })
+        }
+      }
+      for (const voice of document.querySelectorAll<HTMLElement>('.island-agent-voice')) {
+        const audio = voice.querySelector('audio')
+        items.push({
+          kind: 'audio',
+          name: voice.getAttribute('title')?.replace(/^语音:/, '') || undefined,
+          playing: audio ? !audio.paused : false,
+        })
+      }
+      return items
+    },
+    // 媒体窗口默认宽(2026-08-08):写 localStorage,UI 经事件重读;
+    // 返回 previous 供 LLM 回复原值
+    async setMediaWindowSize(width) {
+      const n = Math.min(800, Math.max(160, Math.round(Number(width) || 320)))
+      const previous = readMediaWindowWidth()
+      try {
+        localStorage.setItem(MEDIA_WINDOW_STORAGE_KEY, String(n))
+      } catch {
+        // 存储失败(隐私模式等)仍按成功处理,UI 层重读不到就保持原样
+      }
+      notify(['mediaWindow'])
+      return { ok: true, width: n, previous }
     },
     // 删除(巡检清理用;LLM 工具不暴露,防误删用户数据)
     async deleteFontItem(id) {

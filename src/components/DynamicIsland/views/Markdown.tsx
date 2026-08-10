@@ -18,9 +18,19 @@ import {
   useMemo,
   useRef,
   useState,
+  type CSSProperties,
+  type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from 'react'
 import { parseMarkdown, type MdBlock, type MdInline } from './markdownParser'
+import {
+  loadVideoPrefs,
+  onVideoPrefsChange,
+  setVideoPrefs,
+} from '../../../media/videoPrefs'
+// 媒体窗口默认宽:键与读取定义在 settingsBridge(单一来源,与
+// readAgentScale 同款;LLM 设置工具与设置界面共用)
+import { readMediaWindowWidth } from '../../../settingsBridge'
 
 /** 写入剪贴板:Clipboard API 优先,失败(非安全上下文等)回退 execCommand */
 async function copyToClipboard(text: string): Promise<boolean> {
@@ -141,6 +151,1117 @@ export function AgentImage({ src, alt }: { src: string; alt?: string }) {
   )
 }
 
+/** 媒体窗口拖拽钳制范围 */
+const MEDIA_MIN_W = 120
+const MEDIA_MAX_W = 640
+
+/** 岛内播放失败 → 系统默认播放器打开(降级;远程 URL 走系统浏览器) */
+function openMediaExternally(url: string) {
+  if (/^https?:\/\//i.test(url)) {
+    openExternalUrl(url)
+    return
+  }
+  window.desktop?.openMediaExternal?.(url)
+}
+
+/**
+ * 媒体播放失败提示 + 降级打开按钮(外部播放器仅为降级选择,
+ * 正常播放全在窗口内)。
+ * 2026-08-08 按 video.error.code 区分原因:
+ * code 4(SRC_NOT_SUPPORTED)= 格式不支持——Chromium 窗口内只支持
+ * H.264 的 mp4 / webm(vp8/vp9)/ ogg,HEVC/H.265、mkv、avi、flv 等
+ * 无法解码(硬限制),明确告知 + 系统播放器一键降级。
+ * 2026-08-09 修复"格式正确却报无法播放(实测)":Chromium 对**加载
+ * 失败**(404 文件不存在 / 413 过大 / 500 读取失败)也报 code 4——
+ * 同一错误码无法区分"资源没拿到"与"资源格式不支持"。code 4 且
+ * 本地协议时回查协议状态(HEAD Range 0-0):404/413/500 显示真实
+ * 加载原因(路径错误/过大/读取失败),仅 200/206(资源可读)才判为
+ * 真格式问题。远程 https/data:/blob: 无法回查,维持原判 */
+function MediaError({ src, kind, code }: { src: string; kind: 'img' | 'video' | 'audio'; code?: number | null }) {
+  // 回查结论:null = 未回查/非 code 4;'notfound'|'toolarge'|'readfail'
+  // = 加载失败(协议状态);'ok' = 资源可读 → 真格式问题
+  const [probe, setProbe] = useState<'notfound' | 'toolarge' | 'readfail' | 'ok' | null>(null)
+  useEffect(() => {
+    if (kind !== 'video' || code !== 4) return
+    // 仅本地协议可回查(远程 URL fetch 会跨源/不可达,维持原判)
+    if (!/^island-media:\/\//i.test(src)) return
+    let alive = true
+    // Range 0-0 极小请求:只取响应头与状态码,不下载内容
+    fetch(src, { headers: { Range: 'bytes=0-0' } })
+      .then((res) => {
+        if (!alive) return
+        if (res.status === 404) setProbe('notfound')
+        else if (res.status === 413) setProbe('toolarge')
+        else if (res.status >= 500) setProbe('readfail')
+        else setProbe('ok') // 200/206 = 资源可读,格式问题成立
+      })
+      .catch(() => {
+        // 回查失败(网络层):维持原判,不误报加载原因
+      })
+    return () => {
+      alive = false
+    }
+  }, [src, kind, code])
+  const reason =
+    kind === 'video' && code === 4
+      ? probe === 'notfound'
+        ? '找不到该视频文件(路径可能有误或文件已被移动)'
+        : probe === 'toolarge'
+          ? '视频文件过大,超过窗口内播放上限(10GB)'
+          : probe === 'readfail'
+            ? '视频文件读取失败(可能被占用、已损坏或不可访问)'
+            : '该视频格式无法在窗口内播放(窗口内支持 mp4(H.264)/webm/ogg)'
+      : '无法播放该文件(可能已移动、过大或格式不支持)'
+  return (
+    <div className="island-agent-media-err">
+      <span>{reason}</span>
+      <button
+        type="button"
+        className="island-agent-media-external"
+        title="用系统默认播放器打开"
+        onClick={(event) => {
+          event.stopPropagation()
+          openMediaExternally(src)
+        }}
+        onPointerDown={(event) => {
+          if (event.button === 0) event.stopPropagation()
+        }}
+      >
+        用系统播放器打开
+      </button>
+    </div>
+  )
+}
+
+/**
+ * 语音消息气泡(2026-08-08,参考 QQ/微信语音气泡):胶囊横条 +
+ * 圆形播放键(播放中变暂停)+ **动态声波**(播放时逐条跳动)+
+ * 进度条 + 时长(秒/分'秒);点击整条切换播放/暂停;
+ * 音频不参与拖拽缩放(不需要)。播放失败降级外部播放器打开。
+ */
+function VoiceBubble({
+  src,
+  alt,
+  autoPlay = false,
+}: {
+  src: string
+  alt?: string
+  /** 2026-08-10 用户要求"LLM 播放音频,加载出媒体元素后自动播放":
+   * 就绪后自动播放;被自动播放策略拦截静默回退(点一下播放即可,
+   * 不误报错误) */
+  autoPlay?: boolean
+}) {
+  const audioRef = useRef<HTMLAudioElement>(null)
+  const progressRef = useRef<HTMLSpanElement>(null)
+  const [playing, setPlaying] = useState(false)
+  const [progress, setProgress] = useState(0)
+  const [duration, setDuration] = useState<number | null>(null)
+  const [err, setErr] = useState(false)
+  const scrubbingRef = useRef(false)
+  // 自动播放(2026-08-10 修复"找歌来听没自动播放"):**挂载时一次性捕获
+  // autoPlay(useRef)——消息落定渲染(autoPlay=true)后消费标记使 prop 变
+  // false,若 effect 依赖 [autoPlay] 会重跑:cleanup 移除 loadedmetadata
+  // 监听,加载慢的媒体(本地协议流式)永远等不到 play()(实测音频静默
+  // 失败)。挂载时捕获后,后续重渲染不影响已挂载实例;重挂载(历史恢复)
+  // 时新实例读到 false 不播。**readyState >= 1(元数据就绪)即 play**——
+  // play() 会触发继续加载;原实现等 canplay,但 audio preload="metadata"
+  // 时浏览器不预载数据,canplay 可能**永不触发**;loadedmetadata 必然
+  // 触发兜底。被自动播放策略拦截静默回退(不 setErr,点一下播放即可)
+  const autoPlayOnceRef = useRef(autoPlay)
+  useEffect(() => {
+    if (!autoPlayOnceRef.current) return
+    const a = audioRef.current
+    if (!a) return
+    const start = () => void a.play().catch(() => {})
+    if (a.readyState >= 1) start()
+    else a.addEventListener('loadedmetadata', start, { once: true })
+    return () => a.removeEventListener('loadedmetadata', start)
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅挂载一次
+  }, [])
+  // 2026-08-09:挂载上报已移除(分批挂载顺序不可靠,见 MediaFrame);
+  // 播放上报保留(音频移交后小窗续播标记;收起切换由数据快照驱动)
+  const toggle = () => {
+    const a = audioRef.current
+    if (!a) return
+    if (playing) a.pause()
+    else void a.play().catch(() => setErr(true))
+  }
+  // 进度条拖拽 seek(2026-08-08 用户要求"音频播放气泡支持拖拽进度"):
+  // 点击/拖动进度条跳转播放位置;拦截左键(防整条气泡 toggle 与岛体
+  // 长按收回)
+  const seekFromPointer = (event: ReactPointerEvent<HTMLSpanElement>) => {
+    const bar = progressRef.current
+    const a = audioRef.current
+    if (!bar || !a || !duration || duration <= 0) return
+    const rect = bar.getBoundingClientRect()
+    const ratio = Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width))
+    a.currentTime = ratio * duration
+    setProgress(a.currentTime / duration)
+  }
+  if (err) return <MediaError src={src} kind="audio" code={null} />
+  const dur = duration != null && Number.isFinite(duration) ? Math.round(duration) : 0
+  return (
+    <div
+      className={`island-agent-voice${playing ? ' playing' : ''}`}
+      role="button"
+      tabIndex={0}
+      title={alt ? `语音:${alt}` : '语音消息'}
+      onClick={(event) => {
+        event.stopPropagation()
+        toggle()
+      }}
+      onKeyDown={(event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault()
+          event.stopPropagation()
+          toggle()
+        }
+      }}
+      onPointerDown={(event) => {
+        if (event.button === 0) event.stopPropagation()
+      }}
+    >
+      <button
+        type="button"
+        className="island-agent-voice-play"
+        aria-label={playing ? '暂停' : '播放'}
+        onClick={(event) => {
+          event.stopPropagation()
+          toggle()
+        }}
+      >
+        {playing ? (
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <rect x="6" y="5" width="4" height="14" rx="1.5" />
+            <rect x="14" y="5" width="4" height="14" rx="1.5" />
+          </svg>
+        ) : (
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <path d="M7 4.5v15l13-7.5z" />
+          </svg>
+        )}
+      </button>
+      <span className="island-agent-voice-body">
+        <span className="island-agent-voice-wave" aria-hidden="true">
+          {[0, 1, 2, 3, 4].map((i) => (
+            <span key={i} style={{ '--i': i } as CSSProperties} />
+          ))}
+        </span>
+        <span
+          ref={progressRef}
+          className="island-agent-voice-progress"
+          role="slider"
+          aria-label="播放进度"
+          aria-valuemin={0}
+          aria-valuemax={dur}
+          aria-valuenow={Math.round(progress * dur)}
+          onClick={(event) => event.stopPropagation()}
+          onPointerDown={(event) => {
+            if (event.button !== 0) return
+            event.preventDefault()
+            event.stopPropagation()
+            scrubbingRef.current = true
+            event.currentTarget.setPointerCapture(event.pointerId)
+            seekFromPointer(event)
+          }}
+          onPointerMove={(event) => {
+            if (scrubbingRef.current) seekFromPointer(event)
+          }}
+          onPointerUp={() => {
+            scrubbingRef.current = false
+          }}
+          onPointerCancel={() => {
+            scrubbingRef.current = false
+          }}
+        >
+          <span className="island-agent-voice-fill" style={{ width: `${progress * 100}%` }} />
+          <span className="island-agent-voice-thumb" style={{ left: `${progress * 100}%` }} aria-hidden="true" />
+        </span>
+      </span>
+      <span className="island-agent-voice-dur">
+        {dur >= 60 ? `${Math.floor(dur / 60)}'${String(dur % 60).padStart(2, '0')}″` : `${dur}″`}
+      </span>
+      <audio
+        ref={audioRef}
+        src={src}
+        preload="metadata"
+        onError={() => setErr(true)}
+        onLoadedMetadata={(event) => setDuration(event.currentTarget.duration)}
+        onTimeUpdate={(event) =>
+          setProgress(
+            event.currentTarget.duration > 0
+              ? event.currentTarget.currentTime / event.currentTarget.duration
+              : 0,
+          )
+        }
+        onEnded={() => {
+          setPlaying(false)
+          setProgress(0)
+          dispatchAgentMedia('play', { kind: 'audio', src, playing: false })
+        }}
+        onPlay={() => {
+          setPlaying(true)
+          dispatchAgentMedia('play', { kind: 'audio', src, playing: true })
+        }}
+        onPause={() => {
+          setPlaying(false)
+          dispatchAgentMedia('play', { kind: 'audio', src, playing: false })
+        }}
+      />
+    </div>
+  )
+}
+
+/** 拖拽缩放时媒体保持在可视区内(2026-08-08 用户要求"拖多大自动往下
+ * 滚多少"):图片/视频拖大后底部超出消息列表可视区 → 自动往下滚到媒体
+ * 底部对齐;拖小后顶部超出 → 滚回。每帧随拖拽执行。
+ * 2026-08-09 修复"拖大不自动滚(实测图片气泡)":原实现只查 video——
+ * 图片 frame 里没有 video 元素,守卫提前返回,图片拖大从不滚动;
+ * 改为 video/img 任一存在即跟随,rect 量 frame 本身(img/video 都
+ * 100% 填满 frame,等价且更稳) */
+function followMediaInView(frame: HTMLElement | null) {
+  const media = frame?.querySelector('video, img')
+  const scroller = frame?.closest('.island-agent-messages') as HTMLElement | null
+  if (!frame || !media || !scroller) return
+  const vr = frame.getBoundingClientRect()
+  const cr = scroller.getBoundingClientRect()
+  if (vr.bottom > cr.bottom) scroller.scrollTop += vr.bottom - cr.bottom
+  else if (vr.top < cr.top) scroller.scrollTop -= cr.top - vr.top
+}
+
+/**
+ * 定制视频播放器(2026-08-08 用户要求"不要原生控件"):自定义控件层
+ * (底部渐变遮罩 + 播放/暂停 + 可拖动进度条 + 时间 + 全屏按钮);
+ * 全屏 = 整个播放器容器 requestFullscreen(控件随容器进入全屏层,
+ * 原生 video 全屏层无法带自定义控件);全屏进入/退出有过渡动画。
+ * 控件事件全部拦截左键(消息区内交互,防岛体长按收回)
+ */
+function VideoPlayer({
+  src,
+  cacheKey,
+  autoPlay = false,
+  onAspect,
+  onError,
+  onPlayingChange,
+  onProgress,
+}: {
+  src: string
+  /** 进度缓存 key = 消息里原始路径(2026-08-09 双向同步;src 是
+   * resolved 协议 URL,与缓存 key 不一致) */
+  cacheKey?: string
+  /** 2026-08-10 用户要求"LLM 播放视频,加载出媒体元素后自动播放" */
+  autoPlay?: boolean
+  onAspect: (aspect: number) => void
+  onError: (code: number | null) => void
+  /** 播放状态变化(2026-08-09 媒体小窗上报用) */
+  onPlayingChange?: (playing: boolean) => void
+  /** 播放进度上报(2026-08-09 小窗续播用;timeupdate 每 ~250ms,
+   * 由调用方节流) */
+  onProgress?: (position: number) => void
+}) {
+  const videoRef = useRef<HTMLVideoElement>(null)
+  const playerRef = useRef<HTMLDivElement>(null)
+  const barRef = useRef<HTMLDivElement>(null)
+  const [playing, setPlaying] = useState(false)
+  const [duration, setDuration] = useState(0)
+  const [current, setCurrent] = useState(0)
+  const [fullscreen, setFullscreen] = useState(false)
+  // 退出全屏缩回动画(播完移除 class)
+  const [leavingFs, setLeavingFs] = useState(false)
+  const fsLeaveTimerRef = useRef(0)
+  useEffect(() => () => window.clearTimeout(fsLeaveTimerRef.current), [])
+  // 视频封面(2026-08-10 用户要求"默认展示视频第一帧作为封面,不然
+  // 黑色的也不清楚"):未播放时黑色画面难辨认——加载完成后暂停态
+  // seek 到小偏移用 canvas 抓第一帧转 dataURL 作封面;**仅从未播放
+  // 过时显示**(播放过/暂停显示真实帧,不遮挡)
+  const [poster, setPoster] = useState<string | null>(null)
+  const posterTriedRef = useRef(false)
+  const everPlayedRef = useRef(false)
+  useEffect(() => {
+    const v = videoRef.current
+    if (!v) return
+    const capture = () => {
+      if (posterTriedRef.current || v.readyState < 2 || !v.paused) return
+      posterTriedRef.current = true
+      const restore = v.currentTime
+      const onSeeked = () => {
+        v.removeEventListener('seeked', onSeeked)
+        try {
+          // 长边缩到 640(气泡显示约 320 宽,足够清晰且 dataURL 小)
+          const scale = Math.min(1, 640 / Math.max(v.videoWidth || 1, v.videoHeight || 1))
+          const c = document.createElement('canvas')
+          c.width = Math.max(1, Math.round((v.videoWidth || 1) * scale))
+          c.height = Math.max(1, Math.round((v.videoHeight || 1) * scale))
+          c.getContext('2d')?.drawImage(v, 0, 0, c.width, c.height)
+          const url = c.toDataURL('image/jpeg', 0.72)
+          if (url && url.length > 200) setPoster(url)
+        } catch {
+          // 抓帧失败忽略(保持黑色,可播放)
+        }
+        try {
+          v.currentTime = restore
+        } catch {
+          // 恢复位置失败忽略
+        }
+      }
+      v.addEventListener('seeked', onSeeked)
+      try {
+        // 小偏移防首帧黑(部分编码首帧黑场)
+        v.currentTime = 0.05
+      } catch {
+        v.removeEventListener('seeked', onSeeked)
+      }
+    }
+    const tryCapture = () => {
+      if (v.readyState >= 2) capture()
+    }
+    v.addEventListener('loadeddata', tryCapture)
+    v.addEventListener('loadedmetadata', tryCapture)
+    if (v.readyState >= 2) capture()
+    return () => {
+      v.removeEventListener('loadeddata', tryCapture)
+      v.removeEventListener('loadedmetadata', tryCapture)
+    }
+  }, [])
+  // 挂载续播(2026-08-09 双向同步):小窗播放/seek 的进度经
+  // readAgentMediaPosition 读回,面板重新挂载(收起后再展开)时从该
+  // 位置继续,不再从头;仅同 src、仅挂载时一次
+  useEffect(() => {
+    const v = videoRef.current
+    const pos = cacheKey ? readAgentMediaPosition(cacheKey) : undefined
+    if (!v || !pos || pos <= 0) return
+    const seek = () => {
+      try {
+        v.currentTime = pos
+      } catch {
+        // seek 失败忽略
+      }
+    }
+    if (v.readyState >= 1) seek()
+    else v.addEventListener('loadedmetadata', seek, { once: true })
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅挂载续播
+  }, [])
+  // 应用共享偏好(2026-08-10 双向同步:音量/倍速/循环与视频岛/多媒体
+  // 库共享,挂载时读当前值应用到 video)
+  useEffect(() => {
+    const v = videoRef.current
+    if (!v) return
+    const p = loadVideoPrefs()
+    v.volume = p.volume
+    v.muted = p.volume === 0
+    v.playbackRate = p.speed
+    v.loop = p.loop
+  }, [])
+  // 自动播放(2026-08-10 用户要求"LLM 播放视频,加载出媒体元素后自动
+  // 播放";三轮修复):**挂载时一次性捕获 autoPlay(useRef)**——消费标记
+  // 使 prop 变 false 时 effect 不重跑(cleanup 移除 loadedmetadata 监听
+  // 会让慢加载媒体永远等不到 play,2026-08-10 音频实测根因);
+  // **readyState >= 1 即 play**(play() 触发继续加载;原等 canplay 在
+  // preload=metadata 下可能永不触发,短媒体播完/未播静默失败实测)。
+  // 被策略拦截静默回退封面+播放键(不误报);与挂载续播并存:面板重挂载
+  // 场景先从缓存位置 seek,再自动播放续上;重挂载新实例读 false 不播
+  const autoPlayOnceRef = useRef(autoPlay)
+  useEffect(() => {
+    if (!autoPlayOnceRef.current) return
+    const v = videoRef.current
+    if (!v) return
+    const start = () => void v.play().catch(() => {})
+    if (v.readyState >= 1) start()
+    else v.addEventListener('loadedmetadata', start, { once: true })
+    return () => v.removeEventListener('loadedmetadata', start)
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅挂载一次
+  }, [])
+  // 全屏状态跟踪 + 退出动画
+  useEffect(() => {
+    const v = videoRef.current
+    if (!v) return
+    const onChange = () => {
+      const fs = document.fullscreenElement === playerRef.current
+      setFullscreen(fs)
+      if (!fs) {
+        // 退出全屏:播缩回动画(scale + 淡出 0.2s)后移除
+        setLeavingFs(true)
+        window.clearTimeout(fsLeaveTimerRef.current)
+        fsLeaveTimerRef.current = window.setTimeout(() => setLeavingFs(false), 220)
+      }
+    }
+    v.addEventListener('fullscreenchange', onChange)
+    return () => v.removeEventListener('fullscreenchange', onChange)
+  }, [])
+  const scrubbingRef = useRef(false)
+  const toggle = () => {
+    const v = videoRef.current
+    if (!v) return
+    if (v.paused) void v.play().catch(() => {})
+    else v.pause()
+  }
+  const seekFromPointer = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const bar = barRef.current
+    const v = videoRef.current
+    if (!bar || !v || duration <= 0) return
+    const rect = bar.getBoundingClientRect()
+    const ratio = Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width))
+    v.currentTime = ratio * duration
+    setCurrent(v.currentTime)
+  }
+  const toggleFullscreen = () => {
+    const p = playerRef.current
+    if (!p) return
+    if (document.fullscreenElement) void document.exitFullscreen().catch(() => {})
+    else void p.requestFullscreen().catch(() => {})
+  }
+  const pct = duration > 0 ? Math.min(100, (current / duration) * 100) : 0
+  return (
+    <div
+      ref={playerRef}
+      className={`island-video-player${fullscreen ? ' fullscreen' : ''}${leavingFs ? ' leaving-fullscreen' : ''}`}
+      onPointerDown={(event) => {
+        if (event.button === 0) event.stopPropagation()
+      }}
+    >
+      <video
+        ref={videoRef}
+        src={src}
+        preload="metadata"
+        // 本地协议视频 CORS 加载(2026-08-10 封面抓帧修复):island-media
+        // 协议已返回 Access-Control-Allow-Origin: *,不加 crossorigin 时
+        // video 按 no-cors 加载,drawImage 到 canvas 被判 Tainted 无法
+        // toDataURL(实测);远程 https(可能无 CORS 头)不加,避免破坏
+        // 现有播放
+        crossOrigin={src.startsWith('island-media:') ? 'anonymous' : undefined}
+        onClick={(event) => {
+          event.stopPropagation()
+          toggle()
+        }}
+        onError={(event) => onError(event.currentTarget.error?.code ?? null)}
+        onLoadedMetadata={(event) => {
+          const v = event.currentTarget
+          setDuration(v.duration || 0)
+          if (v.videoWidth > 0 && v.videoHeight > 0) onAspect(v.videoWidth / v.videoHeight)
+        }}
+        onTimeUpdate={(event) => {
+          setCurrent(event.currentTarget.currentTime)
+          onProgress?.(event.currentTarget.currentTime)
+        }}
+        onEnded={() => {
+          setPlaying(false)
+          setCurrent(0)
+          onProgress?.(0)
+          onPlayingChange?.(false)
+        }}
+        onPlay={() => {
+          everPlayedRef.current = true
+          setPlaying(true)
+          onPlayingChange?.(true)
+        }}
+        onPause={() => {
+          setPlaying(false)
+          onPlayingChange?.(false)
+        }}
+      />
+      {/* 封面(2026-08-10 用户要求):未播放过时显示第一帧(黑色画面
+          难辨认);播放过/暂停后显示真实帧不遮挡;pointer-events none
+          点击穿透到 video(点击播放/暂停照常) */}
+      {poster && !playing && !everPlayedRef.current ? (
+        <img
+          src={poster}
+          alt=""
+          draggable={false}
+          className="island-video-poster"
+          aria-hidden="true"
+        />
+      ) : null}
+      {/* 自定义控件层(底部渐变遮罩;全屏时随容器进入全屏层) */}
+      <div className="island-video-controls" onPointerDown={(event) => event.stopPropagation()}>
+        <button
+          type="button"
+          className="island-video-play"
+          aria-label={playing ? '暂停' : '播放'}
+          onClick={(event) => {
+            event.stopPropagation()
+            toggle()
+          }}
+        >
+          {playing ? (
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <rect x="6" y="5" width="4" height="14" rx="1.5" />
+              <rect x="14" y="5" width="4" height="14" rx="1.5" />
+            </svg>
+          ) : (
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <path d="M7 4.5v15l13-7.5z" />
+            </svg>
+          )}
+        </button>
+        <div
+          ref={barRef}
+          className="island-video-bar"
+          role="slider"
+          aria-label="播放进度"
+          aria-valuemin={0}
+          aria-valuemax={Math.round(duration)}
+          aria-valuenow={Math.round(current)}
+          onPointerDown={(event) => {
+            if (event.button !== 0) return
+            event.preventDefault()
+            event.stopPropagation()
+            scrubbingRef.current = true
+            event.currentTarget.setPointerCapture(event.pointerId)
+            seekFromPointer(event)
+          }}
+          onPointerMove={(event) => {
+            if (scrubbingRef.current) seekFromPointer(event)
+          }}
+          onPointerUp={() => {
+            scrubbingRef.current = false
+          }}
+          onPointerCancel={() => {
+            scrubbingRef.current = false
+          }}
+        >
+          <div className="island-video-bar-fill" style={{ width: `${pct}%` }} />
+          <span className="island-video-bar-thumb" style={{ left: `${pct}%` }} aria-hidden="true" />
+        </div>
+        <span className="island-video-time">
+          {fmtMediaTime(current)} / {fmtMediaTime(duration)}
+        </span>
+        {/* 音量 + 更多(2026-08-10 用户要求:定制 UI,与视频岛/多媒体库
+            双向同步) */}
+        <VideoExtras videoRef={videoRef} />
+        {/* 全屏按钮(2026-08-10 用户要求:缩小对齐音量/更多键,放在
+            ⋯ 键右边,同排同高;控件层内 flex 流,全屏随容器进入全屏层) */}
+        <button
+          type="button"
+          className="island-video-fs"
+          aria-label={fullscreen ? '退出全屏' : '全屏'}
+          onPointerDown={(event) => event.stopPropagation()}
+          onClick={(event) => {
+            event.stopPropagation()
+            toggleFullscreen()
+          }}
+        >
+          {fullscreen ? (
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M8 3v3a2 2 0 0 1-2 2H3" />
+              <path d="M21 8h-3a2 2 0 0 1-2-2V3" />
+              <path d="M3 16h3a2 2 0 0 1 2 2v3" />
+              <path d="M16 21v-3a2 2 0 0 1 2-2h3" />
+            </svg>
+          ) : (
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M8 3H5a2 2 0 0 0-2 2v3" />
+              <path d="M21 8V5a2 2 0 0 0-2-2h-3" />
+              <path d="M3 16v3a2 2 0 0 0 2 2h3" />
+              <path d="M16 21h3a2 2 0 0 0 2-2v-3" />
+            </svg>
+          )}
+        </button>
+      </div>
+    </div>
+  )
+}
+
+/** 媒体时间格式 m:ss */
+function fmtMediaTime(sec: number): string {
+  if (!Number.isFinite(sec) || sec < 0) return '0:00'
+  const s = Math.round(sec)
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
+}
+
+/** 播放速度档位(⋯ 菜单) */
+const VIDEO_SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 2] as const
+
+/**
+ * 定制视频扩展控件(2026-08-10 用户要求,多媒体库原生 controls 的
+ * 音量/更多选项改定制 UI,对话播放器与视频岛共用):
+ * - **音量**:喇叭按钮(点击静音切换)+ 悬停滑杆(0-100%);
+ * - **更多(⋯)菜单**:播放速度档位 + 循环开关,点外关闭;
+ * - **双向同步**:偏好经 videoPrefs 共享(volume/speed/loop 写
+ *   localStorage + 派发事件),三处播放器(对话/视频岛/多媒体库)
+ *   任一改动,其余订阅即时同步。
+ */
+export function VideoExtras({
+  videoRef,
+}: {
+  videoRef: React.RefObject<HTMLVideoElement | null>
+}) {
+  const [muted, setMuted] = useState(false)
+  const [volume, setVolume] = useState(() => loadVideoPrefs().volume)
+  const [speed, setSpeed] = useState(() => loadVideoPrefs().speed)
+  const [loop, setLoop] = useState(() => loadVideoPrefs().loop)
+  const [moreOpen, setMoreOpen] = useState(false)
+  const [moreLeaving, setMoreLeaving] = useState(false)
+  const moreRef = useRef<HTMLDivElement>(null)
+  const moreLeaveTimerRef = useRef(0)
+  // 音量条(2026-08-10 用户要求"从音量键延伸的 UI"):自绘竖直条,
+  // pointer 拖拽计算比例
+  const volPopRef = useRef<HTMLSpanElement>(null)
+  const volDraggingRef = useRef(false)
+  useEffect(() => () => window.clearTimeout(moreLeaveTimerRef.current), [])
+  // 双向同步:外部(prefs 事件)改动 → 本地状态 + video 生效
+  useEffect(
+    () =>
+      onVideoPrefsChange((p) => {
+        setVolume(p.volume)
+        setSpeed(p.speed)
+        setLoop(p.loop)
+        const v = videoRef.current
+        if (v) {
+          v.volume = p.volume
+          v.playbackRate = p.speed
+          v.loop = p.loop
+        }
+      }),
+    [videoRef],
+  )
+  // 点外关闭 ⋯ 菜单(播离场动画后卸载;逻辑内联避免闭包依赖)
+  useEffect(() => {
+    if (!moreOpen) return
+    const onDoc = (e: PointerEvent) => {
+      const el = moreRef.current
+      if (el && !el.contains(e.target as Node)) {
+        setMoreLeaving(true)
+        window.clearTimeout(moreLeaveTimerRef.current)
+        moreLeaveTimerRef.current = window.setTimeout(() => {
+          setMoreOpen(false)
+          setMoreLeaving(false)
+        }, 160)
+      }
+    }
+    document.addEventListener('pointerdown', onDoc)
+    return () => document.removeEventListener('pointerdown', onDoc)
+  }, [moreOpen])
+  const closeMore = () => {
+    if (!moreOpen) return
+    setMoreLeaving(true)
+    window.clearTimeout(moreLeaveTimerRef.current)
+    moreLeaveTimerRef.current = window.setTimeout(() => {
+      setMoreOpen(false)
+      setMoreLeaving(false)
+    }, 160)
+  }
+  const setVolFromPointer = (event: ReactPointerEvent<HTMLSpanElement>) => {
+    const pop = volPopRef.current
+    if (!pop) return
+    const rect = pop.getBoundingClientRect()
+    if (rect.height <= 0) return
+    const ratio = 1 - Math.min(1, Math.max(0, (event.clientY - rect.top) / rect.height))
+    changeVolume(ratio)
+  }
+  const changeVolume = (next: number) => {
+    const v = Math.min(1, Math.max(0, next))
+    setVolume(v)
+    setMuted(v === 0)
+    const el = videoRef.current
+    if (el) {
+      el.volume = v
+      el.muted = v === 0
+    }
+    setVideoPrefs({ volume: v })
+  }
+  const toggleMute = () => {
+    const nextMuted = !muted
+    setMuted(nextMuted)
+    const el = videoRef.current
+    if (el) el.muted = nextMuted
+    // 取消静音时恢复音量滑杆值(音量 0 视为静音,点击恢复默认 0.8)
+    if (!nextMuted) {
+      const target = volume > 0 ? volume : 0.8
+      setVolume(target)
+      if (el) el.volume = target
+      setVideoPrefs({ volume: target })
+    }
+  }
+  const changeSpeed = (next: number) => {
+    setSpeed(next)
+    const el = videoRef.current
+    if (el) el.playbackRate = next
+    setVideoPrefs({ speed: next })
+  }
+  const toggleLoop = () => {
+    const next = !loop
+    setLoop(next)
+    const el = videoRef.current
+    if (el) el.loop = next
+    setVideoPrefs({ loop: next })
+  }
+  return (
+    // 拦截 pointerdown 冒泡(2026-08-10:视频岛进度条行 onPointerDown
+    // 是 seek,点音量/更多按钮会误触发进度跳转)
+    <span
+      className="island-video-extras"
+      onPointerDown={(event) => event.stopPropagation()}
+    >
+      {/* 音量:喇叭按钮 + 从按钮向上延伸的自绘竖直条(2026-08-10
+          用户要求"完全在音量键上方,从音量键延伸的 UI";悬停/拖拽
+          显示,scaleY 从按钮顶生长动画) */}
+      <span className="island-video-vol">
+        <button
+          type="button"
+          className="island-video-vol-btn"
+          aria-label={muted ? '取消静音' : '静音'}
+          title={muted ? '取消静音' : '静音'}
+          onClick={(event) => {
+            event.stopPropagation()
+            toggleMute()
+          }}
+        >
+          {muted || volume === 0 ? (
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+              <line x1="23" y1="9" x2="17" y2="15" />
+              <line x1="17" y1="9" x2="23" y2="15" />
+            </svg>
+          ) : volume < 0.5 ? (
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+              <path d="M15.5 8.5a5 5 0 0 1 0 7" />
+            </svg>
+          ) : (
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+              <path d="M15.5 8.5a5 5 0 0 1 0 7" />
+              <path d="M19 5a10 10 0 0 1 0 14" />
+            </svg>
+          )}
+        </button>
+        <span
+          ref={volPopRef}
+          className="island-video-vol-pop"
+          aria-hidden="true"
+          onPointerDown={(event) => {
+            if (event.button !== 0) return
+            event.preventDefault()
+            event.stopPropagation()
+            volDraggingRef.current = true
+            event.currentTarget.setPointerCapture(event.pointerId)
+            setVolFromPointer(event)
+          }}
+          onPointerMove={(event) => {
+            if (volDraggingRef.current) setVolFromPointer(event)
+          }}
+          onPointerUp={() => {
+            volDraggingRef.current = false
+          }}
+          onPointerCancel={() => {
+            volDraggingRef.current = false
+          }}
+        >
+          {/* 背景槽(2026-08-10 用户要求"加入背景 UI" + 修复"还没移动
+              到音量条上就消失":18px 宽深色圆角槽 = 大命中区(原 4px
+              窄条鼠标稍偏即丢 hover),槽是 vol 子元素、hover 保持在
+              槽上;槽底贴按钮顶(无间隙,鼠标从按钮移向条路径连续) */}
+          <span className="island-video-vol-pop-track">
+            <span className="island-video-vol-pop-fill" style={{ height: `${Math.round(volume * 100)}%` }} />
+          </span>
+        </span>
+      </span>
+      {/* 更多(⋯):倍速 + 循环 */}
+      <span className="island-video-more" ref={moreRef}>
+        <button
+          type="button"
+          className="island-video-more-btn"
+          aria-label="更多选项"
+          title="更多选项"
+          onClick={(event) => {
+            event.stopPropagation()
+            if (moreOpen) closeMore()
+            else {
+              setMoreLeaving(false)
+              setMoreOpen(true)
+            }
+          }}
+        >
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <circle cx="12" cy="5" r="2" />
+            <circle cx="12" cy="12" r="2" />
+            <circle cx="12" cy="19" r="2" />
+          </svg>
+        </button>
+        {moreOpen ? (
+          // 呼出 = island-ui-in 回弹淡入;消失 = moreLeaving 播
+          // island-ui-out 上移淡出后卸载(2026-08-10 用户要求动画)
+          <div
+            className={`island-video-more-menu${moreLeaving ? ' leaving' : ''}`}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <span className="island-video-more-label">播放速度</span>
+            <div className="island-video-more-speeds">
+              {VIDEO_SPEEDS.map((s) => (
+                <button
+                  key={s}
+                  type="button"
+                  className={`island-video-more-item${speed === s ? ' on' : ''}`}
+                  onClick={(event) => {
+                    event.stopPropagation()
+                    changeSpeed(s)
+                  }}
+                >
+                  {s}x
+                </button>
+              ))}
+            </div>
+            <button
+              type="button"
+              className={`island-video-more-item island-video-more-loop${loop ? ' on' : ''}`}
+              onClick={(event) => {
+                event.stopPropagation()
+                toggleLoop()
+              }}
+            >
+              循环播放
+            </button>
+          </div>
+        ) : null}
+      </span>
+    </span>
+  )
+}
+
+/** 媒体源解析(2026-08-09):本地路径 → island-media 协议(主进程流式
+ * 播放),远程 https/data:/blob: 原样;消息气泡与媒体小窗共用 */
+export function resolveMediaSrc(src: string): string {
+  return /^(https?:|data:|blob:)/i.test(src) ? src : `island-media://local/${encodeURIComponent(src)}`
+}
+
+/** 对话媒体小窗上报(2026-08-09):MediaFrame/VoiceBubble 挂载/播放/
+ * 卸载时经 DOM 事件上报"最近媒体"——收起 Agent 面板时灵动岛据其
+ * 变形成小窗(视频/图片)或自动切音乐模式(音频)。事件绕开多层
+ * prop 传递,与设置桥 island-settings-changed 同款解耦模式。
+ * position = 播放进度(2026-08-09 修复"收起变多媒体岛从头播放":
+ * 小窗挂载时 seek 到该位置续播,不从头播) */
+export const AGENT_MEDIA_EVENT = 'island:agent-media'
+export interface AgentMediaReport {
+  kind: 'video' | 'img' | 'audio'
+  src: string
+  name?: string
+  playing?: boolean
+  /** 播放进度秒(仅视频上报;节流 ~1Hz) */
+  position?: number
+}
+// 媒体播放位置缓存(2026-08-09 双向同步):小窗/面板任一端的播放进度
+// 经 dispatchAgentMedia('play') 写入;另一端挂载时按 src 读回续播——
+// 面板 ↔ 小窗双向同步,不依赖 React 状态传递
+const agentMediaPositions = new Map<string, number>()
+export function readAgentMediaPosition(src: string): number | undefined {
+  return agentMediaPositions.get(src)
+}
+export function dispatchAgentMedia(type: 'mount' | 'play' | 'unmount', media: AgentMediaReport) {
+  if (type === 'play' && Number.isFinite(media.position)) {
+    agentMediaPositions.set(media.src, media.position as number)
+  }
+  document.dispatchEvent(new CustomEvent(AGENT_MEDIA_EVENT, { detail: { type, media } }))
+}
+
+/**
+ * 对话媒体窗口(2026-08-08):![alt](url) 按扩展名分派的图片/视频/音频;
+ * 也供引擎 media part(open_file 媒体拦截)渲染。
+ * - **图片/视频 = 气泡 UI 包裹**(圆角卡片 + 描边 + 阴影),**右下角
+ *   单手柄拖拽等比例缩放**(2026-08-08 用户要求"四周改回右下角触发":
+ *   宽 = 自然比例换算,钳制 120-640,手柄为简约斜纹 grip,悬浮浮现);
+ * - **拖拽时岛体底部自动跟随**(拖多大自动往下滚多少:视频/图片底部
+ *   超出消息列表可视区即滚动对齐,拖小回滚);
+ * - **视频 = 定制播放器**(VideoPlayer:自定义控件层播放/暂停/进度/
+ *   时间/全屏,全屏容器级带动画,原生控件弃用);
+ * - **音频 = QQ/微信风格语音气泡**(见 VoiceBubble);
+ * - 远程(https/data:/blob:)直接加载;CSP 已放行 img/media 的 https:;
+ * - **本地路径/file: 链接映射为 `island-media://local/<编码路径>` 协议
+ *   URL**——主进程按扩展名校验 + 按类型大小上限(视频 10GB/音频 1GB/
+ *   图片 10GB)流式返回,Chromium 媒体栈边下边播,大文件不整体进内存;
+ * - 播放失败 → MediaError 降级「用系统播放器打开」(外部播放器仅为
+ *   降级选择);
+ * - 初始宽 = 媒体窗口默认设置(localStorage widget-media-window)。
+ */
+export function MediaFrame({
+  kind,
+  src,
+  alt,
+  autoPlay = false,
+}: {
+  kind: 'img' | 'video' | 'audio'
+  src: string
+  alt?: string
+  /** 2026-08-10 用户要求"LLM 播放视频/音频,加载出媒体元素后自动播放"——
+   * 工具拦截产生的媒体附件(open_file / exec_command start)传 true,
+   * 媒体就绪后自动播放;markdown ![url] 图片/视频保持被动(默认 false) */
+  autoPlay?: boolean
+}) {
+  // 本地路径(非 https/data:/blob:)→ island-media 协议 URL(流式播放)
+  const resolved = resolveMediaSrc(src)
+  const [err, setErr] = useState<{ code: number | null } | null>(null)
+  // 2026-08-09:挂载/卸载上报已移除——消息列表分批挂载(visibleCount)
+  // 时上报顺序 ≠ 消息顺序,最后上报的可能是中间批次的旧媒体(实测
+  // 移交错取旧音频);小窗/移交候选改由 AgentView 从消息**数据**计算
+  // (onMediaSnapshot),播放状态仍经事件上报(小窗续播标记)
+  // 拖拽尺寸:width null = 用默认设置;拖拽后按比例缩放
+  const [width, setWidth] = useState<number | null>(null)
+  const [aspect, setAspect] = useState<number | null>(null)
+  // 图片全屏状态(2026-08-10 用户要求:全屏图标切换;容器级全屏,
+  // 范围 = Agent 对话窗口)
+  const [imgFullscreen, setImgFullscreen] = useState(false)
+  useEffect(() => {
+    if (kind !== 'img') return
+    const onChange = () => setImgFullscreen(document.fullscreenElement === frameRef.current)
+    document.addEventListener('fullscreenchange', onChange)
+    return () => document.removeEventListener('fullscreenchange', onChange)
+  }, [kind])
+  // 拖拽中(resizing = 手柄保持可见)
+  const [resizing, setResizing] = useState(false)
+  const frameRef = useRef<HTMLDivElement>(null)
+  const dragRef = useRef<{ x: number; y: number; w: number; aspect: number } | null>(null)
+  // 播放进度节流上报(2026-08-09 小窗续播):每秒至多一次 dispatch,
+  // 存最近整秒位置供 onPlayingChange(暂停/切状态)携带
+  const lastPosRef = useRef(-1)
+  // 右下角拖拽缩放(pointer capture;消息区内交互,拦截左键防长按收回):
+  // 等比例宽度变化(dw = dx + dy×aspect,右下角锚点),钳制 [120, 640];
+  // 拖拽中跟随滚动(岛体底部自动对齐,见 followMediaInView)
+  const onResizeDown = (event: ReactPointerEvent<HTMLSpanElement>) => {
+    if (event.button !== 0) return
+    event.preventDefault()
+    event.stopPropagation()
+    dragRef.current = {
+      x: event.clientX,
+      y: event.clientY,
+      w: width ?? readMediaWindowWidth(),
+      aspect: aspect ?? 1,
+    }
+    setResizing(true)
+    event.currentTarget.setPointerCapture(event.pointerId)
+  }
+  const onResizeMove = (event: ReactPointerEvent<HTMLSpanElement>) => {
+    const d = dragRef.current
+    if (!d) return
+    const dx = event.clientX - d.x
+    // **纯水平 1:1 跟手(2026-08-08 用户要求"鼠标动一点缩放就很大不
+    // 跟手")**:原 dw = dx + dy×aspect 中垂直分量对 16:9 视频放大
+    // 1.78 倍、斜向拖动双轴叠加——鼠标移 1px 视频宽变近 2px。
+    // 等比例缩放由宽度决定大小(高度自动按宽高比),水平移 1px = 宽
+    // 1px 完全跟手;垂直位移不再缩放
+    setWidth(Math.round(Math.min(MEDIA_MAX_W, Math.max(MEDIA_MIN_W, d.w + dx))))
+    // 滚动跟随在下方 useEffect([width]) 里做:setWidth 是异步 React
+    // 更新,pointermove 时布局还是旧尺寸,立即滚动读不到新高度
+  }
+  const onResizeEnd = () => {
+    dragRef.current = null
+    setResizing(false)
+  }
+  // 拖拽缩放后岛体底部自动跟随(2026-08-08 用户要求"拖多大自动往下
+  // 滚多少"):width 每次变化(React 提交后布局已更新)把媒体底部滚入
+  // 消息列表可视区;拖小回滚顶部
+  useEffect(() => {
+    if (width === null) return
+    followMediaInView(frameRef.current)
+  }, [width])
+  if (err) return <MediaError src={resolved} kind={kind} code={err.code} />
+  // 音频 = 语音气泡(不参与拖拽缩放;LLM 播放的音频自动播放)
+  if (kind === 'audio') return <VoiceBubble src={resolved} alt={alt} autoPlay={autoPlay} />
+  const w = width ?? readMediaWindowWidth()
+  // 图片/视频:气泡容器固定宽 + 按自然比例的高,内容 100% 填充(无留白)。
+  // 外层 wrap 承载拖拽手柄(2026-08-08 用户要求"手柄移到气泡外面"——
+  // 与全屏按键重叠):frame 有 overflow:hidden 裁剪内容圆角,手柄放
+  // frame 内会被裁;wrap 相对定位,手柄凸出在气泡右下角外侧
+  return (
+    <div className={`island-media-wrap${resizing ? ' resizing' : ''}`}>
+      <div
+        ref={frameRef}
+        className="island-media-frame"
+        // 媒体名(2026-08-10,get_conversation_media 工具读取:LLM 查对话
+        // 窗口有哪些媒体附件、哪个在播放)
+        data-media-name={alt ?? ''}
+        // aspect 未知(视频元数据未加载)时 16/9 兜底:video 元素没有
+        // 内在尺寸,容器无高度 = 高度 0 = **视频不可见**(2026-08-08
+        // 修复"播放视频看不到");元数据加载后按真实比例修正
+        style={{ width: w, aspectRatio: aspect != null ? String(aspect) : '16 / 9' }}
+      >
+        {kind === 'img' ? (
+          <>
+            <img
+              src={resolved}
+              alt={alt ?? ''}
+              draggable={false}
+              onError={() => setErr({ code: null })}
+              onLoad={(event) => {
+                const n = event.currentTarget
+                if (n.naturalWidth > 0 && n.naturalHeight > 0) {
+                  setAspect(n.naturalWidth / n.naturalHeight)
+                }
+              }}
+            />
+            {/* 图片全屏(2026-08-10 用户要求):容器级全屏,与视频同款
+                右下角按钮——全屏范围 = Agent 对话窗口(island-agent-mini
+                之外,主进程不放大窗口) */}
+            <button
+              type="button"
+              className="island-video-fs"
+              aria-label={imgFullscreen ? '退出全屏' : '全屏'}
+              onClick={(event) => {
+                event.stopPropagation()
+                const f = frameRef.current
+                if (!f) return
+                if (document.fullscreenElement) void document.exitFullscreen().catch(() => {})
+                else void f.requestFullscreen().catch(() => {})
+              }}
+            >
+              {imgFullscreen ? (
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M8 3v3a2 2 0 0 1-2 2H3" />
+                  <path d="M21 8h-3a2 2 0 0 1-2-2V3" />
+                  <path d="M3 16h3a2 2 0 0 1 2 2v3" />
+                  <path d="M16 21v-3a2 2 0 0 1 2-2h3" />
+                </svg>
+              ) : (
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M8 3H5a2 2 0 0 0-2 2v3" />
+                  <path d="M21 8V5a2 2 0 0 0-2-2h-3" />
+                  <path d="M3 16v3a2 2 0 0 0 2 2h3" />
+                  <path d="M16 21h3a2 2 0 0 0 2-2v-3" />
+                </svg>
+              )}
+            </button>
+          </>
+        ) : (
+          <VideoPlayer
+            src={resolved}
+            cacheKey={src}
+            autoPlay={autoPlay}
+            onAspect={setAspect}
+            onError={(code) => setErr({ code })}
+            onPlayingChange={(playing) =>
+              dispatchAgentMedia('play', { kind: 'video', src, name: alt, playing, position: lastPosRef.current })
+            }
+            onProgress={(position) => {
+              // 节流 ~1Hz:timeupdate 每 ~250ms 触发,每次 setAgentPlaying
+              // 都会重渲染岛体,1s 粒度足够小窗续播定位
+              if (Math.round(position) !== lastPosRef.current) {
+                lastPosRef.current = Math.round(position)
+                dispatchAgentMedia('play', { kind: 'video', src, name: alt, playing: true, position })
+              }
+            }}
+          />
+        )}
+      </div>
+      {/* 右下角拖拽手柄:凸出在气泡外,中心贴气泡角点;简约 grip 图标
+          (斜线箭头 + 深色圆底),悬浮浮现,拖拽中保持(2026-08-08 修复
+          "拖拽功能丢失":原纯透明命中区无可见手柄) */}
+      <span
+        className="island-media-resize"
+        aria-label="拖拽缩放媒体窗口"
+        onPointerDown={onResizeDown}
+        onPointerMove={onResizeMove}
+        onPointerUp={onResizeEnd}
+        onPointerCancel={onResizeEnd}
+      >
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.4} strokeLinecap="round" aria-hidden="true">
+          <path d="M21 15v6h-6" />
+          <path d="M21 9l-12 12" />
+          <path d="M15 21H9" />
+          <path d="M21 3l-6 6" />
+        </svg>
+      </span>
+    </div>
+  )
+}
+
 /** 链接:仅 http(s) 渲染为可点击锚点,其余原样文本(防协议注入) */
 function LinkNode({ h, c }: { h: string; c: MdInline[] }) {
   const href = h
@@ -164,6 +1285,24 @@ function LinkNode({ h, c }: { h: string; c: MdInline[] }) {
   )
 }
 
+/**
+ * markdown 内嵌媒体自动播权(2026-08-10 三轮修复"LLM 找歌来听没自动
+ * 播放"):LLM 常在回复里用 ![歌名](路径) 内嵌音频/视频(而非工具拦截的
+ * media part)——Markdown 组件 mediaAutoPlay 时,**该组件遇到的第一个
+ * 音频/视频**获自动播权(图片不占权,无声音),其余保持被动。
+ * 模块级布尔:React 渲染同步单线程,组件体渲染前赋值、renderInlines
+ * 期间消费,顺序确定;StrictMode 双渲染第二次重新赋值,不泄漏
+ */
+let mdAutoPlayRemaining = false
+
+function takeMdAutoPlay(): boolean {
+  if (mdAutoPlayRemaining) {
+    mdAutoPlayRemaining = false
+    return true
+  }
+  return false
+}
+
 /** 行内节点 → React 元素(文本全部经 React 转义) */
 function renderInlines(inl: MdInline[]): ReactNode[] {
   return inl.map((node, i) => {
@@ -183,8 +1322,12 @@ function renderInlines(inl: MdInline[]): ReactNode[] {
       case 'a':
         return <LinkNode key={i} h={node.h} c={node.c} />
       case 'img':
-        // data URL 内嵌图片(工具生成的二维码等;解析器已限定 data:image/)
-        return <AgentImage key={i} src={node.s} alt={node.a} />
+        // 媒体窗口(2026-08-08):Markdown 图片(远程 https / data: / 本地路径)
+        return <MediaFrame key={i} kind="img" src={node.s} alt={node.a} />
+      case 'video':
+        return <MediaFrame key={i} kind="video" src={node.s} alt={node.a} autoPlay={takeMdAutoPlay()} />
+      case 'audio':
+        return <MediaFrame key={i} kind="audio" src={node.s} alt={node.a} autoPlay={takeMdAutoPlay()} />
     }
   })
 }
@@ -420,11 +1563,18 @@ export function Markdown({
   text,
   plainMermaid = false,
   caret = false,
+  mediaAutoPlay = false,
 }: {
   text: string
   plainMermaid?: boolean
   caret?: boolean
+  /** 2026-08-10 自动播权:该文本段内第一个音频/视频媒体自动播放
+   * (markdown 内嵌 ![歌名](路径) 场景;由 AssistantBlock 分派,只限
+   * 当次对话流式落定消息) */
+  mediaAutoPlay?: boolean
 }) {
+  // 渲染前设置模块级播权(组件体同步执行;useMemo 缓存不影响赋值)
+  mdAutoPlayRemaining = mediaAutoPlay
   const blocks = useMemo(() => parseMarkdown(text), [text])
   return (
     <div className="island-agent-md">

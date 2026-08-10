@@ -23,17 +23,18 @@ import type { PlaybackMode } from '../../media/playbackModes'
 import { DEFAULT_BG_CROP, type ImageLibraryItem } from '../../media/backgroundStore'
 import { type FontColorMode, type FontLibraryItem } from '../../media/fontStore'
 import { useAgentPanelLayout } from '../../hooks/useAgentPanelLayout'
+import type { AudioLibraryItem, VideoLibraryItem } from '../../media/libraryStore'
 import { loadImageNaturalSize, sampleImageBrightness } from '../../media/imageUtils'
 import { ParticleTime } from './ParticleTime'
 import {
   AgentSettingsView,
+  MediaLibraryView,
   AgentView,
   BackgroundView,
   ControlView,
   FontColorView,
   FontLibraryView,
   FontView,
-  HelpView,
   ImageLibraryView,
   ListView,
   SettingsView,
@@ -42,6 +43,25 @@ import {
 } from './views'
 import type { AgentConfig, AgentPanelProps } from '../../agent/types'
 import { textFromMessage } from '../../agent/text'
+import { AgentMediaMini } from './views/AgentMediaMini'
+import { AGENT_MEDIA_EVENT, type AgentMediaReport } from './views/Markdown'
+
+/** 媒体源归一化比较(2026-08-09 修复"移交永不触发"):agentPlaying 上报
+ * 的是**已解析形态**(VoiceBubble 收到 resolved 后原样上报,
+ * island-media://local/<编码路径>),agentLastMedia 快照是消息里的
+ * **原始路径**——resolveMediaSrc 对 island-media: 前缀不识别(正则
+ * 只认 http/data/blob)会双重编码,两边直接比较恒不相等。归一化为
+ * 原始路径(解码协议载荷)后比较;http/data/blob 原样(两形态一致) */
+function normMediaSrc(src: string): string {
+  const m = /^island-media:\/\/local\/(.+)$/.exec(src)
+  if (!m) return src
+  try {
+    return decodeURIComponent(m[1])
+  } catch {
+    // 畸形编码(理论不可达):按原样比较
+    return m[1]
+  }
+}
 import {
   BG_COMPACT_REF_H,
   BG_COMPACT_REF_W,
@@ -58,6 +78,7 @@ import {
   HOVER_EXTEND_PX,
   ISLAND_BASE_PX,
   LONG_PRESS_MS,
+  SWIPE_TIME_MS,
   LONG_PRESS_SLOP_PX,
   MAX_WIDTH_PX,
   MODE_ICON_MORPH_MS,
@@ -101,6 +122,12 @@ interface DynamicIslandProps {
   onSwipeRight?: () => void
   /** Agent 模式:文字区左滑/右滑手势回调(通常退出 Agent 切回音乐) */
   onAgentSwipeToMusic?: () => void
+  /** Agent 音频移交(2026-08-09):收起面板时**仅当对话内正在播放**的
+   * 音频才切回音乐模式并继续播放——宿主把音频接进本地播放器(经
+   * addTracks 自动播放)再切模式;**未播放(暂停/播完/从未播过)收起
+   * 不切音乐模式**(2026-08-09 用户要求:历史消息里有音频 ≠ 在播,
+   * 收起面板不该跳到音乐模式),留在 Agent 模式紧凑态 */
+  onAgentAudioHandoff?: (audio: { src: string; name?: string }) => void
   /** 音乐模式:文字区三连击回调(通常切入 Agent 模式) */
   onAgentTripleClick?: () => void
   /** 文字区双击回调(通常暂停/继续播放) */
@@ -169,8 +196,6 @@ interface DynamicIslandProps {
   }) => void
   /** 外部请求打开设置(托盘菜单):seq 变化即展开并切换到设置视图 */
   requestSettingsSeq?: number
-  /** 外部请求打开帮助手册(初次安装引导):seq 变化即展开并切换到帮助视图 */
-  requestHelpSeq?: number
   /** 面板视图变化回调(宿主据此调整窗口高度:背景视图需要更高空间) */
   onPanelViewChange?: (view: PanelView) => void
   /** 面板控制区显示"设置"按钮(Web 演示入口;桌面端入口在托盘菜单) */
@@ -227,6 +252,27 @@ interface DynamicIslandProps {
    * 缩放在设置视图切换时窗口宽度也要立即跟随(高度由面板视图回调管理)
    */
   onAgentPanelWidth?: (width: number) => void
+  /** 媒体窗口默认宽(2026-08-08:对话图片/视频窗口初始宽,160-800,缺省 320) */
+  mediaWindowWidth?: number
+  /** 媒体窗口默认宽变更(写 localStorage,即时生效) */
+  onMediaWindowWidthChange?: (width: number) => void
+  /** 多媒体库(2026-08-08):音频库(ArrayBuffer)/ 视频库(路径引用)条目与变更 */
+  audioLibrary?: AudioLibraryItem[]
+  onAudioLibraryChange?: (items: AudioLibraryItem[]) => void
+  videoLibrary?: VideoLibraryItem[]
+  onVideoLibraryChange?: (items: VideoLibraryItem[]) => void
+  /** 音频库条目导入播放列表(单个/批量) */
+  onAddLibraryTracks?: (items: AudioLibraryItem[]) => void
+  /** 视频导入(宿主弹系统对话框选文件 → 记录路径入库) */
+  onVideoImport?: () => void
+  /** 托盘"多媒体库"菜单:seq 递增触发展开并进入多媒体库视图 */
+  requestMediaLibrarySeq?: number
+  /** LLM 工具 play_library_video(2026-08-10):待播放视频库条目 id——
+   * 多媒体库面板展开后 MediaLibraryView 定位该视频自动播放;播完经
+   * onMediaLibraryPlayConsumed 清回 null(下次打开不重复触发) */
+  mediaLibraryPlayId?: string | null
+  /** 待播放视频已消费(MediaLibraryView 已定位播放) */
+  onMediaLibraryPlayConsumed?: () => void
   /** 对外 API(ref) */
   ref?: Ref<DynamicIslandHandle>
 }
@@ -271,15 +317,20 @@ export interface DynamicIslandHandle {
 /** 文字区三连击判定窗口(ms):三次点击两两间隔都在窗口内才触发 */
 const TRIPLE_CLICK_WINDOW_MS = 400
 
+/** 对话媒体小窗尺寸(2026-08-09):岛体 264×148(16:9 + 紧凑胶囊观感),
+ * 窗口 = 岛体 + 40(复用 onAgentPanelSize 约定) */
+const AGENT_MINI_W = 264
+const AGENT_MINI_H = 148
+
 const SETTINGS_VIEWS: readonly PanelView[] = [
   'settings',
   'background',
   'theme',
-  'help',
   'font',
   'font-color',
   'font-library',
   'image-library',
+  'media-library',
   'agent-settings',
   'lyric-api',
 ]
@@ -401,6 +452,7 @@ export const DynamicIsland = memo(function DynamicIsland({
   onSwipeLeft,
   onSwipeRight,
   onAgentSwipeToMusic,
+  onAgentAudioHandoff,
   onAgentTripleClick,
   onTextDoubleClick,
   onExpandChange,
@@ -427,7 +479,6 @@ export const DynamicIsland = memo(function DynamicIsland({
   backgroundCrop,
   onBackgroundChange,
   requestSettingsSeq,
-  requestHelpSeq,
   onPanelViewChange,
   settingsButton,
   fontLibrary,
@@ -441,17 +492,59 @@ export const DynamicIsland = memo(function DynamicIsland({
   onFontWeightChange,
   imageLibrary,
   onImageLibraryChange,
+  audioLibrary = [],
+  onAudioLibraryChange,
+  videoLibrary = [],
+  onVideoLibraryChange,
+  onAddLibraryTracks,
+  onVideoImport,
+  requestMediaLibrarySeq,
+  mediaLibraryPlayId,
+  onMediaLibraryPlayConsumed,
   agent,
   agentConfig,
   onAgentPanelSize,
   collapseSeq,
   onAgentPanelWidth,
+  mediaWindowWidth = 320,
+  onMediaWindowWidthChange,
   ref,
 }: DynamicIslandProps) {
   // Agent 模式激活(存在即激活):媒体数据与手势让位
   const agentActive = agent != null
   const agentActiveRef = useRef(false)
   agentActiveRef.current = agentActive
+  // 对话媒体小窗/移交(2026-08-09):候选 = **数据驱动的最后媒体**
+  // (AgentView 从消息数据计算并经 onMediaSnapshot 上报——数据顺序 =
+  // 消息顺序,不受消息列表分批挂载影响;原挂载事件上报在大量历史
+  // 消息时最后上报的是中间批次的旧媒体,实测音频移交错取旧文件);
+  // agentPlaying = 播放状态事件上报(仅作小窗视频自动续播标记)。
+  // agentMini = 收起瞬间的快照(独立存活)
+  const [agentLastMedia, setAgentLastMedia] = useState<AgentMediaReport | null>(null)
+  const agentLastMediaRef = useRef<AgentMediaReport | null>(null)
+  const [agentPlaying, setAgentPlaying] = useState<AgentMediaReport | null>(null)
+  const agentPlayingRef = useRef<AgentMediaReport | null>(null)
+  const [agentMini, setAgentMini] = useState<AgentMediaReport | null>(null)
+  useEffect(() => {
+    const onMedia = (event: Event) => {
+      const detail = (
+        event as CustomEvent<{ type: 'mount' | 'play' | 'unmount'; media: AgentMediaReport }>
+      ).detail
+      if (!detail || !detail.media || detail.type !== 'play') return
+      // 播放/暂停:播放中 → 续播标记;暂停 → 清(仅同 src)
+      if (detail.media.playing) setAgentPlaying({ ...detail.media })
+      else setAgentPlaying((prev) => (prev && prev.src === detail.media.src ? null : prev))
+    }
+    document.addEventListener(AGENT_MEDIA_EVENT, onMedia)
+    return () => document.removeEventListener(AGENT_MEDIA_EVENT, onMedia)
+  }, [])
+  // 镜像(ref):doCollapse 同步读取(避免闭包过期)
+  useEffect(() => {
+    agentLastMediaRef.current = agentLastMedia
+  }, [agentLastMedia])
+  useEffect(() => {
+    agentPlayingRef.current = agentPlaying
+  }, [agentPlaying])
   const islandRef = useRef<HTMLDivElement>(null)
   const textRef = useRef<HTMLSpanElement>(null)
   const barRef = useRef<HTMLDivElement>(null)
@@ -465,6 +558,13 @@ export const DynamicIsland = memo(function DynamicIsland({
   const onSeekRef = useRef(onSeek)
   const onHoverChangeRef = useRef(onHoverChange)
   const stateRef = useRef(state)
+  // 音频移交回调(doCollapse 同步读;prop 可能不稳定,ref 镜像)。
+  // 2026-08-09:onAgentSwipeToMusicRef 已删——未播放音频收起不再切
+  // 音乐模式(用户要求),左滑手势直接用 prop(handleTextPointerUp)
+  const onAgentAudioHandoffRef = useRef(onAgentAudioHandoff)
+  useEffect(() => {
+    onAgentAudioHandoffRef.current = onAgentAudioHandoff
+  }, [onAgentAudioHandoff])
   // 长按展开:按下起点 + 计时器;位移超阈值或提前抬起则取消
   const pressRef = useRef<{ startX: number; startY: number; timer: number } | null>(null)
   // 长按触发后的那次 click 只消费此标记(不切换状态也不收起,防止刚展开又被点掉)。
@@ -475,7 +575,14 @@ export const DynamicIsland = memo(function DynamicIsland({
   const expandedRef = useRef(false)
   const onExpandChangeRef = useRef(onExpandChange)
   // 文字区滑动手势:按下起点 + 是否已触发(触发后不再重复)
-  const swipeRef = useRef<{ startX: number; startY: number; pointerId: number; done: boolean } | null>(null)
+  const swipeRef = useRef<{
+    startX: number
+    startY: number
+    pointerId: number
+    done: boolean
+    /** 按下时刻(时间窗判定:快速滑动才算手势,长按/慢速拖动不算) */
+    startAt: number
+  } | null>(null)
   // 文字区点击时间序列(三连击检测:三次点击间隔都在窗口内即触发)
   const tripleClickRef = useRef<number[]>([])
   onSeekRef.current = onSeek
@@ -816,6 +923,7 @@ export const DynamicIsland = memo(function DynamicIsland({
       startY: event.clientY,
       pointerId: event.pointerId,
       done: false,
+      startAt: performance.now(),
     }
     event.currentTarget.setPointerCapture(event.pointerId)
   }
@@ -824,7 +932,18 @@ export const DynamicIsland = memo(function DynamicIsland({
     if (!gesture || gesture.done) return
     const dx = event.clientX - gesture.startX
     const dy = event.clientY - gesture.startY
-    if (Math.abs(dx) < SWIPE_THRESHOLD_PX || Math.abs(dy) > Math.abs(dx) * 1.2) return
+    // 时间窗(2026-08-08 修复"长按边缘切换成音乐模式"):swipe 是
+    // **快速滑动**手势,按下后须在 SWIPE_TIME_MS 内达到位移阈值——
+    // 长按展开(450ms)期间的慢速位移/手抖先超 slop 取消长按后继续
+    // 移动,若没有时间条件会误判为 swipe,Agent 模式直接切回音乐
+    // (UI 抖动 + 展开中断,用户实测)
+    if (
+      Math.abs(dx) < SWIPE_THRESHOLD_PX ||
+      Math.abs(dy) > Math.abs(dx) * 1.2 ||
+      performance.now() - gesture.startAt > SWIPE_TIME_MS
+    ) {
+      return
+    }
     gesture.done = true
     // Agent 模式:左滑/右滑无方向语义,都是退出 Agent 切回音乐
     if (agentActive) {
@@ -845,8 +964,57 @@ export const DynamicIsland = memo(function DynamicIsland({
    * Agent 模式先经两阶段——阶段 1 只收缩高度,阶段 2 才到本函数,
    * 压感在高度收缩期间保持,长条上 3D 旋转先随收缩自然收尾再回弹)
    */
-  const doCollapse = useCallback(() => {
+  const doCollapse = useCallback((opts?: { mediaMini?: boolean }) => {
     releasePress()
+    // 媒体小窗快照/音频移交(2026-08-09 修复"音乐模式展开/收回后自动
+    // 从头播放"):doCollapse 是音乐模式收起也走的公共路径,agentLastMedia
+    // 是最近 Agent 媒体、不随模式清除——音乐模式收起若重复执行移交,
+    // 同一首歌会再次 addTracks 并从 0 自动播放(实测)。防重复的判据
+    // = **agentPlaying(面板内当前正在播放)**,而非模式:Agent → 音乐
+    // 的模式切换动画结束后 agent 已卸载(agentActive=false),但该链路
+    // 的收起正是"续播移交"的主要场景,必须放行;首次移交后清
+    // agentPlaying,音乐模式再展开/收回时判据为空 → 不再移交。
+    // - 视频/图片 → 冻结为小窗快照(候选 = AgentView 数据上报的最后
+    //   媒体,顺序可靠;自动续播标记 = 同 src 的播放事件);
+    // - 音频 → **仅面板内正在播放**才移交本地播放器续播并切音乐模式;
+    //   **未播放(暂停/播完/从没播过)收起不切音乐模式**(2026-08-09
+    //   用户要求:没播音频时收起面板不该切成音乐模式——agentLastMedia
+    //   是数据驱动快照,历史消息里有音频不等于在播,原来 else 分支
+    //   无条件切模式,实测收起就跳到音乐模式)——留在 Agent 模式紧凑态;
+    // - 处理完清 agentPlaying:面板卸载不派发 pause 事件,残留的
+    //   playing:true 会在下次收起时误触发自动续播/移交
+    // **mediaMini: false = "收起为灵动岛"(2026-08-10 用户要求拆分):
+    // 收起成 Agent 紧凑态,不生成媒体岛;缺省 = 收起为多媒体岛**
+    // **正在播放的媒体优先(2026-08-10 用户要求"正在播放视频却触发
+    // 图片岛"**:agentLastMedia 是数据顺序的最后媒体,播放中的视频在
+    // 中间/被后面的图片消息挤掉时收起会取图片;正在播放(agentPlaying)
+    // 的媒体优先作小窗候选,无播放时才回退最后媒体)
+    const mediaMini = opts?.mediaMini !== false
+    const last = agentLastMediaRef.current
+    const playingMedia = agentPlayingRef.current
+    const media =
+      playingMedia && playingMedia.playing && playingMedia.kind !== 'audio' && playingMedia.src
+        ? playingMedia
+        : last
+    // 同 src 判据(2026-08-09):播放中 → 自动续播标记;暂停后收起 → 仍
+    // 带进度,小窗点播放从暂停处继续(修复"收起变多媒体岛从头播放")
+    const sameSrc =
+      !!playingMedia?.src &&
+      normMediaSrc(playingMedia.src) === normMediaSrc(media?.src ?? '')
+    const playing = !!playingMedia?.playing && sameSrc
+    if (media && media.kind !== 'audio' && mediaMini) {
+      setAgentMini({
+        ...media,
+        playing,
+        position: sameSrc ? playingMedia?.position : undefined,
+      })
+    } else {
+      setAgentMini(null)
+    }
+    if (media?.kind === 'audio' && playing && onAgentAudioHandoffRef.current) {
+      onAgentAudioHandoffRef.current({ src: media.src, name: media.name })
+    }
+    setAgentPlaying(null)
     setExpanded(false)
     onExpandChangeRef.current?.(false)
     // 形变动画期:关闭背景毛玻璃(backdrop 每帧重采样是卡顿主因)
@@ -917,7 +1085,7 @@ export const DynamicIsland = memo(function DynamicIsland({
    * 与音乐模式一致,无两段式割裂)
    */
   const changeExpanded = useCallback(
-    (value: boolean) => {
+    (value: boolean, opts?: { mediaMini?: boolean }) => {
       if (value === expandedRef.current) return
       if (value) {
         setExpanded(true)
@@ -928,7 +1096,7 @@ export const DynamicIsland = memo(function DynamicIsland({
         animatingTimerRef.current = window.setTimeout(() => setAnimating(false), MORPH_ANIMATE_MS)
         return
       }
-      doCollapse()
+      doCollapse(opts)
     },
     [doCollapse],
   )
@@ -1026,6 +1194,10 @@ export const DynamicIsland = memo(function DynamicIsland({
         }, SUPPRESS_CLICK_MS)
         releasePress() // 按压回弹 → 同时伸缩展开
         setExpandedWidth(clampExpandedWidth())
+        // 长按展开(2026-08-08 修复"长按边缘切换成音乐模式"):作废
+        // 文字区滑动手势——展开已由长按触发,按住期间的后续移动(哪怕
+        // 达到位移阈值)是长按的延续,不是 swipe,不应切回音乐/切歌
+        swipeRef.current = null
         // Agent 模式:展开同一帧切到聊天视图(与 setExpanded 批量提交),
         // 高度目标直接是 --agent-h,避免"先朝 244 形变再改目标"的二次
         // 重定向抖动(视图切换 effect 兜底运行中/设置类视图保留)
@@ -1069,6 +1241,11 @@ export const DynamicIsland = memo(function DynamicIsland({
       if (!agentActive && !isSettingsView(panelView)) changeExpanded(false)
       return
     }
+    // **单击不展开(2026-08-10 用户澄清撤销)**:挂件版展开 = **长按**
+    // (450ms),单击留给文字区快捷手势(双击播放/暂停、三连击切 Agent、
+    // 左滑右滑切歌)——单击展开会把全部手势吞掉,用户实测文字区快捷
+    // 手势失效,恢复原逻辑;onChange 缺失时单击无操作(Web 演示版有
+    // onChange 时切换播放状态)
     if (!onChange) return
     const next = STATE_ORDER[(STATE_ORDER.indexOf(state) + 1) % STATE_ORDER.length]
     onChange(next)
@@ -1194,7 +1371,7 @@ export const DynamicIsland = memo(function DynamicIsland({
   // Agent 面板高度/缩放布局(2026-08-07 抽出 hook:高度 JS 动画状态机、
   // 界面缩放与持久化、进入视图滑升、缩放同步窗口宽度——行为与内联时
   // 完全一致,高度动画首次可独立测试)
-  const { setAgentPanelH, agentScale, handleAgentScaleChange } = useAgentPanelLayout({
+  const { setAgentPanelH, agentScale, handleAgentScaleChange, agentHReady } = useAgentPanelLayout({
     islandRef,
     panelView,
     expandedWidth,
@@ -1204,15 +1381,23 @@ export const DynamicIsland = memo(function DynamicIsland({
     onAgentPanelWidth,
   })
 
-  // 外部请求(托盘菜单"设置"/初次引导"帮助")打开设置类视图:seq 变化即
-  // 展开并切换(两个 effect 仅视图名不同,合并;两 seq 不会同时触发)
+  // 外部请求(托盘菜单"设置"/托盘"多媒体库")打开设置类视图:
+  // seq 变化即展开并切换(帮助手册已移除 2026-08-10;多媒体库优先)
   useEffect(() => {
-    const seq = requestSettingsSeq || requestHelpSeq
+    const seq = requestSettingsSeq || requestMediaLibrarySeq
     if (!seq) return
-    setPanelView(requestSettingsSeq ? 'settings' : 'help')
+    setPanelView(requestMediaLibrarySeq ? 'media-library' : 'settings')
     setExpandedWidth(clampExpandedWidth())
     changeExpanded(true)
-  }, [requestSettingsSeq, requestHelpSeq, changeExpanded])
+  }, [requestSettingsSeq, requestMediaLibrarySeq, changeExpanded])
+  // 多媒体库独立菜单(2026-08-08 用户要求:不属设置范畴,设置入口移除):
+  // 返回键行为 = 从哪来回哪去——托盘呼出(seq 路径)= 收起岛体;
+  // Agent 对话 ⋯ 菜单呼出 = 回到对话视图
+  const mediaLibraryBackRef = useRef<(() => void) | null>(null)
+  // 背景编辑器返回目标(2026-08-08 用户要求"图片右键跳转后返回直接回
+  // 多媒体库"):多媒体库图片右键"应用到背景"跳转时记录返回目标,
+  // 背景编辑器返回键按此回多媒体库;其余入口(设置视图)返回设置视图
+  const backgroundBackRef = useRef<(() => void) | null>(null)
 
   // 当前应用字体:库中按 id 取(dataUrl 注入 @font-face,名称用于预览/搜索)
   const currentFont = fontLibrary?.find((f) => f.id === currentFontId) ?? null
@@ -1263,6 +1448,17 @@ export const DynamicIsland = memo(function DynamicIsland({
     onPanelViewChange?.(panelView)
     if (panelView === 'agent-settings') agentConfigRef.current?.onRefresh?.()
   }, [panelView, onPanelViewChange])
+
+  // 媒体小窗窗口尺寸(2026-08-09):紧凑态小窗岛体 264×148,窗口 =
+  // 岛体 + 40(复用 onAgentPanelSize 约定)。声明在本 effect 之后:
+  // 收起时本 effect 晚于面板视图回落(handlePanelViewChange 先设常规
+  // 窗口),后发覆盖先发,窗口落到小窗尺寸。小窗无关闭键(2026-08-09
+  // 用户要求移除 ✕),退出 = 长按展开回面板(窗口由面板尺寸接管)
+  useEffect(() => {
+    if (!expanded && agentActive && agentMini) {
+      onAgentPanelSize?.(AGENT_MINI_W, AGENT_MINI_H)
+    }
+  }, [expanded, agentActive, agentMini, onAgentPanelSize])
 
   // 外部请求收起(宿主在模式切换等场景调用;seq 递增触发,仅展开态有效)
   useEffect(() => {
@@ -1385,26 +1581,28 @@ export const DynamicIsland = memo(function DynamicIsland({
     listenersRef.current.forEach((listener) => listener(snap))
   }, [makeSnapshot])
 
+  // 媒体小窗激活:Agent 模式紧凑态 + 有快照(音频不在此,走切音乐模式)
+  const miniActive = agentActive && !expanded && agentMini && agentMini.kind !== 'audio'
+
   return (
     <div
       ref={islandRef}
-      className={`island-demo${stateClass ? ` ${stateClass}` : ''}${modeClass ? ` ${modeClass}` : ''}${expanded ? ' expanded' : ''}${press ? ' is-pressed' : ''}${collapsing ? ' island-collapsing' : ''}${animating ? ' is-animating' : ''}${lyricFold ? ' island-lyric-off' : ''}${panelView === 'background' ? ` island-bg-view${bgTarget === 'compact' ? ' island-bg-view--compact' : ''}` : ''}${panelView === 'font-library' || panelView === 'image-library' ? ' island-lib-view' : ''}${panelView === 'font' ? ' island-font-view' : ''}${panelView === 'font-color' ? ' island-font-color-view' : ''}${panelView === 'theme' ? ' island-theme-view' : ''}${panelView === 'help' ? ' island-help-view' : ''}${panelView === 'agent' ? ' island-agent-view' : ''}${panelView === 'agent-settings' ? ' island-agent-settings-view' : ''}${panelView === 'settings' ? ' island-settings-view' : ''}${panelView === 'lyric-api' ? ' island-lyric-api-view' : ''}`}
+      className={`island-demo${stateClass ? ` ${stateClass}` : ''}${modeClass ? ` ${modeClass}` : ''}${expanded ? ' expanded' : ''}${press ? ' is-pressed' : ''}${collapsing ? ' island-collapsing' : ''}${animating ? ' is-animating' : ''}${lyricFold ? ' island-lyric-off' : ''}${miniActive ? ' island-agent-mini' : ''}${panelView === 'background' ? ` island-bg-view${bgTarget === 'compact' ? ' island-bg-view--compact' : ''}` : ''}${panelView === 'font-library' || panelView === 'image-library' ? ' island-lib-view' : ''}${panelView === 'media-library' ? ' island-lib-view island-media-lib-view' : ''}${panelView === 'font' ? ' island-font-view' : ''}${panelView === 'font-color' ? ' island-font-color-view' : ''}${panelView === 'theme' ? ' island-theme-view' : ''}${panelView === 'agent' ? ' island-agent-view' : ''}${panelView === 'agent' && agentHReady ? ' agent-height-ready' : ''}${panelView === 'agent-settings' ? ' island-agent-settings-view' : ''}${panelView === 'settings' ? ' island-settings-view' : ''}${panelView === 'lyric-api' ? ' island-lyric-api-view' : ''}`}
       role="button"
       tabIndex={0}
       aria-label={`灵动岛,当前状态:${agentActive ? 'Agent' : ISLAND_STATES[state].label},点击切换,长按展开`}
       aria-expanded={expanded}
       style={
         {
-          // 帮助手册展开态:富裕大小 = 逻辑展开宽 × 2(缩放 200% 的大小,
-          // 800px,承载教学内容);Agent 展开态 = 逻辑宽 × 界面缩放
-          // (高度由 CSS var(--agent-h) 计算);其余视图 = 逻辑展开宽
+          // Agent 展开态 = 逻辑宽 × 界面缩放(高度由 CSS var(--agent-h)
+          // 计算);其余视图 = 逻辑展开宽(帮助手册已移除 2026-08-10)
           width: expanded
-            ? panelView === 'help'
-              ? `${Math.round(expandedWidth * 2)}px`
-              : agentActive
-                ? `${Math.round(expandedWidth * (agentScale / 100))}px`
-                : `${expandedWidth}px`
-            : islandWidth,
+            ? agentActive
+              ? `${Math.round(expandedWidth * (agentScale / 100))}px`
+              : `${expandedWidth}px`
+            : miniActive
+              ? `${AGENT_MINI_W}px`
+              : islandWidth,
           '--state-color': theme,
           // 字体颜色(主文字/次级文字),null 时 CSS fallback 白色系
           '--text-color': resolvedTextColor ?? undefined,
@@ -1459,6 +1657,11 @@ export const DynamicIsland = memo(function DynamicIsland({
       {expanded && panelView !== 'control' && (
         <div className="island-panel-mask" aria-hidden="true" />
       )}
+      {/* 媒体小窗(2026-08-09):收起面板后岛体变形成小窗视频/图片;
+          常规紧凑态保持图标 + 文字区 */}
+      {miniActive && agentMini ? (
+        <AgentMediaMini media={agentMini} onExpand={() => changeExpanded(true)} />
+      ) : (
       <div className="island-content">
         <div className="island-icon">
           {/* Agent 模式:四角星图标;音乐模式:状态图标 */}
@@ -1485,6 +1688,7 @@ export const DynamicIsland = memo(function DynamicIsland({
           )}
         </span>
       </div>
+      )}
       {/* 拖动中:粒子时间画布覆盖标题文字区域居中显示(指针穿透,不影响进度条拖动) */}
       {showingScrub && (
         <ParticleTime
@@ -1574,22 +1778,74 @@ export const DynamicIsland = memo(function DynamicIsland({
               onTargetChange={setBgTarget}
               imageLibraryAvailable={Boolean(onImageLibraryChange)}
               onOpenImageLibrary={() => setPanelView('image-library')}
-              onBack={() => setPanelView('settings')}
+              // 返回目标 = 从哪来回哪去(多媒体库右键应用 → 回多媒体库;
+              // 设置视图入口 → 回设置视图;一次即清)
+              onBack={() => {
+                const back = backgroundBackRef.current
+                backgroundBackRef.current = null
+                if (back) back()
+                else setPanelView('settings')
+              }}
             />
           ) : null}
-          {/* 帮助手册视图(托盘菜单入口,岛内打开):操作引导列表 */}
-          {panelView === 'help' ? <HelpView onBack={() => setPanelView('settings')} /> : null}
           {/* 设置视图(托盘菜单入口,岛内打开):设置类功能的总入口,
-              自定义背景 / 帮助手册 / 主题色按宿主能力显隐 */}
+              自定义背景 / 主题色 / 字体按宿主能力显隐(帮助手册已移除
+              2026-08-10)。**返回收起 = 收起为灵动岛(2026-08-10 用户
+              要求:设置等返回默认 Agent 紧凑态,不生成多媒体岛;
+              "收起为多媒体岛"仅 ⋯ 菜单显式入口)** */}
           {panelView === 'settings' ? (
             <SettingsView
               onOpenBackground={onBackgroundChange ? () => setPanelView('background') : undefined}
-              onOpenHelp={() => setPanelView('help')}
               onOpenTheme={onThemeChange ? () => setPanelView('theme') : undefined}
               onOpenFont={onFontAdd || onFontLibraryChange ? () => setPanelView('font') : undefined}
               onOpenAgent={agentConfig ? () => setPanelView('agent-settings') : undefined}
               onOpenLyricApi={() => setPanelView('lyric-api')}
-              onBack={() => changeExpanded(false)}
+              onBack={() => changeExpanded(false, { mediaMini: false })}
+            />
+          ) : null}
+          {/* 多媒体库(2026-08-08,独立菜单:托盘/Agent 菜单呼出,设置入口
+              已移除——不属设置范畴,Agent 设置面板大小):
+              图片/音频/视频三库增删改查,音频导入播放列表。
+              返回 = 收起岛体(托盘呼出)或回到对话视图(⋯ 菜单呼出) */}
+          {panelView === 'media-library' ? (
+            <MediaLibraryView
+              imageLibrary={imageLibrary}
+              onImageLibraryChange={onImageLibraryChange}
+              audioLibrary={audioLibrary}
+              onAudioLibraryChange={(items) => onAudioLibraryChange?.(items)}
+              videoLibrary={videoLibrary}
+              onVideoLibraryChange={(items) => onVideoLibraryChange?.(items)}
+              onAddToPlaylist={(items) => onAddLibraryTracks?.(items)}
+              onVideoImport={onVideoImport}
+              // 图片右键"应用到背景"(2026-08-08):把库中图片直接导入
+              // 对应形态槽位(裁切参数复位默认,只需手动调整方位)并
+              // 跳转背景编辑器——省略导入步骤
+              onApplyImageToBackground={(target, dataUrl) => {
+                if (!onBackgroundChange) return
+                const crop = backgroundCrop ?? { expanded: DEFAULT_BG_CROP, compact: DEFAULT_BG_CROP }
+                onBackgroundChange({
+                  expandedImage: (target === 'expanded' ? dataUrl : backgroundExpandedImage) ?? null,
+                  compactImage: (target === 'compact' ? dataUrl : backgroundCompactImage) ?? null,
+                  opacity: backgroundOpacity ?? { expanded: 0.4, compact: 0.4 },
+                  expanded: target === 'expanded' ? DEFAULT_BG_CROP : crop.expanded,
+                  compact: target === 'compact' ? DEFAULT_BG_CROP : crop.compact,
+                })
+                // 返回目标 = 多媒体库(用户要求:调整方位后直接返回多媒体库,
+                // 不经过设置视图)
+                backgroundBackRef.current = () => setPanelView('media-library')
+                setPanelView('background')
+              }}
+              onBack={() => {
+                const back = mediaLibraryBackRef.current
+                mediaLibraryBackRef.current = null
+                if (back) back()
+                // 托盘呼出路径:返回收起 = 收起为灵动岛(2026-08-10 用户
+                // 要求与设置一致,不生成多媒体岛)
+                else changeExpanded(false, { mediaMini: false })
+              }}
+              // LLM 工具 play_library_video(2026-08-10):定位播放指定视频
+              autoPlayVideoId={mediaLibraryPlayId}
+              onAutoPlayConsumed={onMediaLibraryPlayConsumed}
             />
           ) : null}
           {/* 歌词 API 接入点(设置视图"歌词 API"入口):预设厂家 + 自定义 */}
@@ -1597,15 +1853,27 @@ export const DynamicIsland = memo(function DynamicIsland({
             <LyricApiView onBack={() => setPanelView('settings')} />
           ) : null}
           {/* Agent 聊天视图(agent 模式展开默认;只保留长按收回,
-              设置类视图除外) */}
-          {panelView === 'agent' && agent ? (
+              设置类视图除外)。**agentHReady 门闩(2026-08-08 修复"展开
+              动画图中 UI 透明")**:宽度动画期间面板不挂载(岛体 56 高
+              宽条内面板被裁切、compact 内容已淡出 = 全透明),高度
+              动画就绪后才挂载面板(淡入 + 测量 + 高度展开同步) */}
+          {panelView === 'agent' && agent && agentHReady ? (
             <AgentView
               {...agent}
               // ⋯ 菜单"设置"入口:切换到 Agent 设置视图(设置类视图,
-              // 只能经返回键退出)
+              // 只能经返回键退出);"多媒体库"入口切视图(独立菜单,
+              // 返回回到对话视图)
               onOpenSettings={() => setPanelView('agent-settings')}
+              onOpenMediaLibrary={() => {
+                mediaLibraryBackRef.current = () => setPanelView('agent')
+                setPanelView('media-library')
+              }}
               onCollapse={() => changeExpanded(false)}
+              // 收起为灵动岛(2026-08-10 用户要求):收起成 Agent 紧凑态,
+              // 不生成媒体岛
+              onCollapseMini={() => changeExpanded(false, { mediaMini: false })}
               onHeightChange={setAgentPanelH}
+              onMediaSnapshot={setAgentLastMedia}
             />
           ) : null}
           {/* Agent 设置(设置视图"Agent 设置"入口,设置类视图:只能经返回键退出):
@@ -1619,6 +1887,8 @@ export const DynamicIsland = memo(function DynamicIsland({
               tools={agent?.tools}
               scale={agentScale}
               onScaleChange={handleAgentScaleChange}
+              mediaWindowWidth={mediaWindowWidth}
+              onMediaWindowWidthChange={onMediaWindowWidthChange ?? (() => {})}
               onBack={() => setPanelView('settings')}
             />
           ) : null}
