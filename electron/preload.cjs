@@ -150,6 +150,11 @@ contextBridge.exposeInMainWorld('desktop', {
   agentSkillImport() {
     return ipcRenderer.invoke('agent:skill-import')
   },
+  /** Agent:彻底删除技能(仅 userData/skills 下的应用自有技能;删除即
+   * 从磁盘消失,不进排除/恢复区;payload {slug}) */
+  agentSkillDelete(slug) {
+    return ipcRenderer.invoke('agent:skill-delete', { slug })
+  },
   /** Agent:静默总结对话标题(后台,不打扰用户) */
   agentSummarize(messages) {
     return ipcRenderer.invoke('agent:summarize', messages)

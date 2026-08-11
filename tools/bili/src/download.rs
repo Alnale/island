@@ -26,6 +26,12 @@ pub struct DownloadOptions {
     pub force: bool,
     pub skip: bool,
     pub page: Option<i64>, // 分P：Some(n) 只下第 n P；None=全部
+    /// 视频编码策略(2026-08-11,修复"HEVC 视频在挂件对话窗口播放全黑"):
+    /// `auto`(缺省)= 视频流是 HEVC(H.265)时自动转码为 H.264(libx264
+    /// veryfast,1080p 实测 ~17x 实时,33 分钟视频约 2 分钟)——挂件窗口
+    /// 的 Chromium 在禁用硬件加速(透明窗口稳定需要)下无法呈现 HEVC 帧;
+    /// `copy` = 原样保留编码(旧行为,HEVC 文件在窗口内不可播)
+    pub codec: String,
 }
 
 impl Default for DownloadOptions {
@@ -42,6 +48,7 @@ impl Default for DownloadOptions {
             force: false,
             skip: true,
             page: None,
+            codec: "auto".into(),
         }
     }
 }
@@ -518,11 +525,29 @@ async fn download_page_body(
                 return Err("需要 ffmpeg 合并音视频（未找到 ffmpeg）".into());
             }
             final_path = outdir.join(format!("{name}.mp4"));
-            log("合并音视频 ...".into());
-            let ok = run_ffmpeg(&[
-                "-y", "-i", src_v.to_str().unwrap(), "-i", src_a.to_str().unwrap(),
-                "-c", "copy", "-movflags", "+faststart", final_path.to_str().unwrap(),
-            ]);
+            // 编码策略(2026-08-11):codec=auto 且视频流是 HEVC → 转码
+            // H.264(挂件窗口无法呈现 HEVC 帧,全黑——ffmpeg libx264
+            // veryfast 实测 ~17x 实时,大文件几分钟内完成,保留画质)
+            let is_hevc = v_stream.codecs.to_lowercase().starts_with("hev");
+            let transcode = opts.codec != "copy" && is_hevc;
+            if transcode {
+                log("视频为 HEVC(H.265),转码为 H.264(挂件窗口可直接播放,需几分钟)...".into());
+            } else {
+                log("合并音视频 ...".into());
+            }
+            let mut args: Vec<String> = vec![
+                "-y".into(),
+                "-i".into(), src_v.to_str().unwrap().to_string(),
+                "-i".into(), src_a.to_str().unwrap().to_string(),
+            ];
+            if transcode {
+                args.extend(["-c:v".into(), "libx264".into(), "-preset".into(), "veryfast".into(), "-crf".into(), "23".into(), "-c:a".into(), "copy".into()]);
+            } else {
+                args.extend(["-c".into(), "copy".into()]);
+            }
+            args.extend(["-movflags".into(), "+faststart".into(), final_path.to_str().unwrap().to_string()]);
+            let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+            let ok = run_ffmpeg(&arg_refs);
             let _ = std::fs::remove_file(&src_v);
             let _ = std::fs::remove_file(&src_a);
             if !ok {
@@ -535,3 +560,78 @@ async fn download_page_body(
     Ok(final_path)
 }
 
+
+// ================================================================
+// 编码探测与就地转码(2026-08-11,convert 子命令:把已有 HEVC 视频转成
+// H.264——挂件对话窗口在禁用硬件加速下无法呈现 HEVC 帧(全黑),转码后
+// 窗口内直接可播;ffprobe 不是依赖(只有 ffmpeg),用 ffmpeg -i 的 stderr
+// 探测编码)
+// ================================================================
+
+/// 用 ffmpeg -i 探测视频流编码(返回 "hevc"/"h264"/"av1"...;失败 None)
+pub fn probe_video_codec(path: &str) -> Option<String> {
+    #[cfg(windows)]
+    let output = {
+        use std::os::windows::process::CommandExt;
+        std::process::Command::new("ffmpeg")
+            .arg("-i").arg(path)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .creation_flags(0x08000000) // CREATE_NO_WINDOW
+            .output().ok()?
+    };
+    #[cfg(not(windows))]
+    let output = {
+        std::process::Command::new("ffmpeg")
+            .arg("-i").arg(path)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .output().ok()?
+    };
+    let err = String::from_utf8_lossy(&output.stderr);
+    // "  Stream #0:0[0x1](und): Video: hevc (Main) (hev1 / 0x31766568), ..."
+    for line in err.lines() {
+        let t = line.trim();
+        if t.contains("Video: ") && !t.contains("attached pic") {
+            let rest = &t[t.find("Video: ").unwrap() + 7..];
+            let codec = rest.split([' ', ',', '(', ')']).next().unwrap_or("").to_string();
+            if !codec.is_empty() {
+                return Some(codec);
+            }
+        }
+    }
+    None
+}
+
+/// 就地转码 HEVC → H.264(先写临时文件,成功后再替换原文件;非 HEVC 跳过)。
+/// 返回 (是否已转码, 说明文本)
+pub fn convert_to_h264(path: &str) -> Result<(bool, String), String> {
+    if !ffmpeg_exists() {
+        return Err("需要 ffmpeg(未找到 ffmpeg)".into());
+    }
+    let p = std::path::Path::new(path);
+    if !p.is_file() {
+        return Err(format!("文件不存在: {path}"));
+    }
+    let codec = match probe_video_codec(path) {
+        Some(c) => c,
+        None => return Err(format!("无法识别视频编码: {path}")),
+    };
+    if codec != "hevc" {
+        return Ok((false, format!("已是 {codec} 编码,无需转换")));
+    }
+    let tmp = p.with_extension("tmp_h264.mp4");
+    let ok = run_ffmpeg(&[
+        "-y", "-i", path,
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+        "-c:a", "copy", "-movflags", "+faststart",
+        tmp.to_str().unwrap(),
+    ]);
+    if !ok {
+        let _ = std::fs::remove_file(&tmp);
+        return Err("转码失败(可检查磁盘空间/文件是否被占用)".into());
+    }
+    let _ = std::fs::remove_file(path);
+    std::fs::rename(&tmp, p).map_err(|e| format!("替换原文件失败: {e}"))?;
+    Ok((true, format!("HEVC → H.264 转码完成: {path}")))
+}

@@ -112,6 +112,7 @@ WIDGET_SCREENSHOT 六种巡检模式 ~1160 行已从 main.cjs 抽离)。
 | WIDGET_SCREENSHOT_MODE | 巡检模式(见下表);**probe-clear** = 新对话后窗口扁平回归探针, **probe-evolve** = 记忆进化垂直细分整合实测探针(真实 LLM,4 轮) |
 | WIDGET_SCREENSHOT_QUIT | **必须带 1**:巡检完成后优雅退出(app.quit)——应用托盘常驻不自退,用 timeout/taskkill 强杀进程树会让子进程(bridge/GPU/renderer)打出 "renderer gone: crashed" 假象(实测误导) |
 | WIDGET_MOCK_SERVER | mock MCP 服务器路径(agent 巡检段 3 真实连接) |
+| WIDGET_HEVC_VIDEO | hevc-frame 巡检的待测视频路径(缺省 bili 20260514 HEVC 文件) |
 
 ### 巡检模式
 
@@ -124,6 +125,8 @@ WIDGET_SCREENSHOT 六种巡检模式 ~1160 行已从 main.cjs 抽离)。
 | agent | Agent 全链路:设置表单/四区断言/MCP mock 连接/记忆增删/记忆类型滚轮/进化/设置工具端到端(段 4.7)/快捷切换按钮(sendInputEvent 注入真实鼠标,段 4.5)/主动陪伴消息(段 4.8)/10 秒真实调度链路(段 4.9) |
 | chat-media | 对话媒体:MediaRecorder 录真实 webm 注入 → 断言消息气泡/video/可见高度;优先扫描 `C:\Program Files\JiJiDown\Download` 真实 mp4/mp3(不可读回退 webm) |
 | media-lib | 多媒体库:面板/试听自动播放/编辑动画/宽度对齐/右键菜单应用背景/视频 autoPlay(79 用例) |
+| hevc-frame | HEVC 黑屏诊断:注入本地视频 → 轮询帧呈现(rVFC/总帧数/错误文案)——HEVC+禁用硬件加速时 readyState/decodeError 全过但零帧呈现(全黑);断言 HEVC → code 9 错误文案, H.264/转码产物 → 帧数持续增长 |
+| skill-delete-check | 技能彻底删除:预置测试技能 → agentSkillDelete → 断言目录已删/其它技能不受影响/非法 slug 被拒 |
 
 ### 运行示例
 

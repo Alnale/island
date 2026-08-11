@@ -1641,6 +1641,38 @@ ipcMain.handle('agent:skill-import', async () => {
   }
 })
 
+// 彻底删除技能(2026-08-11 用户要求"灵动岛创建分区支持彻底删除,不在
+// 恢复区"):**仅删除 userData/skills 下的技能目录**(灵动岛创建/手动导入
+// 都是应用自有的本地副本;扫描到的外部技能(~/.claude/skills 等)不在此
+// 目录,天然不会误删),删除即从磁盘消失、不进排除/恢复区;同时从
+// excludedSkills 移除(已删除技能保留排除标记无意义)
+ipcMain.handle('agent:skill-delete', async (_event, payload) => {
+  try {
+    const slug = String(payload?.slug ?? '').trim().replace(/^skill_/, '')
+    if (!/^[a-z0-9][a-z0-9-]{0,99}$/.test(slug)) {
+      return { error: '无效的技能名称' }
+    }
+    const targetRoot = path.join(app.getPath('userData'), 'skills')
+    const target = path.join(targetRoot, slug)
+    // 安全:目标必须落在 userData/skills 内(防路径穿越)
+    const rel = path.relative(targetRoot, target)
+    if (rel.startsWith('..') || path.isAbsolute(rel)) {
+      return { error: '无效的技能路径' }
+    }
+    if (!fs.existsSync(path.join(target, 'SKILL.md'))) {
+      return { error: `技能 ${slug} 不存在或已被删除` }
+    }
+    fs.rmSync(target, { recursive: true, force: true })
+    const prev = currentAgentConfig().excludedSkills ?? []
+    if (prev.includes(slug)) {
+      applyAgentConfigPatch({ excludedSkills: prev.filter((s) => s !== slug) })
+    }
+    return { ok: true, slug }
+  } catch (err) {
+    return { error: err.message || String(err) }
+  }
+})
+
 // 渲染端启动时询问当前模式(与 tray 切换保持一致)
 ipcMain.handle('widget:get-mode', () => currentMode())
 

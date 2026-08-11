@@ -390,6 +390,7 @@ seek 并返回 false。验证结果按 sourceAppId 持久化(localStorage
 | agent:summarize/mind-guess | 渲染→主 | 标题总结/心理揣测 |
 | agent:proactive-tick | 渲染→主 | 主动陪伴调度 |
 | agent:skill-import | 渲染→主 | 技能包导入 |
+| agent:skill-delete | 渲染→主 | 彻底删除技能(userData/skills,不进恢复区) |
 | app:pick-media-files | 渲染→主 | 视频导入对话框(返回绝对路径) |
 | app:island-pick-files | 渲染→主 | 音频导入对话框 |
 
@@ -583,6 +584,12 @@ send(text, history)
 - **登录态热搜修复**:登录过期时 nav 接口无 wbi_img → 空 mixin →
   `orig.as_bytes()[i]` 越界 panic——wbi_keys 提取失败降级游客 nav 重试,
   仍失败返回明确错误;sign_wbi 加长度防御。
+- **HEVC 自动转码(2026-08-11)**:B 站高清流多为 HEVC,而挂件窗口在禁用
+  硬件加速下无法呈现 HEVC 帧(播放全黑,详见 10.x 黑屏诊断)——下载合并
+  时检测视频流编码,HEVC 自动转 H.264(libx264 veryfast,~17-20× 实时);
+  `--codec copy` 或 config `codec=copy` 保留原编码。**convert 子命令**:
+  `bili convert <path...>` 把已有 HEVC 文件就地转码为 H.264(引擎 bili
+  工具 `convert` action,后台执行),转码后窗口内直接可播。
 
 #### 5.4.2 doc_convert(文档转换)
 
@@ -867,7 +874,12 @@ running(detail 带进程与输出目录),完成/失败进终态——**顺带修
   标记)/ imported(手动导入:.island-imported 标记)/ scanned(外部目录);
   设置技能区三区展示,各自计数与移除按钮。
 - **技能排除**:agent.excludedSkills(slug 数组)——被排除的技能扫描跳过;
-  LLM 对话 skills_config 工具 exclude/include,或设置界面每行移除按钮。
+  LLM 对话 skills_config 工具 exclude/include,或设置界面每行移除按钮
+  (已排除区可恢复)。
+- **技能彻底删除(2026-08-11)**:「灵动岛创建」分区行**删除**按钮(两段式
+  确认)——IPC agent:skill-delete 删 userData/skills/<slug> 目录(slug
+  白名单 + path.relative 校验防穿越),删除即从磁盘消失、**不进已移除/
+  恢复区**,同时从 excludedSkills 清除;扫描到的外部技能只有移除按钮。
 - **自然语言创建技能**:skills_config create action——LLM 提供
   name/description/content,引擎规范化写入 userData/skills/<slug>/
   SKILL.md(下一轮起 /技能名 可用);同名冲突检查基于实时扫描,overwrite
@@ -1415,21 +1427,35 @@ direction?('right'|'left'), wheelWhenOpen?}>`,四处复用:Agent 设置菜单 /
   42px 高(防 j/g/y 下沿裁切);主进程 disableHardwareAcceleration(避免
   半透明 alpha 突变)。
 
-### 10.3 歌词查询竞态(useLyrics)
+### 10.3 HEVC 视频黑屏(2026-08-11)
+
+- **症状**:bili 下载的 HEVC(H.265)视频在对话窗口"播放中全黑"——时间轴/
+  音频正常、readyState 4、无 error 事件,但 videoWidth/videoHeight 恒 0、
+  totalVideoFrames 恒 0 = **解码器零帧呈现**。
+- **根因**:挂件 `disableHardwareAcceleration()`(透明窗口 alpha 稳定需要)
+  下,HEVC 只能走 Media Foundation 解码,而 MF 路径在无 GPU 进程时无法
+  投帧(开关矩阵实测:全 GPU 可靠出帧但 alpha 闪烁风险回归;disable-gpu-
+  compositing 出帧数秒后随机停滞;Electron 自带 ffmpeg 无 HEVC 软件解码器)。
+  H.264 走 ffmpeg 软件解码不受影响。
+- **处置**:① bili 下载时 HEVC 自动转码 H.264(见 5.4.1);② 已有 HEVC 文件
+  用 `bili convert` 就地转码;③ 播放器零帧检测(播放中 2.5s videoWidth 恒 0
+  → onError(9))显示明确文案 + 系统播放器打开,不再静默黑屏。
+
+### 10.4 歌词查询竞态(useLyrics)
 
 - 本地播放器 idle 时 player.track 仍指向列表首曲(index 默认 0);外部监听
   短暂回落本地(externalActive 瞬时为 false)会误用本地首曲发起歌词查询。
   useLyrics 的响应在应用前按 lastKeyRef 校验,过期响应(曲目已切换)一律
   丢弃,否则旧响应会覆盖新曲目歌词且不会重查。
 
-### 10.4 tools.ts 的 fs 导入陷阱
+### 10.5 tools.ts 的 fs 导入陷阱
 
 - 只用 `promises as fs`,existsSync/mkdirSync 在主模块
   (`import { existsSync, mkdirSync, promises as fs }`)——promises 没有
   existsSync/mkdirSync,实测报错;mkdirSync 曾调 undefined 被空 catch 吞掉,
   静默失败。
 
-### 10.5 Windows 平台注意
+### 10.6 Windows 平台注意
 
 - .cmd 命令必须经 cmd.exe /d /c 启动;cmd /c 会把 %VAR% 当环境变量展开,
   路径含 % 需加引号;
@@ -1437,13 +1463,13 @@ direction?('right'|'left'), wheelWhenOpen?}>`,四处复用:Agent 设置菜单 /
   子进程残留);
 - 透明无边框窗口实际宽比请求宽大 ~2px(set-size 补偿见 4.3)。
 
-### 10.6 缓存前缀稳定性(省钱关键)
+### 10.7 缓存前缀稳定性(省钱关键)
 
 - DeepSeek 上下文缓存按前缀单元命中,命中价 0.02元 vs 未命中 1元(50 倍)。
   instructions 与历史序列化幂等、tools 顺序固定、reasoning item 固定回传;
   proactive 内部指令不拼进 system prompt(动态段断前缀)。
 
-### 10.7 双岛并存模式(设计文档,未实现)
+### 10.8 双岛并存模式(设计文档,未实现)
 
 > ⚠️ 全仓库(排除 node_modules/.git/release)对 `dual` 零匹配——main.cjs
 > 的 widget:set-mode 只接受 music/agent、托盘 radio 只有两项、无
@@ -1525,6 +1551,10 @@ direction?('right'|'left'), wheelWhenOpen?}>`,四处复用:Agent 设置菜单 /
 - **用户怎么说**:"B站热搜是什么""下载这个视频 https://www.bilibili.com/
   video/BV…""B站登录一下"。
 - **注意**:首次下载需要扫码登录(对话里展示二维码,手机 B站 App 扫码)。
+- **HEVC 转码(2026-08-11)**:下载的 HEVC(H.265)视频自动转码为 H.264(挂件
+  对话窗口内可直接播放,大视频多等一两分钟);用户说"视频播放黑屏/打不开"
+  时,先让助手用 bili 工具 convert 转码(convert action,输入本地视频路径)
+  再播放,或提示用系统播放器打开。
 
 ### 11.8 文档转换
 

@@ -212,7 +212,9 @@ function MediaError({ src, kind, code }: { src: string; kind: 'img' | 'video' | 
           : probe === 'readfail'
             ? '视频文件读取失败(可能被占用、已损坏或不可访问)'
             : '该视频格式无法在窗口内播放(窗口内支持 mp4(H.264)/webm/ogg)'
-      : '无法播放该文件(可能已移动、过大或格式不支持)'
+      : kind === 'video' && code === 9
+        ? '该视频为 HEVC(H.265)等特殊编码,窗口内无法解码(挂件禁用硬件加速)——可用系统播放器打开,或让助手用 bili 工具转码(convert)为 H.264 后窗口内直接播放'
+        : '无法播放该文件(可能已移动、过大或格式不支持)'
   return (
     <div className="island-agent-media-err">
       <span>{reason}</span>
@@ -637,6 +639,39 @@ function VideoPlayer({
     if (v.readyState >= 1) start()
     else v.addEventListener('loadedmetadata', start, { once: true })
     // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅挂载续播
+  }, [])
+  // 黑屏检测(2026-08-11 修复"bili 下载的 HEVC 视频在对话窗口播放全黑"):
+  // HEVC 在禁用硬件加速(透明窗口 alpha 稳定需要)下,Media Foundation
+  // 解码器**零帧呈现**——表现 = 时间轴/音频正常、无 error 事件,但
+  // videoWidth 恒为 0(实测真实应用 fr=0/vw=0)。元数据加载 2.5s 后
+  // 仍无视频尺寸 → 按解码失败处理(code 9 自定义),展示明确错误文案 +
+  // 系统播放器打开,不再静默全黑
+  useEffect(() => {
+    const v = videoRef.current
+    if (!v) return
+    let timer = 0
+    const check = () => {
+      if (v.error) return // 已有错误事件:走原生错误路径(code 4 等)
+      if (v.paused) return // 未播放:解码器未启动,vw=0 是正常状态
+      if (v.videoWidth > 0 || v.videoHeight > 0) return
+      onError(9)
+    }
+    // 仅播放中才计时(暂停时 vw=0 正常;play 事件重武装——暂停后再播
+    // 也检;meta 加载时已在播则立即计时)
+    const arm = () => {
+      if (v.paused) return
+      window.clearTimeout(timer)
+      timer = window.setTimeout(check, 2500)
+    }
+    v.addEventListener('loadedmetadata', arm)
+    v.addEventListener('play', arm)
+    if (v.readyState >= 1 && !v.paused) arm()
+    return () => {
+      v.removeEventListener('loadedmetadata', arm)
+      v.removeEventListener('play', arm)
+      window.clearTimeout(timer)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 挂载一次
   }, [])
   // 应用播放偏好(2026-08-10 双向同步:音量/倍速/循环与视频岛/多媒体
   // 库共享;2026-08-10 二轮:videoKey 指定时读**该视频个性化**,缺省

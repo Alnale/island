@@ -285,16 +285,38 @@ function formatBudget(v: number): string {
   return String(v)
 }
 
-/** 技能行(设置技能区;移除 = 加入排除列表;leaving = 离场动画中) */
+/** 技能行(设置技能区;移除 = 加入排除列表;leaving = 离场动画中;
+ * canDelete = 彻底删除(2026-08-11 用户要求:灵动岛创建分区支持彻底删除,
+ * 不进恢复区)——两段式确认(同清除数据:首次点击进入确认态 3.5s 自动
+ * 复位,再次点击执行),删除即从磁盘消失,不可恢复) */
 function SkillRow({
   t,
   leaving,
+  canDelete,
   onExclude,
+  onDelete,
 }: {
   t: AgentToolInfo
   leaving: boolean
+  canDelete?: boolean
   onExclude: (slug: string) => void
+  onDelete?: (slug: string) => void
 }) {
+  const [confirming, setConfirming] = useState(false)
+  const confirmTimerRef = useRef(0)
+  useEffect(() => () => window.clearTimeout(confirmTimerRef.current), [])
+  const requestDelete = (slug: string) => {
+    if (!onDelete) return
+    if (!confirming) {
+      setConfirming(true)
+      window.clearTimeout(confirmTimerRef.current)
+      confirmTimerRef.current = window.setTimeout(() => setConfirming(false), 3500)
+      return
+    }
+    window.clearTimeout(confirmTimerRef.current)
+    setConfirming(false)
+    onDelete(slug)
+  }
   return (
     <div className={`island-skills-reg-row${leaving ? ' island-ui-leave' : ''}`}>
       <span className="island-skills-reg-name">{t.name.replace(/^skill_/, '')}</span>
@@ -311,22 +333,40 @@ function SkillRow({
       >
         移除
       </button>
+      {canDelete ? (
+        <button
+          type="button"
+          className={`island-agent-scale-btn island-data-clear${confirming ? ' confirming' : ''}`}
+          title="彻底删除(从磁盘移除,不可恢复,不会进入下方已移除区)"
+          onClick={(event) => {
+            event.stopPropagation()
+            requestDelete(t.name.replace(/^skill_/, ''))
+          }}
+        >
+          {confirming ? '再次点击确认删除' : '删除'}
+        </button>
+      ) : null}
     </div>
   )
 }
 
 /** 技能注册区(灵动岛创建 / 手动导入 / 扫描到的三区共用;审计 P1 #7:
- * 原同一区块复制 3 遍,仅标签与条目谓词不同) */
+ * 原同一区块复制 3 遍,仅标签与条目谓词不同;canDelete = 该区技能支持
+ * 彻底删除(应用自有副本,2026-08-11) */
 function SkillsSection({
   label,
   skills,
   leavingIds,
+  canDelete,
   onExclude,
+  onDelete,
 }: {
   label: string
   skills: AgentToolInfo[]
   leavingIds: readonly string[]
+  canDelete?: boolean
   onExclude: (slug: string) => void
+  onDelete?: (slug: string) => void
 }) {
   if (skills.length === 0) return null
   return (
@@ -339,7 +379,9 @@ function SkillsSection({
           key={t.name}
           t={t}
           leaving={leavingIds.includes(t.name.replace(/^skill_/, ''))}
+          canDelete={canDelete}
           onExclude={onExclude}
+          onDelete={onDelete}
         />
       ))}
     </>
@@ -792,6 +834,28 @@ export function AgentSettingsView({
     const next = excludedSkills.filter((s) => s !== slug)
     setExcludedSkills(next)
     window.desktop?.agentSetConfig?.({ excludedSkills: next }).catch(() => {})
+  }
+  // 彻底删除技能(2026-08-11 用户要求:灵动岛创建分区支持彻底删除,不进
+  // 恢复区):主进程删 userData/skills/<slug> 目录(应用自有副本,扫描
+  // 到的外部技能不在该目录不会误删)→ 立即刷新工具清单(技能马上消失);
+  // 若该技能此前被排除,同步清掉排除标记
+  const deleteSkill = async (slug: string) => {
+    if (excludedSkills.includes(slug)) {
+      const next = excludedSkills.filter((s) => s !== slug)
+      setExcludedSkills(next)
+      window.desktop?.agentSetConfig?.({ excludedSkills: next }).catch(() => {})
+    }
+    try {
+      const res = await window.desktop?.agentSkillDelete?.(slug)
+      if (res?.error) {
+        setSkillImportMsg(`删除失败:${res.error}`)
+        return
+      }
+      const list = await window.desktop?.agentGetTools?.()
+      if (Array.isArray(list)) setLocalTools(list)
+    } catch {
+      // 刷新失败:重进设置可见
+    }
   }
 
   // ---- 记忆管理 ----
@@ -1320,8 +1384,9 @@ export function AgentSettingsView({
               <span className="island-agent-section-hint">技能清单加载中…</span>
             ) : (
               <>
-                {/* 三区共用 SkillsSection(审计 P1 #7:原同一区块复制 3 遍) */}
-                <SkillsSection label="灵动岛创建" skills={createdSkills} leavingIds={skillsLeave.leavingIds} onExclude={excludeSkill} />
+                {/* 三区共用 SkillsSection(审计 P1 #7:原同一区块复制 3 遍);
+                    灵动岛创建 = 应用自有副本,支持彻底删除(2026-08-11) */}
+                <SkillsSection label="灵动岛创建" skills={createdSkills} leavingIds={skillsLeave.leavingIds} canDelete onExclude={excludeSkill} onDelete={deleteSkill} />
                 <SkillsSection label="手动导入" skills={importedSkills} leavingIds={skillsLeave.leavingIds} onExclude={excludeSkill} />
                 <SkillsSection label="扫描到的" skills={scannedSkills} leavingIds={skillsLeave.leavingIds} onExclude={excludeSkill} />
               </>

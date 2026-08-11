@@ -3009,6 +3009,107 @@ function runScreenshotTests({ win, app, fs, path, settingsPath, runIslandSetting
             win.webContents.send('widget:set-mode', { mode: 'music', source: 'user' })
             console.log('[chat-media] done')
           }
+          if (process.env.WIDGET_SCREENSHOT_MODE === 'hevc-frame') {
+            // HEVC 黑屏诊断巡检(2026-08-11):真实应用内注入本地视频文件 →
+            // 轮询 rVFC 帧计数(帧是否真正呈现;readyState/decodeError 检查
+            // 不出帧问题——HEVC 在软件合成下"播放中但零帧呈现"= 全黑)。
+            // WIDGET_HEVC_VIDEO = 待测视频路径(缺省 bili 20260514 HEVC)
+            const sleep = (ms) => new Promise((res) => setTimeout(res, ms))
+            const js = (code) => win.webContents.executeJavaScript(code)
+            const videoPath = process.env.WIDGET_HEVC_VIDEO
+            const msgBackup = await js(`localStorage.getItem('widget-agent-messages')`)
+            await js(`localStorage.removeItem('widget-agent-messages')`)
+            win.webContents.reload()
+            await sleep(3000)
+            win.webContents.send('widget:set-mode', { mode: 'agent', source: 'user' })
+            await sleep(1600)
+            const expanded = await js(`(async () => {
+              const sleep = (ms) => new Promise((res) => setTimeout(res, ms))
+              const island = document.querySelector('.island-demo')
+              const r = island.getBoundingClientRect()
+              const x = r.left + r.width / 2
+              const y = r.top + r.height / 2
+              island.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, clientX: x, clientY: y, pointerId: 1, isPrimary: true, button: 0 }))
+              setTimeout(() => island.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, clientX: x, clientY: y, pointerId: 1, isPrimary: true, button: 0 })), 600)
+              await sleep(1300)
+              return island.classList.contains('expanded')
+            })()`)
+            console.log('[hevc-frame] expanded:', expanded, '| video:', videoPath)
+            win.webContents.send('agent:event', {
+              type: 'message',
+              message: {
+                id: 'hevc-frame-msg-1',
+                role: 'assistant',
+                parts: [
+                  { type: 'text', text: 'HEVC 帧呈现测试' },
+                  { type: 'media', kind: 'video', url: videoPath, name: path.basename(videoPath) },
+                ],
+              },
+              usage: { input: 1, output: 1 },
+            })
+            for (let i = 0; i < 8; i++) {
+              await sleep(1500)
+              const s = await js(`(async () => {
+                const msg = [...document.querySelectorAll('.island-agent-msg-assistant')].find((m) => m.textContent.includes('HEVC 帧呈现测试'))
+                if (!msg) return JSON.stringify({ msg: false })
+                const video = msg.querySelector('video')
+                if (!video) {
+                  // 黑屏检测触发后 video 被替换为 MediaError(2026-08-11):
+                  // 报错文案 = code 9(零帧/无法解码)的明确提示
+                  const errEl = msg.querySelector('.island-agent-media-err')
+                  return JSON.stringify({ msg: true, video: false, errText: errEl ? errEl.textContent.slice(0, 40) : null })
+                }
+                return JSON.stringify({
+                  t: +video.currentTime.toFixed(1),
+                  rs: video.readyState,
+                  paused: video.paused,
+                  err: video.error ? video.error.code : null,
+                  vw: video.videoWidth,
+                  vh: video.videoHeight,
+                  fr: video.getVideoPlaybackQuality ? video.getVideoPlaybackQuality().totalVideoFrames : -1,
+                  dropped: video.getVideoPlaybackQuality ? video.getVideoPlaybackQuality().droppedVideoFrames : -1,
+                  visible: video.offsetWidth > 0 && video.offsetHeight > 0,
+                })
+              })()`)
+              console.log('[hevc-frame]', s)
+            }
+            await js(`(async () => {
+              if (${JSON.stringify(msgBackup)} === null) localStorage.removeItem('widget-agent-messages')
+              else localStorage.setItem('widget-agent-messages', ${JSON.stringify(msgBackup)})
+              localStorage.removeItem('widget-agent-mind')
+              return 'restored'
+            })()`)
+            win.webContents.send('widget:set-mode', { mode: 'music', source: 'user' })
+            console.log('[hevc-frame] done')
+          }
+          if (process.env.WIDGET_SCREENSHOT_MODE === 'skill-delete-check') {
+            // 技能彻底删除巡检(2026-08-11 用户要求"灵动岛创建分区支持
+            // 彻底删除,不在恢复区"):预置 userData/skills 测试技能 →
+            // executeJavaScript 调 agentSkillDelete → 断言目录已删 +
+            // 非自有目录不被误删
+            const sleep = (ms) => new Promise((res) => setTimeout(res, ms))
+            const js = (code) => win.webContents.executeJavaScript(code)
+            const ud = path.dirname(typeof settingsPath === 'function' ? settingsPath() : settingsPath)
+            const skillsRoot = path.join(ud, 'skills')
+            const delSlug = 'test-del-skill-20260811'
+            const keepSlug = 'test-keep-skill-20260811'
+            fs.mkdirSync(path.join(skillsRoot, delSlug), { recursive: true })
+            fs.mkdirSync(path.join(skillsRoot, keepSlug), { recursive: true })
+            fs.writeFileSync(path.join(skillsRoot, delSlug, 'SKILL.md'), '---\nname: test-del-skill\n---\n测试技能\n')
+            fs.writeFileSync(path.join(skillsRoot, keepSlug, 'SKILL.md'), '---\nname: test-keep-skill\n---\n测试技能\n')
+            await sleep(500)
+            const res = await js(`window.desktop.agentSkillDelete(${JSON.stringify(delSlug)})`)
+            const delGone = !fs.existsSync(path.join(skillsRoot, delSlug))
+            const keepIntact = fs.existsSync(path.join(skillsRoot, keepSlug))
+            console.log('[skill-delete-check] res:', JSON.stringify(res), '| delGone:', delGone, '| keepIntact:', keepIntact)
+            // 非法 slug 拒绝(路径穿越防护)
+            const bad = await js(`window.desktop.agentSkillDelete('..')`)
+            console.log('[skill-delete-check] bad slug res:', JSON.stringify(bad))
+            // 清理
+            fs.rmSync(path.join(skillsRoot, delSlug), { recursive: true, force: true })
+            fs.rmSync(path.join(skillsRoot, keepSlug), { recursive: true, force: true })
+            console.log('[skill-delete-check] done')
+          }
           if (process.env.WIDGET_SCREENSHOT_MODE === 'clear-data') {
             // 清除数据重启可交互性巡检(2026-08-10 用户实测"清除灵动岛
             // 数据后重启无法交互"):完整走 AgentSettingsView doClear 同款

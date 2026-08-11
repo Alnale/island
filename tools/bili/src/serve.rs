@@ -233,6 +233,7 @@ fn parse_opts(body: &Value, st: &AppState) -> DownloadOptions {
     let fmt = body.get("dm_fmt").and_then(|v| v.as_str()).unwrap_or("xml").to_string();
     DownloadOptions {
         quality,
+        codec: cfg.get_str("codec", "auto"),
         audio_only: audio,
         parallel: body.get("parallel").and_then(|v| v.as_i64()).map(|v| v as usize).unwrap_or_else(|| cfg.get_int("parallel", 8) as usize),
         rate: body.get("rate").and_then(|v| v.as_str()).map(|s| s.to_string()),
@@ -611,6 +612,7 @@ async fn api_subscribe_update(State(st): State<Arc<AppState>>, Json(body): Json<
             force: false,
             skip: true,
             page: None,
+            codec: cfg.get_str("codec", "auto"),
         };
         // 按 UP 分组下载
         let mut by_up: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();

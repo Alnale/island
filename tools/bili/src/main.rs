@@ -106,6 +106,7 @@ enum Cmd {
         #[arg(long)] new_only: bool,
         #[arg(long)] audio: Option<String>,
         #[arg(long)] quality: Option<String>,
+        #[arg(long)] codec: Option<String>,
         #[arg(long)] jobs: Option<i64>,
         #[arg(long)] parallel: Option<i64>,
         #[arg(long)] rate: Option<String>,
@@ -124,6 +125,7 @@ enum Cmd {
         #[arg(required = true)] bvid: Vec<String>,
         #[arg(long)] audio: Option<String>,
         #[arg(long)] quality: Option<String>,
+        #[arg(long)] codec: Option<String>,
         #[arg(long)] page: Option<i64>,
         #[arg(long)] outdir: Option<String>,
         #[arg(long)] no_danmaku: bool,
@@ -219,6 +221,10 @@ enum Cmd {
     History { #[arg(long)] limit: Option<i64> },
     /// 查看已下载记录
     Saved { #[arg(long)] limit: Option<i64> },
+    /// 把已有 HEVC(H.265)视频就地转码为 H.264(挂件对话窗口直接可播)
+    Convert {
+        #[arg(required = true)] paths: Vec<String>,
+    },
     /// 启动 Web 图形界面（浏览器访问 http://127.0.0.1:8787）
     Serve { #[arg(long, default_value_t = 8787)] port: u16 },
 }
@@ -273,6 +279,7 @@ fn build_opts(
     cfg: &config::Config,
     audio: Option<&str>,
     quality: Option<&str>,
+    codec: Option<&str>,
     parallel: Option<i64>,
     rate: Option<&str>,
     no_danmaku: bool,
@@ -285,6 +292,15 @@ fn build_opts(
 ) -> DownloadOptions {
     let quality = quality.unwrap_or("best").to_string();
     let fmt = dm_fmt.unwrap_or(&cfg.get_str("dm_fmt", "xml")).to_string();
+    // 编码策略:auto(HEVC 自动转 H.264)/ copy(保留原编码);配置可设
+    let codec = match codec {
+        Some(c) if c == "auto" || c == "copy" => c.to_string(),
+        Some(c) => {
+            eprintln!("忽略未知 codec {c}(auto/copy)");
+            "auto".to_string()
+        }
+        None => cfg.get_str("codec", "auto"),
+    };
     DownloadOptions {
         quality: quality.clone(),
         audio_only: resolve_audio(audio, cfg),
@@ -300,6 +316,7 @@ fn build_opts(
         force,
         skip: !no_skip,
         page,
+        codec,
     }
 }
 
@@ -502,13 +519,13 @@ fn store() -> std::sync::MutexGuard<'static, store::Store> {
 async fn cmd_download(api: &BiliApi, mids: &[String], since: Option<&str>, until: Option<&str>,
                       days: Option<i64>, regex: Option<&str>, exclude: Option<&str>,
                       latest: Option<i64>, limit: Option<i64>, new_only: bool, audio: Option<&str>,
-                      quality: Option<&str>, jobs: Option<i64>, parallel: Option<i64>,
+                      quality: Option<&str>, codec: Option<&str>, jobs: Option<i64>, parallel: Option<i64>,
                       rate: Option<&str>, page: Option<i64>, outdir: Option<&str>, no_danmaku: bool,
                       dm_fmt: Option<&str>, subs: bool, no_cover: bool, force: bool, no_skip: bool,
                       dry_run: bool) -> Result<(), String> {
     let cfg = config::Config::new(base_dir().join("config").join("config.json"));
     let outdir = PathBuf::from(outdir.unwrap_or(&cfg.get_str("outdir", "downloads")));
-    let opts = build_opts(&cfg, audio, quality, parallel, rate, no_danmaku, dm_fmt, subs, no_cover, force, no_skip, page);
+    let opts = build_opts(&cfg, audio, quality, codec, parallel, rate, no_danmaku, dm_fmt, subs, no_cover, force, no_skip, page);
     let jobs = jobs.unwrap_or_else(|| cfg.get_int("jobs", 2)) as usize;
     let t0 = since.and_then(utils::parse_date);
     let t0 = days.map(|d| utils::now_ts() - d * 86400).or(t0);
@@ -565,12 +582,12 @@ async fn cmd_download(api: &BiliApi, mids: &[String], since: Option<&str>, until
 }
 
 async fn cmd_get(api: &BiliApi, bvids: &[String], audio: Option<&str>, quality: Option<&str>,
-                 page: Option<i64>, outdir: Option<&str>, no_danmaku: bool, dm_fmt: Option<&str>,
+                 codec: Option<&str>, page: Option<i64>, outdir: Option<&str>, no_danmaku: bool, dm_fmt: Option<&str>,
                  subs: bool, no_cover: bool, force: bool, no_skip: bool, only_info: bool,
                  as_json: bool) -> Result<(), String> {
     let cfg = config::Config::new(base_dir().join("config").join("config.json"));
     let outdir = PathBuf::from(outdir.unwrap_or(&cfg.get_str("outdir", "downloads")));
-    let opts = build_opts(&cfg, audio, quality, None, None, no_danmaku, dm_fmt, subs, no_cover, force, no_skip, page);
+    let opts = build_opts(&cfg, audio, quality, codec, None, None, no_danmaku, dm_fmt, subs, no_cover, force, no_skip, page);
     for b in bvids {
         let Some(bv) = parse_bvid(b) else {
             println!("✗ 无法解析 BVID: {b}");
@@ -824,7 +841,7 @@ async fn cmd_season(api: &BiliApi, mid: &str, do_list: bool, download_id: Option
         }
         if !dry_run {
             let outdir = PathBuf::from(outdir.unwrap_or(&cfg.get_str("outdir", "downloads")));
-            let opts = build_opts(&cfg, audio, None, None, None, false, None, false, false, false, false, None);
+            let opts = build_opts(&cfg, audio, None, None, None, None, false, None, false, false, false, false, None);
             let bvids: Vec<String> = season.episodes.iter().map(|e| e.bvid.clone()).collect();
             batch_download(api, &bvids, &outdir, Some(&season.title), &opts, cfg.get_int("jobs", 2) as usize).await;
         }
@@ -843,7 +860,7 @@ async fn cmd_fav(api: &BiliApi, uid: &str, _do_list: bool, media_id: Option<&str
         }
         if !dry_run && !items.is_empty() {
             let outdir = PathBuf::from(outdir.unwrap_or(&cfg.get_str("outdir", "downloads")));
-            let opts = build_opts(&cfg, audio, None, None, None, false, None, false, false, false, false, None);
+            let opts = build_opts(&cfg, audio, None, None, None, None, false, None, false, false, false, false, None);
             let bvids: Vec<String> = items.iter().map(|v| v.bvid.clone()).collect();
             batch_download(api, &bvids, &outdir, None, &opts, cfg.get_int("jobs", 2) as usize).await;
         }
@@ -926,7 +943,7 @@ async fn cmd_subscribe(api: &BiliApi, sub: &SubCmd) -> Result<(), String> {
                 }
                 if *do_dl && !new.is_empty() {
                     let outdir = PathBuf::from(outdir.clone().unwrap_or(cfg.get_str("outdir", "downloads")));
-                    let opts = build_opts(&cfg, audio.as_deref(), None, None, None, false, None, false, false, false, false, None);
+                    let opts = build_opts(&cfg, audio.as_deref(), None, None, None, None, false, None, false, false, false, false, None);
                     let bvids: Vec<String> = new.iter().map(|v| v.bvid.clone()).collect();
                     batch_download(api, &bvids, &outdir, Some(&name), &opts, cfg.get_int("jobs", 2) as usize).await;
                 }
@@ -967,7 +984,7 @@ async fn cmd_update(api: &BiliApi, audio: Option<&str>, outdir: Option<&str>, dr
             }
             if !dry_run {
                 let outdir = PathBuf::from(outdir.unwrap_or(&cfg.get_str("outdir", "downloads")));
-                let opts = build_opts(&cfg, audio, None, None, None, false, None, false, false, false, false, None);
+                let opts = build_opts(&cfg, audio, None, None, None, None, false, None, false, false, false, false, None);
                 let bvids: Vec<String> = new.iter().map(|v| v.bvid.clone()).collect();
                 batch_download(api, &bvids, &outdir, Some(&name), &opts, cfg.get_int("jobs", 2) as usize).await;
             }
@@ -1013,6 +1030,12 @@ fn cmd_config(set: Option<&[String]>, reset: bool) -> Result<(), String> {
                 }
                 cfg.set(key, serde_json::json!(value));
             }
+            "codec" => {
+                if !["auto", "copy"].contains(&value.as_str()) {
+                    return Err("codec 需为 auto(HEVC 自动转 H.264)/copy(保留原编码)".into());
+                }
+                cfg.set(key, serde_json::json!(value));
+            }
             "outdir" | "dm_fmt" | "rate" => {
                 cfg.set(key, serde_json::json!(value));
             }
@@ -1022,14 +1045,30 @@ fn cmd_config(set: Option<&[String]>, reset: bool) -> Result<(), String> {
     }
     println!("当前配置（config/config.json，未设置的项显示默认值）:");
     let all = cfg.all();
-    let defaults: [(&str, &str); 9] = [
-        ("outdir", "downloads"), ("quality", "best"), ("jobs", "2"),
-        ("parallel", "8"), ("audio", "(空=视频)"), ("dm_fmt", "xml"),
-        ("danmaku", "true"), ("cover", "true"), ("rate", "(空)"),
+    let defaults: [(&str, &str); 10] = [
+        ("outdir", "downloads"), ("quality", "best"), ("codec", "auto"),
+        ("jobs", "2"), ("parallel", "8"), ("audio", "(空=视频)"),
+        ("dm_fmt", "xml"), ("danmaku", "true"), ("cover", "true"), ("rate", "(空)"),
     ];
     for (k, d) in defaults {
         let v = all.get(k).map(|v| v.to_string()).unwrap_or_else(|| d.to_string());
         println!("  {:<10} = {}", k, v);
+    }
+    Ok(())
+}
+
+/// convert 子命令(2026-08-11):已有 HEVC 视频就地转码为 H.264(挂件
+/// 对话窗口在禁用硬件加速下无法呈现 HEVC 帧,转码后窗口内直接可播)
+fn cmd_convert(paths: &[String]) -> Result<(), String> {
+    if !download::ffmpeg_exists() {
+        return Err("需要 ffmpeg 转码(未找到 ffmpeg)".into());
+    }
+    for p in paths {
+        match download::convert_to_h264(p) {
+            Ok((true, msg)) => println!("✓ {msg}"),
+            Ok((false, msg)) => println!("= {msg}"),
+            Err(e) => println!("✗ {p}: {e}"),
+        }
     }
     Ok(())
 }
@@ -1087,16 +1126,16 @@ async fn main() {
                      exclude.as_deref(), *limit, *json, *csv, *md, out.as_deref()).await
         }
         Cmd::Download { mid, since, until, days, regex, exclude, latest, limit, new_only, audio,
-                        quality, jobs, parallel, rate, page, outdir, no_danmaku, dm_fmt, subs,
+                        quality, codec, jobs, parallel, rate, page, outdir, no_danmaku, dm_fmt, subs,
                         no_cover, force, no_skip, dry_run } => {
             cmd_download(&api, mid, since.as_deref(), until.as_deref(), *days, regex.as_deref(),
                          exclude.as_deref(), *latest, *limit, *new_only, audio.as_deref(),
-                         quality.as_deref(), *jobs, *parallel, rate.as_deref(), *page,
+                         quality.as_deref(), codec.as_deref(), *jobs, *parallel, rate.as_deref(), *page,
                          outdir.as_deref(), *no_danmaku, dm_fmt.as_deref(), *subs, *no_cover,
                          *force, *no_skip, *dry_run).await
         }
-        Cmd::Get { bvid, audio, quality, page, outdir, no_danmaku, dm_fmt, subs, no_cover, force, no_skip, info, json } => {
-            cmd_get(&api, bvid, audio.as_deref(), quality.as_deref(), *page, outdir.as_deref(),
+        Cmd::Get { bvid, audio, quality, codec, page, outdir, no_danmaku, dm_fmt, subs, no_cover, force, no_skip, info, json } => {
+            cmd_get(&api, bvid, audio.as_deref(), quality.as_deref(), codec.as_deref(), *page, outdir.as_deref(),
                     *no_danmaku, dm_fmt.as_deref(), *subs, *no_cover, *force, *no_skip, *info, *json).await
         }
         Cmd::Danmaku { bvid, fmt, out } => cmd_danmaku(&api, bvid, fmt.as_deref(), out.as_deref()).await,
@@ -1147,6 +1186,7 @@ async fn main() {
         Cmd::Config { set, reset } => cmd_config(set.as_deref(), *reset),
         Cmd::History { limit } => cmd_history(*limit),
         Cmd::Saved { limit } => cmd_saved(*limit),
+        Cmd::Convert { paths } => cmd_convert(paths),
         Cmd::Serve { port } => {
             let api2 = api.clone();
             let base2 = base_dir();

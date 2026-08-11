@@ -451,6 +451,15 @@ async function biliQuery(params: ToolParams): Promise<string | { text: string; i
       const out = await runBili(['whoami'], 15000)
       return out.trim()
     }
+    case 'convert': {
+      // 把已有 HEVC(H.265)视频就地转码为 H.264(2026-08-11,修复
+      // "bili 下载的 HEVC 视频在对话窗口播放全黑"):挂件窗口的 Chromium
+      // 在禁用硬件加速(透明窗口稳定需要)下无法呈现 HEVC 帧;转码后
+      // 窗口内直接可播。长任务后台执行(33 分钟 1080p 约 1-2 分钟,
+      // 更长视频更久),完成/失败自动通知 + 对话反馈
+      if (!query) throw new Error('convert 需要本地视频文件路径')
+      return runBiliBackground(['convert', query])
+    }
     case 'open': {
       // 搜索并直接打开第一个结果(一次调用完成"搜索+打开",
       // 免去 LLM 解析 JSON 再拼接 BV 链接的中间步骤)。
@@ -1316,14 +1325,15 @@ export function createTools(deps: {
               'saved',
               'login',
               'whoami',
+              'convert',
             ],
             description:
-              '操作:up_info/up_videos/search/open/trending/comments(查询)/download(单视频下载)/download_up(UP批量下载)/danmaku(弹幕)/subtitle(字幕)/saved(下载记录)/login(生成扫码登录二维码图片)/whoami(查询登录状态)',
+              '操作:up_info/up_videos/search/open/trending/comments(查询)/download(单视频下载)/download_up(UP批量下载)/danmaku(弹幕)/subtitle(字幕)/saved(下载记录)/login(生成扫码登录二维码图片)/whoami(查询登录状态)/convert(把已有 HEVC 视频就地转码为 H.264——窗口内无法播放 HEVC 时的修复手段)',
           },
           query: {
             type: 'string',
             description:
-              '查询/下载目标:UP 主 mid 或空间链接(up_info/up_videos/download_up)、搜索关键词(search)、视频 BV 号或链接(download/comments/danmaku/subtitle);trending/saved 不需要',
+              '查询/下载目标:UP 主 mid 或空间链接(up_info/up_videos/download_up)、搜索关键词(search)、视频 BV 号或链接(download/comments/danmaku/subtitle)、本地视频文件路径(convert);trending/saved 不需要',
           },
           type: {
             type: 'string',
@@ -1332,7 +1342,7 @@ export function createTools(deps: {
           },
           rid: { type: 'number', description: 'trending 的分区 id,缺省 0(全站)' },
           audio: { type: 'string', description: '仅下载音频并转码为指定格式(如 mp3/flac);不填 = 视频' },
-          quality: { type: 'string', description: '视频清晰度(如 1080p/720p/360p),缺省 best' },
+          quality: { type: 'string', description: '视频清晰度(如 1080p/720p/360p),缺省 best;下载的 HEVC(H.265)视频会自动转码为 H.264(对话窗口内可直接播放)' },
           outdir: { type: 'string', description: '下载输出目录,缺省 bili-tool 的 downloads/' },
           page: { type: 'number', description: 'download 多 P 视频的选集页码,缺省 1' },
           subs: { type: 'boolean', description: 'download 同时下载 CC 字幕' },
