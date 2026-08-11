@@ -20,7 +20,7 @@ import { existsSync, mkdirSync, promises as fs } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { app, Notification, shell } from 'electron'
-import { registerTask, setTaskDoneHandler, updateTask } from './tasks'
+import { listTasks, registerTask, setTaskDoneHandler, updateTask } from './tasks'
 import type { AgentTool, ToolParams } from './types'
 
 /**
@@ -185,6 +185,19 @@ async function resolveBiliOutputs(job: BiliJob): Promise<string[]> {
  * 返回文本明确"无需等待",防止 Agent 自行反复轮询造成等待感 */
 function runBiliBackground(args: string[]): string {
   try {
+    // 实时进度(2026-08-11,用户要求"下载到哪了可查"):单视频下载(get)
+    // 追加 --progress-file,bili-tool 每 1.5s 原子写进度 JSON;下方轮询器
+    // 每 2s 读取,把百分比注入任务状态块(detail)——LLM 对话里直接能
+    // 回答"下载到 68%"。批量下载(download_up)任务粒度是"UP 主",进度
+    // 文件会被多个分P 互相覆盖,不启用
+    const taskIdPrefix = `bili-dl-`
+    let progressPath: string | null = null
+    let progressTimer: ReturnType<typeof setInterval> | null = null
+    if (args[0] === 'get') {
+      progressPath = path.join(BILI_CWD, '.progress', `${taskIdPrefix}${Date.now()}-${Math.random().toString(36).slice(2, 8)}.json`)
+      mkdirSync(path.dirname(progressPath), { recursive: true })
+      args = [...args, '--progress-file', progressPath]
+    }
     const child = spawn(BILI_BIN, args, {
       windowsHide: true,
       stdio: 'ignore',
@@ -195,7 +208,7 @@ function runBiliBackground(args: string[]): string {
     child.unref()
     const pid = child.pid ?? -1
     biliJobs.set(pid, { pid, startedAt: Date.now(), args, finished: false, exitCode: null, finishedAt: 0, outputPaths: [] })
-    const taskId = `bili-dl-${pid}`
+    const taskId = `${taskIdPrefix}${pid}`
     const outdir = biliOutdir(args)
     registerTask({
       id: taskId,
@@ -204,7 +217,39 @@ function runBiliBackground(args: string[]): string {
       // 进行中也带输出目录:LLM 回答"下载到哪"时能给真实绝对路径
       detail: `${biliJobLabel(args)}(进程 ${pid}),输出目录 ${outdir}`,
     })
+    // 进度轮询:读 bili-tool 写的进度 JSON → 更新任务 detail(可读化)
+    const fmtMb = (n: number) => `${(n / 1024 / 1024).toFixed(1)}MB`
+    const progressFile = progressPath
+    if (progressFile) {
+      progressTimer = setInterval(() => {
+        if (biliJobs.get(pid)?.finished) return
+        void fs
+          .readFile(progressFile, 'utf8')
+          .then((text) => {
+            const p = JSON.parse(text) as { stage?: string; label?: string; done?: number; total?: number; percent?: number }
+            if (!p || typeof p.stage !== 'string') return
+            let detail: string
+            if (p.stage === 'download' && typeof p.percent === 'number' && p.percent >= 0) {
+              detail = `${biliJobLabel(args)} ${p.percent}%(${p.label ?? ''} ${fmtMb(p.done ?? 0)}/${fmtMb(p.total ?? 0)}),输出目录 ${outdir}`
+            } else if (p.stage === 'transcode') {
+              detail = `${biliJobLabel(args)} 下载完成,正在转码为 H.264(约需几分钟),输出目录 ${outdir}`
+            } else if (p.stage === 'mux') {
+              detail = `${biliJobLabel(args)} 下载完成,正在合并音视频,输出目录 ${outdir}`
+            } else {
+              return
+            }
+            updateTask(taskId, { detail })
+          })
+          .catch(() => {
+            // 文件未就绪/半截写入:跳过本轮
+          })
+      }, 2000)
+    }
     child.on('close', (code) => {
+      if (progressTimer) clearInterval(progressTimer)
+      if (progressFile) {
+        void fs.rm(progressFile, { force: true }).catch(() => {})
+      }
       const job = biliJobs.get(pid)
       if (!job) return
       // 状态推进:进行中 → 结束(记录 close 后即删,终态信息在任务注册表)
@@ -240,7 +285,7 @@ function runBiliBackground(args: string[]): string {
       `输出目录:${biliOutdir(args)}。` +
       '**这是长任务,通常 1-10 分钟,不要等待**:请立即告知用户"下载已开始,完成后会有系统通知";' +
       '完成/失败都会自动发系统通知,并在对话里告知结果,不需要反复查询。' +
-      '仅当用户主动询问下载进度时,才调用 bili saved 查询下载记录(下载进行中查不到记录是正常的)。' +
+      '仅当用户主动询问下载进度时,调用 bili progress 查询实时进度(如"下载到 68%")。' +
       '**完成后若要播放,用 open_file 打开下载的文件——媒体会作为附件在对话窗口内直接播放**,' +
       '不要切换音乐模式,也不要让用户去文件管理器里找。'
     )
@@ -354,6 +399,17 @@ async function biliQuery(params: ToolParams): Promise<string | { text: string; i
       // 单视频下载:长任务后台启动(detached 独立进程),立即返回;
       // 完成情况用 saved action 查询
       if (!query) throw new Error('download 需要视频 BV 号或链接')
+      // 未登录提示(2026-08-11):未登录时高清受限(通常只能 360p/480p),
+      // 返回文本附提示让用户知情(不阻塞下载)
+      let loginHint = ''
+      try {
+        const whoami = await runBili(['whoami'], 15000)
+        if (!whoami.includes('已登录')) {
+          loginHint = '当前未登录,高清画质受限(可能只能下 360p/480p);需要高清可先 login 扫码登录。'
+        }
+      } catch {
+        // 登录态查询失败不阻塞下载
+      }
       const dargs = ['get', query]
       if (params.audio) dargs.push('--audio', String(params.audio))
       if (params.quality) dargs.push('--quality', String(params.quality))
@@ -361,7 +417,8 @@ async function biliQuery(params: ToolParams): Promise<string | { text: string; i
       if (params.page) dargs.push('--page', String(Number(params.page) || 1))
       if (params.subs) dargs.push('--subs')
       if (params.no_danmaku) dargs.push('--no-danmaku')
-      return runBiliBackground(dargs)
+      const started = runBiliBackground(dargs)
+      return loginHint ? `${started}\n${loginHint}` : started
     }
     case 'download_up': {
       // UP 主视频批量下载:后台启动,立即返回。
@@ -421,6 +478,14 @@ async function biliQuery(params: ToolParams): Promise<string | { text: string; i
         })
         .join('\n')
     }
+    case 'progress': {
+      // 实时下载进度(2026-08-11):查询进行中的 bili 后台下载任务——
+      // detail 由引擎轮询 bili-tool 进度文件持续更新(如"68%"),任务
+      // 已完成/失败则不在列表(自动对话告知结果);无进行中任务返回提示
+      const running = listTasks().filter((t) => t.id.startsWith('bili-dl-'))
+      if (running.length === 0) return '当前没有进行中的 bili 下载任务(最近下载完成/失败后已自动告知结果,可用 bili saved 查记录)'
+      return running.map((t) => `- ${t.detail}`).join('\n')
+    }
     case 'login': {
       // 扫码登录(对话内二维码图片方案,2026-08-07):bili-tool 生成
       // 二维码 PNG(no-wait 不阻塞),返回 **文本 + 图片附件** —— 引擎
@@ -449,6 +514,22 @@ async function biliQuery(params: ToolParams): Promise<string | { text: string; i
     case 'whoami': {
       // 登录状态确认(扫码后调用;已登录显示 UID,未登录提示)
       const out = await runBili(['whoami'], 15000)
+      return out.trim()
+    }
+    case 'config': {
+      // 查看/修改 bili-tool 默认配置(2026-08-11):quality/codec/outdir/
+      // jobs/parallel 等持久化在 BILI_CWD/config/config.json——
+      // 对话里"以后 B站都下 720p""下载默认转码"即可改,不用手动编辑
+      // 文件;校验值域由 bili-tool config 命令完成(错误会直接返回)
+      if (params.key) {
+        const key = String(params.key).trim()
+        if (!key) throw new Error('config 需要 key(如 quality/codec/outdir)')
+        const value = String(params.value ?? '').trim()
+        if (!value) throw new Error(`config 需要 value(设置 ${key} 的值)`)
+        const out = await runBili(['config', '--set', key, value], 15000)
+        return out.trim()
+      }
+      const out = await runBili(['config'], 15000)
       return out.trim()
     }
     case 'convert': {
@@ -1323,12 +1404,14 @@ export function createTools(deps: {
               'danmaku',
               'subtitle',
               'saved',
+              'progress',
               'login',
               'whoami',
               'convert',
+              'config',
             ],
             description:
-              '操作:up_info/up_videos/search/open/trending/comments(查询)/download(单视频下载)/download_up(UP批量下载)/danmaku(弹幕)/subtitle(字幕)/saved(下载记录)/login(生成扫码登录二维码图片)/whoami(查询登录状态)/convert(把已有 HEVC 视频就地转码为 H.264——窗口内无法播放 HEVC 时的修复手段)',
+              '操作:up_info/up_videos/search/open/trending/comments(查询)/download(单视频下载)/download_up(UP批量下载)/danmaku(弹幕)/subtitle(字幕)/saved(下载记录)/progress(查询进行中下载的实时进度,如"68%")/login(生成扫码登录二维码图片)/whoami(查询登录状态)/convert(把已有 HEVC/AV1 视频就地转码为 H.264——窗口内无法播放时的修复手段)/config(查看/修改 bili 默认配置,如清晰度 quality/codec/输出目录 outdir)',
           },
           query: {
             type: 'string',
@@ -1352,6 +1435,8 @@ export function createTools(deps: {
           regex: { type: 'string', description: 'download_up 按标题正则过滤(只下载匹配的视频)' },
           dry_run: { type: 'boolean', description: 'download_up 只列出将下载的视频,不实际下载(预览)' },
           format: { type: 'string', enum: ['xml', 'ass', 'txt', 'json'], description: 'danmaku 的输出格式,缺省 xml' },
+          key: { type: 'string', description: 'config 要查看/修改的配置项(quality/codec/outdir/jobs/parallel/audio 等;不填 = 查看当前全部配置)' },
+          value: { type: 'string', description: 'config 设置的值(quality: 480/720/1080/2160/best;codec: auto/copy;outdir: 目录路径)' },
         },
         required: ['action'],
       },

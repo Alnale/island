@@ -66,6 +66,16 @@ impl Store {
         self.save();
     }
 
+    /// 清空全部下载记录(2026-08-11 saved --clear;只清记录,不删文件)
+    pub fn clear_downloads(&mut self) -> usize {
+        let videos = self.arr("videos");
+        let n = videos.len();
+        *videos = Vec::new();
+        self.log("saved_clear", "", &format!("清空 {n} 条下载记录"));
+        self.save();
+        n
+    }
+
     pub fn delete_record(&mut self, bvid: &str) -> bool {
         let videos = self.arr("videos");
         let before = videos.len();

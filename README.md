@@ -46,8 +46,9 @@
 项目以**源码方式运行**(当前不提供安装发行版),需要 Node.js 环境:
 
 1. 安装依赖:`pnpm install`;
-2. 启动挂件:`pnpm dev:widget`(构建挂件页面 + 启动 Electron,灵动岛出现在
-   屏幕顶部居中)。
+2. 启动挂件:双击项目根目录的 **`dev.bat`**(一键重新构建并启动:自动结束
+   残留旧实例 → 重新构建 → 启动 Electron,灵动岛出现在屏幕顶部居中);
+   或手动执行 `pnpm dev:widget`(效果等价)。
 
 ### 启动与退出
 
@@ -184,7 +185,7 @@
 | web_search | 联网搜索 |
 | get_time / system_info / notify | 时间 / 系统信息 / 系统通知 |
 | switch_to_music | 切回音乐模式;说"听歌"会自动开始播放当前播放列表(play) |
-| bili | B站搜索/热榜/视频信息/下载(扫码登录后可下高清;**HEVC 视频自动转码 H.264**,窗口内直接可播;已有 HEVC 文件可让助手用 convert 转码) |
+| bili | B站搜索/热榜/视频信息/下载(扫码登录后可下高清;**HEVC/AV1 视频自动转码 H.264**,窗口内直接可播;已有 HEVC 文件可让助手用 convert 转码;可查下载实时进度,对话里改默认清晰度/转码设置) |
 | doc_convert | 文档转 Markdown(Word/PDF 等) |
 | xxt | 超星学习通自动答题 |
 | get_feature_guide | 读取内置技术文档,向用户介绍灵动岛功能 |
@@ -340,6 +341,9 @@ A: 格式限制:窗口内只支持 H.264 mp4 / webm(vp8-vp9)/ ogg;HEVC(H.265)
 ### 命令
 
 ```bash
+dev.bat              # 一键重新构建并启动桌面开发版(双击即可):结束旧实例
+                     # (单实例锁,不结束则新启动只唤起旧窗口) → 重新构建 →
+                     # 启动 Electron;真实逻辑在 scripts/dev.mjs,中文不乱码
 pnpm dev             # 仅 Web 演示版(浏览器调试,不进 Electron)
 pnpm dev:widget      # 构建挂件页面并启动 Electron(日常调试主入口)
 pnpm build           # tsc -b 类型检查 + Web 版构建
@@ -348,7 +352,7 @@ pnpm build:electron  # esbuild 打包 Agent 引擎 + SMTC 桥
 pnpm lint            # oxlint
 pnpm bridge          # 独立运行系统媒体桥接脚本(单独调试 SMTC)
 pnpm watch:electron  # 热重建 Agent 引擎/桥
-node scripts/test-agent-core.mjs   # 引擎核心测试(84 用例)
+node scripts/test-agent-core.mjs   # 引擎核心测试(109 用例)
 pnpm test:markdown    # Markdown 解析器测试(39 断言)
 ```
 

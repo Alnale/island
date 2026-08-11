@@ -59,6 +59,11 @@ WidgetApp.tsx)。
 ### 常用命令
 
 ```bash
+dev.bat              # 一键重新构建并启动(双击即可):先结束残留旧实例
+                     # (单实例锁,不结束则新启动只唤起旧窗口),再跑
+                     # pnpm dev:widget;真实逻辑在 scripts/dev.mjs
+                     # (bat 纯 ASCII 壳,中文逻辑在 Node——cmd 分块读
+                     # 取批处理,chcp 65001 前缓冲的中文行会乱码,实测)
 pnpm dev:widget      # 构建挂件页面 + 启动 Electron(日常调试主入口;
                      # 已前置 build:electron,改 electron/agent/*.ts 不会
                      # 静默跑旧 bundle)

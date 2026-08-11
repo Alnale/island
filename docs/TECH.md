@@ -160,6 +160,9 @@ dynamic-island/
 ### 2.1 常用命令
 
 ```bash
+dev.bat                # 一键重新构建并启动桌面开发版(项目根双击即可):先结束残留旧实例,
+                       # 再跑 pnpm dev:widget(见 2.2.1 编码与实现说明)
+node scripts/dev.mjs   # 与 dev.bat 等价的 Node 直接入口(不经 bat 壳)
 pnpm dev             # 仅 Vite Web 演示版(浏览器调试,不进 Electron)
 pnpm dev:widget      # 构建挂件页面并启动 Electron(日常调试主入口;
                      # 已前置 pnpm build:electron——dev:widget 自动重建
@@ -176,13 +179,34 @@ pnpm bridge          # 独立运行系统媒体桥接脚本(单独调试 SMTC)
 pnpm watch:electron  # 热重建 Agent 引擎/桥(监听 electron/agent/*.ts 与
                      # scripts/,自动 esbuild 重建 + 重启 electron;渲染端
                      # 仍用 dev:widget)
-node scripts/test-agent-core.mjs   # Agent 引擎核心测试(后端直测,93 用例)
+node scripts/test-agent-core.mjs   # Agent 引擎核心测试(后端直测,109 用例)
 pnpm test:markdown    # 消息气泡 Markdown 解析器测试(39 断言)
 ```
 
 ### 2.2 开发流程与验证约定
 
-- 日常调试:`pnpm dev:widget`(构建 + 启动 Electron)。
+- 日常调试:`pnpm dev:widget`(构建 + 启动 Electron),或双击项目根
+  `dev.bat` 一键完成「结束旧实例 → 重新构建 → 启动」。
+
+#### 2.2.1 dev.bat 一键启动脚本(2026-08-11)
+
+- **流程**:① 结束残留的旧实例——应用有单实例锁(`requestSingleInstanceLock`),
+  不结束则新启动只会唤起旧窗口、加载旧代码(常见于上次被强杀、托盘进程残留);
+  按 electron.exe 可执行文件路径过滤(`*dynamic-island*`),只杀本项目实例,
+  不影响电脑上其它 Electron 应用;随后轮询确认全部退出(上限 8s,锁文件随
+  进程退出释放,仍有残留时提示"可能权限不足")。② `pnpm dev:widget`
+  (已前置 build:electron,再构建挂件页面,最后启动 Electron)。
+- **编码设计(bat 必须纯 ASCII,真实逻辑在 Node)**——cmd.exe 分块读取批处理
+  文件:批处理启动瞬间以旧代码页(GBK)缓冲文件块,即使 `chcp 65001` 已把
+  控制台切到 UTF-8,切换前已缓冲的行仍按旧代码页解码,中文行被截断成乱码
+  命令(`'�并结束旧实例...' is not recognized`,实测)。因此 `dev.bat` 只保留
+  `@echo off` / `chcp 65001`(纯 ASCII,不受影响)并转调 `scripts/dev.mjs`
+  ——Node 原生 UTF-8,中文输出 100% 正确。
+- **踩坑实录**:① PowerShell 5.1 上 `$_.ProcessId` 恒为空(Stop-Process 报
+  "参数不能为空"),必须用 `$_.Id`(实测,原方案杀不掉任何进程);② Node 24
+  spawn `shell:true` + args 触发 `DEP0190` 弃用警告——pnpm 是 .cmd 壳,
+  CreateProcess 不能直接执行,改显式 `spawn('cmd.exe', ['/d','/s','/c',
+  'pnpm dev:widget'])`(与 MCP 工具启动 .cmd 的规则同款)。
 - **验证约定(用户要求)**:每次优化/修改代码后,自动重新构建并启动实机
   验证——默认执行 `pnpm dev:widget` 确认改动生效,配合 `timeout` 让应用
   几十秒后自动退出(托盘常驻不会自退)。
@@ -584,12 +608,20 @@ send(text, history)
 - **登录态热搜修复**:登录过期时 nav 接口无 wbi_img → 空 mixin →
   `orig.as_bytes()[i]` 越界 panic——wbi_keys 提取失败降级游客 nav 重试,
   仍失败返回明确错误;sign_wbi 加长度防御。
-- **HEVC 自动转码(2026-08-11)**:B 站高清流多为 HEVC,而挂件窗口在禁用
-  硬件加速下无法呈现 HEVC 帧(播放全黑,详见 10.x 黑屏诊断)——下载合并
-  时检测视频流编码,HEVC 自动转 H.264(libx264 veryfast,~17-20× 实时);
-  `--codec copy` 或 config `codec=copy` 保留原编码。**convert 子命令**:
-  `bili convert <path...>` 把已有 HEVC 文件就地转码为 H.264(引擎 bili
-  工具 `convert` action,后台执行),转码后窗口内直接可播。
+- **HEVC/AV1 自动转码(2026-08-11)**:B 站高清流多为 HEVC/AV1,而挂件
+  窗口在禁用硬件加速下无法呈现 HEVC 帧(播放全黑,详见 10.x 黑屏诊断;
+  AV1 只能软件解码,4K 掉帧)——下载合并时检测视频流编码,hev/av01
+  自动转 H.264(libx264 veryfast,~17-20× 实时);`--codec copy` 或 config
+  `codec=copy` 保留原编码。**convert 子命令**:`bili convert <path...>`
+  把已有 HEVC/AV1 文件就地转码为 H.264(引擎 bili 工具 `convert` action,
+  后台执行;含磁盘空间预检),转码后窗口内直接可播。
+- **实时下载进度(2026-08-11)**:`--progress-file <path>` 让 bili-tool 每
+  1.5s 原子写进度 JSON(stage/label/done/total/percent);引擎对单视频
+  下载自动追加该参数,轮询器每 2s 读文件更新任务状态块 detail——LLM
+  对话可答"下载到 68%";bili 工具 `progress` action 查进行中任务。
+- **其它加固(2026-08-11)**:拼接分片完整性校验(不匹配报错,防静默损坏);
+  `config` action(LLM 对话改默认 quality/codec/outdir,clap `--set` 需
+  num_args=2);download 未登录提示;`saved --clear` 清记录不删文件。
 
 #### 5.4.2 doc_convert(文档转换)
 

@@ -27,11 +27,18 @@ pub struct DownloadOptions {
     pub skip: bool,
     pub page: Option<i64>, // 分P：Some(n) 只下第 n P；None=全部
     /// 视频编码策略(2026-08-11,修复"HEVC 视频在挂件对话窗口播放全黑"):
-    /// `auto`(缺省)= 视频流是 HEVC(H.265)时自动转码为 H.264(libx264
-    /// veryfast,1080p 实测 ~17x 实时,33 分钟视频约 2 分钟)——挂件窗口
-    /// 的 Chromium 在禁用硬件加速(透明窗口稳定需要)下无法呈现 HEVC 帧;
+    /// `auto`(缺省)= 视频流是 HEVC(H.265)/AV1 时自动转码为 H.264
+    /// (libx264 veryfast,1080p 实测 ~17x 实时,33 分钟视频约 2 分钟)
+    /// ——挂件窗口的 Chromium 在禁用硬件加速(透明窗口稳定需要)下无法
+    /// 呈现 HEVC 帧,AV1 只能软件解码高码率掉帧;
     /// `copy` = 原样保留编码(旧行为,HEVC 文件在窗口内不可播)
     pub codec: String,
+    /// 进度 JSON 文件路径(2026-08-11 实时进度):下载/转码期间持续写入
+    /// `{"stage": "download"|"mux"|"transcode"|"done"|"error",
+    ///  "label": "video"|"audio", "done": 字节, "total": 字节,
+    ///  "percent": 0-100}`——引擎后台任务轮询读取,注入任务状态块,
+    /// LLM 对话里可回答"下载到 68%"。None = 不写(缺省)
+    pub progress_file: Option<String>,
 }
 
 impl Default for DownloadOptions {
@@ -49,6 +56,7 @@ impl Default for DownloadOptions {
             skip: true,
             page: None,
             codec: "auto".into(),
+            progress_file: None,
         }
     }
 }
@@ -109,6 +117,21 @@ fn pick_audio_stream(streams: &[video::Stream]) -> Option<&video::Stream> {
     streams.iter().max_by_key(|s| s.bandwidth)
 }
 
+/// 写进度 JSON(2026-08-11 实时进度):tmp + rename 原子写,轮询方
+/// (引擎)读不到半截 JSON;percent: -1 = 该阶段无百分比概念
+pub fn write_progress(path: Option<&str>, stage: &str, label: &str, done: u64, total: u64) {
+    let Some(p) = path else { return };
+    let percent = if total > 0 { (done as f64 / total as f64 * 100.0).round() as i64 } else { -1 };
+    let json = format!(
+        "{{\"stage\":\"{}\",\"label\":\"{}\",\"done\":{},\"total\":{},\"percent\":{}}}\n",
+        stage, label, done, total, percent
+    );
+    let tmp = format!("{p}.tmp");
+    if std::fs::write(&tmp, &json).is_ok() {
+        let _ = std::fs::rename(&tmp, p);
+    }
+}
+
 /// 下载一个 URL 到文件（Range 分片并发 + 断点续传 + 进度）
 pub async fn download_url(
     api: BiliApi,
@@ -118,6 +141,7 @@ pub async fn download_url(
     parallel: usize,
     rate_limit: Option<u64>,
     label: &str,
+    progress_path: Option<&Path>,
 ) -> Result<u64, ApiError> {
     std::fs::create_dir_all(tmpdir).map_err(|e| ApiError(format!("创建目录失败: {e}")))?;
 
@@ -199,12 +223,13 @@ pub async fn download_url(
         }));
     }
 
-    // 进度打印（每 1.5s）
+    // 进度打印（每 1.5s）+ 进度文件(2026-08-11 实时进度:引擎轮询读取)
     let d = done.clone();
     let dt = done_total.clone();
     let tt = total;
     let total_chunks = chunks;
     let label_owned = label.to_string();
+    let pp = progress_path.map(|p| p.to_path_buf());
     let progress_task = tokio::spawn(async move {
         loop {
             tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
@@ -213,6 +238,9 @@ pub async fn download_url(
             print!("\r{label_owned}: {:.1}% ({}/{})", pct, bytes, tt);
             use std::io::Write;
             std::io::stdout().flush().ok();
+            if let Some(p) = pp.as_deref() {
+                write_progress(p.to_str(), "download", &label_owned, bytes, tt);
+            }
             if d.load(Ordering::SeqCst) >= total_chunks {
                 break;
             }
@@ -232,6 +260,21 @@ pub async fn download_url(
         let part_path = tmpdir.join(format!("{label}_part_{i}.tmp"));
         if !part_path.exists() {
             return Err(ApiError(format!("分片 {i} 下载失败（{label}），已保留部分分片在 {tmpdir:?}")));
+        }
+        // **拼接完整性校验(2026-08-11 修复"静默损坏")**:4 次重试后仍失败
+        // 的分片可能留下**部分数据**(如 4MB 只下了 2MB),原实现直接拼接
+        // → 输出"看似成功"的损坏文件(播放到缺口处花屏/中断)。断点续传
+        // 跳过逻辑有大小校验,拼接这里必须同款校验,不匹配即报错(用户
+        // 重新下载即可,不产出坏文件)
+        let start = i * CHUNK;
+        let end = ((i + 1) * CHUNK - 1).min(total - 1);
+        let meta = tokio::fs::metadata(&part_path).await.map_err(|e| ApiError(format!("读取分片失败: {e}")))?;
+        if meta.len() != end - start + 1 {
+            return Err(ApiError(format!(
+                "分片 {i} 不完整({}/{} 字节,下载中断),请重新下载",
+                meta.len(),
+                end - start + 1
+            )));
         }
         let data = tokio::fs::read(&part_path).await.map_err(|e| ApiError(format!("读取分片失败: {e}")))?;
         out.write_all(&data).await.map_err(|e| ApiError(format!("拼接失败: {e}")))?;
@@ -455,6 +498,8 @@ async fn download_page_body(
 ) -> Result<PathBuf, String> {
     let tmpdir = outdir.join(format!(".tmp_{bvid}_{cid}"));
     let log = |m: String| println!("  {m}");
+    // 实时进度(2026-08-11):下载开始阶段标记(percent 由 download_url 更新)
+    write_progress(opts.progress_file.as_deref(), "download", "start", 0, 0);
     let playurl = video::get_playurl(api, bvid, cid).await.map_err(|e| e.to_string())?;
     let rate = rate_bytes(opts.rate.as_deref());
     let audio_stream = pick_audio_stream(&playurl.audio);
@@ -467,7 +512,7 @@ async fn download_page_body(
         };
         log(format!("下载音频 ({} kbps) ...", a_stream.bandwidth / 1000));
         let src_audio = tmpdir.join("audio.m4a");
-        if let Err(e) = download_url(api.clone(), &a_stream.base_url, &src_audio, &tmpdir, opts.parallel, rate, "audio").await {
+        if let Err(e) = download_url(api.clone(), &a_stream.base_url, &src_audio, &tmpdir, opts.parallel, rate, "audio", opts.progress_file.as_deref().map(std::path::Path::new)).await {
             let _ = std::fs::remove_dir_all(&tmpdir);
             return Err(format!("音频下载失败: {e}"));
         }
@@ -495,7 +540,7 @@ async fn download_page_body(
             // 非 dash 单文件（少见，未登录低清兜底）
             final_path = outdir.join(format!("{name}.mp4"));
             log("下载视频（单文件模式）...".into());
-            if let Err(e) = download_url(api.clone(), &playurl.durl[0].base_url, &final_path, &tmpdir, opts.parallel, rate, "video").await {
+            if let Err(e) = download_url(api.clone(), &playurl.durl[0].base_url, &final_path, &tmpdir, opts.parallel, rate, "video", opts.progress_file.as_deref().map(std::path::Path::new)).await {
                 let _ = std::fs::remove_dir_all(&tmpdir);
                 return Err(format!("视频下载失败: {e}"));
             }
@@ -510,8 +555,8 @@ async fn download_page_body(
             let src_v = tmpdir.join("video.m4v");
             let src_a = tmpdir.join("audio.m4a");
             let (rv, ra) = tokio::join!(
-                download_url(api.clone(), &v_stream.base_url, &src_v, &tmpdir, opts.parallel, rate, "video"),
-                download_url(api.clone(), &a_stream.base_url, &src_a, &tmpdir, opts.parallel, rate, "audio"),
+                download_url(api.clone(), &v_stream.base_url, &src_v, &tmpdir, opts.parallel, rate, "video", opts.progress_file.as_deref().map(std::path::Path::new)),
+                download_url(api.clone(), &a_stream.base_url, &src_a, &tmpdir, opts.parallel, rate, "audio", opts.progress_file.as_deref().map(std::path::Path::new)),
             );
             match (rv, ra) {
                 (Ok(_), Ok(_)) => {}
@@ -525,13 +570,16 @@ async fn download_page_body(
                 return Err("需要 ffmpeg 合并音视频（未找到 ffmpeg）".into());
             }
             final_path = outdir.join(format!("{name}.mp4"));
-            // 编码策略(2026-08-11):codec=auto 且视频流是 HEVC → 转码
-            // H.264(挂件窗口无法呈现 HEVC 帧,全黑——ffmpeg libx264
-            // veryfast 实测 ~17x 实时,大文件几分钟内完成,保留画质)
-            let is_hevc = v_stream.codecs.to_lowercase().starts_with("hev");
-            let transcode = opts.codec != "copy" && is_hevc;
+            // 编码策略(2026-08-11):codec=auto 且视频流是 HEVC/AV1 →
+            // 转码 H.264(挂件窗口:HEVC 在禁用硬件加速下零帧全黑、AV1
+            // 只能软件解码 4K 掉帧——ffmpeg libx264 veryfast 实测
+            // ~17x 实时,大文件几分钟内完成,保留画质)
+            let codecs_lc = v_stream.codecs.to_lowercase();
+            let needs_transcode = codecs_lc.starts_with("hev") || codecs_lc.starts_with("av01");
+            let transcode = opts.codec != "copy" && needs_transcode;
+            write_progress(opts.progress_file.as_deref(), if transcode { "transcode" } else { "mux" }, "video", 0, 0);
             if transcode {
-                log("视频为 HEVC(H.265),转码为 H.264(挂件窗口可直接播放,需几分钟)...".into());
+                log("视频为 HEVC/AV1 编码,转码为 H.264(挂件窗口可直接播放,需几分钟)...".into());
             } else {
                 log("合并音视频 ...".into());
             }
@@ -557,6 +605,7 @@ async fn download_page_body(
         }
     }
     let _ = std::fs::remove_dir_all(&tmpdir);
+    write_progress(opts.progress_file.as_deref(), "done", "video", 100, 100);
     Ok(final_path)
 }
 
@@ -613,6 +662,15 @@ pub fn convert_to_h264(path: &str) -> Result<(bool, String), String> {
     if !p.is_file() {
         return Err(format!("文件不存在: {path}"));
     }
+    // **磁盘空间预检(2026-08-11)**:输出 H.264 体积 ≈ 源文件(veryfast
+    // crf 23 实测相近),预留 1.2 倍;空间不足提前报错,避免转码到一半
+    // 失败留下半截临时文件(用户实测大视频转码失败的常见原因)
+    if let Some(free) = free_disk_bytes(p) {
+        let need = std::fs::metadata(p).map(|m| m.len() as f64 * 1.2).unwrap_or(0.0) as u64;
+        if free < need {
+            return Err(format!("磁盘空间不足(可用 {}/{} 字节,预计需要 {}),请清理磁盘后重试", free, fmt_bytes(free), fmt_bytes(need)));
+        }
+    }
     let codec = match probe_video_codec(path) {
         Some(c) => c,
         None => return Err(format!("无法识别视频编码: {path}")),
@@ -634,4 +692,48 @@ pub fn convert_to_h264(path: &str) -> Result<(bool, String), String> {
     let _ = std::fs::remove_file(path);
     std::fs::rename(&tmp, p).map_err(|e| format!("替换原文件失败: {e}"))?;
     Ok((true, format!("HEVC → H.264 转码完成: {path}")))
+}
+
+/// 路径所在磁盘的可用字节数(2026-08-11 转码预检;Windows 用
+/// GetDiskFreeSpaceExW,非 Windows 返回 None 跳过检查)
+fn free_disk_bytes(p: &std::path::Path) -> Option<u64> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+        let root: Vec<u16> = p
+            .ancestors()
+            .filter_map(|a| a.to_str())
+            .find(|s| s.len() >= 2 && s.as_bytes()[1] == b':')
+            .map(|s| format!("{}\\", &s[..2]))
+            .unwrap_or_else(|| "C:\\".to_string())
+            .encode_utf16()
+            .collect();
+        let mut free: u64 = 0;
+        let mut total: u64 = 0;
+        let mut free_total: u64 = 0;
+        let ok = unsafe {
+            GetDiskFreeSpaceExW(
+                root.as_ptr(),
+                &mut free,
+                &mut total,
+                &mut free_total,
+            )
+        };
+        if ok != 0 { Some(free) } else { None }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = p;
+        None
+    }
+}
+
+/// 人类可读字节数(MB/GB)
+fn fmt_bytes(n: u64) -> String {
+    if n >= 1024 * 1024 * 1024 {
+        format!("{:.1}GB", n as f64 / 1024.0 / 1024.0 / 1024.0)
+    } else {
+        format!("{:.1}MB", n as f64 / 1024.0 / 1024.0)
+    }
 }

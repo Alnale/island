@@ -17,7 +17,7 @@ percent-encoding = "2"
 qrcode = "0.14"
 image = "0.25"  # 二维码 PNG 输出(对话内扫码登录,2026-08-07)
 futures = "0.3"
-windows-sys = { version = "0.59", features = ["Win32_System_Console", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.59", features = ["Win32_System_Console", "Win32_UI_WindowsAndMessaging", "Win32_Storage_FileSystem"] }
 axum = "0.8.9"
 tokio-util = "0.7.19"
 rust-embed = "8.12.0"
