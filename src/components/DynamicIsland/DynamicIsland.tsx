@@ -533,7 +533,11 @@ export const DynamicIsland = memo(function DynamicIsland({
   // agentMini = 收起瞬间的快照(独立存活)
   const [agentLastMedia, setAgentLastMedia] = useState<AgentMediaReport | null>(null)
   const agentLastMediaRef = useRef<AgentMediaReport | null>(null)
-  const [agentPlaying, setAgentPlaying] = useState<AgentMediaReport | null>(null)
+  // 2026-08-11 性能:agentPlaying 只被 doCollapse 同步读取(小窗快照/续播
+  // 判定),**无渲染用途**——原 useState 让视频播放进度上报(节流 1Hz,
+  // setAgentPlaying 每次新对象)触发整岛重渲染:消息多 + 视频播放 = 卡顿
+  // 主因(1Hz 全列表重建,软件渲染下再叠视频合成)。改 useRef 直写,
+  // 播放上报零渲染;doCollapse 读 ref 最新值,语义不变
   const agentPlayingRef = useRef<AgentMediaReport | null>(null)
   const [agentMini, setAgentMini] = useState<AgentMediaReport | null>(null)
   useEffect(() => {
@@ -543,8 +547,10 @@ export const DynamicIsland = memo(function DynamicIsland({
       ).detail
       if (!detail || !detail.media || detail.type !== 'play') return
       // 播放/暂停:播放中 → 续播标记;暂停 → 清(仅同 src)
-      if (detail.media.playing) setAgentPlaying({ ...detail.media })
-      else setAgentPlaying((prev) => (prev && prev.src === detail.media.src ? null : prev))
+      if (detail.media.playing) agentPlayingRef.current = { ...detail.media }
+      else if (agentPlayingRef.current && agentPlayingRef.current.src === detail.media.src) {
+        agentPlayingRef.current = null
+      }
     }
     document.addEventListener(AGENT_MEDIA_EVENT, onMedia)
     return () => document.removeEventListener(AGENT_MEDIA_EVENT, onMedia)
@@ -553,9 +559,6 @@ export const DynamicIsland = memo(function DynamicIsland({
   useEffect(() => {
     agentLastMediaRef.current = agentLastMedia
   }, [agentLastMedia])
-  useEffect(() => {
-    agentPlayingRef.current = agentPlaying
-  }, [agentPlaying])
   const islandRef = useRef<HTMLDivElement>(null)
   const textRef = useRef<HTMLSpanElement>(null)
   const barRef = useRef<HTMLDivElement>(null)
@@ -1062,7 +1065,7 @@ export const DynamicIsland = memo(function DynamicIsland({
         loop: playingAudio.loop,
       })
     }
-    setAgentPlaying(null)
+    agentPlayingRef.current = null
     setExpanded(false)
     onExpandChangeRef.current?.(false)
     // 形变动画期:关闭背景毛玻璃(backdrop 每帧重采样是卡顿主因)

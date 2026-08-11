@@ -1022,7 +1022,34 @@ running(detail 带进程与输出目录),完成/失败进终态——**顺带修
   thinking+reasoning 流 → 深度思考中…;thinking+文本流 → 正在回复…;
   running → 正在执行:工具名;idle → 最近回复预览)。
 
-### 6.3 消息气泡 Markdown 渲染
+#### 6.2.1 视频播放性能(2026-08-11 用户实测"消息稍微多一点,加载一个视频就很卡")
+
+放大器链(原实现,全部实测定位):
+
+1. **视频播放进度上报 1Hz 触发整岛重渲染(P0)**:VideoPlayer timeupdate
+   节流 1Hz 经 `dispatchAgentMedia('play')` → DynamicIsland 的
+   `setAgentPlaying({...detail.media})`(每次新对象)→ **整个 DynamicIsland
+   重渲染** → AgentView 重渲染 → 全消息列表重建。而 `agentPlaying` 其实
+   只被 `doCollapse` 同步读取(小窗快照/续播判定),**JSX 零消费**——改
+   `useRef` 直写,播放上报零渲染(2026-08-11)。附带:上报 payload 原
+   `frameRef.current?.offsetWidth`(1Hz 强制 reflow)改 `width` state 值
+   (style width = 显示宽,等价零布局读)。
+2. **内联箭头打穿 AssistantBlock 的 memo(P0)**:`onMediaAutoPlayed={() =>
+   onMediaAutoPlayed?.(m.id)}` 每渲染新引用 → memo 失效 → 任何一次
+   AgentView 重渲染都重建全部已落定消息(每条 = parts 遍历 + Markdown
+   全量重渲染 + 工具卡片重建)。改稳定 `useCallback` + `id` prop 传参
+   (AssistantBlock 增 id prop,消费回调按 id 调用)。
+3. **MutationObserver 全列表 reflow(P1)**:class 属性监听(工具卡片折叠
+   实时收缩用)覆盖整个消息列表子树——视频控件自动隐藏/全屏/离场类切换
+   (ui-hidden/fullscreen/leaving-fullscreen)每次触发 `measureHeight`
+   全列表强制 reflow(逐子 offsetHeight + getComputedStyle)。媒体气泡
+   内部类切换不影响列表高度(高度由 width×aspect 决定)——突变目标在
+   `.island-media-frame` 内时跳过重测。
+
+遗留(架构性,未改):禁用硬件加速(透明窗口 alpha 稳定需要)下视频软件
+解码 + 全窗口软件合成,成本 ∝ 窗口面积——消息多 → 窗口高 → 每帧合成
+更贵,这是卡顿的下限,无法从渲染端消除(正解 = 保持消息少/窗口高度 16:9
+封顶,已有)。
 
 - 手写零依赖渲染器:**解析器 `views/markdownParser.ts`(纯 TS,不依赖
   DOM/React,可 node 直测)+ 组件 `views/Markdown.tsx`**。GFM 子集:

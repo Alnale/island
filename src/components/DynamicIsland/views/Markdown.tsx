@@ -1509,15 +1509,18 @@ export function MediaFrame({
                 name: alt,
                 playing,
                 position: lastPosRef.current,
-                // 尺寸同步(2026-08-10 小窗尺寸):offsetWidth 实时读(渲染
-                // 帧内布局已更新);aspect state 闭包取当前值
-                width: frameRef.current?.offsetWidth,
+                // 尺寸同步(2026-08-10 小窗尺寸):width state 就是显示宽
+                // (style width),上报 1Hz 节流——原 offsetWidth 实时读是
+                // 强制 reflow(视频播放期间每上报一次全列表布局校验,
+                // 2026-08-11 性能);aspect state 闭包取当前值
+                width: width ?? readMediaWindowWidth(),
                 aspect: aspect ?? 16 / 9,
               })
             }
             onProgress={(position) => {
-              // 节流 ~1Hz:timeupdate 每 ~250ms 触发,每次 setAgentPlaying
-              // 都会重渲染岛体,1s 粒度足够小窗续播定位
+              // 节流 ~1Hz:timeupdate 每 ~250ms 触发,1s 粒度足够小窗
+              // 续播定位(2026-08-11:播放上报已不触发渲染,见
+              // DynamicIsland agentPlaying 改 ref)
               if (Math.round(position) !== lastPosRef.current) {
                 lastPosRef.current = Math.round(position)
                 dispatchAgentMedia('play', {
@@ -1526,7 +1529,7 @@ export function MediaFrame({
                   name: alt,
                   playing: true,
                   position,
-                  width: frameRef.current?.offsetWidth,
+                  width: width ?? readMediaWindowWidth(),
                   aspect: aspect ?? 16 / 9,
                 })
               }

@@ -357,6 +357,14 @@ export function AgentView({
   mediaAutoPlayIds,
   onMediaAutoPlayed,
 }: AgentViewProps) {
+  // 稳定引用(2026-08-11,性能):消费自动播放标记回调按 id 传参,每条
+  // 消息复用同一引用——内联箭头会让 AssistantBlock 的 memo 全部失效,
+  // 任何一次本组件重渲染都重建全部已落定消息(视频播放 1Hz 上报/流式
+  // 期间尤其放大,见 Fix B)
+  const onMediaAutoPlayedStable = useCallback(
+    (id: string) => onMediaAutoPlayed?.(id),
+    [onMediaAutoPlayed],
+  )
   // 对话最后媒体快照(2026-08-09):从消息**数据**取最后一条含媒体的
   // 消息的最后一个媒体——数据顺序 = 消息顺序,不受消息列表分批挂载
   // (visibleCount)/重挂载影响(原挂载事件上报在大量历史消息时最后上报
@@ -796,11 +804,22 @@ export function AgentView({
   // ToolCard 的 open 是内部状态,折叠后内容变矮——但消息列表 overflow
   // 滚动,列表容器高度不变,ResizeObserver 不触发 → 岛体高度不收缩,
   // 直到下一条消息/工具调用才重测(实测 bug)。MutationObserver 监听
-  // 子树 class 变化(卡片 open 类切换)→ rAF 重测,实时跟随
+  // 子树 class 变化(卡片 open 类切换)→ rAF 重测,实时跟随。
+  // **媒体气泡内部 UI 类切换跳过(2026-08-11 性能)**:视频控件的
+  // 自动隐藏/全屏/离场类切换(ui-hidden/fullscreen/leaving-fullscreen)
+  // 不影响列表高度——原实现每次切换都触发全列表强制 reflow
+  // (measureHeight 逐子 offsetHeight + getComputedStyle),视频播放
+  // 期间控件隐藏/交互显示 = 卡顿源之一;媒体高度由 width×aspect
+  // 决定,类切换不改尺寸,安全跳过
   useLayoutEffect(() => {
     const el = scrollRef.current
     if (!el || !onHeightChange) return
-    const observer = new MutationObserver(() => requestAnimationFrame(measureHeight))
+    const observer = new MutationObserver((records) => {
+      for (const r of records) {
+        if (r.target instanceof Element && r.target.closest('.island-media-frame')) return
+      }
+      requestAnimationFrame(measureHeight)
+    })
     observer.observe(el, { subtree: true, attributes: true, attributeFilter: ['class'] })
     return () => observer.disconnect()
   }, [measureHeight, onHeightChange])
@@ -1337,12 +1356,15 @@ export function AgentView({
               ) : (
                 <AssistantBlock
                   key={m.id}
+                  id={m.id}
                   parts={m.parts}
                   usage={m.usage}
                   // 2026-08-10 自动播放只限"当次对话":本会话流式落定且
-                  // 未消费的消息才自动播;历史/重挂载读到 false 不播
+                  // 未消费的消息才自动播;历史/重挂载读到 false 不播。
+                  // onMediaAutoPlayed 引用稳定(useCallback)+ id 传参,
+                  // 不打穿 AssistantBlock 的 memo(2026-08-11)
                   mediaAutoPlay={mediaAutoPlayIds?.has(m.id) ?? false}
-                  onMediaAutoPlayed={() => onMediaAutoPlayed?.(m.id)}
+                  onMediaAutoPlayed={onMediaAutoPlayedStable}
                 />
               ),
             )}

@@ -166,24 +166,30 @@ export const ToolSummary = memo(function ToolSummary({ items }: { items: ToolCal
     点击汇总行展开看各卡,再点卡片展开参数。
     memo:已落定消息 parts 引用不变,流式期间不再重建 */
 export const AssistantBlock = memo(function AssistantBlock({
+  id,
   parts,
   usage,
   mediaAutoPlay = false,
   onMediaAutoPlayed,
 }: {
+  /** 消息 id(2026-08-11:消费标记回调按 id 传参,回调引用稳定——原
+   * 内联箭头 `() => onMediaAutoPlayed?.(m.id)` 每渲染新引用,把 memo
+   * 整个打穿,消息一多任何一次重渲染(流式/视频播放上报)都全列表
+   * 重建 = 卡顿放大器) */
+  id?: string
   parts: AgentMessage['parts']
   usage?: AgentMessage['usage']
   /** 2026-08-10 自动播放只限"当次对话":本会话流式落定且未消费的消息才
    * true(LLM 播放的那一轮自动播一次);历史/重挂载读到 false */
   mediaAutoPlay?: boolean
   /** 消费标记(自动播放已发生,该消息重挂载不再播) */
-  onMediaAutoPlayed?: () => void
+  onMediaAutoPlayed?: (id: string) => void
 }) {
   // 消费自动播放标记:渲染后立即从 Set 移除——之后重挂载(收起再展开/
   // 历史恢复)渲染时读到 false,不再自动播放;消费幂等(Set.delete 重复
   // 调用无害)
   useEffect(() => {
-    if (mediaAutoPlay) onMediaAutoPlayed?.()
+    if (mediaAutoPlay && id !== undefined) onMediaAutoPlayed?.(id)
     // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅标记翻转时
   }, [mediaAutoPlay])
   // 文本段按原顺序渲染;工具调用全量收集(调用 + 结果配对;顺序即执行
