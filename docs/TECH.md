@@ -1031,6 +1031,56 @@ running(detail 带进程与输出目录),完成/失败进终态——**顺带修
   thinking+reasoning 流 → 深度思考中…;thinking+文本流 → 正在回复…;
   running → 正在执行:工具名;idle → 最近回复预览)。
 
+#### 6.2.0 消息列表虚拟滚动(2026-08-12,修复"100+ 条消息滚动到中间抽搐")
+
+**现象(用户实测)**:100+ 条消息时滚动条滚到中间就抽搐——全量渲染下消息
+DOM 数千节点,挂件禁用硬件加速(透明窗口 alpha 稳定,见 10.2)软件渲染,
+滚动中部每帧绘制成本随内容全长增长 = 掉帧;滚动条也没有"按消息压缩"。
+
+**方案**:聊天视图消息区 = `MessageWindow`(`views/MessageWindow.tsx`)+
+尾部(流式/思考/错误)两个 flex 段,窗口化渲染——只挂载可视区 ± overscan
+(上 3 条 / 下 600px)的消息,其余高度由上下 spacer 撑起:
+
+- **高度缓存** `Map<id, px>`:挂载消息经 ResizeObserver 实测(工具卡片
+  展开、媒体 aspect 修正、文本重排、宽度动画中的换行变化自动跟踪);
+  滚动经过区域全部真实化,重挂载直接复用。
+- **未测消息按角色预估**(user 64 / assistant 150):测量前滚动条估算;
+  滚动经过一次只真实化一条(平滑修正)——此前 content-visibility 方案
+  (--msg-h 估算 / `.cv` 阈值 200)已整体删除:CV 在滚动中**整段**真实化
+  scrollHeight = 累计高度修正 = 滚动条抽搐无解(2026-08-09~08-12 实测)。
+- **spacer 数学**:top = offset(start) − gap、bottom = total −
+  offset(end) − gap(offset(i) = 更早消息高度和 + 每条后一个 gap,gap
+  运行时从容器 rowGap 读取,与 CSS `--agent-msg-gap` 同源)。窗口 div
+  布局高**恒等于虚拟总高**(可证:top + gap + 渲染段 + gap + bottom
+  展开即 total)——AgentView 的岛体高度测量(children.offsetHeight
+  求和)零改动,直接量窗口。
+- **零重渲染布局更新**:高度变化(RO)只直写 spacer + 贴底校正,不
+  setState;只有可视范围变化(滚动/岛体长高)才重渲染挂载区(~15 条)
+  ——滚动中绘制成本与内容全长解耦,165Hz 跟手。
+- **贴底保持**:`atBottomRef` 事件驱动(onScroll 距底 48px 判定),内容
+  总高变化时贴底;滚动本身不强制(用户拖到"距底 20px"不被吸走)。
+  **核心坑(实测,贴底链断裂根因)**:贴底后测量收敛令 total 变小,下一帧
+  读取的 scrollTop 瞬时**大于内容总高** → start 循环 `acc+h > scrollTop`
+  恒 false → start=0(全量渲染)+ spacer 直写 0/0 → win 高塌缩 → 浏览器
+  clamp scrollTop 到塌缩后的小值,总高恢复后不再恢复 = 滚动停在中间
+  (实测 200 条注入后停在 ~145 条处,手动滚动能到尾部)——修复:start
+  循环前把 scrollTop 钳制到 [0, total − clientH](详见 10.9)。
+- **firstInit 首帧贴底优先**:按 total − clientH 直接写 scrollTop(不能
+  只改局部范围计算——滚动条停在顶部、可视区显示 top spacer 空白,偶发
+  竞态下贴底链断裂),首帧即渲染底部消息零闪烁。
+- **宽度变化**(展开/缩放动画):已挂载消息因换行变化高度自动重测(消息
+  RO 观察含宽度,换行 → 高度变化 → 回调),屏外消息保留旧宽度缓存、滚动
+  经过时重挂载重测——不整清缓存(清空后已挂载消息无新 RO 回调,缓存
+  永远为空,总高恒用预估)。
+- **React 19 ref cleanup** 挂载/卸载观察关系(不 unobserve 会累积被卸载
+  消息的强引用,长历史滚动泄漏)。
+- **已知取舍**:屏外消息卸载 → 工具卡片展开状态不保留(滚走再滚回折叠)、
+  媒体不挂载(桥 list_conversation_media 只列可视区附件);进入面板/发送
+  跳底保留(双 rAF + 150ms 校正,MessageWindow 测量后贴底保持兜底)。
+- 验证:独立 Electron 验证脚本注入 200 条交替消息,5/5 次全断言通过
+  (DOM 消息数 8~16、scrollHeight 与窗口高度精确一致、初始贴底、中部/
+  底部/顶部渲染正确)。
+
 #### 6.2.1 视频播放性能(2026-08-11 用户实测"消息稍微多一点,加载一个视频就很卡")
 
 放大器链(原实现,全部实测定位):
@@ -1560,6 +1610,34 @@ direction?('right'|'left'), wheelWhenOpen?}>`,四处复用:Agent 设置菜单 /
 > 设计内容(堆叠/停靠/黑洞吸纳/模式切换条/潮汐形变等)详见 CLAUDE.md
 > 「双岛并存模式」章节,实现时按 screenshot-tests.cjs 先例把组合状态机
 > 独立成 electron/dual.cjs。
+
+### 10.9 虚拟滚动贴底链断裂(2026-08-12,MessageWindow 实测)
+
+**现象**:200 条消息注入后偶发(2/3 次运行)滚动停在 ~145 条处——范围
+计算正常(手动滚动能到尾部),自动贴底链断裂。链条:消息落定 → 跳底
+(scrollTop = scrollHeight)→ 可视区消息挂载 → RO 测量 → total 变化 →
+贴底(scrollTop = scrollHeight)→ scroll 事件 → 范围后移 → 新消息挂载
+→ 测量 → ……
+
+**根因**:贴底(scrollTop = scrollHeight)后测量收敛令 total 变小(预估
+普遍偏高,user 64 vs 真实 ~36)——下一帧 updateLayout 读取的 scrollTop
+**瞬时大于内容总高** → start 循环 `acc+h > scrollTop` 恒 false →
+start=0(全量渲染)+ spacer 直写 0/0 → win 高塌缩(scrollHeight 瞬变
+305px)→ 浏览器把 scrollTop clamp 到塌缩后的小值(≈9720)→ 总高恢复
+后 scrollTop 不再恢复 = 滚动停在中间。诊断轨迹:updateLayout 逐帧打印
+`scrollTop=21743 → 9722`(clamp 后不再回)、`calcSt=22365 > total=22341`
+(start=0 现场)。
+
+**修复**:start 循环前把 scrollTop 钳制到 [0, total − clientH](贴底语义
+由 atBottomRef 分支保持)。修复后 5/5 次验证全过。
+
+**排查过程教训(验证脚本)**:用 stub IPC 独立 Electron 验证时,`agent:tools`
+handler 误返回 `{tools: []}`(对象)而 useAgent 期望数组——useAgent 的
+3s 外部工具重拉轮询 `toolsRef.current.some` 崩溃,React 错误恢复重挂载
+子树(MessageWindow 重挂载 → 高度缓存清空 → total 锯齿 305/737/35701,
+掩盖真实 bug 多轮)。stub 必须与真实 handler 返回形状逐一对齐(先查
+main.cjs 的 safeHandle 实现);渲染端错误要挂 `unhandledrejection` 捕获
+堆栈定位(仅 window 'error' 捕获不到 promise rejection)。
 
 ---
 

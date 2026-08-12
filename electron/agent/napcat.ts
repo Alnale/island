@@ -89,6 +89,11 @@ export interface NapcatStatus {
   receivedCount: number
   /** 已回复数 */
   repliedCount: number
+  /** 私聊白名单(2026-08-12 诊断:空 = 回复所有私聊) */
+  allowed?: string[]
+  /** 监听群白名单(2026-08-12 诊断:空 = 监听所有群;不在列表的群
+   * 消息被过滤,LLM 查"为什么新群收不到"可见) */
+  allowedGroups?: string[]
 }
 
 /** 主进程注入的依赖 */
@@ -590,6 +595,8 @@ export function createNapcatClient(deps: NapcatDeps) {
         lastError,
         receivedCount,
         repliedCount,
+        allowed: cfg().napcatAllowed ?? [],
+        allowedGroups: cfg().napcatAllowedGroups ?? [],
       }
     },
     getRecentMessages(): NapcatMessage[] {
@@ -668,7 +675,12 @@ export function createNapcatTools(client: {
           return (
             `NapCat 状态:${s.connected ? '已连接' : '未连接'}(${s.url})` +
             (s.lastError ? `\n最近错误:${s.lastError}` : '') +
-            `\n收到消息 ${s.receivedCount} 条,已回复 ${s.repliedCount} 条`
+            `\n收到消息 ${s.receivedCount} 条,已回复 ${s.repliedCount} 条` +
+            // 白名单诊断(2026-08-12:换群监听后新群收不到 = 群白名单
+            // 没变,status 直接可见)
+            `\n私聊白名单:${s.allowed && s.allowed.length > 0 ? s.allowed.join('、') : '(全部)'}` +
+            `\n监听群:${s.allowedGroups && s.allowedGroups.length > 0 ? s.allowedGroups.join('、') : '(全部)'}` +
+            `\n(换群监听用 set_napcat_config 的 allowedGroups 参数)`
           )
         }
         if (action === 'recent') {

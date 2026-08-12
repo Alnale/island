@@ -32,6 +32,8 @@ import { useLeavingList } from '../../../hooks/useLeavingList'
 import { QuickMenu } from './QuickMenu'
 import { Markdown, type AgentMediaReport } from './Markdown'
 import { AssistantBlock, ToolSummary, UserBubble } from './AgentMessages'
+import { MessageWindow } from './MessageWindow'
+import type { AgentMessage } from '../../../agent/types'
 import {
   AGENT_PANEL_FIXED_H,
   AGENT_PANEL_MAX_H,
@@ -190,23 +192,11 @@ const VIEW_LEAVE_MS = 200
  * 恢复未发送的输入;发送成功即清除(已消费) */
 const AGENT_DRAFT_KEY = 'widget-agent-draft'
 
-/** 消息分批挂载每帧批大小(对话多时展开不卡,2026-08-08):每帧挂载
- * 一批消息(从最新往旧),React commit + Markdown 解析分散到多帧 */
+/** 消息分批挂载每帧批大小(2026-08-08 起:对话多时展开不卡——每帧挂载
+ * 一批消息(从最新往旧),React commit + Markdown 解析分散到多帧;
+ * 2026-08-12 起仅作骨架阈值:消息多(>一批)先进骨架再挂载真实内容,
+ * 实际挂载由 MessageWindow 虚拟滚动按可视区窗口化接管) */
 const BATCH_RENDER = 12
-
-/** 消息列表启用 content-visibility 的条数阈值(2026-08-09 修复"大量
- * 消息滚动条中间部分滚动抖动"):实测 content-visibility 的估算机制在
- * 滚动中必然修正 scrollHeight(60 条滚动 6 段波动 412px,估算精确到
- * 每条真实高度也一样,Chromium 行为)——滚动条抖动无解;而全量布局
- * 滚动条完全稳定(drift 0,实测)。阈值:≤200 条全量布局(文本消息
- * 布局成本低,滚动流畅);超过(长历史)才启用 content-visibility 保
- * 证滚动性能,接受滚动条轻微修正。
- * **2026-08-12 阈值 100→200(用户实测 100+ 条"拖到底只滚一点" +
- * 滚动中部抽搐)**:100-200 条启用 CV 时,屏外估算(120px/条默认,
- * 长文本/媒体实际数百 px)远小于真实 → scrollHeight 低估 → thumb 大、
- * 拖到底滚不满;滚动时真实化 → 高度修正 → 抽搐。提到 200 后 100-200
- * 条全量布局(滚动条完全稳定、长度真实),超 200 才启用 CV */
-const AGENT_MSG_CV_THRESHOLD = 200
 
 /**
  * 平滑滚动到目标位置(自绘 rAF 插值,非线性):
@@ -428,6 +418,26 @@ export function AgentView({
     (id: string) => onMediaAutoPlayed?.(id),
     [onMediaAutoPlayed],
   )
+  // 单条消息渲染(2026-08-12,MessageWindow 窗口化渲染用):useCallback
+  // 稳定引用——滚动中 MessageWindow 重渲染(范围变化)时消息组件靠
+  // memo 跳过;mediaAutoPlayIds 变化(新消息落定)才重建(此时范围内
+  // 消息数据本就该刷新)
+  const renderMessage = useCallback(
+    (m: AgentMessage) =>
+      m.role === 'user' ? (
+        <UserBubble key={m.id} m={m} />
+      ) : (
+        <AssistantBlock
+          key={m.id}
+          id={m.id}
+          parts={m.parts}
+          usage={m.usage}
+          mediaAutoPlay={mediaAutoPlayIds?.has(m.id) ?? false}
+          onMediaAutoPlayed={onMediaAutoPlayedStable}
+        />
+      ),
+    [mediaAutoPlayIds, onMediaAutoPlayedStable],
+  )
   // 对话最后媒体快照(2026-08-09):从消息**数据**取最后一条含媒体的
   // 消息的最后一个媒体——数据顺序 = 消息顺序,不受消息列表分批挂载
   // (visibleCount)/重挂载影响(原挂载事件上报在大量历史消息时最后上报
@@ -536,61 +546,11 @@ export function AgentView({
     const timer = window.setTimeout(() => setPhase('content'), AGENT_PHASE_IN_MS)
     return () => window.clearTimeout(timer)
   }, [phase])
-  // 消息分批挂载(2026-08-08 用户要求"对话一多展开就卡"):内容期一次性
-  // 挂载全部消息时,几百条消息的 React commit + Markdown 解析 + DOM
-  // 创建阻塞主线程数百毫秒(形变刚结束、窗口 resize 同步进行 = 卡顿)。
-  // 分批:每帧挂载一批(从最新消息往旧),commit 分散到多帧,展开流畅;
-  // 分批期间高度测量跟随(窗口平滑增长),滚动保持底部。消息少(≤一批)
-  // 时一次挂载,无感
-  const [visibleCount, setVisibleCount] = useState(0)
-  const visibleCountRef = useRef(0)
-  const visibleTotalRef = useRef(messages.length)
-  visibleTotalRef.current = messages.length
-  // 2026-08-11 修复"头部媒体消息分批追平中卸载重挂,自动播放标记丢失":
-  // 消息数比上次渲染增加(运行时注入)→ **立即全量显示**(渲染期计算,
-  // 不等追平 effect)——slice(-visibleCount) 在 visibleCount < messages.length
-  // 时会切掉头部已挂载消息(DOM 卸载),追平后重挂的新实例读到**已消费**
-  // 的 mediaAutoPlay 标记不再自动播放(chat-media 巡检实测测试视频挂载
-  // 4 次全不播;真实 LLM 回复在尾部不受影响,但注入/恢复场景同样受益)。
-  // 展开瞬间(messages 不变)仍走分批:visibleCount 从 0 逐批增长,
-  // slice(-N) 从尾部(最新消息)往旧显示,分批语义不变;
-  // shownCount === 0 时显示空(消除 slice(-0)=slice(0)=全量的边界 bug)
-  const lastMsgLenRef = useRef(messages.length)
-  const msgGrew = messages.length > lastMsgLenRef.current
-  lastMsgLenRef.current = messages.length
-  const shownCount = msgGrew ? messages.length : visibleCount
-  const visibleMessages = shownCount > 0 ? messages.slice(-shownCount) : []
-  // **useLayoutEffect 而不是 useEffect**(2026-08-08 修复"几条消息也卡"
-  // 回归):effect 在 commit 后、paint 前同步 setVisibleCount → React
-  // 同步 re-render,content 切换**首帧即渲染首批消息**——原 useEffect
-  // 先提交一帧 visibleCount=0 的空列表,测量把岛体高度压到下限、窗口
-  // resize 一次,下一帧消息渲染再测量再 resize = 高度二次跳变 + 双
-  // resize,展开动画卡(几条消息也走此路径,实测)
-  useLayoutEffect(() => {
-    if (phase !== 'content') return
-    const total = visibleTotalRef.current
-    if (visibleCountRef.current >= total) return // 已挂载(追平后进入)
-    visibleCountRef.current = Math.min(BATCH_RENDER, total)
-    setVisibleCount(visibleCountRef.current)
-    if (total <= BATCH_RENDER) return
-    let raf = 0
-    const step = () => {
-      const next = Math.min(visibleTotalRef.current, visibleCountRef.current + BATCH_RENDER)
-      visibleCountRef.current = next
-      setVisibleCount(next)
-      if (next < visibleTotalRef.current) raf = requestAnimationFrame(step)
-    }
-    raf = requestAnimationFrame(step)
-    return () => cancelAnimationFrame(raf)
-  }, [phase])
-  // 新消息落定(流式/历史加载):分批结束后追平,新消息不等分批
-  // (分批进行中由循环天然追到最新总数,无需打断)
-  useEffect(() => {
-    if (visibleCountRef.current < messages.length) {
-      visibleCountRef.current = messages.length
-      setVisibleCount(messages.length)
-    }
-  }, [messages])
+  // 消息挂载(2026-08-12 虚拟滚动接管):MessageWindow 按可视区窗口化
+  // 渲染,只挂载可视区 ± overscan 的消息,其余高度由 spacer 撑起——
+  // 数百条消息的 DOM/绘制成本与可视区解耦,滚动到中间不再抽搐。
+  // 原分批挂载(visibleCount 逐批 rAF 增长)与 content-visibility
+  // 估算(--msg-h/阈值 200)已删除,见 MessageWindow.tsx 头部注释
   // 卸载时清理候选收起计时器(动画未完成即卸载不残留)
   useEffect(() => () => window.clearTimeout(suggestCloseTimerRef.current), [])
   // 输入框引用:LLM 回复完成后自动聚焦,直接可输入
@@ -624,46 +584,19 @@ export function AgentView({
   }, [busy, view])
 
   // 岛体高度自适应:目标高度 = 固定部分 + 消息列表内容自然高。
-  // 内容自然高 = 子元素高度求和(含列表 gap):scrollHeight 在内容
-  // 不足时 = 可视高(flex 拉伸的盒高,自收敛)——岛体高度只长不缩,
-  // 上一轮对话拉伸后,新对话不会缩回初始小空间(实测 bug);
-  // 子元素高度不受 flex 拉伸影响,始终反映真实内容。
-  // clamp 到 [200, 600];超高时岛体封顶 600,列表滚动不自锁。
+  // 内容自然高 = 子元素高度求和(含列表 gap):消息区 = 虚拟滚动窗口
+  // (MessageWindow,高度恒等于虚拟总高——见其 spacer 数学) + 尾部
+  // (流式/思考/错误);scrollHeight 在内容不足时 = 可视高(flex 拉伸
+  // 的盒高,自收敛)——岛体高度只长不缩,上一轮对话拉伸后,新对话
+  // 不会缩回初始小空间(实测 bug);子元素高度不受 flex 拉伸影响,
+  // 始终反映真实内容。
+  // clamp 到 [176, 700];超高时岛体封顶 700,列表滚动不自锁。
   // 流式回复中:**测量与上报一起按 80ms 节拍**(测量本身是强制 reflow——
   // offsetHeight 循环 + getComputedStyle,每帧跑 = reflow 频率≈帧率;
   // 节拍点排队期间跳过的调用不再测量,只保留最后一次)
   const measureTimerRef = useRef(0)
   const streamingRef = useRef(streaming)
   streamingRef.current = streaming
-  // **消息真实高度测量(2026-08-09 修复"大量消息滚动条中间部分滚动
-  // 抖动")**:content-visibility 屏外消息的 offsetHeight 返回**估算值**
-  // (跳过布局,实测 Chromium 不强制定位),直接读写 --msg-h 无效——
-  // 需**临时禁用跳过强制真实布局**测一次(挂载后每条仅一次,
-  // data-msg-h-measured 标记;容器 resize = 宽度/缩放变化时 force 重测
-  // 全部)。真实高度写入 --msg-h → contain-intrinsic-size 估算 ≈ 真实
-  // → 滚动中部真实化零跳变(scrollHeight 不再反复修正,实测 60 条
-  // 单向滚动 6 段波动 412px → 修复后应 ≈ 0)
-  // 全量布局(≤阈值,无 content-visibility)不需要 --msg-h 估算——跳过
-  // 强制布局测高(避免每条消息挂载时白做一次强制布局)
-  const useCv = messages.length > AGENT_MSG_CV_THRESHOLD
-  const useCvRef = useRef(useCv)
-  useCvRef.current = useCv
-  const measureMsgH = (child: HTMLElement, force: boolean) => {
-    if (!force && child.dataset.msgHMeasured) return
-    if (!useCvRef.current) return
-    child.dataset.msgHMeasured = '1'
-    const prev = child.style.contentVisibility
-    let h: number
-    if (prev !== 'visible') {
-      // 禁用跳过 → 强制真实布局测高 → 恢复(继续享受屏外跳过优化)
-      child.style.contentVisibility = 'visible'
-      h = child.offsetHeight
-      child.style.contentVisibility = prev || ''
-    } else {
-      h = child.offsetHeight
-    }
-    if (h > 0) child.style.setProperty('--msg-h', `${h}px`)
-  }
   const measureHeight = useCallback(() => {
     const doMeasure = (el: HTMLElement) => {
       let contentH = 0
@@ -671,8 +604,6 @@ export function AgentView({
       for (let i = 0; i < children.length; i++) {
         const child = children[i] as HTMLElement
         contentH += child.offsetHeight
-        // 未测过(新挂载)才强制布局测一次;已测过直接用
-        measureMsgH(child, false)
       }
       if (children.length > 1) {
         // 列表 gap 从运行时样式读取(聊天 10px / 历史、工具 8px,自动跟随)
@@ -850,116 +781,24 @@ export function AgentView({
   }
 
   // 内容变化(消息/流式/状态)时重测(rAF 延迟一帧:面板首帧挂载不阻塞
-  // 展开动画布局,测量结果下一帧生效,展开更顺)。visibleCount = 分批
-  // 挂载进度,每批后测量 → 窗口平滑跟随消息增长
+  // 展开动画布局,测量结果下一帧生效,展开更顺)。消息内部高度变化
+  // (工具卡片展开/媒体 aspect)由 MessageWindow 的 ResizeObserver 驱动
+  // onLayoutChange → 本函数重测(2026-08-12 起,原 MutationObserver/
+  // 容器 ResizeObserver 兜底已并入虚拟滚动)
   useLayoutEffect(() => {
     const raf = requestAnimationFrame(measureHeight)
     return () => cancelAnimationFrame(raf)
-  }, [measureHeight, messages, streaming, status, lastError, phase, visibleCount])
-
-  // ResizeObserver 兜底:字体/岛宽变化导致换行数变化时,列表高度随之变化;
-  // **容器尺寸变化(缩放/宽度)会改变所有消息的换行高度(2026-08-09)——
-  // 清空已测标记强制重测全部 --msg-h,否则屏外估算用旧高度仍会跳**
-  useLayoutEffect(() => {
-    const el = scrollRef.current
-    if (!el || !onHeightChange) return
-    const observer = new ResizeObserver(() => {
-      const list = scrollRef.current
-      if (list) {
-        for (const c of list.children) delete (c as HTMLElement).dataset.msgHMeasured
-      }
-      measureHeight()
-    })
-    observer.observe(el)
-    return () => observer.disconnect()
-  }, [measureHeight, onHeightChange])
-
-  // 工具卡片折叠/展开**实时收缩**(2026-08-07 用户要求):ToolSummary/
-  // ToolCard 的 open 是内部状态,折叠后内容变矮——但消息列表 overflow
-  // 滚动,列表容器高度不变,ResizeObserver 不触发 → 岛体高度不收缩,
-  // 直到下一条消息/工具调用才重测(实测 bug)。MutationObserver 监听
-  // 子树 class 变化(卡片 open 类切换)→ rAF 重测,实时跟随。
-  // **媒体气泡内部 UI 类切换跳过(2026-08-11 性能)**:视频控件的
-  // 自动隐藏/全屏/离场类切换(ui-hidden/fullscreen/leaving-fullscreen)
-  // 不影响列表高度——原实现每次切换都触发全列表强制 reflow
-  // (measureHeight 逐子 offsetHeight + getComputedStyle),视频播放
-  // 期间控件隐藏/交互显示 = 卡顿源之一;媒体高度由 width×aspect
-  // 决定,类切换不改尺寸,安全跳过
-  // **动画结束补测(2026-08-11 修复"工具调用列表收起后窗口高度不实时
-  // 响应 + 收起动画卡")**:class 变化瞬间的 rAF 测量发生在 0fr↔1fr
-  // 过渡**起点**,测到的是过渡中间高度(≈旧值)——收起动画(0.28s)
-  // 结束后高度才到位,只测一次窗口永远停在旧值(直到下一条消息/工具
-  // 事件才重测);延迟 ~350ms(动画时长 + 余量)补测一次取终值,窗口
-  // 收缩走岛体 --agent-h 的 0.3s 平滑过渡,不再"动画播完窗口不动、
-  // 之后突然跳变"(卡感主因)。展开同款受益(动画结束高度才完整)
-  useLayoutEffect(() => {
-    const el = scrollRef.current
-    if (!el || !onHeightChange) return
-    let settleTimer = 0
-    const observer = new MutationObserver((records) => {
-      for (const r of records) {
-        if (r.target instanceof Element && r.target.closest('.island-media-frame')) return
-      }
-      requestAnimationFrame(measureHeight)
-      window.clearTimeout(settleTimer)
-      settleTimer = window.setTimeout(measureHeight, 350)
-    })
-    observer.observe(el, { subtree: true, attributes: true, attributeFilter: ['class'] })
-    return () => {
-      observer.disconnect()
-      window.clearTimeout(settleTimer)
-    }
-  }, [measureHeight, onHeightChange])
-
-  // 注:消息级 ResizeObserver 方案已删(2026-08-09 实测弃用)——屏外
-  // 消息(content-visibility 跳过布局)的 contentRect 是**估算值**,observe
-  // 初始回调把估算高度写回 --msg-h,**覆盖 measureMsgH 的精确值**(实测
-  // 写入日志 >36... 而 style 值 20px),滚动估算反而更差。精确值由
-  // measureMsgH 管理(挂载/宽度动画后重测),滚动场景由 content-
-  // visibility 的 auto 记住尺寸兜底(真实化一次后屏外估算 = 真实)
-
-  // **宽度动画完成后 force 重测全部 --msg-h(2026-08-09,抖动修复的
-  // 关键一环)**:分批挂载发生在展开宽度动画期间(骨架 120ms + 5 批 ×
-  // 每帧,宽度到 120-250ms 处仍在动画中)——挂载时强制布局测到的是
-  // "动画中间宽度"下的高度(实测 user 消息 20px,最终宽度下真实 36px)。
-  // 屏外消息被 content-visibility 跳过布局,ResizeObserver 观察不到
-  // 估算尺寸变化 → --msg-h 永不刷新 → 滚动中部真实化时 20→36 跳变。
-  // 分批结束(visibleCount 追平)后 500ms(宽度动画 0.3s 已完成)清
-  // 标记 force 重测一次——屏外估算 = 最终宽度下的真实高度,首次
-  // 真实化零跳变;此后滚动场景由 auto 记住尺寸兜底
-  // 宽度重测只执行一次(分批结束 500ms);新消息落定(visibleCount 追平
-  // 变化)不重复重测——否则每轮对话都强制布局全部消息(卡顿)。AgentView
-  // 卸载重挂载时 ref 重置,再次展开重新测
-  const widthSettleMeasuredRef = useRef(false)
-  useEffect(() => {
-    if (phase !== 'content') return
-    if (widthSettleMeasuredRef.current) return
-    const t = window.setTimeout(() => {
-      widthSettleMeasuredRef.current = true
-      const el = scrollRef.current
-      if (!el) return
-      // 巡检诊断标记(2026-08-09:验证宽度动画后重测执行)
-      el.dataset.msgHSettled = '1'
-      for (const c of el.children) delete (c as HTMLElement).dataset.msgHMeasured
-      measureHeight()
-    }, 500)
-    return () => window.clearTimeout(t)
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- 分批结束(visibleCount 追平)后重测一次
-  }, [phase, visibleCount])
+  }, [measureHeight, messages, streaming, status, lastError, phase])
 
   // 卸载时清理测量节流计时器
   useEffect(() => () => window.clearTimeout(measureTimerRef.current), [])
 
-  // 消息/流式变化时自动滚到底(用户上翻查看历史时不打扰;
-  // content-visibility 下跳底需双 rAF 校正估算尺寸)。
-  // visibleCount = 分批挂载:顶部追加旧消息会下推底部内容,保持底部
-  // (双 rAF 校正同款)。
-  // **延迟再校正一次(2026-08-11 修复"发送内容时偶现突然跳转到中间的
-  // 对话")**:>100 条时 content-visibility 的 scrollHeight 是估算值,
-  // 双 rAF 校正发生在真实化**之前**(估算只在校验/滚动时真实化,发送
-  // 瞬间估算 < 真实,校正读到的还是估算)——滚动位置停在估算底,
-  // CV 真实化后高度增长、scrollTop 不再更新 = 视觉跳到中间。150ms
-  // 后(CV 已真实化)按 atBottomRef(用户没上翻)再校正一次
+  // 消息/流式变化时自动滚到底(用户上翻查看历史时不打扰)。
+  // 虚拟滚动(2026-08-12):scrollHeight = 虚拟总高(spacer 撑起),跳底
+  // 双 rAF 校正一次(消息挂载测量后总高真实化);150ms 再校正一次
+  // (2026-08-11 修复"发送内容时偶现突然跳转到中间的对话"——估算与
+  // 真实高度差异的兜底)。**测量后贴底保持由 MessageWindow 负责**
+  // (高度缓存真实化 → 推高内容 → atBottom 时同步滚到新底部)
   useEffect(() => {
     const el = scrollRef.current
     if (el && atBottomRef.current) {
@@ -969,8 +808,10 @@ export function AgentView({
       }, 150)
       return () => window.clearTimeout(t)
     }
-  }, [messages, streaming, status, lastError, visibleCount])
+  }, [messages, streaming, status, lastError])
 
+  // 对话历史/工具列表视图的滚动(聊天视图滚动由 MessageWindow 接管:
+  // 它同时更新贴底标志与可视范围,见 MessageWindow 内部 scroll 监听)
   const handleScroll = () => {
     const el = scrollRef.current
     if (!el) return
@@ -984,6 +825,10 @@ export function AgentView({
   // 消息时不模糊**(紧凑态进入新对话的滚动动画干净无模糊)。
   // messages 长度经 ref 读取:不入依赖(消息到达时发送路径已平滑滚动,
   // 这里只在视图/骨架切换时滚动一次)
+  // 虚拟滚动(2026-08-12):MessageWindow 挂载即初始贴底(预估高度),
+  // 这里在宽度动画结束后再校正一次——此时可视区消息已挂载测量,
+  // scrollHeight 接近真实,双 rAF 校正兜底(原分批追平等待已删,
+  // 虚拟化不再分批)
   const messagesLenRef = useRef(messages.length)
   messagesLenRef.current = messages.length
   useEffect(() => {
@@ -997,26 +842,10 @@ export function AgentView({
       // MORPH_ANIMATE_MS 400ms 同步——原滚动比高度动画晚 100ms,
       // 展开收尾滞涩)——宽度动画期间岛体还是 56 高宽条,滚动无意义
       // 且浪费;高度展开时伴随滚动到底(桌面挂件直接跳底零动画成本;
-      // Web 演示版保留平滑滚动)。
-      // **等分批追平再跳底(2026-08-11 修复"偶尔切换回 Agent 跳转到
-      // 中间的历史记录")**:历史消息多时(>BATCH_RENDER)content 期分批
-      // 挂载(visibleCount 逐批 rAF 增长),固定延迟后跳底时 scrollHeight
-      // 还是估算/部分值(>100 条 content-visibility 估算 + 未挂载批),
-      // scrollTop 停在中间位置,后续分批的跳底校正依赖 atBottomRef
-      // 与滚动事件链,偶发失配(切换回 Agent 的进入滚动与分批竞态)——
-      // 改为**分批追平(visibleCountRef >= 消息数)后再跳底**,rAF 轮询
-      // 等待,分批完成瞬间的 scrollHeight 已真实(双 rAF 校正)
+      // Web 演示版保留平滑滚动)
       const t = window.setTimeout(() => {
         const el2 = scrollRef.current
-        if (!el2) return
-        const waitBatches = () => {
-          if (visibleCountRef.current < messagesLenRef.current) {
-            requestAnimationFrame(waitBatches)
-            return
-          }
-          scrollMessagesToBottom(el2, { blur: messagesLenRef.current > 0 })
-        }
-        waitBatches()
+        if (el2) scrollMessagesToBottom(el2, { blur: messagesLenRef.current > 0 })
       }, AGENT_WIDTH_ANIMATE_MS)
       return () => window.clearTimeout(t)
     }
@@ -1390,7 +1219,12 @@ export function AgentView({
         </div>
 
         {/* 消息列表:展开首帧先渲染骨架占位(形变动画期间 DOM 轻量),
-            延迟后挂载真实内容淡入并测量长高 */}
+            延迟后挂载真实内容淡入并测量长高。
+            2026-08-12 虚拟滚动:消息区 = 虚拟滚动窗口(MessageWindow,
+            只挂载可视区消息)+ 尾部(流式/思考/错误)——数百条历史
+            消息的 DOM 与滚动中绘制成本与可视区解耦,不再抽搐;
+            滚动容器自身不挂 onScroll(chat 视图滚动由 MessageWindow
+            内部监听,同时更新贴底标志与可视范围) */}
         {phase === 'skeleton' ? (
           <div className="island-agent-skeleton" aria-hidden="true">
             <div className="island-agent-skeleton-item assistant" />
@@ -1398,11 +1232,7 @@ export function AgentView({
             <div className="island-agent-skeleton-item assistant short" />
           </div>
         ) : (
-          <div
-            className={`island-agent-messages${messages.length > AGENT_MSG_CV_THRESHOLD ? ' cv' : ''}`}
-            ref={listRef}
-            onScroll={handleScroll}
-          >
+          <div className="island-agent-messages" ref={listRef}>
             {messages.length === 0 && !streaming && !lastError && (
               <div className="island-agent-welcome">
                 我是岛灵,可以帮你执行本机操作。
@@ -1410,61 +1240,59 @@ export function AgentView({
                 试试:「打开计算器」「查一下最近的新闻」「列出下载目录」
               </div>
             )}
-            {visibleMessages.map((m) =>
-              m.role === 'user' ? (
-                <UserBubble key={m.id} m={m} />
-              ) : (
-                <AssistantBlock
-                  key={m.id}
-                  id={m.id}
-                  parts={m.parts}
-                  usage={m.usage}
-                  // 2026-08-10 自动播放只限"当次对话":本会话流式落定且
-                  // 未消费的消息才自动播;历史/重挂载读到 false 不播。
-                  // onMediaAutoPlayed 引用稳定(useCallback)+ id 传参,
-                  // 不打穿 AssistantBlock 的 memo(2026-08-11)
-                  mediaAutoPlay={mediaAutoPlayIds?.has(m.id) ?? false}
-                  onMediaAutoPlayed={onMediaAutoPlayedStable}
-                />
-              ),
-            )}
-            {/* 流式中的助手回复:工具实时并入同一汇总列表(收纳态只有
-                一行,执行中脉冲/成功失败计数实时更新;展开可看各卡
-                状态,卡片 key 稳定 → open 状态跨事件保留) */}
-            {streaming && (streaming.text || streaming.tools.length > 0) && (
-              <div className="island-agent-msg-assistant">
-                {streaming.text && (
-                  <div className="island-agent-text">
-                    <Markdown text={streaming.text} caret />
+            <MessageWindow
+              messages={messages}
+              scrollRef={listRef}
+              atBottomRef={atBottomRef}
+              onLayoutChange={measureHeight}
+              renderItem={renderMessage}
+            />
+            {/* 尾部(流式/思考/错误):独立 flex 段,消息落定后进
+                MessageWindow;其高度经 AgentView 的 streaming effect
+                驱动重测(不参与虚拟滚动数学) */}
+            {(streaming && (streaming.text || streaming.tools.length > 0)) ||
+            (status === 'thinking' && !streaming?.text) ||
+            lastError ? (
+              <div className="island-agent-tail">
+                {/* 流式中的助手回复:工具实时并入同一汇总列表(收纳态
+                    只有一行,执行中脉冲/成功失败计数实时更新;展开可
+                    看各卡状态,卡片 key 稳定 → open 状态跨事件保留) */}
+                {streaming && (streaming.text || streaming.tools.length > 0) && (
+                  <div className="island-agent-msg-assistant">
+                    {streaming.text && (
+                      <div className="island-agent-text">
+                        <Markdown text={streaming.text} caret />
+                      </div>
+                    )}
+                    {streaming.tools.length > 0 && (
+                      <ToolSummary
+                        items={streaming.tools.map((tool) => ({
+                          id: tool.id,
+                          name: tool.name,
+                          args: tool.args,
+                          ok: tool.ok,
+                          result: tool.result,
+                          durationMs: tool.durationMs,
+                        }))}
+                      />
+                    )}
                   </div>
                 )}
-                {streaming.tools.length > 0 && (
-                  <ToolSummary
-                    items={streaming.tools.map((tool) => ({
-                      id: tool.id,
-                      name: tool.name,
-                      args: tool.args,
-                      ok: tool.ok,
-                      result: tool.result,
-                      durationMs: tool.durationMs,
-                    }))}
-                  />
+                {/* 思考中(无文本输出时) */}
+                {status === 'thinking' && !streaming?.text && (
+                  <div className="island-agent-thinking">
+                    <span className="island-agent-dot thinking" aria-hidden="true" />
+                    正在思考
+                    <span className="island-agent-dots" aria-hidden="true">
+                      <span />
+                      <span />
+                      <span />
+                    </span>
+                  </div>
                 )}
+                {lastError && <div className="island-agent-error">{lastError}</div>}
               </div>
-            )}
-            {/* 思考中(无文本输出时) */}
-            {status === 'thinking' && !streaming?.text && (
-              <div className="island-agent-thinking">
-                <span className="island-agent-dot thinking" aria-hidden="true" />
-                正在思考
-                <span className="island-agent-dots" aria-hidden="true">
-                  <span />
-                  <span />
-                  <span />
-                </span>
-              </div>
-            )}
-            {lastError && <div className="island-agent-error">{lastError}</div>}
+            ) : null}
           </div>
         )}
 

@@ -3335,15 +3335,23 @@ await test('napcatMessageText:群消息 @ 与图片/回复段解析', () => {
   )
 })
 
-await test('set_napcat_config:enabled/wsUrl/allowed 校验与写配置', async () => {
+await test('set_napcat_config:enabled/wsUrl/allowed/allowedGroups 校验与写配置', async () => {
   const { writes, tools } = makeConfigToolsDeps()
   const tool = tools.find((t) => t.name === 'set_napcat_config')!
-  const out = String(await tool.execute({ enabled: true, wsUrl: 'ws://127.0.0.1:3001', allowed: ['10001', '10002'] }))
+  const out = String(
+    await tool.execute({ enabled: true, wsUrl: 'ws://127.0.0.1:3001', allowed: ['10001', '10002'], allowedGroups: ['1045765371', '22222222'] }),
+  )
   assert(out.includes('已开启'), `应回显开启,实际:${out}`)
-  const patch = writes.at(-1) as { napcatEnabled?: boolean; napcatAllowed?: string[] }
+  const patch = writes.at(-1) as { napcatEnabled?: boolean; napcatAllowed?: string[]; napcatAllowedGroups?: string[] }
   assert(patch?.napcatEnabled === true && patch?.napcatAllowed?.length === 2, '配置应写入')
+  // 换群监听(2026-08-12 修复"换群后消息收不到"):allowedGroups 必须可改
+  assert(patch?.napcatAllowedGroups?.length === 2 && patch?.napcatAllowedGroups?.includes('22222222'), 'allowedGroups 应写入')
+  assert(out.includes('监听群'), `应回显监听群,实际:${out}`)
+  const outEmpty = String(await tool.execute({ allowedGroups: [] }))
+  assert(outEmpty.includes('监听所有群'), `空数组应监听所有群,实际:${outEmpty}`)
   await assertRejects(() => tool.execute({ wsUrl: 'http://bad' }), 'wsUrl 需要是 ws:// 开头')
   await assertRejects(() => tool.execute({}), '至少提供一个参数')
+  await assertRejects(() => tool.execute({ allowedGroups: 'not-array' }), 'allowedGroups 需要是群号字符串数组')
   const out2 = String(await tool.execute({ enabled: false }))
   assert(out2.includes('已关闭'), `关闭应回显,实际:${out2}`)
 })

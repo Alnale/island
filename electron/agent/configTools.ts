@@ -434,15 +434,22 @@ export function createConfigTools(deps: {
         'NapCat QQ 机器人设置(2026-08-12):enabled 开关——开启后挂件连接 ' +
         'NapCat(OneBot 11),收到 QQ 私聊消息自动进入对话并回复到 QQ;' +
         'wsUrl = NapCat WebSocket 地址(默认 ws://127.0.0.1:3001);' +
-        'allowed = 只回复的 QQ 号数组(空 = 回复所有私聊,防骚扰可只填自己)。' +
-        '如"开启 QQ 机器人""只回复我自己的 QQ 消息"。开启后连接失败会提示 ' +
-        '(NapCat 需先启动并开放 WS 端口)。',
+        'allowed = 私聊白名单 QQ 号数组(空 = 回复所有私聊,防骚扰可只填自己);' +
+        '**allowedGroups = 监听的群号数组(2026-08-12,换群监听用——' +
+        '空数组 = 监听所有群;不在列表的群消息不会收到,改这里才能换群)**。' +
+        '如"开启 QQ 机器人""只回复我自己的 QQ 消息""把群监听换成 12345678"。' +
+        '开启后连接失败会提示 (NapCat 需先启动并开放 WS 端口)。',
       parameters: {
         type: 'object',
         properties: {
           enabled: { type: 'boolean', description: '开关 NapCat QQ 机器人(缺省不改)' },
           wsUrl: { type: 'string', description: 'NapCat WebSocket 地址,如 ws://127.0.0.1:3001(缺省不改)' },
-          allowed: { type: 'array', items: { type: 'string' }, description: 'QQ 号白名单(空数组 = 回复所有私聊;缺省不改)' },
+          allowed: { type: 'array', items: { type: 'string' }, description: '私聊白名单 QQ 号数组(空数组 = 回复所有私聊;缺省不改)' },
+          allowedGroups: {
+            type: 'array',
+            items: { type: 'string' },
+            description: '监听的群号数组(换群监听用;空数组 = 监听所有群;缺省不改)',
+          },
         },
       },
       async execute(params: ToolParams) {
@@ -457,8 +464,12 @@ export function createConfigTools(deps: {
           if (!Array.isArray(params.allowed)) throw new Error('allowed 需要是 QQ 号字符串数组')
           patch.napcatAllowed = params.allowed.map(String).map((s) => s.trim()).filter(Boolean).slice(0, 50)
         }
+        if (params.allowedGroups !== undefined) {
+          if (!Array.isArray(params.allowedGroups)) throw new Error('allowedGroups 需要是群号字符串数组')
+          patch.napcatAllowedGroups = params.allowedGroups.map(String).map((s) => s.trim()).filter(Boolean).slice(0, 50)
+        }
         if (Object.keys(patch).length === 0) {
-          throw new Error('至少提供一个参数:enabled / wsUrl / allowed')
+          throw new Error('至少提供一个参数:enabled / wsUrl / allowed / allowedGroups')
         }
         if (!deps.updateAgentConfig) throw new Error('配置写入不可用(未注入 updateAgentConfig)')
         deps.updateAgentConfig(patch)
@@ -470,7 +481,10 @@ export function createConfigTools(deps: {
           parts.push(`WS 地址 = ${patch.napcatWsUrl || '(默认 ws://127.0.0.1:3001)'}`)
         }
         if (patch.napcatAllowed !== undefined) {
-          parts.push(patch.napcatAllowed.length > 0 ? `白名单 = ${patch.napcatAllowed.join('、')}` : '白名单 = 空(回复所有私聊)')
+          parts.push(patch.napcatAllowed.length > 0 ? `私聊白名单 = ${patch.napcatAllowed.join('、')}` : '私聊白名单 = 空(回复所有私聊)')
+        }
+        if (patch.napcatAllowedGroups !== undefined) {
+          parts.push(patch.napcatAllowedGroups.length > 0 ? `监听群 = ${patch.napcatAllowedGroups.join('、')}` : '监听群 = 空(监听所有群)')
         }
         return `已保存 NapCat 配置:${parts.join(';')}(立即生效,收到 QQ 消息自动进入对话并回复)`
       },

@@ -369,7 +369,11 @@
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  /* 消息间距(2026-08-12 起经 CSS 变量下发:MessageWindow 虚拟滚动的
+     spacer 数学读取本容器 rowGap,窗口内部 gap 必须与之一致——
+     两处引用同一变量,改间距不会漂移) */
+  --agent-msg-gap: 10px;
+  gap: var(--agent-msg-gap);
   padding-right: 4px;
   user-select: text;
   /* 右侧预留滚动条槽位(2026-08-08 用户要求):滚动条出现/消失不改变
@@ -385,41 +389,31 @@
   animation: agent-content-in 0.26s ease both;
 }
 
-/* 长历史消息滚动性能(2026-08-08 用户要求"历史消息多时滚动越来越卡"):
-   `content-visibility: auto` 让浏览器跳过视口外消息的渲染/布局/绘制
-   (等效 CSS 级虚拟化,无需 JS 窗口化)——历史消息多时 DOM 巨大,滚动
-   每帧对屏外内容全量重排重绘是卡顿主因;`contain-intrinsic-size` 用
-   估算尺寸占位稳定滚动条。屏外消息不可交互/不可聚焦属预期(滚入视口
-   恢复正常)。注意:跳底(scrollTop = scrollHeight)首帧按估算尺寸,
-   AgentView 双 rAF 后用真实布局尺寸校正一次。
-   **估算精度(2026-08-09 修复"大量消息滚动条中间部分滚动抖动")**:
-   原固定 120px 与真实高度差异大(短文本 ~45px/长消息数百 px),滚动
-   中部时元素真实化 → scrollHeight 被持续修正(实测 60 条滚动 6 段
-   波动 412px)= thumb 跳动。改为 `var(--msg-h, 120px)`——AgentView
-   测量时顺带写每条消息的真实高度(见 measureHeight),估算 ≈ 真实
-   → 真实化零跳变;`auto` 保留(记住真实尺寸,图片异步加载等未刷新
-   场景二次滚动兜底) */
-/* 消息列表滚动性能/稳定权衡(2026-08-09 修复"大量消息滚动条中间部分
-   滚动抖动"):content-visibility 的估算机制在**滚动中必然修正
-   scrollHeight**(实测 60 条滚动 6 段波动 412px;估算精确到每条真实
-   高度也无效,Chromium 行为)——滚动条抖动无解;全量布局滚动条完全
-   稳定(drift 0,实测)。**默认全量布局(≤100 条,AgentView 按消息数
-   加 .cv 类);超过阈值(长历史)才启用 content-visibility 保滚动性能,
-   接受滚动条轻微修正**,估算用每条真实高度(--msg-h,measureMsgH 挂载
-   时强制布局测 + 宽度动画完成后重测)尽量减小修正幅度;auto 记住
-   真实尺寸兜底二次滚动 */
-.island-agent-messages > * {
-  content-visibility: visible;
+/* 消息窗口(虚拟滚动,2026-08-12)与尾部(流式/思考/错误)= 消息区的
+   两个 flex 段:
+   - .island-msgs-window:MessageWindow 渲染的虚拟滚动窗口,内部
+     spacer + 可视消息同款 gap(--agent-msg-gap,spacer 数学按此计算,
+     MessageWindow 挂载时从 .island-agent-messages 读 rowGap);
+     flex-shrink: 0 保证窗口高度恒等于内容高(不被容器拉伸压缩,
+     AgentView 岛体高度测量量它)。
+   - .island-msgs-item:单条消息的测量挂载点(ResizeObserver 观察其
+     高度写入虚拟滚动高度缓存)。
+   - .island-agent-tail:流式/思考/错误尾部,不参与虚拟滚动数学
+     (自然排在 spacer 之后,消息落定后进窗口)。
+   原 content-visibility 方案(--msg-h 估算/阈值 .cv 类)已整体删除:
+   CV 在滚动中整段真实化 scrollHeight = 滚动条抽搐无解(实测),
+   JS 窗口化逐条真实化修正平滑,且滚动中绘制成本与内容全长解耦 */
+.island-msgs-window {
+  display: flex;
+  flex-direction: column;
+  gap: var(--agent-msg-gap);
+  flex-shrink: 0;
 }
-
-/* 长历史(>100 条)启用 CSS 级虚拟化:跳过视口外消息的渲染/布局/绘制
-   (2026-08-08 用户要求"历史消息多时滚动越来越卡");contain-intrinsic
-   -size 用精确估算占位稳定滚动条。屏外消息不可交互/不可聚焦属预期。
-   注意:跳底(scrollTop = scrollHeight)首帧按估算尺寸,AgentView
-   双 rAF 后用真实布局尺寸校正一次 */
-.island-agent-messages.cv > * {
-  content-visibility: auto;
-  contain-intrinsic-size: auto var(--msg-h, 120px);
+.island-msgs-item {
+  flex-shrink: 0;
+}
+.island-agent-tail {
+  flex-shrink: 0;
 }
 
 @keyframes agent-content-in {
