@@ -16,6 +16,7 @@ import type {
   AgentConfig,
   AgentEvent,
   AgentMessage,
+  AgentPart,
   AgentSession,
   AgentStatus,
   AgentToolCallState,
@@ -36,6 +37,71 @@ const TITLE_KEY = 'widget-agent-title'
 const MIND_KEY = 'widget-agent-mind'
 /** 历史会话数量上限(超出丢弃最旧) */
 const MAX_SESSIONS = 20
+
+/** 新会话 ID(2026-08-12,工具输出按对话 ID 分类存放:引擎侧
+ * <输出根>/<工具>/<会话ID> 目录由它拼接)。时间戳 + 随机后缀防
+ * 同一毫秒多次 clear 撞同一 id(存档会话 id 沿用旧格式 s-<时间戳>,
+ * 仅当前会话用本函数生成) */
+function newSessionId(): string {
+  return `s-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+}
+
+/**
+ * 历史会话坏标题判定(2026-08-12 用户实测"历史记录标题有问题"):
+ * 旧版标题总结(修复前)存档的标题常是**摘抄回复句的截断残句**(如
+ * "嘞,主人看完课要补个合集是吧,我这就把《"、"哈哈,看来TTG全员都在
+ * 「赚钱买小胖」,")或**单字垃圾**(如"你")——历史存档不会自动重生成。
+ * 判定特征与引擎 looksLikeSentenceTitle / looksLikeIncompleteMind 同款
+ * (渲染端不 import 引擎运行时,内联):
+ * 空 / <4 码元 / >6 码元含完成体"了"、句尾"的"、疑问词 /
+ * 逗号顿号冒号结尾(半句) / 连词或"把/就"收尾 / 书名号引号残缺结尾 = 坏
+ */
+function isBadSessionTitle(title: string): boolean {
+  const t = (title ?? '').trim()
+  if (!t) return true
+  const len = Array.from(t).length
+  if (len < 4) return true
+  // 疑问词与引擎 looksLikeSentenceTitle 同款(2026-08-12 四轮:漏口语
+  // 疑问词"干啥"导致"哈喽主人～看我干啥呀?…"判不坏,修复 effect 跳过)
+  if (
+    len > 6 &&
+    (/了/.test(t) ||
+      /.+的$/.test(t) ||
+      /(吗|呢|有没有|能不能|怎么|怎样|如何|为什么|啥|干嘛|干啥|谁|哪里|哪儿|是不是|会不会|要不要|好不好)/.test(t))
+  ) {
+    return true
+  }
+  // 残句:逗号/顿号/冒号结尾 = 半句;连词/把/就收尾 = 没说完;
+  // 书名号/引号残缺结尾(如"我这就把《")= 截断残片
+  if (/[,，、;；:：]$/.test(t)) return true
+  if (/(你那|就是|因为|但是|然后|所以|还有|这边|之后|接着|反正|把|就)$/.test(t)) return true
+  if (/[《「【"']$/.test(t)) return true
+  return false
+}
+
+/**
+ * 历史会话兜底标题(2026-08-12):重总结失败/结果仍坏时的本地确定性
+ * 兜底——取首条用户消息文本,截 20 码元(与引擎 fallbackTitle 同语义;
+ * 首条用户消息通常是短句,比坏标题可读)。标题必非空(会话必有消息)
+ */
+function fallbackSessionTitle(session: AgentSession): string {
+  for (const m of session.messages) {
+    if (m.role !== 'user') continue
+    const text = m.parts
+      .filter((p): p is Extract<AgentPart, { type: 'text' }> => p.type === 'text')
+      .map((p) => p.text)
+      .join(' ')
+    // 跳过过短消息(与引擎 fallbackTitle 同款:首条"你?"这类短句
+    // 得到单字垃圾标题,取第一条 ≥4 码元的实质内容)
+    if (text.trim() && Array.from(text).length >= 4) {
+      // 与引擎 sanitizeTitle 同款终止标点截断:取第一个。！？～前的
+      // 完整段(≥4 码元),避免长句 20 码元硬截的残句观感
+      const seg = text.split(/[。！？!?…～~]/)[0].trim()
+      return truncateCodepoints(seg.length >= 4 ? seg : text, 20)
+    }
+  }
+  return '对话'
+}
 
 /** 未落定的助手消息(流式累积) */
 interface PendingAssistant {
@@ -177,6 +243,11 @@ export function useAgent(opts?: { allowProactive?: boolean }): AgentController {
   // 主动陪伴(2026-08-07):上次"有操作"时刻(用户发送/清空/切换会话/
   // 主动回复落定都会重置)——调度器据此判断"无操作满 N 分钟"
   const lastUserSendRef = useRef(Date.now())
+  // 当前会话 ID(2026-08-12,工具输出按对话 ID 分类存放):send /
+  // proactive-tick 回传引擎,引擎据此拼输出目录(<根>/<工具>/<会话ID>)。
+  // 初始化生成;clear(新对话)重新生成;loadSession 沿用历史会话 id
+  // (加载的对话还是那个对话,输出归入原文件夹)
+  const sessionIdRef = useRef(newSessionId())
   // 主动陪伴 tick in-flight 守卫(覆盖 judge 全程:IPC 在 judge 完成后
   // 才 resolve,期间不重发;judge 阶段用户 send 天然优先)
   const proactiveInFlightRef = useRef(false)
@@ -195,18 +266,43 @@ export function useAgent(opts?: { allowProactive?: boolean }): AgentController {
   // 频率压到帧率上限(跨 IPC 消息的多次 setState 不自动批处理)
   const streamingRef = useRef<PendingAssistant>({ text: '', reasoning: '', tools: [] })
   const streamingRafRef = useRef(0)
+  // 流式提交 50ms 降频(2026-08-11 性能):rAF 合批在 165Hz 显示器上
+  // 每帧提交一次——流式增量(文本/推理/工具参数)逐帧到达,渲染频率
+  // 被帧率拉满,每帧都做全量 Markdown 重解析 + 测量 + reconcile。
+  // 50ms 最小间隔压到 ~20Hz:LLM 生成速度远低于此,视觉无差,主线程
+  // 工作减 ~3/4——视频播放/工具调用叠加时掉帧明显缓解
+  const STREAM_COMMIT_MIN_MS = 50
+  const lastStreamCommitRef = useRef(0)
+  const streamCommitTimerRef = useRef(0)
   const resetStreaming = useCallback(() => {
     if (streamingRafRef.current) cancelAnimationFrame(streamingRafRef.current)
     streamingRafRef.current = 0
+    window.clearTimeout(streamCommitTimerRef.current)
+    streamCommitTimerRef.current = 0
+    lastStreamCommitRef.current = 0
     streamingRef.current = { text: '', reasoning: '', tools: [] }
     setStreaming(null)
   }, [])
   const scheduleStreamingCommit = useCallback(() => {
-    if (streamingRafRef.current) return
-    streamingRafRef.current = requestAnimationFrame(() => {
-      streamingRafRef.current = 0
-      setStreaming({ ...streamingRef.current })
-    })
+    if (streamingRafRef.current || streamCommitTimerRef.current) return
+    const now = performance.now()
+    const wait = lastStreamCommitRef.current + STREAM_COMMIT_MIN_MS - now
+    const commit = () => {
+      streamingRafRef.current = requestAnimationFrame(() => {
+        streamingRafRef.current = 0
+        setStreaming({ ...streamingRef.current })
+      })
+    }
+    if (wait <= 0) {
+      lastStreamCommitRef.current = now
+      commit()
+    } else {
+      streamCommitTimerRef.current = window.setTimeout(() => {
+        streamCommitTimerRef.current = 0
+        lastStreamCommitRef.current = performance.now()
+        commit()
+      }, wait)
+    }
   }, [])
   // 工具镜像 upsert(新数组引用:提交后 React.memo 才能识别变化)。
   // 已存在条目**合并**(tool-result 只带 ok/result/durationMs,保留
@@ -341,6 +437,47 @@ export function useAgent(opts?: { allowProactive?: boolean }): AgentController {
       // 存储失败忽略
     }
   }, [sessions])
+  // 历史会话坏标题自动修复(2026-08-12 用户实测"历史记录标题有问题"):
+  // 旧版存档的坏标题(摘抄句截断残片/单字垃圾)加载时检测,异步重总结
+  // 并更新存储——**只对坏标题调 LLM**(好标题不碰,"历史消息不该被重新
+  // 总结"的既有设计不变);fixingRef 守卫防并发重总结;sessions 更新后
+  // 好标题跳过,effect 收敛不循环
+  const fixingSessionsRef = useRef(new Set<string>())
+  useEffect(() => {
+    if (!window.desktop?.agentSummarize) return
+    let cancelled = false
+    const fix = async () => {
+      for (const s of sessions) {
+        if (cancelled) return
+        if (!isBadSessionTitle(s.title)) continue
+        if (fixingSessionsRef.current.has(s.id)) continue
+        fixingSessionsRef.current.add(s.id)
+        try {
+          const t = await window.desktop?.agentSummarize(s.messages)
+          if (cancelled) return
+          // 重总结结果仍坏(引擎判效漏网等)→ 本地兜底 = 首条用户消息
+          // (确定性,保证标题可读且收敛,不反复重试)
+          let title = truncateCodepoints(t ?? '', 20)
+          if (isBadSessionTitle(title)) {
+            title = fallbackSessionTitle(s)
+          }
+          setSessions((prev) => prev.map((x) => (x.id === s.id ? { ...x, title } : x)))
+        } catch {
+          // 重总结失败(超时等)→ 本地兜底标题(不保留坏标题等下次)
+          const title = fallbackSessionTitle(s)
+          if (title) {
+            setSessions((prev) => prev.map((x) => (x.id === s.id ? { ...x, title } : x)))
+          }
+        } finally {
+          fixingSessionsRef.current.delete(s.id)
+        }
+      }
+    }
+    void fix()
+    return () => {
+      cancelled = true
+    }
+  }, [sessions])
   // 当前对话标题持久化
   useEffect(() => {
     try {
@@ -363,6 +500,7 @@ export function useAgent(opts?: { allowProactive?: boolean }): AgentController {
   useEffect(
     () => () => {
       if (streamingRafRef.current) cancelAnimationFrame(streamingRafRef.current)
+      window.clearTimeout(streamCommitTimerRef.current)
     },
     [],
   )
@@ -576,7 +714,7 @@ export function useAgent(opts?: { allowProactive?: boolean }): AgentController {
       proactiveInFlightRef.current = true
       const snapshot = messagesRef.current
       window.desktop
-        ?.agentProactiveTick?.(snapshot, Math.floor(idleMs / 60_000))
+        ?.agentProactiveTick?.(snapshot, Math.floor(idleMs / 60_000), sessionIdRef.current)
         .then((r) => {
           if (r?.reason === 'judge-no') lastUserSendRef.current = Date.now()
         })
@@ -588,7 +726,8 @@ export function useAgent(opts?: { allowProactive?: boolean }): AgentController {
     return () => window.clearInterval(timer)
   }, [config?.proactiveEnabled, config?.proactiveInterval, config?.proactiveIntervalUnit, opts?.allowProactive])
 
-  const send = useCallback((text: string, opts?: { silent?: boolean }) => {
+  const send = useCallback(
+    (text: string, opts?: { silent?: boolean; source?: 'qq' | 'group' | 'ask'; target?: string }) => {
     const trimmed = text.trim()
     if (!trimmed) return
     if (statusRef.current === 'thinking' || statusRef.current === 'running') return
@@ -610,6 +749,11 @@ export function useAgent(opts?: { allowProactive?: boolean }): AgentController {
       id: `u-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       role: 'user',
       parts: [{ type: 'text', text: trimmed }],
+      // NapCat 来源标记(2026-08-12):QQ 私聊('qq',target = QQ 号)/
+      // 群聊('group',target = 群号)/ 询问轮('ask',target = 陌生人 QQ)
+      // 消息进入对话,气泡显示来源标签
+      source: opts?.source === 'qq' || opts?.source === 'group' ? opts.source : undefined,
+      qq: opts?.target,
     }
     const next = [...base, userMessage]
     if (opts?.silent) {
@@ -619,8 +763,9 @@ export function useAgent(opts?: { allowProactive?: boolean }): AgentController {
       // 历史——LLM 据此回复,回复照常落定
       messagesRef.current = prev
       setLastError(null)
-      // 引擎无状态:回传完整历史(末尾 = 系统通知,引擎不再追加)
-      window.desktop?.agentSend?.(trimmed, next)
+      // 引擎无状态:回传完整历史(末尾 = 系统通知,引擎不再追加);
+      // 带会话 ID(工具输出按对话分类存放)
+      window.desktop?.agentSend?.(trimmed, next, sessionIdRef.current)
       return
     }
     // 同步更新引用:连续 send 之间(React 尚未渲染)也能拿到最新历史,
@@ -628,9 +773,65 @@ export function useAgent(opts?: { allowProactive?: boolean }): AgentController {
     messagesRef.current = next
     setMessages(next)
     setLastError(null)
-    // 引擎无状态:回传完整历史(含刚加入的用户消息)
-    window.desktop?.agentSend?.(trimmed, next)
-  }, [])
+    // 引擎无状态:回传完整历史(含刚加入的用户消息);带会话 ID 与
+    // NapCat 来源('qq' 私聊 / 'group' 群聊 / 'ask' 询问轮——2026-08-12:
+    // 询问轮回复由 main.cjs 发到主人 QQ)
+    window.desktop?.agentSend?.(
+      trimmed,
+      next,
+      sessionIdRef.current,
+      opts?.source === 'qq' || opts?.source === 'group' || opts?.source === 'ask' ? opts.source : undefined,
+      opts?.source === 'qq' || opts?.source === 'group' || opts?.source === 'ask' ? opts.target : undefined,
+    )
+  },
+    [],
+  )
+
+  // NapCat 消息(2026-08-12):主进程收到 QQ 私聊(napcat:message)/ 群
+  // 接话(napcat:group-message)→ 作为用户消息 send(显示在对话窗口,
+  // 同步上下文)。busy 时排队(按到达顺序,status idle 后逐条发送)。
+  // **来源分级(2026-08-12 二轮,用户要求"偏袒我这一方")**:
+  // - 白名单 QQ(trusted: true)= 自主回复链路——send 带 source='qq',
+  //   回复落定自动发回(带上下文与长期记忆);
+  // - 陌生人(trusted: false)= 主进程已把文本注入"【QQ xxx 发来消息,
+  //   先问主人】"前缀,本侧**不带 source**——LLM 先询问主人,主人
+  //   指示后的回复由主进程 pendingQQReply 链路发回;
+  // - 群接话 = 带 source='group'(回复发回群)
+  const napcatQueueRef = useRef<Array<{ text: string; source?: 'qq' | 'group' | 'ask'; target?: string }>>([])
+  useEffect(() => {
+    const offs: Array<() => void> = []
+    const push = (text: string, source: 'qq' | 'group' | 'ask' | undefined, target: string | undefined) => {
+      if (!text.trim()) return
+      if (statusRef.current === 'thinking' || statusRef.current === 'running') {
+        napcatQueueRef.current.push({ text, source, target })
+        return
+      }
+      send(text, source && target ? { source, target } : undefined)
+    }
+    const off1 = window.desktop?.onNapcatMessage?.((msg) => {
+      if (!msg || typeof msg.text !== 'string') return
+      // trusted: true = 白名单(自主回复,带 source='qq');
+      // false = 陌生人(带 source='ask'——2026-08-12 询问同步:该轮回复
+      // 是"询问主人怎么回复",main.cjs 把它发到主人 QQ,同时对话窗口
+      // 显示;主人指示后(QQ 或对话窗口)回复发回陌生人)
+      push(msg.text, msg.trusted === false ? 'ask' : 'qq', msg.qq)
+    })
+    if (typeof off1 === 'function') offs.push(off1)
+    const off2 = window.desktop?.onNapcatGroupMessage?.((msg) => {
+      if (msg && typeof msg.text === 'string') push(msg.text, 'group', msg.groupId)
+    })
+    if (typeof off2 === 'function') offs.push(off2)
+    return () => {
+      for (const off of offs) off()
+    }
+  }, [send])
+  // busy 结束(idle)后处理排队的 NapCat 消息
+  useEffect(() => {
+    if (status !== 'idle') return
+    if (napcatQueueRef.current.length === 0) return
+    const next = napcatQueueRef.current.shift()!
+    send(next.text, next.source && next.target ? { source: next.source, target: next.target } : undefined)
+  }, [status, send])
 
   const confirmTool = useCallback((approved: boolean) => {
     window.desktop?.agentConfirmTool?.(approved)
@@ -662,6 +863,8 @@ export function useAgent(opts?: { allowProactive?: boolean }): AgentController {
     // 新对话:当前对话(非空)存档到历史,再清空。
     // 标题用实时总结(每轮回复后已静默更新,无需再次调用 LLM)
     sessionVersionRef.current += 1
+    // 新对话 = 新会话 ID(此后工具输出落到新对话文件夹)
+    sessionIdRef.current = newSessionId()
     // 自动播放标记随会话清空(历史/新会话不自动播)
     mediaAutoPlayRef.current.clear()
     const current = messagesRef.current
@@ -690,6 +893,9 @@ export function useAgent(opts?: { allowProactive?: boolean }): AgentController {
     // 加载 = 替换当前对话;从历史移除(当前会话继续由 HISTORY_KEY 持久化);
     // 标题/心理重置并跳过下一次自动生成(历史消息不该被重新总结)
     sessionVersionRef.current += 1
+    // 加载历史会话 = 沿用其原 id(对话还是那个对话,工具输出归入
+    // 原对话文件夹;2026-08-12)
+    sessionIdRef.current = target.id
     // 自动播放标记随会话切换清空(加载的历史消息不自动播放)
     mediaAutoPlayRef.current.clear()
     skipNextLabelRef.current = true

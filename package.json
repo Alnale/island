@@ -6,9 +6,9 @@
   "main": "electron/main.cjs",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "build": "tsc -b tsconfig/tsconfig.json && vite build",
     "lint": "oxlint",
-    "test:markdown": "node scripts/test-markdown.mjs",
+    "test:markdown": "node tests/test-markdown.mjs",
     "preview": "vite preview",
     "bridge": "node scripts/system-media-bridge.ts",
     "build:widget": "vite build --mode widget --config vite.widget.config.ts",

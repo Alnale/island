@@ -194,6 +194,28 @@ export interface AgentConfig {
   /** 心理揣测人格(2026-08-07 Sub Agent 设置):预设 id(MIND_PERSONAS)
    * 或自定义文本 ≤100 字;注入揣测系统提示 */
   mindPersona?: string
+  /**
+   * 工具输出根目录(2026-08-12):所有工具的产出文件统一存放——
+   * 目录结构 = <根>/<工具名>/[<会话ID>](每工具文件夹分类、文件按
+   * 对话 ID 分类;会话 ID 缺失时落在 <根>/<工具名>)。空 = 未启用,
+   * 各工具保持默认位置(userData 下)。影响 bili 下载 / xxt 截图 /
+   * doc_convert 输出;write_file 与 exec_command 是用户指定路径,
+   * 不重定向
+   */
+  outputDir?: string
+  /**
+   * NapCat QQ 机器人(2026-08-12):WebSocket 地址(OneBot 11,默认
+   * ws://127.0.0.1:3001)。收到私聊消息自动进入对话,LLM 回复发回 QQ
+   */
+  napcatWsUrl?: string
+  /** NapCat 开关(默认 false;开启后挂件启动即连接) */
+  napcatEnabled?: boolean
+  /** 私聊 QQ 号白名单(用户限定:只能和 1178821869 通信;空 = 全部) */
+  napcatAllowed?: string[]
+  /** 群白名单(用户限定:只能和群 1045765371 通信;空 = 不处理群消息) */
+  napcatAllowedGroups?: string[]
+  /** 机器人自身 QQ(群消息 @ 检测;默认 108724305) */
+  napcatBotQQ?: string
 }
 
 /** 工具执行上下文(可选第二参):主回合中止信号——delegate 子代理
@@ -301,6 +323,33 @@ export interface EngineDeps {
    * island-settings-changed 事件即时生效)。未注入则不注册设置工具
    */
   runIslandSettings?(op: string, args: unknown[]): Promise<unknown>
+  /**
+   * 音乐控制(2026-08-12,QQ 远程控制/后台对话):主进程经 executeJavaScript
+   * 调 window.__islandMusicControl(外部 SMTC 优先,本地播放器兜底)。
+   * 未注入则不注册 music_control 工具
+   */
+  runMusicControl?(op: string, args: unknown[]): Promise<unknown>
+  /**
+   * NapCat QQ 机器人客户端(2026-08-12,main.cjs 创建注入):
+   * 未注入则不注册 napcat 工具。收到的 QQ 消息经 main.cjs 转发渲染端
+   * 进入对话;回复由 main.cjs 的 message 事件链路发回 QQ
+   */
+  napcat?: {
+    status(): { connected: boolean; url: string; lastError: string; receivedCount: number; repliedCount: number }
+    sendToQQ(qq: string, text: string): Promise<string>
+    sendToGroup(groupId: string, text: string): Promise<string>
+    getRecentMessages(): Array<{ qq: string; text: string; messageId: string; time: number; replied?: boolean }>
+    /** 联系人档案(2026-08-12:napcat 工具 contacts/contact_update) */
+    getContacts(): Promise<
+      Record<string, { qq: string; name?: string; info?: string; source?: 'private' | 'group'; updatedAt: number }>
+    >
+    updateContact(patch: {
+      qq: string
+      name?: string
+      info?: string
+      source?: 'private' | 'group'
+    }): Promise<{ qq: string; name?: string; info?: string; source?: 'private' | 'group'; updatedAt: number }>
+  }
 }
 
 /** 记忆存储的引擎可见子集(避免 types ↔ memory 循环引用) */

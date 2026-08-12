@@ -1057,7 +1057,12 @@ export const DynamicIsland = memo(function DynamicIsland({
       playingMedia && playingMedia.kind === 'audio' && playingMedia.playing && playingMedia.src
         ? playingMedia
         : null
-    if (playingAudio && onAgentAudioHandoffRef.current) {
+    // **仅"收起为多媒体岛"(mediaMini)执行音频移交(2026-08-12 修复
+    // "播放音频时点收起为灵动岛,结果切成音乐模式"——用户实测):移交的
+    // 语义 = 面板卸载后由音乐模式续播,那是多媒体岛的专属行为;收起为
+    // 灵动岛(mediaMini:false) = 纯 Agent 紧凑态,音频随面板卸载停止,
+    // 不切音乐模式
+    if (mediaMini && playingAudio && onAgentAudioHandoffRef.current) {
       onAgentAudioHandoffRef.current({
         src: playingAudio.src,
         name: playingAudio.name,

@@ -6,7 +6,7 @@
  * 状态(列表/测量/输入/菜单)留在 AgentView。
  */
 
-import { memo, useEffect, useState } from 'react'
+import { memo, useEffect, useRef, useState } from 'react'
 import type { AgentMessage, AgentPart } from '../../../agent/types'
 import { textFromMessage, textFromParts } from '../../../agent/text'
 import { firstMediaKindInText } from './markdownParser'
@@ -15,11 +15,34 @@ import { AgentImage, CopyButton, Markdown, MediaFrame } from './Markdown'
 /** 用户消息气泡:右侧强调色,Markdown 文本(plainMermaid:用户贴的
  * mermaid 源码按普通代码块显示,图表深色主题进浅色气泡不可读) + 复制按钮。
  * memo:已落定消息引用不变,流式期间不再重建 */
+/** 剥离 NapCat 注入指令段(2026-08-12 修复"提示词泄露"):main.cjs
+ * 群/陌生人消息的注入文本 = 【来源】消息 + 【群聊指令/私聊指令】…——
+ * 指令段只给 LLM 看(引擎历史回传完整),对话窗口显示剥离,用户只见
+ * 来源标注与原始消息 */
+function stripNapcatInstructions(text: string): string {
+  return text
+    .replace(/【群聊指令】[\s\S]*$/, '')
+    .replace(/【私聊指令】[\s\S]*$/, '')
+    .trim()
+}
+
 export const UserBubble = memo(function UserBubble({ m }: { m: AgentMessage }) {
-  const text = textFromMessage(m)
+  const text = stripNapcatInstructions(textFromMessage(m))
   return (
     <div className="island-agent-msg-user">
       <div className="island-agent-msg-user-text">
+        {/* NapCat 来源标签(2026-08-12):QQ 私聊('QQ')/ 群聊('群聊')
+            消息进入对话显示来源,与本地输入区分(回复会发回对应 QQ/群) */}
+        {m.source === 'qq' && (
+          <span className="island-agent-msg-qq-tag" title={m.qq ? `来自 QQ ${m.qq}` : '来自 QQ'}>
+            QQ
+          </span>
+        )}
+        {m.source === 'group' && (
+          <span className="island-agent-msg-qq-tag" title={m.qq ? `来自群聊(QQ ${m.qq})` : '来自群聊'}>
+            群聊
+          </span>
+        )}
         <Markdown text={text} plainMermaid />
       </div>
       <CopyButton text={text} />
@@ -43,6 +66,27 @@ interface ToolCallData {
     memo:已落定消息里 call 引用稳定,流式期间不再重建 */
 export const ToolCard = memo(function ToolCard({ call }: { call: ToolCallData }) {
   const [open, setOpen] = useState(false)
+  // body 懒渲染(2026-08-11 性能):工具调用流式期间每帧重渲染整个
+  // ToolSummary(参数增量逐帧累积),卡片默认折叠——参数 JSON.stringify
+  // + 8000 字符结果 pre 的渲染纯浪费(不可见),且大参数(write_file
+  // 内容/长命令)stringify 本身是重活。折叠时 body 不渲染;展开先挂
+  // 内容、双 rAF 后再加 open 类(0fr→1fr 动画首帧内容已就位不塌缩);
+  // 收起动画(0.28s)结束后清空
+  const [showBody, setShowBody] = useState(false)
+  const bodyClearTimerRef = useRef(0)
+  useEffect(() => () => window.clearTimeout(bodyClearTimerRef.current), [])
+  const toggle = () => {
+    if (!open) {
+      setShowBody(true)
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => setOpen(true))
+      })
+    } else {
+      setOpen(false)
+      window.clearTimeout(bodyClearTimerRef.current)
+      bodyClearTimerRef.current = window.setTimeout(() => setShowBody(false), 300)
+    }
+  }
   return (
     <div className={`island-agent-tool${open ? ' open' : ''}`}>
       {/* 卡片是交互元素:拦截左键,长按卡片不触发岛体收回 */}
@@ -52,7 +96,7 @@ export const ToolCard = memo(function ToolCard({ call }: { call: ToolCallData })
         aria-expanded={open}
         onClick={(event) => {
           event.stopPropagation()
-          setOpen((v) => !v)
+          toggle()
         }}
         onPointerDown={(event) => {
           if (event.button === 0) event.stopPropagation()
@@ -70,20 +114,22 @@ export const ToolCard = memo(function ToolCard({ call }: { call: ToolCallData })
           ▸
         </span>
       </button>
-      <div className="island-agent-tool-body-wrap">
-        <div className="island-agent-tool-body">
-          <div className="island-agent-tool-sec">
-            <span className="island-agent-tool-sec-title">参数</span>
-            <pre className="island-agent-tool-code">{JSON.stringify(call.args ?? {}, null, 2)}</pre>
-          </div>
-          {call.result !== undefined && (
+      {showBody && (
+        <div className="island-agent-tool-body-wrap">
+          <div className="island-agent-tool-body">
             <div className="island-agent-tool-sec">
-              <span className="island-agent-tool-sec-title">{call.ok === false ? '错误' : '结果'}</span>
-              <pre className="island-agent-tool-code">{call.result}</pre>
+              <span className="island-agent-tool-sec-title">参数</span>
+              <pre className="island-agent-tool-code">{JSON.stringify(call.args ?? {}, null, 2)}</pre>
             </div>
-          )}
+            {call.result !== undefined && (
+              <div className="island-agent-tool-sec">
+                <span className="island-agent-tool-sec-title">{call.ok === false ? '错误' : '结果'}</span>
+                <pre className="island-agent-tool-code">{call.result}</pre>
+              </div>
+            )}
+          </div>
         </div>
-      </div>
+      )}
     </div>
   )
 })

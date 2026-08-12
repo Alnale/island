@@ -49,6 +49,10 @@ import {
 // 写共享偏好经 island:video-prefs 事件三处播放器即时同步;2026-08-10 二轮
 // 支持 key = 单个视频个性化,事件带 key 只影响匹配播放器)
 import { loadVideoPrefs, setVideoPrefs as saveVideoPrefs } from './media/videoPrefs'
+// 音频播放偏好(2026-08-12,LLM 工具 set_audio_config 的 volume/loop:
+// 写共享/个性化偏好经 island:audio-prefs 事件语音气泡即时同步,同
+// videoPrefs 的双层(key = 单条音频个性化)语义)
+import { setAudioPrefs } from './media/audioPrefs'
 // 歌词 API 提供商(2026-08-11,LLM 工具 set_lyric_provider:与设置视图
 // 歌词 API 页同款 localStorage 存储,运行时查询即时生效)
 import {
@@ -194,14 +198,39 @@ export interface IslandSettingsBridge {
     speed: number
     loop: boolean
   }>
+  /** 按音频名控制**单条音频**(2026-08-12,LLM 工具 set_audio_config):
+   * 音量/循环写该音频的个性化存储(只影响匹配的音频,其它音频不变),
+   * playing 直接播放/暂停。name 缺省 = 对话窗口里正在播放的音频
+   * (无播放中的取最后挂载);找不到抛错(LLM 可先 list_conversation_media
+   * 查名字) */
+  setAudioState(input: {
+    name?: string
+    volume?: number
+    loop?: boolean
+    playing?: boolean
+  }): Promise<{
+    ok: true
+    name?: string
+    playing: boolean
+    volume: number
+    loop: boolean
+  }>
   /** 对话窗口媒体清单(2026-08-10,LLM 工具 list_conversation_media):
    * 遍历消息气泡 DOM 列出全部媒体附件(图片/视频/音频),视频带播放
-   * 状态(播放中/音量/速度/循环/全屏/进度)——LLM 据此回答"对话里有
-   * 什么媒体、哪个在播放、视频音量多大" */
+   * 状态(播放中/音量/速度/循环/全屏/进度),音频带播放/音量/循环/进度
+   * ——LLM 据此回答"对话里有什么媒体、哪个在播放、音量多大" */
   getConversationMedia(): Promise<
     Array<
       | { kind: 'img'; name?: string }
-      | { kind: 'audio'; name?: string; playing: boolean }
+      | {
+          kind: 'audio'
+          name?: string
+          playing: boolean
+          volume: number
+          loop: boolean
+          position: number
+          duration: number | null
+        }
       | {
           kind: 'video'
           name?: string
@@ -228,9 +257,11 @@ export interface IslandSettingsBridge {
   /**
    * 音频库条目 → 音乐模式播放列表(2026-08-10,LLM 工具
    * add_audio_to_playlist):校验条目存在后派发 island:playlist-import
-   * 事件,WidgetApp 监听 → addLibraryTracks(自动播首曲)+ 切音乐模式
-   * ——用户能直接在音乐模式点播(音频库 ≠ 播放列表,import_audio_library
-   * 只进库,不加入播放列表是"LLM 说导入了却播不了"的根因)
+   * 事件,WidgetApp 监听 → addLibraryTracks(**autoPlay:false,仅入列表
+   * 不自动播、不切音乐模式**——2026-08-11 用户要求"除非明确指定切到
+   * 音乐模式播放,音频都在对话窗口播放";音频库 ≠ 播放列表,
+   * import_audio_library 只进库,不加入播放列表是"LLM 说导入了却播不了"
+   * 的根因)
    */
   addAudioLibraryToPlaylist(ids: string[]): Promise<{
     ok: true
@@ -420,6 +451,75 @@ export function readMediaWindowWidth(): number {
     // 读取失败按默认
   }
   return 320
+}
+
+// ---- 音乐控制桥(2026-08-12,QQ 远程控制 / 后台对话:主进程经
+// executeJavaScript 调 window.__islandMusicControl → 外部平台(SMTC)
+// 优先,本地播放器兜底——与 WidgetApp 现有控制逻辑一致) ----
+export interface IslandMusicControl {
+  /** 播放控制:play / pause / next / previous(切歌) */
+  control(action: 'play' | 'pause' | 'next' | 'previous'): Promise<{ ok: boolean; action: string }>
+  /** 当前播放状态(LLM 回答"现在放什么"用) */
+  status(): {
+    external: boolean
+    playing: boolean
+    title: string | null
+    artist: string | null
+    position: number
+    duration: number
+  }
+}
+
+export function registerMusicControlBridge(deps: {
+  getExternalActive(): boolean
+  systemControl(action: 'play' | 'pause' | 'next' | 'previous'): Promise<boolean | undefined>
+  /** 惰性读取(实时状态:phase/track/position 随播放变化,闭包捕获
+   * 首次渲染值会读到旧状态) */
+  getPlayer(): {
+    phase: string
+    track: { title: string; artist: string } | null
+    position: number
+    duration: number
+    play(): void
+    pause(): void
+    next(): void
+    previous(): void
+  }
+  getSystem(): {
+    track: { title: string; artist: string } | null
+    playing: boolean
+    position: number
+    duration: number
+  }
+}): void {
+  if (window.__islandMusicControl) return
+  const bridge: IslandMusicControl = {
+    async control(action) {
+      if (deps.getExternalActive()) {
+        await deps.systemControl(action)
+      } else {
+        const p = deps.getPlayer()
+        if (action === 'play') p.play()
+        else if (action === 'pause') p.pause()
+        else if (action === 'next') p.next()
+        else if (action === 'previous') p.previous()
+      }
+      return { ok: true, action }
+    },
+    status() {
+      const external = deps.getExternalActive()
+      const src = external ? deps.getSystem() : deps.getPlayer()
+      return {
+        external,
+        playing: external ? deps.getSystem().playing : deps.getPlayer().phase === 'playing',
+        title: src.track?.title ?? null,
+        artist: src.track?.artist ?? null,
+        position: Math.round(src.position || 0),
+        duration: Math.round(src.duration || 0),
+      }
+    },
+  }
+  window.__islandMusicControl = bridge
 }
 
 export function registerIslandSettingsBridge(): void {
@@ -723,6 +823,45 @@ export function registerIslandSettingsBridge(): void {
         loop: v.loop,
       }
     },
+    // 按名字控制单条音频(2026-08-12,LLM 工具 set_audio_config):
+    // 音量/循环写该音频个性化存储(audioPrefs,key = data-media-name,
+    // 与 VoiceBubble 的 alt 同源)→ island:audio-prefs 事件(带 key)→
+    // 匹配的语音气泡订阅应用,其它音频不受影响;playing 直接操作 audio
+    // 元素(play/pause 触发 onPlay/onPause,组件播放状态自然同步)
+    async setAudioState(input) {
+      const voices = [...document.querySelectorAll<HTMLElement>('.island-agent-voice')]
+        .map((voice) => ({ voice, audio: voice.querySelector<HTMLAudioElement>('audio') }))
+        .filter((x) => x.audio)
+      if (voices.length === 0) {
+        throw new Error('对话窗口当前没有音频(用 list_conversation_media 查看)')
+      }
+      let target =
+        input.name !== undefined
+          ? voices.find((v) => (v.voice.getAttribute('data-media-name') ?? '') === input.name)
+          : voices.find((v) => !v.audio!.paused) ?? voices[voices.length - 1]
+      if (!target) {
+        throw new Error(`对话窗口没有名为「${input.name}」的音频(用 list_conversation_media 查看可用的名字)`)
+      }
+      const a = target.audio!
+      const key = target.voice.getAttribute('data-media-name') || undefined
+      const prefsPatch: { volume?: number; loop?: boolean } = {}
+      if (input.volume !== undefined) {
+        const vol = Number(input.volume)
+        if (!Number.isFinite(vol)) throw new Error('volume 需要是 0-1 的数字')
+        prefsPatch.volume = Math.min(1, Math.max(0, vol))
+      }
+      if (input.loop !== undefined) prefsPatch.loop = Boolean(input.loop)
+      if (Object.keys(prefsPatch).length > 0) setAudioPrefs(prefsPatch, key)
+      if (input.playing === true) void a.play().catch(() => {})
+      else if (input.playing === false) a.pause()
+      return {
+        ok: true,
+        name: target.voice.getAttribute('data-media-name') || undefined,
+        playing: !a.paused,
+        volume: Math.round((a.volume || 0) * 100),
+        loop: a.loop,
+      }
+    },
     // 全屏切换(2026-08-10):enter=true 把对话窗口内**正在播放**的视频
     // 容器全屏(优先非 paused,无播放中的取最后挂载的);false 退出全屏
     async setFullscreen(enter) {
@@ -742,7 +881,15 @@ export function registerIslandSettingsBridge(): void {
     async getConversationMedia() {
       const items: Array<
         | { kind: 'img'; name?: string }
-        | { kind: 'audio'; name?: string; playing: boolean }
+        | {
+            kind: 'audio'
+            name?: string
+            playing: boolean
+            volume: number
+            loop: boolean
+            position: number
+            duration: number | null
+          }
         | {
             kind: 'video'
             name?: string
@@ -780,10 +927,17 @@ export function registerIslandSettingsBridge(): void {
       }
       for (const voice of document.querySelectorAll<HTMLElement>('.island-agent-voice')) {
         const audio = voice.querySelector('audio')
+        // 2026-08-12:音频条目扩展音量/循环/进度(set_audio_config 调整前
+        // 先查当前值;name 优先 data-media-name(= VoiceBubble 的 alt),
+        // 回退旧 title 格式)
         items.push({
           kind: 'audio',
-          name: voice.getAttribute('title')?.replace(/^语音:/, '') || undefined,
+          name: voice.getAttribute('data-media-name') || voice.getAttribute('title')?.replace(/^语音:/, '') || undefined,
           playing: audio ? !audio.paused : false,
+          volume: audio ? Math.round((audio.volume || 0) * 100) : 100,
+          loop: audio ? audio.loop : false,
+          position: audio ? Math.round(audio.currentTime || 0) : 0,
+          duration: audio && Number.isFinite(audio.duration) ? Math.round(audio.duration) : null,
         })
       }
       return items
@@ -890,9 +1044,10 @@ export function registerIslandSettingsBridge(): void {
       notify(['background'])
       return { ok: true, removed, previous }
     },
-    // 音频库 → 播放列表(2026-08-10,LLM 工具 add_audio_to_playlist):
+    // 音频库 → 播放列表(2026-08-10,LLM 工具 add_audio_to_playlist;
+    // 2026-08-11 改语义:仅入列表不自动播不切模式,见接口注释):
     // 校验条目存在(不存在抛错,LLM 可自纠)后派发事件,WidgetApp 监听
-    // 导入播放列表 + 切音乐模式自动播放
+    // 以 autoPlay:false 导入播放列表
     async addAudioLibraryToPlaylist(ids) {
       const items = await loadAudioLibrary()
       const picked = items.filter((it) => (ids ?? []).includes(it.id))
@@ -924,5 +1079,7 @@ export function registerIslandSettingsBridge(): void {
 declare global {
   interface Window {
     __islandSettings?: IslandSettingsBridge
+    /** 音乐控制桥(2026-08-12:QQ 远程控制 / 后台对话经主进程调用) */
+    __islandMusicControl?: IslandMusicControl
   }
 }

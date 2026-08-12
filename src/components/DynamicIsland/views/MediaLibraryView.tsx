@@ -79,7 +79,8 @@ function MediaLibVideoPlayer({ path }: { path: string }) {
   const vRef = useRef<HTMLVideoElement>(null)
   const barRef = useRef<HTMLDivElement>(null)
   const [playing, setPlaying] = useState(true)
-  const [current, setCurrent] = useState(0)
+  // current 改 DOM 直写(2026-08-11 性能:原每 ~250ms timeupdate
+  // setCurrent 重渲染整个预览播放器,见 renderProgress 注释)
   const [duration, setDuration] = useState(0)
   const scrubbingRef = useRef(false)
   // 应用共享偏好(2026-08-10 双向同步)
@@ -110,9 +111,30 @@ function MediaLibVideoPlayer({ path }: { path: string }) {
     if (event.clientX < rect.left || event.clientX > rect.right) return
     const ratio = Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width))
     v.currentTime = ratio * duration
-    setCurrent(v.currentTime)
+    renderProgress()
   }
-  const pct = duration > 0 && Number.isFinite(duration) ? Math.min(100, (current / duration) * 100) : 0
+  // 播放进度 DOM 直写(2026-08-11 性能,与对话播放器/视频岛同款:
+  // timeupdate 每 ~250ms,原 setCurrent 每次重渲染整个预览播放器;
+  // 直写后播放期间零 React 重渲染,组件重渲染后由下方 effect 同步)
+  const renderProgress = (reset = false) => {
+    const v = vRef.current
+    const bar = barRef.current
+    if (!bar) return
+    const dur = v ? v.duration || 0 : 0
+    const cur = reset ? 0 : v ? v.currentTime || 0 : 0
+    const pct = dur > 0 && Number.isFinite(dur) ? Math.min(100, (cur / dur) * 100) : 0
+    const fill = bar.querySelector('.island-media-lib-bar-fill') as HTMLElement | null
+    const thumb = bar.querySelector('.island-media-lib-bar-thumb') as HTMLElement | null
+    if (fill) fill.style.width = `${pct}%`
+    if (thumb) thumb.style.left = `${pct}%`
+    const timeEl = bar.parentElement?.querySelector('.island-media-lib-time')
+    if (timeEl) timeEl.textContent = `${fmtLibTime(cur)} / ${fmtLibTime(dur)}`
+    bar.setAttribute('aria-valuenow', String(Math.round(cur)))
+  }
+  // 每次渲染提交后同步一次真实进度(JSX 静态,重渲染不覆盖直写值)
+  useEffect(() => {
+    renderProgress()
+  })
   return (
     <div className="island-media-lib-player">
       <video
@@ -128,10 +150,14 @@ function MediaLibVideoPlayer({ path }: { path: string }) {
           const d = event.currentTarget.duration
           setDuration(Number.isFinite(d) ? d : 0)
         }}
-        onTimeUpdate={(event) => setCurrent(event.currentTarget.currentTime)}
+        onTimeUpdate={() => {
+          // 进度 DOM 直写(2026-08-11 性能,见 renderProgress 注释)
+          renderProgress()
+        }}
         onEnded={() => {
           setPlaying(false)
-          setCurrent(0)
+          // ended 后 currentTime 停在时长,显式归零
+          renderProgress(true)
         }}
         onPlay={() => setPlaying(true)}
         onPause={() => setPlaying(false)}
@@ -156,7 +182,7 @@ function MediaLibVideoPlayer({ path }: { path: string }) {
           aria-label="播放进度"
           aria-valuemin={0}
           aria-valuemax={Math.round(duration)}
-          aria-valuenow={Math.round(current)}
+          aria-valuenow={0}
           onPointerDown={(event) => {
             if (event.button !== 0) return
             event.preventDefault()
@@ -175,12 +201,11 @@ function MediaLibVideoPlayer({ path }: { path: string }) {
             scrubbingRef.current = false
           }}
         >
-          <div className="island-media-lib-bar-fill" style={{ width: `${pct}%` }} />
-          <span className="island-media-lib-bar-thumb" style={{ left: `${pct}%` }} />
+          {/* 进度由 renderProgress 直写(JSX 静态,重渲染不覆盖) */}
+          <div className="island-media-lib-bar-fill" />
+          <span className="island-media-lib-bar-thumb" />
         </div>
-        <span className="island-media-lib-time">
-          {fmtLibTime(current)} / {fmtLibTime(duration)}
-        </span>
+        <span className="island-media-lib-time">0:00 / 0:00</span>
         <VideoExtras videoRef={vRef} />
       </div>
     </div>
@@ -284,7 +309,8 @@ function AudioPlayBar({ src, autoPlay = false }: { src: string; autoPlay?: boole
   const trackRef = useRef<HTMLDivElement>(null)
   const [playing, setPlaying] = useState(false)
   const [duration, setDuration] = useState(0)
-  const [current, setCurrent] = useState(0)
+  // current 改 DOM 直写(2026-08-11 性能:原每 ~250ms timeupdate
+  // setCurrent 重渲染整个播放条,见 renderProgress 注释)
   const [err, setErr] = useState(false)
   const scrubbingRef = useRef(false)
   // 挂载即播(展开手势链内;失败保留错误提示——播放失败会显示)
@@ -306,9 +332,29 @@ function AudioPlayBar({ src, autoPlay = false }: { src: string; autoPlay?: boole
     const rect = bar.getBoundingClientRect()
     const ratio = Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width))
     a.currentTime = ratio * duration
-    setCurrent(a.currentTime)
+    renderProgress()
   }
-  const pct = duration > 0 ? Math.min(100, (current / duration) * 100) : 0
+  // 播放进度 DOM 直写(2026-08-11 性能,与视频播放器同款:
+  // timeupdate 每 ~250ms,原 setCurrent 每次重渲染整个播放条)
+  const renderProgress = (reset = false) => {
+    const a = audioRef.current
+    const track = trackRef.current
+    if (!track) return
+    const dur = a ? a.duration || 0 : 0
+    const cur = reset ? 0 : a ? a.currentTime || 0 : 0
+    const pct = dur > 0 && Number.isFinite(dur) ? Math.min(100, (cur / dur) * 100) : 0
+    const fill = track.querySelector('.island-media-playbar-fill') as HTMLElement | null
+    const thumb = track.querySelector('.island-media-playbar-thumb') as HTMLElement | null
+    if (fill) fill.style.width = `${pct}%`
+    if (thumb) thumb.style.left = `${pct}%`
+    const timeEl = track.parentElement?.querySelector('.island-media-playbar-time')
+    if (timeEl) timeEl.textContent = `${fmtTime(cur)} / ${fmtTime(dur)}`
+    track.setAttribute('aria-valuenow', String(Math.round(cur)))
+  }
+  // 每次渲染提交后同步一次真实进度(JSX 静态,重渲染不覆盖直写值)
+  useEffect(() => {
+    renderProgress()
+  })
   if (err) return <div className="island-agent-media-err">无法播放该音频</div>
   return (
     <div className="island-media-playbar">
@@ -330,7 +376,7 @@ function AudioPlayBar({ src, autoPlay = false }: { src: string; autoPlay?: boole
         aria-label="播放进度"
         aria-valuemin={0}
         aria-valuemax={Math.round(duration)}
-        aria-valuenow={Math.round(current)}
+        aria-valuenow={0}
         onPointerDown={(event) => {
           if (event.button !== 0) return
           event.preventDefault()
@@ -349,22 +395,25 @@ function AudioPlayBar({ src, autoPlay = false }: { src: string; autoPlay?: boole
           scrubbingRef.current = false
         }}
       >
-        <div className="island-media-playbar-fill" style={{ width: `${pct}%` }} />
-        <span className="island-media-playbar-thumb" style={{ left: `${pct}%` }} aria-hidden="true" />
+        {/* 进度由 renderProgress 直写(JSX 静态,重渲染不覆盖) */}
+        <div className="island-media-playbar-fill" />
+        <span className="island-media-playbar-thumb" aria-hidden="true" />
       </div>
-      <span className="island-media-playbar-time">
-        {fmtTime(current)} / {fmtTime(duration)}
-      </span>
+      <span className="island-media-playbar-time">0:00 / 0:00</span>
       <audio
         ref={audioRef}
         src={src}
         preload="metadata"
         onError={() => setErr(true)}
         onLoadedMetadata={(event) => setDuration(event.currentTarget.duration || 0)}
-        onTimeUpdate={(event) => setCurrent(event.currentTarget.currentTime)}
+        onTimeUpdate={() => {
+          // 进度 DOM 直写(2026-08-11 性能,见 renderProgress 注释)
+          renderProgress()
+        }}
         onEnded={() => {
           setPlaying(false)
-          setCurrent(0)
+          // ended 后 currentTime 停在时长,显式归零
+          renderProgress(true)
         }}
         onPlay={() => setPlaying(true)}
         onPause={() => setPlaying(false)}

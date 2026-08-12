@@ -28,6 +28,10 @@ export type { AgentPart } from '../../electron/agent/types'
 export interface AgentMessage extends EngineAgentMessage {
   /** token 用量(assistant 消息落定时附上;cached = 缓存命中 token 数) */
   usage?: { input: number; output: number; cached?: number }
+  /** NapCat 来源(2026-08-12):'qq' = 私聊 / 'group' = 群聊,
+   * qq = 发送者 QQ 号(气泡显示来源标签,回复发回对应 QQ/群) */
+  source?: 'qq' | 'group'
+  qq?: string
 }
 
 /** 引擎事件流(含确认门/进化/后台完成事件) */

@@ -67,6 +67,32 @@ const BILI_ENV = {
 /** DocFlow 服务地址(本地 Flask;未运行时 doc_convert 自动拉起) */
 const DOCFLOW_BASE = 'http://127.0.0.1:5000'
 
+/**
+ * 工具输出目录环境(2026-08-12,引擎经 createTools deps 注入):
+ * - getOutputDir = Agent 配置的工具输出根目录(空 = 未启用,工具保持
+ *   默认位置 userData 下);
+ * - getSessionId = 当前会话 ID(send/proactiveTurn 更新)。
+ * 目录结构 = <根>/<工具名>/[<会话ID>]——每工具文件夹分类、文件按
+ * 对话 ID 分类(用户要求);会话 ID 缺失(测试/历史调用)回退
+ * <根>/<工具名>。write_file/exec_command 是用户指定路径的写入,
+ * 不重定向,只有工具自产文件(bili 下载 / xxt 截图 / doc_convert 输出)
+ * 走本机制
+ */
+let outputEnv: { getOutputDir: () => string | null; getSessionId: () => string | null } = {
+  getOutputDir: () => null,
+  getSessionId: () => null,
+}
+
+/** 工具输出目录解析(测试导出):未配置根目录返回 null,否则
+ * <根>/<工具名>/[<会话ID>](会话 ID 缺失落在 <根>/<工具名>) */
+export function toolOutputDir(tool: string): string | null {
+  const root = outputEnv.getOutputDir()
+  if (!root) return null
+  const base = path.join(root, tool)
+  const sid = outputEnv.getSessionId()
+  return sid ? path.join(base, sid) : base
+}
+
 // bili-tool 工作目录必须存在:spawn 的 cwd 不存在会 ENOENT(且被误报为
 // "二进制缺失")——download/saved/trending 等分支都直接 spawn,从不创建
 // 目录,首次使用必然失败(2026-08-08 工具逐一验证实测);login 分支虽有
@@ -99,10 +125,13 @@ function absolutizeBiliPath(rel: string): string {
  * 含用户登录态,不随仓库分发(2026-08-07 改造) */
 function runXxt(args: string[], timeoutMs: number): Promise<string> {
   return new Promise((resolve, reject) => {
+    // 截图输出目录(2026-08-12):配置了工具输出根目录时落到
+    // <根>/xxt/[<会话ID>],否则默认 userData/xxt-screenshots
+    const xxtOut = toolOutputDir('xxt')
     const env = {
       ...process.env,
       XXT_PROFILE_DIR: path.join(userDataDir(), 'xxt-profile'),
-      XXT_SCREENSHOT_DIR: path.join(userDataDir(), 'xxt-screenshots'),
+      XXT_SCREENSHOT_DIR: xxtOut ?? path.join(userDataDir(), 'xxt-screenshots'),
     }
     const child = existsSync(XXT_EXE)
       ? spawn(XXT_EXE, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], env })
@@ -413,7 +442,11 @@ async function biliQuery(params: ToolParams): Promise<string | { text: string; i
       const dargs = ['get', query]
       if (params.audio) dargs.push('--audio', String(params.audio))
       if (params.quality) dargs.push('--quality', String(params.quality))
+      // 输出目录(2026-08-12):LLM 显式传 outdir 恒优先;否则配置了
+      // 工具输出根目录时缺省 = <根>/bili/[<会话ID>](下载按对话分类)
+      const biliOut = toolOutputDir('bili')
       if (params.outdir) dargs.push('--outdir', String(params.outdir))
+      else if (biliOut) dargs.push('--outdir', biliOut)
       if (params.page) dargs.push('--page', String(Number(params.page) || 1))
       if (params.subs) dargs.push('--subs')
       if (params.no_danmaku) dargs.push('--no-danmaku')
@@ -434,7 +467,10 @@ async function biliQuery(params: ToolParams): Promise<string | { text: string; i
       if (params.regex) dargs.push('--regex', String(params.regex))
       if (params.audio) dargs.push('--audio', String(params.audio))
       if (params.quality) dargs.push('--quality', String(params.quality))
+      // 与单视频 download 同款:LLM 显式 outdir 优先,否则输出目录缺省
+      const biliOut = toolOutputDir('bili')
       if (params.outdir) dargs.push('--outdir', String(params.outdir))
+      else if (biliOut) dargs.push('--outdir', biliOut)
       if (params.dry_run) dargs.push('--dry-run')
       // 确认门(未注入 = 放行,测试/无 UI 环境):批量下载是占用磁盘与
       // 带宽的动作,LLM 不能未经用户同意就启动
@@ -657,8 +693,13 @@ async function docConvert(params: ToolParams): Promise<string> {
   if (!['.doc', '.docx', '.pdf'].includes(ext)) throw new Error('仅支持 .doc/.docx/.pdf 文件')
   const target = String(params.target ?? (ext === '.pdf' ? 'docx' : 'pdf'))
   if (!['pdf', 'docx', 'markdown'].includes(target)) throw new Error('target 仅支持 pdf/docx/markdown')
+  // 输出目录(2026-08-12):配置了工具输出根目录时缺省 =
+  // <根>/doc_convert/[<会话ID>](转换产物按对话分类);未配置保持
+  // 原语义 = 输入文件所在目录(LLM 显式传 outputDir 恒优先)
   const outputDir =
-    typeof params.outputDir === 'string' && params.outputDir ? params.outputDir : path.dirname(inputPath)
+    typeof params.outputDir === 'string' && params.outputDir
+      ? params.outputDir
+      : (toolOutputDir('doc_convert') ?? path.dirname(inputPath))
   const timeoutMs = Math.min(Math.max(Number(params.waitTimeout) || 120, 10), 600) * 1000
 
   // 1. 服务探测:未运行则自动拉起(2026-08-07——用户无需手动
@@ -971,7 +1012,19 @@ export function createTools(deps: {
    * 未注入 = 不确认(测试环境)
    */
   confirmAction?(title: string, detail: string): Promise<boolean>
+  /**
+   * 工具输出根目录(2026-08-12):Agent 配置 agent.outputDir(空 = 未启用);
+   * getSessionId = 当前会话 ID(send 时更新)。产出文件按
+   * <根>/<工具名>/[<会话ID>] 存放,未注入保持默认位置
+   */
+  getOutputDir?(): string | null
+  getSessionId?(): string | null
 }): AgentTool[] {
+  // 工具输出目录环境注入(模块级,工具执行时读取)
+  outputEnv = {
+    getOutputDir: deps.getOutputDir ?? (() => null),
+    getSessionId: deps.getSessionId ?? (() => null),
+  }
   // bili 批量下载确认门注入(模块级 ref,biliQuery 同步读取)
   biliConfirmRef.current = deps.confirmAction ? { confirmAction: deps.confirmAction } : null
   // 通用任务注册表接线(替代原 bili 专用 bgDone 模块级回调):任何工具
@@ -1109,7 +1162,9 @@ export function createTools(deps: {
       description:
         '用系统默认程序打开文件或文件夹(文档、目录等)。' +
         '注意:图片/视频/音频等媒体文件**不会**打开外部播放器——' +
-        '媒体会作为附件直接展示在对话窗口内播放,回复时告知用户"已打开"即可。',
+        '媒体会作为附件直接展示在对话窗口内播放,回复时告知用户"已打开"即可。' +
+        '**用户要求"听歌/放首歌/播音乐"时默认用本工具打开音频在对话窗口内播放**,' +
+        '不要切音乐模式;只有用户明确说"切到音乐模式播放"时才用 switch_to_music。',
       parameters: {
         type: 'object',
         properties: {
@@ -1269,7 +1324,9 @@ export function createTools(deps: {
       name: 'switch_to_music',
       description:
         '把灵动岛挂件从 Agent 模式切回音乐播放器模式(岛体恢复歌曲/播放控制)。' +
-        '**用户要求"听歌/播放音乐"时必须带 play:true——切换后从当前播放列表开始播放**;' +
+        '**仅在用户明确要求切换到音乐模式时调用**(如"切到音乐模式""用音乐模式放")——' +
+        '用户说"听歌/放首歌/播音乐"默认是让本助手播放,**默认用 open_file 打开音频在对话窗口内直接播放,不要切音乐模式**;' +
+        'play:true = 用户明确要求切过去后立即开始播放当前播放列表;' +
         '仅切换模式(用户只想回音乐模式看状态)不带 play。' +
         '播放列表为空时提示用户先添加歌曲,或用 list_audio_library + add_audio_to_playlist 把歌曲加入播放列表再切。',
       parameters: {
@@ -1277,7 +1334,7 @@ export function createTools(deps: {
         properties: {
           play: {
             type: 'boolean',
-            description: 'true = 切换到音乐模式后立即开始播放当前播放列表(用户要求听歌/播放时传)',
+            description: 'true = 切换到音乐模式后立即开始播放当前播放列表(用户明确要求切过去并播放时传)',
           },
         },
       },
@@ -1304,7 +1361,11 @@ export function createTools(deps: {
             enum: ['pdf', 'docx', 'markdown'],
             description: '目标格式;缺省按输入类型自动(pdf→docx、doc/docx→pdf)',
           },
-          outputDir: { type: 'string', description: '输出目录,缺省为输入文件所在目录' },
+          outputDir: {
+            type: 'string',
+            description:
+              '输出目录,缺省 = 工具输出目录(设置里配置后为 输出根/doc_convert/当前对话ID,转换产物按对话分类);未配置输出目录时缺省为输入文件所在目录',
+          },
           waitTimeout: { type: 'number', description: '等待转换完成秒数,缺省 120,最大 600' },
         },
         required: ['inputPath'],
@@ -1335,7 +1396,11 @@ export function createTools(deps: {
             type: 'string',
             description: 'fill 时的答案,JSON 字符串,如 {"1":"C","2":"A","3":"答案文本"}',
           },
-          output: { type: 'string', description: 'screenshot 的截图保存路径' },
+          output: {
+            type: 'string',
+            description:
+              'screenshot 的截图保存路径;缺省 = 工具输出目录(设置里配置后为 输出根/xxt/当前对话ID/截图.png,截图按对话分类);未配置时保存到默认截图目录',
+          },
           headless: { type: 'boolean', description: '无头浏览器模式,缺省 false(可见窗口)' },
         },
         required: ['action'],
@@ -1426,7 +1491,11 @@ export function createTools(deps: {
           rid: { type: 'number', description: 'trending 的分区 id,缺省 0(全站)' },
           audio: { type: 'string', description: '仅下载音频并转码为指定格式(如 mp3/flac);不填 = 视频' },
           quality: { type: 'string', description: '视频清晰度(如 1080p/720p/360p),缺省 best;下载的 HEVC(H.265)视频会自动转码为 H.264(对话窗口内可直接播放)' },
-          outdir: { type: 'string', description: '下载输出目录,缺省 bili-tool 的 downloads/' },
+          outdir: {
+            type: 'string',
+            description:
+              '下载输出目录;缺省 = 工具输出目录(设置里配置后为 输出根/bili/当前对话ID,下载按对话分类);未配置输出目录时缺省 bili-tool 的 downloads/',
+          },
           page: { type: 'number', description: 'download 多 P 视频的选集页码,缺省 1' },
           subs: { type: 'boolean', description: 'download 同时下载 CC 字幕' },
           no_danmaku: { type: 'boolean', description: 'download 不下载弹幕' },

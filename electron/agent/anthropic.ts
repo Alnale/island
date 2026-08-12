@@ -21,7 +21,7 @@
  * → message_delta(usage) → message_stop / error。
  */
 
-import { parseSse, truncateResult } from './sse'
+import { parseSse, sanitizeJsonStrings, truncateResult } from './sse'
 import { apiErrorMessage } from './constants'
 import type { AgentConfig, AgentEvent, AgentMessage, AgentPart, AgentTool, ProviderOutcome } from './types'
 
@@ -139,7 +139,9 @@ export async function streamAnthropic(params: {
         'x-api-key': config.apiKey.trim(),
         'anthropic-version': '2023-06-01',
       },
-      body: JSON.stringify(body),
+      // 请求体深度清洗孤立代理(2026-08-11,与 DeepSeek 同款修复:
+      // 历史含孤立代理 → 服务器解析 400,见 sse.ts sanitizeUnpairedSurrogates)
+      body: JSON.stringify(sanitizeJsonStrings(body)),
       signal,
     })
   } catch (err) {

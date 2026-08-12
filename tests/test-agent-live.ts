@@ -9,7 +9,7 @@
  *    进化日志(接受或拒绝都算评估子代理跑通)。
  *
  * API 配置从用户 settings.json 读取(真实 Key);所有写入走临时目录。
- * 运行:node scripts/test-agent-live.mjs(最坏耗时约 7 分钟)
+ * 运行:node tests/test-agent-live.mjs(最坏耗时约 7 分钟)
  */
 
 import { promises as fs } from 'node:fs'

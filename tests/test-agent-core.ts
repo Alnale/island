@@ -4,10 +4,10 @@
  * 覆盖:记忆系统 / MCP stdio+sse 双传输(真实 mock 服务器)/ skills 扫描 /
  * LLM 自我配置工具 / 自我进化(版本化快照/回滚防降级)/ 手动调用解析。
  *
- * electron 依赖经 esbuild 别名替换为 stub(scripts/test-agent/stub-electron.cjs,
+ * electron 依赖经 esbuild 别名替换为 stub(tests/mocks/stub-electron.cjs,
  * Notification 记录到 global.__notifications 供断言)。
  *
- * 运行:node scripts/test-agent-core.mjs
+ * 运行:node tests/test-agent-core.mjs
  */
 
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process'
@@ -35,9 +35,16 @@ import {
   createSummaryAgent,
   createMindAgent,
   fetchDeepseekBalance,
+  sanitizeTitle,
+  looksLikeSentenceTitle,
+  looksLikeIncompleteMind,
+  cutMindSentence,
+  fallbackTitle,
 } from '../electron/agent/engine'
-import { createTools } from '../electron/agent/tools'
+import { createTools, toolOutputDir } from '../electron/agent/tools'
+import { createNapcatTools, napcatMessageText } from '../electron/agent/napcat'
 import { streamResponse } from '../electron/agent/deepseek'
+import { sanitizeUnpairedSurrogates } from '../electron/agent/sse'
 import {
   getTasksStatusBlock,
   listTasks,
@@ -48,14 +55,14 @@ import {
   updateTask,
   type AgentTask,
 } from '../electron/agent/tasks'
-import { createSettingsTools } from '../electron/agent/settingsTools'
+import { createMusicControlTools, createSettingsTools } from '../electron/agent/settingsTools'
 import { applyChanges, createEvolution, isCleanupChange, mapSeqToEntry } from '../electron/agent/evolution'
-import type { AgentTool, McpServerConfig, MemoryEntry } from '../electron/agent/types'
+import type { AgentMessage, AgentTool, McpServerConfig, MemoryEntry } from '../electron/agent/types'
 
 // 打包产物运行时路径会变(import.meta.url 指向 node_modules/.cache),
 // mock 服务器目录由 esbuild define 注入(__ROOT__ = 项目根)
 declare const __ROOT__: string
-const mockDir = path.join(__ROOT__, 'scripts', 'test-agent')
+const mockDir = path.join(__ROOT__, 'tests', 'mocks')
 
 // ---------------------------------------------------------------------------
 // 测试框架(顺序执行,失败不中断)
@@ -626,6 +633,8 @@ function makeConfigToolsDeps(
       mcpServers: initial.mcpServers ?? [],
       skillsDirs: initial.skillsDirs ?? [],
       excludedSkills: initial.excludedSkills ?? [],
+      // 工具输出根目录(2026-08-12):get/set 测试
+      outputDir: '',
     },
   }
   const writes: Array<Record<string, unknown>> = []
@@ -1197,6 +1206,83 @@ await test('extractJsonTitle:严格解析,垃圾输出拒绝(回归 "[\'data\']"
 })
 
 // ---------------------------------------------------------------------------
+// 7.7 标题清洗与句子式判定(2026-08-12:用户实测"标题废话太多 + 截断"——
+// 模型把回复原句/续写内容当标题,措辞三层 + 清洗/判效兜底)
+// ---------------------------------------------------------------------------
+
+console.log('\n=== 标题清洗与句子式判定(sanitizeTitle / looksLikeSentenceTitle) ===')
+
+await test('sanitizeTitle:剥回应词前缀(模型把回复原句当标题)', () => {
+  // 注意:原句 22 码元,剥前缀后仍超 20 码元上限 → 截断为 20 码元(断言
+  // 期望值按截断后写——"门"在第 22 位被截掉)
+  assert(sanitizeTitle('是的,exec_command 默认有执行确认门') === 'exec_command 默认有执行确认', '剥「是的,」')
+  assert(sanitizeTitle('好的: 字体导入') === '字体导入', '剥「好的:」')
+  assert(sanitizeTitle('有的,可以配置') === '可以配置', '剥「有的,」')
+  assert(sanitizeTitle('可以行吧') === '行吧', '剥「可以」后剩余继续处理')
+})
+
+await test('sanitizeTitle:逗号截断兜底(摘抄整句不再被 20 码元截断)', () => {
+  assert(
+    sanitizeTitle('开心的事倒是有,中午食堂的土豆牛肉特别好') === '开心的事倒是有',
+    '含逗号的句子取首个逗号前的前半短语',
+  )
+  assert(sanitizeTitle('公司楼下新开了一家火锅店') === '公司楼下新开了一家火锅店', '无逗号句子原样(交给句子式判定)')
+  assert(sanitizeTitle('字体导入') === '字体导入', '正常短语不受影响')
+})
+
+await test('sanitizeTitle:终止标点截断(兜底长句不再 20 码元硬截)', () => {
+  assert(sanitizeTitle('哈喽主人～看我干啥呀?我刚才一直陪你看视') === '哈喽主人', '终止标点(~)前截断')
+  assert(sanitizeTitle('好。下面开始正式内容') === '下面开始正式内容', '回应词剥离后残留的开头标点剥掉')
+  assert(sanitizeTitle('深夜B站热门视频盘点') === '深夜B站热门视频盘点', '无终止标点短语不受影响')
+})
+
+await test('fallbackTitle:跳过过短消息取实质内容(首条"你?"不再得到单字垃圾)', () => {
+  const msgs: AgentMessage[] = [
+    { id: 'u1', role: 'user', parts: [{ type: 'text', text: '你?' }] },
+    { id: 'u2', role: 'user', parts: [{ type: 'text', text: '你猜呢' }] },
+    { id: 'u3', role: 'user', parts: [{ type: 'text', text: '我要听二哥王力宏的需要你陪' }] },
+  ]
+  assert(fallbackTitle(msgs) === '我要听二哥王力宏的需要你陪', `应跳过过短消息取实质内容,实际:${fallbackTitle(msgs)}`)
+  assert(fallbackTitle([{ id: 'u1', role: 'user', parts: [{ type: 'text', text: '你?' }] }]) === '', '全过短返回空')
+})
+
+await test('looksLikeSentenceTitle:完成体/句尾的/疑问词 = 句子式(判无效)', () => {
+  assert(looksLikeSentenceTitle('公司楼下新开了一家火锅店') === true, '含「了」的叙述句应判句子')
+  assert(looksLikeSentenceTitle('开心的事') === false, '短标题不计(≤6 码元)')
+  assert(looksLikeSentenceTitle('文言文里有没有轻松好玩的句子') === true, '疑问词「有没有」应判句子')
+  assert(looksLikeSentenceTitle('今天天气怎么样才好') === true, '疑问词「怎么样」应判句子')
+  assert(looksLikeSentenceTitle('哈喽主人看我干啥呀我刚才一直陪你看视') === true, '口语疑问词「干啥」应判句子')
+  assert(looksLikeSentenceTitle('字体导入') === false, '正常短语不是句子')
+  assert(looksLikeSentenceTitle('B站下载与热点分析') === false, '并列短语不是句子')
+  assert(looksLikeSentenceTitle('深夜加班闲聊') === false, '闲聊场景短语不是句子')
+})
+
+await test('looksLikeIncompleteMind:残句/过短判废(16 码元整却半句)', () => {
+  assert(looksLikeIncompleteMind('收到,以后给你最精简的干货。你那') === true, '以「你那」收尾的半句应判废')
+  assert(looksLikeIncompleteMind('哈哈,') === true, '逗号结尾应判废')
+  assert(looksLikeIncompleteMind('心里嘀咕') === false, '4 码元以上完整短语不判废')
+  assert(looksLikeIncompleteMind('嘴上说够,心里嘀咕:问倒我算了') === false, '完整揣测句不判废')
+  assert(looksLikeIncompleteMind('') === true, '空串判废')
+})
+
+await test('cutMindSentence:超长 raw 取第一个句末标点前的完整小句', () => {
+  // 实机样本(2026-08-12):模型超长输出 = 完整小句 + 续写
+  assert(
+    cutMindSentence('好,李文亚教授是吧!刚才那列表里正好看到《李文亚"噫噫……"》那条,我直接给你抓下来播放 🐳') ===
+      '好,李文亚教授是吧',
+    '取第一个！前的完整小句',
+  )
+  assert(
+    cutMindSentence('主人这是又陷进旋律里了吧～那我不吵你,安静当个胖鲸鱼靠垫') === '主人这是又陷进旋律里了吧',
+    '取第一个～前的完整小句',
+  )
+  assert(cutMindSentence('收到,以后我答嘢快狠准,唔会再长篇大论') === null, '无句末标点(只有逗号)返回 null 判废')
+  assert(cutMindSentence('嘴上说够,心里嘀咕:问倒我算了') === null, '正常长度(≤16)不触发截取')
+  assert(cutMindSentence('哈哈!') === null, '截取结果过短(<4)判废')
+  assert(cutMindSentence('') === null, '空串返回 null')
+})
+
+// ---------------------------------------------------------------------------
 // 7.5 记忆提取 + 用户风格分析(2026-08-10 新增 Sub Agent 职能)
 // ---------------------------------------------------------------------------
 
@@ -1507,11 +1593,11 @@ await test('预算不足提示:截断(response.incomplete)→ 下一轮请求注
 
 console.log('\n=== 灵动岛设置工具(createSettingsTools) ===')
 
-await test('设置工具:未注入桥时不注册;注入后 30 个工具齐', () => {
+await test('设置工具:未注入桥时不注册;注入后 31 个工具齐', () => {
   assert(createSettingsTools({}).length === 0, '无 runIslandSettings 不应注册')
   const tools = createSettingsTools({ runIslandSettings: async () => ({ ok: true }) })
   const names = tools.map((t) => t.name)
-  assert(names.length === 30, `应有 30 个工具,实际 ${names.length}:${names.join(',')}`)
+  assert(names.length === 31, `应有 31 个工具,实际 ${names.length}:${names.join(',')}`)
   for (const n of [
     'set_theme_color',
     'set_agent_scale',
@@ -1537,9 +1623,73 @@ await test('设置工具:未注入桥时不注册;注入后 30 个工具齐', ()
     'set_font_weight',
     'list_playlist',
     'remove_playlist_item',
+    'set_audio_config',
   ]) {
     assert(names.includes(n), `应含工具 ${n}`)
   }
+})
+
+await test('music_control:action 校验与桥透传,status 格式化', async () => {
+  const calls: string[] = []
+  const tools = createMusicControlTools(async (op, args) => {
+    calls.push(`${op}:${args[0] ?? ''}`)
+    if (op === 'status') {
+      return { ok: true, external: true, playing: true, title: '晴天', artist: '周杰伦', position: 90, duration: 270 }
+    }
+    if (op === 'control' && args[0] === 'next') {
+      return { ok: true, action: 'next', error: undefined }
+    }
+    return { ok: true, action: String(args[0]) }
+  })
+  const tool = tools.find((t) => t.name === 'music_control')!
+  assert(tool !== undefined, 'music_control 应注册')
+  const status = String(await tool.execute({ action: 'status' }))
+  assert(status.includes('晴天') && status.includes('周杰伦') && status.includes('外部平台') && status.includes('播放中') && status.includes('1:30/4:30'), `status 应含曲目与进度,实际:${status}`)
+  const pause = String(await tool.execute({ action: 'pause' }))
+  assert(calls.includes('control:pause'), 'pause 应调桥 control')
+  assert(pause.includes('已暂停'), `pause 应回显,实际:${pause}`)
+  const next = String(await tool.execute({ action: 'next' }))
+  assert(calls.includes('control:next'), 'next 应调桥 control')
+  assert(next.includes('下一首'), `next 应回显,实际:${next}`)
+  await assertRejects(() => tool.execute({ action: 'nope' }), 'action 仅支持')
+})
+
+await test('set_audio_config:volume 钳制/空参数拒绝/target 透传/playing', async () => {
+  const calls: Array<{ op: string; args: unknown[] }> = []
+  const tools = createSettingsTools({
+    runIslandSettings: async (op, args) => {
+      calls.push({ op, args })
+      if (op === 'setAudioState') {
+        return {
+          ok: true,
+          name: (args[0] as { name?: string }).name ?? undefined,
+          playing: Boolean((args[0] as { playing?: boolean }).playing),
+          volume: 60,
+          loop: true,
+        }
+      }
+      return { ok: true }
+    },
+  })
+  const tool = tools.find((t) => t.name === 'set_audio_config')!
+  // 空参数拒绝
+  await assertRejects(() => tool.execute({}), '至少提供一个参数')
+  // volume 越界拒绝
+  await assertRejects(() => tool.execute({ volume: 1.5 }), 'volume 需要是 0-1')
+  await assertRejects(() => tool.execute({ volume: -0.1 }), 'volume 需要是 0-1')
+  // target + volume/loop/playing → 桥 setAudioState 透传
+  const out = String(
+    await tool.execute({ target: '测试歌.mp3', volume: 0.6, loop: true, playing: true }),
+  )
+  assert(calls.at(-1)?.op === 'setAudioState', '应调桥 setAudioState')
+  const arg = calls.at(-1)?.args?.[0] as { name?: string; volume?: number; loop?: boolean; playing?: boolean }
+  assert(arg.name === '测试歌.mp3' && arg.volume === 0.6 && arg.loop === true && arg.playing === true, '参数应透传')
+  assert(out.includes('测试歌.mp3') && out.includes('60%') && out.includes('循环播放已开启') && out.includes('已播放'), `回复应含设置结果,实际:${out}`)
+  // 无 target 只 playing(缺省 = 当前播放中音频)
+  const out2 = String(await tool.execute({ playing: false }))
+  const arg2 = calls.at(-1)?.args?.[0] as { name?: string } | undefined
+  assert(arg2?.name === undefined, '无 target 时 name 应为空(桥取播放中音频)')
+  assert(out2.includes('已暂停'), `回复应含已暂停,实际:${out2}`)
 })
 
 await test('播放列表:list_playlist 格式化 / remove_playlist_item 校验透传', async () => {
@@ -2780,6 +2930,422 @@ await test('余额查询工具:get_deepseek_balance 注册并格式化余额', a
     globalThis.fetch = origFetch2
     engine2.dispose()
   }
+})
+
+// ---------------------------------------------------------------------------
+// 孤立代理清洗(2026-08-11 修复 400 "unexpected end of hex escape":
+// 历史文本含孤立代理 → JSON.stringify 原样输出 \udXXX → 服务器
+// serde_json 解析失败;发送端(请求体)与接收端(SSE 帧)都清洗)
+// ---------------------------------------------------------------------------
+
+console.log('\n=== 孤立代理清洗(sanitizeUnpairedSurrogates + 发送/接收端) ===')
+
+/** 深度扫描对象树:是否存在孤立代理码元(服务器 strict JSON 会炸的形态) */
+function scanLoneSurrogates(value: unknown): boolean {
+  if (typeof value === 'string') {
+    return /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(value)
+  }
+  if (Array.isArray(value)) return value.some(scanLoneSurrogates)
+  if (value && typeof value === 'object') return Object.values(value).some(scanLoneSurrogates)
+  return false
+}
+
+await test('sanitizeUnpairedSurrogates:孤立代理替换 U+FFFD,合法 emoji 保留', () => {
+  // 孤立高代理(流式回复在 emoji 中间被截断的典型形态)
+  assert(sanitizeUnpairedSurrogates('a\ud83db') === 'a�b', '孤立高代理应替换为 U+FFFD')
+  // 孤立低代理
+  assert(sanitizeUnpairedSurrogates('\ude00') === '�', '孤立低代理应替换为 U+FFFD')
+  // 合法代理对(完整 emoji)不受影响
+  assert(sanitizeUnpairedSurrogates('好😀啊') === '好😀啊', '完整代理对应原样保留')
+  // 相邻孤立代理(两个半截 emoji)
+  assert(sanitizeUnpairedSurrogates('😀') === '😀', '成对码元拼接后为合法 emoji')
+  // 空串/普通文本
+  assert(sanitizeUnpairedSurrogates('') === '' && sanitizeUnpairedSurrogates('plain') === 'plain', '普通文本不变')
+})
+
+await test('发送端:历史含孤立代理(用户消息/工具结果/reasoning)回传请求体无孤立代理', async () => {
+  const origFetch = globalThis.fetch
+  const capturedBodies: string[] = []
+  globalThis.fetch = async (_url: string | URL | Request, opts?: RequestInit) => {
+    capturedBodies.push(String(opts?.body ?? ''))
+    return sseResponse([
+      { type: 'response.created', response: { id: 'r1' } },
+      { type: 'response.output_item.added', output_index: 0, item: { type: 'message', id: 'item_1' } },
+      { type: 'response.output_text.delta', output_index: 0, delta: '好的' },
+      { type: 'response.output_item.done', output_index: 0, item: { type: 'message', id: 'item_1' } },
+      { type: 'response.completed', response: { usage: { input_tokens: 10, output_tokens: 5 } } },
+    ])
+  }
+  try {
+    const engine = createAgentEngine({
+      getConfig: () => ({ ...mockConfig, mcpServers: [], skillsDirs: [] }),
+      onEvent: () => {},
+      onSwitchToMusic: () => {},
+      getSkillDir: () => path.join(tmp, 'skills-e2e'),
+      getMemoryStore: () => null,
+      getEvolution: () => null,
+    })
+    // 三种毒源:用户消息(粘贴文本)、工具结果(MCP/命令输出)、
+    // assistant reasoning(截断回复)——都含孤立代理
+    const history = [
+      { id: 'm1', role: 'user' as const, parts: [{ type: 'text' as const, text: '帮我看看\ud83d这个' }] },
+      {
+        id: 'm2',
+        role: 'assistant' as const,
+        parts: [
+          { type: 'reasoning' as const, text: '思考到一半截断\ud83d' },
+          { type: 'text' as const, text: '好' },
+          { type: 'tool-call' as const, id: 'call_1', name: 'exec_command', args: { cmd: 'echo hi' } },
+        ],
+      },
+      {
+        id: 'm3',
+        role: 'user' as const,
+        parts: [{ type: 'tool-result' as const, id: 'call_1', result: '输出末尾\ude00' }],
+      },
+    ]
+    engine.send('继续', history as never)
+    await waitFor(() => !engine.busy, 10000, '发送端清洗回合结束')
+    assert(capturedBodies.length >= 1, '应捕获到请求体')
+    // 原始请求体里不允许出现裸孤立代理转义(清洗后输出的是字面 �;
+    // 高代理后必须跟 \u(低代理对),低代理前必须已有 \u 高代理)
+    assert(
+      !/\\u[dD][89aAbB][0-9a-fA-F]{2}(?![\\u])|(?<!\\u[dD][89aAbB][0-9a-fA-F]{2})\\u[dD][cCeEfF][0-9a-fA-F]{2}/.test(
+        capturedBodies[0] ?? '',
+      ),
+      `请求体含裸孤立代理转义(服务器会报 unexpected end of hex escape):${(capturedBodies[0] ?? '').slice(-200)}`,
+    )
+    // 解析后的字符串也不该有孤立代理码元
+    assert(
+      !scanLoneSurrogates(JSON.parse(capturedBodies[0] ?? '{}')),
+      '请求体解析后仍含孤立代理码元',
+    )
+  } finally {
+    globalThis.fetch = origFetch
+  }
+})
+
+await test('接收端:SSE delta 含孤立代理(截断回复)→ 事件文本已清洗且合法 emoji 保留', async () => {
+  const origFetch = globalThis.fetch
+  const received: string[] = []
+  globalThis.fetch = async () => {
+    return sseResponse([
+      { type: 'response.created', response: { id: 'r1' } },
+      { type: 'response.output_item.added', output_index: 0, item: { type: 'message', id: 'item_1' } },
+      // 完整 emoji + 后一帧在代理对中间截断(孤立高代理)
+      { type: 'response.output_text.delta', output_index: 0, delta: '今天天气不错😀' },
+      { type: 'response.output_text.delta', output_index: 0, delta: '，明天下雨\ud83d' },
+      { type: 'response.output_item.done', output_index: 0, item: { type: 'message', id: 'item_1' } },
+      { type: 'response.completed', response: { usage: { input_tokens: 10, output_tokens: 5 } } },
+    ])
+  }
+  try {
+    // 直测 streamResponse(不经引擎):onEvent 收到的 delta 必须干净
+    const outcome = await streamResponse({
+      config: mockConfig as never,
+      system: 's',
+      history: [],
+      tools: [],
+      signal: new AbortController().signal,
+      onEvent: (e) => {
+        if (e.type === 'text-delta') received.push(e.text)
+      },
+    })
+    assert(received.length === 2, `应收到两段 delta,实际 ${received.length}`)
+    assert(!received.some(scanLoneSurrogates), '转发的事件文本不得含孤立代理')
+    assert(received[0]?.includes('😀') === true, '合法 emoji 应原样保留')
+    assert(received[1]?.includes('�') === true, '截断的孤立代理应替换为 U+FFFD')
+    assert(outcome.text.includes('😀') && !scanLoneSurrogates(outcome.text), '汇总文本同样干净')
+  } finally {
+    globalThis.fetch = origFetch
+  }
+})
+
+// ---------------------------------------------------------------------------
+// 9. 工具输出目录(2026-08-12:Agent 设置里配置输出根目录,所有工具产出
+//    按 <根>/<工具名>/[<会话ID>] 分类——每工具文件夹分类、文件按对话
+//     ID 分类;未配置保持默认位置)
+// ---------------------------------------------------------------------------
+
+console.log('\n=== 工具输出目录(toolOutputDir / set_output_dir) ===')
+
+await test('toolOutputDir:未注入输出目录环境 = null(保持默认位置)', async () => {
+  // 新创建 createTools(未注入 getOutputDir)后 outputEnv 复位为默认 null
+  createTools({ onSwitchToMusic: () => {} })
+  assert(toolOutputDir('bili') === null, '未配置输出根目录应返回 null')
+})
+
+await test('toolOutputDir:根目录 + 会话 ID → 分类路径', async () => {
+  createTools({
+    onSwitchToMusic: () => {},
+    getOutputDir: () => 'D:/agent-output',
+    getSessionId: () => 's-123-abc',
+  })
+  assert(
+    toolOutputDir('bili') === path.join('D:/agent-output', 'bili', 's-123-abc'),
+    `bili 应落在 根/bili/会话ID,实际:${toolOutputDir('bili')}`,
+  )
+  assert(
+    toolOutputDir('doc_convert') === path.join('D:/agent-output', 'doc_convert', 's-123-abc'),
+    `doc_convert 应落在 根/doc_convert/会话ID,实际:${toolOutputDir('doc_convert')}`,
+  )
+  assert(
+    toolOutputDir('xxt') === path.join('D:/agent-output', 'xxt', 's-123-abc'),
+    `xxt 应落在 根/xxt/会话ID,实际:${toolOutputDir('xxt')}`,
+  )
+})
+
+await test('toolOutputDir:有根目录无会话 ID → 落在 根/工具名(不带会话层)', async () => {
+  createTools({
+    onSwitchToMusic: () => {},
+    getOutputDir: () => 'D:/agent-output',
+    getSessionId: () => null,
+  })
+  assert(
+    toolOutputDir('bili') === path.join('D:/agent-output', 'bili'),
+    `无会话 ID 应回退 根/工具名,实际:${toolOutputDir('bili')}`,
+  )
+})
+
+await test('bili download_up:配置输出目录 → 后台任务带 --outdir 根/bili/会话ID', async () => {
+  const tools = createTools({
+    onSwitchToMusic: () => {},
+    confirmAction: async () => true,
+    getOutputDir: () => 'D:/agent-output',
+    getSessionId: () => 's-456-xyz',
+  })
+  const bili = tools.find((t) => t.name === 'bili')!
+  const out = String(await bili.execute({ action: 'download_up', query: '12345' }))
+  const expected = path.join('D:/agent-output', 'bili', 's-456-xyz')
+  assert(out.includes(expected), `后台任务应带输出目录 ${expected},实际:${out.slice(0, 200)}`)
+  // LLM 显式传 outdir 恒优先于配置的根目录
+  const out2 = String(
+    await bili.execute({ action: 'download_up', query: '12345', outdir: 'E:/custom' }),
+  )
+  assert(out2.includes('E:/custom'), `显式 outdir 应优先,实际:${out2.slice(0, 200)}`)
+})
+
+await test('set_output_dir:get 查当前值 / set 写配置(经 updateAgentConfig)', async () => {
+  const { state, writes, tools } = makeConfigToolsDeps()
+  const dir = tools.find((t) => t.name === 'set_output_dir')!
+  // 未配置 → get 提示未设置
+  const getNone = String(await dir.execute({ action: 'get' }))
+  assert(getNone.includes('未设置'), `未配置时 get 应提示未设置,实际:${getNone}`)
+  // set → 写配置
+  const setOut = String(await dir.execute({ action: 'set', dir: 'D:/agent-output' }))
+  assert(setOut.includes('D:/agent-output'), `set 应回显目录,实际:${setOut}`)
+  assert(writes.at(-1)?.outputDir === 'D:/agent-output', 'updateAgentConfig 应收到 outputDir 补丁')
+  assert(state.config.outputDir === 'D:/agent-output', 'state 应同步 outputDir')
+  // 已配置 → get 回显目录与目录结构说明
+  const getSet = String(await dir.execute({ action: 'get' }))
+  assert(getSet.includes('D:/agent-output'), `已配置时 get 应回显目录,实际:${getSet}`)
+  // 空串 = 恢复默认位置
+  const resetOut = String(await dir.execute({ action: 'set', dir: '' }))
+  assert(resetOut.includes('恢复默认'), `空串应恢复默认,实际:${resetOut}`)
+  assert(writes.at(-1)?.outputDir === '', '恢复默认应写空 outputDir')
+})
+
+// ---------------------------------------------------------------------------
+// 10. NapCat QQ 机器人(2026-08-12)
+// ---------------------------------------------------------------------------
+
+console.log('\n=== NapCat QQ 机器人(napcat 工具 / set_napcat_config / 消息解析) ===')
+
+await test('napcatMessageText:string 与段数组解析', () => {
+  assert(napcatMessageText('你好') === '你好', 'string 原样')
+  assert(
+    napcatMessageText([
+      { type: 'text', data: { text: '你好' } },
+      { type: 'face', data: { id: '1' } },
+      { type: 'image', data: { file: 'a.png' } },
+    ]) === '你好[face][图片]',
+    '段数组:text 拼接 + face 标注 + 图片标注',
+  )
+  assert(napcatMessageText(null) === '', '空返回空串')
+})
+
+await test('napcat 工具:status/recent 格式化,send/send_group 校验与透传', async () => {
+  const calls: Array<{ kind: 'qq' | 'group'; target: string; text: string }> = []
+  const contactWrites: Array<{ qq: string; name?: string; info?: string }> = []
+  let contacts: Record<string, { qq: string; name?: string; info?: string; source?: 'private' | 'group'; updatedAt: number }> = {}
+  const tools = createNapcatTools({
+    status: () => ({ connected: true, url: 'ws://127.0.0.1:3001', lastError: '', receivedCount: 3, repliedCount: 2 }),
+    sendToQQ: async (qq, text) => {
+      calls.push({ kind: 'qq', target: qq, text })
+      return 'msg-1'
+    },
+    sendToGroup: async (groupId, text) => {
+      calls.push({ kind: 'group', target: groupId, text })
+      return 'msg-2'
+    },
+    getRecentMessages: () => [
+      { qq: '10001', text: '你好', messageId: 'm1', time: 1700000000, replied: true },
+      { qq: '10002', text: '在吗', messageId: 'm2', time: 1700000000 },
+    ],
+    getContacts: async () => contacts,
+    updateContact: async (patch) => {
+      contactWrites.push({ qq: patch.qq, name: patch.name, info: patch.info })
+      const next = {
+        qq: patch.qq,
+        name: patch.name,
+        info: patch.info,
+        source: patch.source,
+        updatedAt: 1700000000,
+      }
+      contacts = { ...contacts, [patch.qq]: next }
+      return next
+    },
+  })
+  const tool = tools.find((t) => t.name === 'napcat')!
+  assert(tool !== undefined, 'napcat 工具应注册')
+  const status = String(await tool.execute({ action: 'status' }))
+  assert(status.includes('已连接') && status.includes('3 条') && status.includes('2 条'), `status 应含连接与统计,实际:${status}`)
+  const recent = String(await tool.execute({ action: 'recent' }))
+  assert(recent.includes('10001') && recent.includes('[已回复]') && recent.includes('10002'), `recent 应列消息与回复标记,实际:${recent}`)
+  const send = String(await tool.execute({ action: 'send', user_id: '10001', message: '下载完成' }))
+  assert(calls.length === 1 && calls[0].kind === 'qq' && calls[0].target === '10001' && calls[0].text === '下载完成', 'send 应透传 QQ 号与文本')
+  assert(send.includes('msg-1'), `send 应回显 message_id,实际:${send}`)
+  const sendGroup = String(await tool.execute({ action: 'send_group', group_id: '1045765371', message: '大家好' }))
+  const n: number = calls.length
+  assert(n === 2 && calls[1].kind === 'group' && calls[1].target === '1045765371', 'send_group 应透传群号')
+  assert(sendGroup.includes('msg-2'), `send_group 应回显 message_id,实际:${sendGroup}`)
+  // send_group 带文件(2026-08-12:下载好的文件直接发群里)
+  const sendFile = String(
+    await tool.execute({ action: 'send_group', group_id: '1045765371', message: '关羽之歌下载好了', file: 'D:/music/关羽之歌.mp3' }),
+  )
+  const n2: number = calls.length
+  assert(n2 === 3 && calls[2].target === '1045765371' && calls[2].text === '关羽之歌下载好了', 'send_group file 应透传群号与文本')
+  assert(sendFile.includes('含文件'), `send_group 带文件应回显,实际:${sendFile}`)
+  await assertRejects(() => tool.execute({ action: 'send', message: '缺 QQ 号' }), 'send 需要 user_id')
+  await assertRejects(() => tool.execute({ action: 'send', user_id: '1' }), 'send 需要 message')
+  await assertRejects(() => tool.execute({ action: 'send_group', message: '缺群号' }), 'send_group 需要 group_id')
+  await assertRejects(() => tool.execute({ action: 'send_group', group_id: '1' }), 'send_group 需要 message 或 file')
+  await assertRejects(() => tool.execute({ action: 'nope' }), 'action 仅支持')
+})
+
+await test('napcat 工具:contacts 档案查询与 contact_update 记录', async () => {
+  const contactWrites: Array<{ qq: string; name?: string; info?: string }> = []
+  let contacts: Record<string, { qq: string; name?: string; info?: string; source?: 'private' | 'group'; updatedAt: number }> = {
+    '10001': { qq: '10001', name: '阿白', info: '群友,喜欢猫', source: 'group', updatedAt: 1700000000 },
+  }
+  const tools = createNapcatTools({
+    status: () => ({ connected: false, url: 'ws://127.0.0.1:3001', lastError: '', receivedCount: 0, repliedCount: 0 }),
+    sendToQQ: async () => '',
+    sendToGroup: async () => '',
+    getRecentMessages: () => [],
+    getContacts: async () => contacts,
+    updateContact: async (patch) => {
+      contactWrites.push({ qq: patch.qq, name: patch.name, info: patch.info })
+      const next = { qq: patch.qq, name: patch.name, info: patch.info, source: patch.source, updatedAt: 1700000001 }
+      contacts = { ...contacts, [patch.qq]: next }
+      return next
+    },
+  })
+  const tool = tools.find((t) => t.name === 'napcat')!
+  const list = String(await tool.execute({ action: 'contacts' }))
+  assert(list.includes('10001') && list.includes('阿白') && list.includes('喜欢猫') && list.includes('[群聊]'), `contacts 应列档案,实际:${list}`)
+  const up = String(await tool.execute({ action: 'contact_update', qq: '10002', name: '老王', info: '私聊联系人,做设计的' }))
+  assert(contactWrites.length === 1 && contactWrites[0].qq === '10002' && contactWrites[0].info?.includes('设计'), 'contact_update 应透传')
+  assert(up.includes('10002') && up.includes('老王'), `应回显档案,实际:${up}`)
+  const empty = String(await tool.execute({ action: 'contacts' }))
+  void empty
+  await assertRejects(() => tool.execute({ action: 'contact_update', name: '缺 QQ' }), 'contact_update 需要 qq')
+})
+
+await test('napcat 工具:chats 聊天记录备份查询与过滤', async () => {
+  const chats = [
+    { id: 'p1', type: 'private' as const, target: '10001', qq: '10001', text: '你好呀', time: 1700000000 },
+    { id: 'g1', type: 'group' as const, target: '1045765371', qq: '20001', text: '今天天气不错', atMe: true, time: 1700000100 },
+    { id: 'g2', type: 'group' as const, target: '1045765371', qq: '20002', text: '哈哈', time: 1700000200 },
+  ]
+  const tools = createNapcatTools({
+    status: () => ({ connected: false, url: '', lastError: '', receivedCount: 0, repliedCount: 0 }),
+    sendToQQ: async () => '',
+    sendToGroup: async () => '',
+    getRecentMessages: () => [],
+    getContacts: async () => ({}),
+    updateContact: async (p) => ({ qq: p.qq, source: p.source, updatedAt: 0 }),
+    getChats: async () => chats,
+  })
+  const tool = tools.find((t) => t.name === 'napcat')!
+  const all = String(await tool.execute({ action: 'chats' }))
+  assert(all.includes('10001') && all.includes('1045765371') && all.includes('你好呀') && all.includes('@鲸鱼娘'), `chats 应列全部记录,实际:${all}`)
+  const byQq = String(await tool.execute({ action: 'chats', user_id: '10001' }))
+  assert(byQq.includes('你好呀') && !byQq.includes('今天天气不错'), '按 QQ 过滤应只剩私聊')
+  const byGroup = String(await tool.execute({ action: 'chats', group_id: '1045765371' }))
+  assert(byGroup.includes('今天天气不错') && !byGroup.includes('你好呀'), '按群过滤应只剩群聊')
+  const none = String(await tool.execute({ action: 'chats', user_id: '999' }))
+  assert(none.includes('为空'), '无匹配应提示为空')
+})
+
+await test('napcat 工具:persona 会话人格查询与 persona_set 设置/删除', async () => {
+  let personas: Record<string, { persona: string; updatedAt: number }> = {
+    'group:1045765371': { persona: '群聊高冷版,话少但偶尔毒舌', updatedAt: 1700000000 },
+  }
+  const writes: string[] = []
+  const tools = createNapcatTools({
+    status: () => ({ connected: false, url: '', lastError: '', receivedCount: 0, repliedCount: 0 }),
+    sendToQQ: async () => '',
+    sendToGroup: async () => '',
+    getRecentMessages: () => [],
+    getContacts: async () => ({}),
+    updateContact: async (p) => ({ qq: p.qq, source: p.source, updatedAt: 0 }),
+    getPersonas: async () => personas,
+    setPersona: async (scope, persona) => {
+      writes.push(`${scope}:${persona}`)
+      if (!persona) {
+        delete personas[scope]
+        return null
+      }
+      const next = { persona, updatedAt: 1700000001 }
+      personas = { ...personas, [scope]: next }
+      return next
+    },
+  })
+  const tool = tools.find((t) => t.name === 'napcat')!
+  const list = String(await tool.execute({ action: 'persona' }))
+  assert(list.includes('group:1045765371') && list.includes('高冷版'), `persona 应列会话人格,实际:${list}`)
+  const set = String(await tool.execute({ action: 'persona_set', scope: 'private:1178821869', persona: '私聊亲近版,黏人撒娇' }))
+  assert(writes.includes('private:1178821869:私聊亲近版,黏人撒娇'), 'persona_set 应写入')
+  assert(set.includes('private:1178821869') && set.includes('黏人撒娇'), `应回显设置,实际:${set}`)
+  // scope 校验
+  await assertRejects(() => tool.execute({ action: 'persona_set', scope: 'bad', persona: 'x' }), 'scope 需要是 private:<QQ号> 或 group:<群号>')
+  // 空 persona = 删除
+  const del = String(await tool.execute({ action: 'persona_set', scope: 'group:1045765371', persona: '' }))
+  assert(writes.includes('group:1045765371:'), '空 persona 应删除')
+  assert(del.includes('已删除'), `应回显删除,实际:${del}`)
+})
+
+await test('napcatMessageText:群消息 @ 与图片/回复段解析', () => {
+  assert(
+    napcatMessageText(
+      [
+        { type: 'at', data: { qq: '108724305' } },
+        { type: 'text', data: { text: ' 在吗' } },
+        { type: 'image', data: { file: 'x.png' } },
+        { type: 'reply', data: { id: '1' } },
+      ],
+      '108724305',
+    ) === '@鲸鱼娘 在吗[图片][回复]',
+    '群消息:@ 机器人标注 + 图片/回复段',
+  )
+  assert(
+    napcatMessageText([{ type: 'at', data: { qq: '123' } }, { type: 'text', data: { text: ' hi' } }], '108724305') === '@123 hi',
+    '@ 他人标注 QQ 号',
+  )
+})
+
+await test('set_napcat_config:enabled/wsUrl/allowed 校验与写配置', async () => {
+  const { writes, tools } = makeConfigToolsDeps()
+  const tool = tools.find((t) => t.name === 'set_napcat_config')!
+  const out = String(await tool.execute({ enabled: true, wsUrl: 'ws://127.0.0.1:3001', allowed: ['10001', '10002'] }))
+  assert(out.includes('已开启'), `应回显开启,实际:${out}`)
+  const patch = writes.at(-1) as { napcatEnabled?: boolean; napcatAllowed?: string[] }
+  assert(patch?.napcatEnabled === true && patch?.napcatAllowed?.length === 2, '配置应写入')
+  await assertRejects(() => tool.execute({ wsUrl: 'http://bad' }), 'wsUrl 需要是 ws:// 开头')
+  await assertRejects(() => tool.execute({}), '至少提供一个参数')
+  const out2 = String(await tool.execute({ enabled: false }))
+  assert(out2.includes('已关闭'), `关闭应回显,实际:${out2}`)
 })
 
 // ---------------------------------------------------------------------------

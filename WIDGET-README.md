@@ -84,7 +84,7 @@ pnpm bridge          # 独立运行系统媒体桥接脚本(单独调试 SMTC)
 **巡检约定**:重新构建程序后**不要自动跑 WIDGET_SCREENSHOT 巡检**——完整
 巡检(agent 模式等)只在用户明确要求时执行(每轮全量巡检耗时 8-10 分钟且
 依赖真实 LLM);默认完成标准 = 构建 + dev:widget 启动 + 类型检查 + lint +
-单测(`tsc -b` / `pnpm lint` / `node scripts/test-agent-core.mjs`)。
+单测(`tsc -b tsconfig/tsconfig.json` / `pnpm lint` / `node tests/test-agent-core.mjs`)。
 
 ### 主进程 IPC 调试
 
@@ -106,7 +106,7 @@ powershell Stop-Process -Name electron
 
 ## UI 巡检(WIDGET_SCREENSHOT)
 
-主进程注入式 UI 巡检(`electron/screenshot-tests.cjs`,deps 注入;
+主进程注入式 UI 巡检(`tests/screenshot-tests.cjs`,deps 注入;
 WIDGET_SCREENSHOT 六种巡检模式 ~1160 行已从 main.cjs 抽离)。
 
 ### 环境变量
@@ -140,7 +140,7 @@ WIDGET_SCREENSHOT 六种巡检模式 ~1160 行已从 main.cjs 抽离)。
 WIDGET_SCREENSHOT=D:/tmp/shot.png WIDGET_SCREENSHOT_QUIT=1 pnpm dev:widget
 # agent 全链路巡检(mock MCP + 退出)
 WIDGET_SCREENSHOT=D:/tmp/agent WIDGET_SCREENSHOT_MODE=agent \
-  WIDGET_SCREENSHOT_QUIT=1 WIDGET_MOCK_SERVER=scripts/test-agent/mock-mcp-stdio.cjs \
+  WIDGET_SCREENSHOT_QUIT=1 WIDGET_MOCK_SERVER=tests/mocks/mock-mcp-stdio.cjs \
   pnpm dev:widget
 ```
 
@@ -154,6 +154,13 @@ WIDGET_SCREENSHOT=D:/tmp/agent WIDGET_SCREENSHOT_MODE=agent \
   输出进度日志。
 
 ---
+
+## QQ 机器人(NapCat)调试
+
+- 对话里"开启 QQ 机器人"→ 连接 ws://127.0.0.1:3001(可改);"QQ 连上了吗"查状态;
+- 消息链路:QQ 消息 → 系统通知 + 对话窗口(带来源标签)→ LLM 处理 → 回复发回(群回复走 `send_group` 工具,文件走 `upload_group_file` 上传本体);
+- 工具记忆:`userData/napcat-contacts.json`(联系人)/ `napcat-chats.json`(聊天记录备份)/ `napcat-personas.json`(会话人格);
+- 启用前停用旧 Python 桥(`NapCatQQNode/bridge/qq_bridge.py` 进程),避免双回复。
 
 ## 常见调试场景
 

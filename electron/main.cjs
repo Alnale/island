@@ -47,7 +47,7 @@ const agentEngineModule = require('./agent.cjs')
 const { createSettingsStore } = require('./settings-store.cjs')
 
 // 截图/巡检测试模式(仅 WIDGET_SCREENSHOT env 时激活;依赖注入,见文件头)
-const { runScreenshotTests } = require('./screenshot-tests.cjs')
+const { runScreenshotTests } = require('../tests/screenshot-tests.cjs')
 
 // 透明窗口在 Windows GPU 合成下,叠在其他应用上方时半透明区域
 // (岛体背景)的 alpha 偶发突变(闪全黑/全透明)。
@@ -211,6 +211,18 @@ const AGENT_CONFIG_DEFAULTS = {
   summaryStyle: '',
   /** 心理揣测人格(Sub Agent 设置:预设 id 或自定义 ≤100 字;空 = 默认) */
   mindPersona: '',
+  /** 工具输出根目录(2026-08-12):空 = 未启用,工具保持默认位置 */
+  outputDir: '',
+  /** NapCat QQ 机器人(2026-08-12):OneBot 11 WS 地址(默认 3001 端口) */
+  napcatWsUrl: 'ws://127.0.0.1:3001',
+  /** NapCat 开关(默认关;开启后挂件启动即连接,QQ 私聊自动回复) */
+  napcatEnabled: false,
+  /** 私聊 QQ 白名单(用户限定:只能和 1178821869 通信) */
+  napcatAllowed: ['1178821869'],
+  /** 群白名单(用户限定:只能和群 1045765371 通信) */
+  napcatAllowedGroups: ['1045765371'],
+  /** 机器人自身 QQ(群 @ 检测;与 Python 桥 BOT_QQ 一致) */
+  napcatBotQQ: '108724305',
 }
 
 let agentEngine = null
@@ -275,6 +287,40 @@ function applyAgentConfigPatch(patch) {
     if (typeof value === 'string') {
       next[key] = value.trim().slice(0, 100)
     }
+  }
+  // 工具输出根目录(2026-08-12):绝对路径字符串(≤1000,trim);
+  // 空串 = 恢复默认位置(userData 下)
+  if (typeof patch?.outputDir === 'string') {
+    next.outputDir = patch.outputDir.trim().slice(0, 1000)
+  }
+  // NapCat QQ 机器人(2026-08-12):WS 地址(≤500)/ 开关 / QQ 号白名单
+  if (typeof patch?.napcatWsUrl === 'string') {
+    next.napcatWsUrl = patch.napcatWsUrl.trim().slice(0, 500)
+  }
+  if (typeof patch?.napcatEnabled === 'boolean') {
+    next.napcatEnabled = patch.napcatEnabled
+  }
+  if (Array.isArray(patch?.napcatAllowed)) {
+    const qq = []
+    for (const q of patch.napcatAllowed) {
+      if (typeof q !== 'string') continue
+      const t = q.trim().slice(0, 30)
+      if (t && !qq.includes(t)) qq.push(t)
+    }
+    next.napcatAllowed = qq.slice(0, 50)
+  }
+  // 群白名单(2026-08-12,整合 Python 桥群聊能力)
+  if (Array.isArray(patch?.napcatAllowedGroups)) {
+    const g = []
+    for (const x of patch.napcatAllowedGroups) {
+      if (typeof x !== 'string') continue
+      const t = x.trim().slice(0, 30)
+      if (t && !g.includes(t)) g.push(t)
+    }
+    next.napcatAllowedGroups = g.slice(0, 50)
+  }
+  if (typeof patch?.napcatBotQQ === 'string') {
+    next.napcatBotQQ = patch.napcatBotQQ.trim().slice(0, 30)
   }
   // 布尔开关(确认门 / 主动陪伴)
   if (typeof patch?.confirmExec === 'boolean') {
@@ -453,6 +499,10 @@ function getAgentEngine() {
       if (event.type === 'message' && event.message?.proactive) {
         void runProactiveGuess(event.message)
       }
+      // NapCat(2026-08-12):'qq' 来源触发的本轮回复落定 → 发回 QQ
+      if (event.type === 'message' && !event.message?.proactive) {
+        handleEngineMessageForNapcat(event.message)
+      }
     },
     onSwitchToMusic: (play) => setWidgetMode('music', 'tool', play),
     // 记忆系统(引擎记忆工具 + 系统提示记忆块)
@@ -473,8 +523,287 @@ function getAgentEngine() {
     // 与 confirmCommand 同款槽机制,payload 带 title/detail
     // (渲染端确认卡通用化:title 存在时展示标题 + 详情)
     confirmAction: (title, detail) => requestUserConfirm({ title, detail }),
+    // NapCat QQ 机器人客户端(2026-08-12;未启用时返回空壳不注册工具)
+    napcat: getNapcatClient().active ? getNapcatClient().client : undefined,
+    // 音乐控制(2026-08-12,QQ 远程控制/后台对话):executeJavaScript 调
+    // window.__islandMusicControl 桥(挂件版 WidgetApp 注册)
+    runMusicControl: (op, args) => runMusicControl(op, args),
   })
   return agentEngine
+}
+
+// 音乐控制桥调用(2026-08-12):白名单只放行 control/status(防原型链
+// 键命中);executeJavaScript 构造调用字符串,await 桥方法返回
+const MUSIC_CONTROL_OPS = new Set(['control', 'status'])
+async function runMusicControl(op, args) {
+  if (!MUSIC_CONTROL_OPS.has(op)) throw new Error(`未知的音乐控制操作:${String(op)}`)
+  if (!win || win.isDestroyed()) throw new Error('挂件窗口不可用')
+  const payload = JSON.stringify((args ?? [])[0])
+  const expr = `(async () => {
+    const b = window.__islandMusicControl
+    if (!b) return { error: '音乐控制桥不可用(Web 演示版无主进程)' }
+    try { return await b.${op}(${payload}) } catch (e) { return { error: String(e && e.message || e) } }
+  })()`
+  return win.webContents.executeJavaScript(expr)
+}
+
+// ---------------------------------------------------------------------------
+// NapCat QQ 机器人桥(2026-08-12,用户要求"收到 QQ 消息后在对话窗口和
+// QQ 自己回复我,同步上下文 + 调用长期记忆")
+// ---------------------------------------------------------------------------
+
+// 本轮 send 的来源(agent:send 第 4 参):'qq' = 私聊触发(回复发回该
+// QQ)、'group' = 群聊触发(回复发回该群)——LLM 回复落定后发回
+// (消息事件落定检查并清除);非 NapCat 触发每轮重置
+let lastSendSource = null
+let lastSendTarget = null
+/** 询问轮标记(2026-08-12,source='ask'):陌生人消息触发,LLM 回复 =
+ * "询问主人怎么回复"——落定后发到**主人 QQ**(napcatAllowed[0])同步
+ * 询问(不只在对话窗口);询问轮不清 pendingQQReply(等待主人指示) */
+let lastAskTurn = false
+/** 最近一次 QQ/群触发轮的时间戳(2026-08-12:summarize 时据此强制
+ * 记忆提取——QQ 聊天记录要沉淀进长期记忆,不受主动陪伴开关限制) */
+let lastQQTurnAt = 0
+/** 非白名单私聊的待回复(2026-08-12 二轮):陌生人消息 → LLM 先询问
+ * 主人 → 主人指示后的回复落定发回该 QQ;30 分钟超时作废 */
+let pendingQQReply = null
+const PENDING_QQ_TIMEOUT_MS = 30 * 60 * 1000
+/** NapCat 客户端状态(懒加载单例:active = 已连接开关,client = 客户端) */
+let napcatClientState = null
+
+// 群聊状态(2026-08-12 二轮:所有群消息直接进对话,LLM 看场合自主
+// 决定是否回复——群上下文(最近 20 条)注入 LLM 看场合用)
+let groupContext = []
+
+function getNapcatClient() {
+  if (napcatClientState) return napcatClientState
+  const state = {
+    active: false,
+    client: null,
+    handle: null,
+  }
+  napcatClientState = state
+  // 懒启动:创建时若配置未开启则不连(工具/引擎注入用空壳);
+  // 配置变更(napcatEnabled)后由 IPC handler 触发 start/stop
+  state.client = agentEngineModule.createNapcatClient({
+    getConfig: () => currentAgentConfig(),
+    // 系统通知(2026-08-12 用户要求"加个系统通知的功能"):QQ 消息到达
+    // 弹 Windows 通知(标题带 QQ 号,正文预览)
+    notify: (title, body) => {
+      try {
+        new Notification({ title, body }).show()
+      } catch {
+        // 通知失败忽略(不影响消息链路)
+      }
+    },
+    // 收到私聊消息 → 按来源分级(2026-08-12 二轮,用户要求"偏袒我
+    // 这一方"):白名单 QQ(如 1178821869 = 主人)→ 自主回复链路(带
+    // 上下文与长期记忆,消息原样进对话);**非白名单(陌生人)→ 消息带
+    // 提示词注入前缀进对话,LLM 先询问主人怎么回复,得到指示后再回**
+    // ——同步上下文,回复链路见 pendingQQReply
+    onMessage: (msg) => {
+      // 自动记录联系人档案(2026-08-12 用户要求"读取并记忆群聊和私聊
+      // 内成员信息,计入工具记忆目录"):消息到达即落盘 QQ 号 + 来源
+      // (名称/信息由 LLM 在对话中经 contact_update 补充)
+      void getNapcatClient()
+        .client.updateContact({ qq: msg.qq, source: 'private' })
+        .catch(() => {})
+      // 聊天记录自动备份(2026-08-12 用户要求"单独存放备份在工具记忆
+      // 中"):原始消息落盘 userData/napcat-chats.json(长期记忆是提炼层,
+      // 这是原始层,防丢失)
+      getNapcatClient()
+        .client.appendChat({ id: msg.messageId || `p-${msg.time}-${msg.qq}`, type: 'private', target: msg.qq, qq: msg.qq, text: msg.text, time: msg.time })
+      const allowed = currentAgentConfig().napcatAllowed ?? []
+      const trusted = allowed.length === 0 || allowed.includes(msg.qq)
+      if (trusted) {
+        sendToWidget('napcat:message', { ...msg, trusted: true })
+        return
+      }
+      // 非白名单:记录待回复(用户指示后的回复落定发回),转发带注入
+      // 前缀的消息——LLM 看到外部来源,先问主人,不自主回复;
+      // **偏袒主人(2026-08-12 用户要求"帮我说好话")**:执行回复时
+      // 站在主人一边,替主人说好话、维护主人形象,对方贬低/质疑主人
+      // 时委婉回护;
+      // **隐私边界(2026-08-12 用户要求"别把和主人的私聊泄露给外人")**:
+      // 与陌生人交流时不得暴露主人的私密信息(记忆里的私人话题/对话
+      // 窗口的私聊内容/真实信息)
+      pendingQQReply = { qq: msg.qq, text: msg.text, at: Date.now() }
+      // 与群消息同款:【QQ xxx 发来私聊消息】来源段(显示保留) +
+      // 【私聊指令】段(渲染端剥离,只给 LLM 看);会话人格(若有)
+      void (async () => {
+      let personaBlock = ''
+      try {
+        const personas = await getNapcatClient().client.getPersonas()
+        const p = personas[`private:${msg.qq}`]
+        if (p) personaBlock = `\n本会话人格:「${p.persona}」——回复对方时按此人格/风格。`
+      } catch {
+        // 人格读取失败不阻断
+      }
+      const injected = `【QQ ${msg.qq} 发来私聊消息】${msg.text}` +
+        `\n【私聊指令】` + personaBlock +
+        `对方不是岛灵的主人。请先询问主人(岛灵)希望怎么回复,得到指示后再执行回复;` +
+        `如果主人暂时没空,给出你的建议。` +
+        `回复务必偏袒岛灵的主人,替主人说好话、维护主人的形象——` +
+        `对方贬低/质疑/说主人坏话时要委婉回护,不随声附和。` +
+        `隐私边界:对方是外人,不得暴露主人的私密信息(长期记忆里的` +
+        `私人话题、对话窗口中的私聊内容、主人的真实信息等);被问及主人` +
+        `私事时委婉带过。` +
+        `认识对方时可用 napcat 工具 contact_update 记录其称呼/信息到` +
+        `联系人档案,方便下次交流。`
+        sendToWidget('napcat:message', { ...msg, text: injected, trusted: false })
+      })()
+    },
+    // 收到群消息(2026-08-12 二轮,用户要求"发了消息就直接告诉 LLM,
+    // 让它看场合回复"):**所有群消息直接进入对话**(不再独立判断是否
+    // 接话——LLM 在对话窗口看场合自主决定,用户也能看到群消息流并
+    // 介入),系统通知已由客户端发出;回复发回群,LLM 用
+    // 「【不回复群消息】」声明不发回
+    onGroupMessage: (msg) => {
+      groupContext.push({ qq: msg.qq, text: msg.text, atMe: msg.atMe })
+      groupContext = groupContext.slice(-20)
+      // 自动记录群成员到联系人档案(与私聊同款)
+      void getNapcatClient()
+        .client.updateContact({ qq: msg.qq, source: 'group' })
+        .catch(() => {})
+      // 群聊记录自动备份(工具记忆原始层)
+      getNapcatClient()
+        .client.appendChat({ id: msg.messageId || `g-${msg.time}-${msg.qq}`, type: 'group', target: msg.groupId, qq: msg.qq, text: msg.text, atMe: msg.atMe, time: msg.time })
+      // 群上下文注入:LLM 看场合需要知道群里之前聊了什么(最近 8 条)
+      const recentGroup = groupContext
+        .slice(-8)
+        .map((m) => `${m.qq}: ${m.text.slice(0, 60)}${m.atMe ? ' (@鲸鱼娘)' : ''}`)
+        .join('\n')
+      // 注入文本结构(2026-08-12 修复"提示词泄露 + 回复两条"):
+      // 【群聊消息…】段 = 来源标注 + 原始消息(对话窗口显示保留);
+      // 【群聊指令】段 = 系统指令,只给 LLM 看(渲染端显示时剥离),
+      // 含"回复就是发到群里的内容"——LLM 直接对群友说话,不向主人
+      // 汇报过程、不重复调工具发群(用户实测:群消息触发后 LLM 回复
+      // 两条——一条对群、一条向主人汇报)
+      // 注入文本结构(2026-08-12 三轮,用户要求"对话窗口看我的汇报,
+      // 群友那里是不一样的信息"):
+      // 【群聊消息…】段 = 来源标注 + 原始消息(气泡显示保留);
+      // 【群聊指令】段 = 系统指令(渲染端剥离,只给 LLM 看):
+      // **回复群友 = 调 napcat send_group 工具(对公)**,对话窗口的
+      // 回复 = 向主人汇报(对私,不会发到群里)——两条消息各归其位;
+      // **会话人格(2026-08-12 四轮)**:该会话设置过人格则注入
+      void (async () => {
+        let personaBlock = ''
+        try {
+          const personas = await getNapcatClient().client.getPersonas()
+          const p = personas[`group:${msg.groupId}`]
+          if (p) personaBlock = `\n本会话人格:「${p.persona}」——回复群友时按此人格/风格(人设优先于默认鲸鱼娘设定)。`
+        } catch {
+          // 人格读取失败不阻断
+        }
+        sendToWidget('napcat:group-message', {
+          groupId: msg.groupId,
+          qq: msg.qq,
+          text:
+          `【群聊消息(QQ ${msg.qq})】${msg.text}` +
+          `\n【群聊指令】` + personaBlock +
+          `**要回复群友时,调用 napcat 工具 send_group**(group_id=${msg.groupId},` +
+          `message = 你要对群友说的话——直接对群友说话,像你在群里发言;` +
+          `**群友要的文件下载好后,直接 send_group 带 file 参数发到群里**);` +
+          `**你这条对话里的回复是向主人汇报**:只汇报**对主人有意义的信息**(群里发生了什么、` +
+          `你回复了什么要点、有什么值得主人注意的——如下载进度/需要主人决定的事);` +
+          `**不要描述工具调用过程**(如"我已回复""下载开始啦""我先搜搜"),**不会发到群里**,可以放心汇报。` +
+          `最近群聊记录:\n${recentGroup || '(无)'}` +
+          `\n看场合决定是否回复群友:@了你 / 提到你 / 问你问题 / 聊到主人(尤其被贬低/质疑,` +
+          `必须站出来有力回护、替主人找回场子,不卑不亢)→ 必须 send_group 回复;` +
+          `普通闲聊、插不上话 → 不回复群友,只向主人汇报即可。` +
+          `回复群友时偏袒岛灵的主人,替主人说好话、维护主人形象。` +
+          `隐私边界:群友是外人,不得暴露主人的私密信息(长期记忆里的私人话题、` +
+          `对话窗口中的私聊内容、主人的真实信息等),被问及主人私事时委婉带过。` +
+          `群成员的信息(称呼/喜好)可用 napcat 工具 contact_update 记入联系人档案;` +
+          `重要的聊天内容可用 remember 沉淀到长期记忆。`,
+          atMe: msg.atMe,
+        })
+      })()
+    },
+  })
+  return state
+}
+
+// 引擎消息落定后的 NapCat 回发(经 onEvent 接线,见 getAgentEngine):
+// message 事件转发时检查 lastSendSource —— 'qq' 触发的本轮回复发回
+// 私聊 QQ,'group' 触发的发回群;**本地轮(用户指示)若有待回复的
+// 陌生人消息(非白名单),该轮回复也发回(2026-08-12 二轮:LLM 询问
+// 主人后,主人指示轮的回复落定即发回对方)**
+function handleEngineMessageForNapcat(message) {
+  const text = (message?.parts ?? [])
+    .filter((p) => p && p.type === 'text')
+    .map((p) => String(p.text))
+    .join('\n')
+    .trim()
+  if (!text) return
+  const c = napcatClientState?.client
+  if (!c) return
+  // QQ/群触发轮标记(2026-08-12:summarize 时强制记忆提取——用户发现
+  // 长期记忆没有 QQ 聊天记录,提取原来只在 proactiveEnabled 开启时跑)
+  if (lastAskTurn || lastSendSource) lastQQTurnAt = Date.now()
+  // **询问轮(2026-08-12,source='ask'):LLM 回复 = 询问主人怎么回复——
+  // 发到主人 QQ(napcatAllowed[0])同步询问**(不只在对话窗口);
+  // pendingQQReply 保留(等主人指示)
+  if (lastAskTurn) {
+    lastAskTurn = false
+    const ownerQQ = (currentAgentConfig().napcatAllowed ?? [])[0]
+    if (ownerQQ) {
+      c.sendToQQ(ownerQQ, text).catch(() => {})
+    }
+    return
+  }
+  // 来源触发轮(白名单私聊 / 群消息)
+  if (lastSendSource && lastSendTarget) {
+    const source = lastSendSource
+    const target = lastSendTarget
+    lastSendSource = null
+    lastSendTarget = null
+    // **群消息触发轮的对话回复 = 向主人汇报(对私,不发群)**;
+    // 回复群友由 LLM 调 napcat send_group 工具完成(对公)
+    if (source === 'group') {
+      return
+    }
+    // 白名单(主人 QQ)消息轮:若有待回复的陌生人消息 → 该轮回复 =
+    // 主人指示的执行结果,发回陌生人(2026-08-12 询问同步闭环:
+    // 主人在 QQ 里回复指示,LLM 回复直接发给对方);无则发回主人
+    if (pendingQQReply && Date.now() - pendingQQReply.at < PENDING_QQ_TIMEOUT_MS) {
+      const qq = pendingQQReply.qq
+      pendingQQReply = null
+      c.sendToQQ(qq, text).catch(() => {})
+      return
+    }
+    const done = () => {
+      try {
+        new Notification({
+          title: '🐳 已回复 QQ',
+          body: text.length > 60 ? text.slice(0, 60) + '…' : text,
+        }).show()
+      } catch {
+        // 通知失败忽略
+      }
+    }
+    c.sendToQQ(target, text).then(done).catch(() => {})
+    return
+  }
+  // 本地轮(对话窗口指示) + 待回复的陌生人消息 → 发回(超时作废)
+  if (pendingQQReply && Date.now() - pendingQQReply.at < PENDING_QQ_TIMEOUT_MS) {
+    const qq = pendingQQReply.qq
+    pendingQQReply = null
+    c.sendToQQ(qq, text).catch(() => {})
+  }
+}
+
+// NapCat 开关切换(配置变更时):开启即连接,关闭即断开
+function syncNapcatLifecycle() {
+  const cfg = currentAgentConfig()
+  const state = getNapcatClient()
+  if (cfg.napcatEnabled && !state.active) {
+    state.active = true
+    state.client.start()
+  } else if (!cfg.napcatEnabled && state.active) {
+    state.active = false
+    state.client.stop()
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -504,6 +833,8 @@ const ISLAND_SETTINGS_OPS = new Set([
   'getVideoPrefs', 'setVideoPrefs', 'setFullscreen',
   // 按视频名控制单个视频(2026-08-10 二轮,set_video_config target/playing)
   'setVideoState',
+  // 按音频名控制单条音频(2026-08-12,set_audio_config 工具)
+  'setAudioState',
   // 对话窗口媒体清单(2026-08-10,list_conversation_media 工具)
   'getConversationMedia',
   // 移除背景 / 音频库 → 播放列表(2026-08-10,remove_background /
@@ -755,7 +1086,7 @@ function createWindow() {
 
   // 调试:设置 WIDGET_SCREENSHOT=<path> 时,页面加载后截一张窗口图用于验证。
   // 截图/巡检模式(设置 WIDGET_SCREENSHOT=<path> 时):逻辑抽在
-  // electron/screenshot-tests.cjs(2026-08-06 架构优化,原内嵌 ~1160 行),
+  // tests/screenshot-tests.cjs(2026-08-06 架构优化,原内嵌 ~1160 行),
   // 依赖经 deps 注入,不参与正常运行路径
   if (process.env.WIDGET_SCREENSHOT) {
     runScreenshotTests({
@@ -808,9 +1139,6 @@ ipcMain.on('widget:pointer', (_event, active) => {
   // 防原生层抛异常(实测退出瞬间 drag-move 的 setPosition 抛过
   // "conversion failure",win 已销毁时调用任何窗口方法都会抛)
   if (!win || win.isDestroyed()) return
-  // 穿透切换时间戳(2026-08-10 诊断:复现"清除数据后悬浮延迟"时核对
-  // 恢复时序——mouseleave 开穿透与轮询校正回接收的间隔即恢复延迟)
-  console.log('[pointer]', Date.now(), 'active:', active)
   // 点击穿透开关:true = 鼠标在岛上,正常接收事件;false = 穿透给下层窗口
   win.setIgnoreMouseEvents(!active, { forward: !active })
   // 切接收时刷新页面 hover(2026-08-10 修复"收起后鼠标悬浮无响应"):
@@ -1161,10 +1489,18 @@ function asArray(value, fallback = []) {
   return Array.isArray(value) ? value : fallback
 }
 
-// 发送一轮对话:引擎无状态,history 为渲染端回传的完整历史
-ipcMain.on('agent:send', (_event, text, history) => {
+// 发送一轮对话:引擎无状态,history 为渲染端回传的完整历史;
+// sessionId = 渲染端会话 ID(2026-08-12,工具输出按对话分类存放);
+// source/target = NapCat 触发标记(2026-08-12:'qq' = 私聊触发(回复发回
+// 该 QQ)、'group' = 群聊触发(回复发回该群);非 NapCat 触发每轮重置)
+ipcMain.on('agent:send', (_event, text, history, sessionId, source, target) => {
   if (typeof text !== 'string') return
-  getAgentEngine().send(text, asArray(history))
+  // 询问轮(source='ask',2026-08-12):不设 lastSendSource/Target——
+  // 落定后由 handleEngineMessageForNapcat 发到主人 QQ 同步询问
+  lastAskTurn = source === 'ask'
+  lastSendSource = source === 'qq' || source === 'group' ? source : null
+  lastSendTarget = lastSendSource && typeof target === 'string' ? target : null
+  getAgentEngine().send(text, asArray(history), typeof sessionId === 'string' ? sessionId : undefined)
 })
 
 // exec_command 确认门回执(渲染端用户点允许/拒绝)
@@ -1183,7 +1519,12 @@ ipcMain.on('agent:abort', () => {
 // 经 currentAgentConfig:defaults 合并 + 旧 proactiveIntervalMinutes 迁移)
 ipcMain.handle('agent:config-get', () => currentAgentConfig())
 
-ipcMain.handle('agent:config-set', (_event, patch) => applyAgentConfigPatch(patch))
+ipcMain.handle('agent:config-set', (_event, patch) => {
+  const next = applyAgentConfigPatch(patch)
+  // NapCat 开关即时生效(配置变更后重同步连接;同时引擎下一轮读新配置)
+  syncNapcatLifecycle()
+  return next
+})
 
 /** 主动陪伴 tick 最近一次结果(巡检经 deps 轮询:判定调度器确实按
  * 10s 间隔触发,不依赖 LLM judge 结果——judge-no 也应记录) */
@@ -1200,7 +1541,7 @@ function getLastProactiveTick() {
 // busy,proactiveTurn 自动放弃)。judge-no 携带 reason 供渲染端回退
 // idle 时钟(下次判断在 N 分钟后,防闲置时每分钟一次 LLM 判断调用)。
 // 每次调用记录 lastProactiveTick(巡检轮询用)
-ipcMain.handle('agent:proactive-tick', async (_event, messages, idleMinutes) => {
+ipcMain.handle('agent:proactive-tick', async (_event, messages, idleMinutes, sessionId) => {
   let result
   try {
     if (currentMode() !== 'agent') result = { started: false, reason: 'mode' }
@@ -1234,7 +1575,11 @@ ipcMain.handle('agent:proactive-tick', async (_event, messages, idleMinutes) => 
           ]
             .filter(Boolean)
             .join(' ')
-          getAgentEngine().proactiveTurn(list, { hint })
+          // 主动回合归属当前会话(输出按对话分类;sessionId 缺省 = 无会话层)
+          getAgentEngine().proactiveTurn(list, {
+            hint,
+            sessionId: typeof sessionId === 'string' && sessionId ? sessionId : undefined,
+          })
           result = { started: true }
         }
       }
@@ -1724,7 +2069,14 @@ let lastMemoryExtractCount = -1
 ipcMain.handle('agent:summarize', async (_event, messages) => {
   const list = asArray(messages)
   const summaryPromise = getSummaryAgent().summarize(list)
-  if (currentAgentConfig().proactiveEnabled && list.length > 0 && list.length !== lastMemoryExtractCount) {
+  // QQ/群触发轮强制提取(2026-08-12:5 秒内有过 QQ/群轮 → 即使主动
+  // 陪伴关闭也提取——QQ 聊天记录必须沉淀长期记忆,用户实测没有)
+  const qqTurn = Date.now() - lastQQTurnAt < 5000
+  if (
+    list.length > 0 &&
+    list.length !== lastMemoryExtractCount &&
+    (currentAgentConfig().proactiveEnabled || qqTurn)
+  ) {
     lastMemoryExtractCount = list.length
     void getSummaryAgent()
       .extractMemories(list)
@@ -1866,6 +2218,8 @@ if (!gotLock) {
     createWindow()
     createTray()
     startBridge()
+    // NapCat QQ 桥(2026-08-12):配置开启即连接
+    syncNapcatLifecycle()
   })
 
   app.on('before-quit', () => {
@@ -1876,6 +2230,14 @@ if (!gotLock) {
       bridgeProc?.kill()
     } catch {
       // already gone
+    }
+    // NapCat QQ 桥断开(2026-08-12)
+    if (napcatClientState?.active) {
+      try {
+        napcatClientState.client.stop()
+      } catch {
+        // already stopped
+      }
     }
     // 关闭 MCP 服务子进程(agentEngine 懒加载:未用过则不会创建,
     // 无资源泄漏;已使用过则连进程树一起清理)

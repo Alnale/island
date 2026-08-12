@@ -43,3 +43,6 @@ test-check.png
 .dual-shots/
 # bili-tool 运行时产物(登录二维码等)
 tools/bili/config/login-qrcode.png
+
+# 测试产物
+/tests/title-test-result.log

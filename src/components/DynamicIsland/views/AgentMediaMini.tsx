@@ -36,8 +36,9 @@ export function AgentMediaMini({
   const src = resolveMediaSrc(media.src)
   const [playing, setPlaying] = useState(Boolean(media.playing))
   const [fullscreen, setFullscreen] = useState(false)
-  // 进度条(2026-08-09 用户要求):当前/总时长 + 拖拽 seek
-  const [current, setCurrent] = useState(0)
+  // 进度条(2026-08-09 用户要求):当前/总时长 + 拖拽 seek;
+  // current 改 DOM 直写(2026-08-11 性能:原每 ~250ms timeupdate
+  // setCurrent 重渲染整个视频岛——小窗播放是常驻重活,见 renderProgress)
   const [duration, setDuration] = useState(0)
   const scrubbingRef = useRef(false)
   // 退出全屏缩回动画(2026-08-09 全屏 ↔ 小窗过渡):播完移除 class
@@ -132,10 +133,33 @@ export function AgentMediaMini({
     if (event.clientX < rect.left || event.clientX > rect.right) return
     const ratio = Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width))
     v.currentTime = ratio * duration
-    setCurrent(v.currentTime)
+    renderProgress()
     // 双向同步(2026-08-09):seek 立即上报,展开回面板时同 src 续播
     dispatchAgentMedia('play', { kind: 'video', src: media.src, playing: !v.paused, position: v.currentTime })
   }
+  // 播放进度 DOM 直写(2026-08-11 性能):timeupdate 每 ~250ms 触发,
+  // 原 setCurrent → 每次重渲染整个视频岛(控制条/时间/VideoExtras)——
+  // 小窗常驻播放,是软件渲染下最重的场景;进度条/时间改直写 DOM,
+  // 播放期间零 React 重渲染;组件重渲染后由下方 effect 同步真实进度
+  // (JSX 静态初始值,重渲染不覆盖直写值)
+  const renderProgress = (reset = false) => {
+    const v = videoRef.current
+    const track = barRef.current
+    if (!track) return
+    const dur = v ? v.duration || 0 : 0
+    const cur = reset ? 0 : v ? v.currentTime || 0 : 0
+    const pct = dur > 0 && Number.isFinite(dur) ? Math.min(100, (cur / dur) * 100) : 0
+    const fill = track.querySelector('.island-agent-mini-fill') as HTMLElement | null
+    const thumb = track.querySelector('.island-agent-mini-thumb') as HTMLElement | null
+    if (fill) fill.style.width = `${pct}%`
+    if (thumb) thumb.style.left = `${pct}%`
+    const timeEl = track.parentElement?.querySelector('.island-agent-mini-time')
+    if (timeEl) timeEl.textContent = `${fmtMiniTime(cur)} / ${fmtMiniTime(dur)}`
+  }
+  // 每次渲染提交后同步一次真实进度(JSX 静态,重渲染不覆盖直写值)
+  useEffect(() => {
+    renderProgress()
+  })
   // 小窗播放进度上报(2026-08-09 双向同步):timeupdate 经 dispatch
   // 更新位置缓存与 agentPlaying——展开回面板时 MediaFrame 从该位置
   // 续播(节流 ~1Hz,与 MediaFrame onProgress 同款)。
@@ -183,7 +207,6 @@ export function AgentMediaMini({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- 播放状态变化驱动
   }, [playing])
-  const pct = duration > 0 && Number.isFinite(duration) ? Math.min(100, (current / duration) * 100) : 0
   return (
     <div
       ref={wrapRef}
@@ -245,12 +268,14 @@ export function AgentMediaMini({
               setDuration(Number.isFinite(d) ? d : 0)
             }}
             onTimeUpdate={(event) => {
-              setCurrent(event.currentTarget.currentTime)
+              // 进度 DOM 直写(2026-08-11 性能,见 renderProgress 注释)
+              renderProgress()
               reportPosition(event.currentTarget.currentTime)
             }}
             onEnded={() => {
               setPlaying(false)
-              setCurrent(0)
+              // ended 后 currentTime 停在时长,显式归零
+              renderProgress(true)
               // 播完清除播放状态同步(切回面板不自动重播)
               dispatchAgentMedia('play', { kind: 'video', src: media.src, playing: false })
             }}
@@ -313,13 +338,12 @@ export function AgentMediaMini({
               restartBarTimer()
             }}
           >
+            {/* 进度由 renderProgress 直写(JSX 静态,重渲染不覆盖) */}
             <div ref={barRef} className="island-agent-mini-track" aria-hidden="true">
-              <div className="island-agent-mini-fill" style={{ width: `${pct}%` }} />
-              <span className="island-agent-mini-thumb" style={{ left: `${pct}%` }} />
+              <div className="island-agent-mini-fill" />
+              <span className="island-agent-mini-thumb" />
             </div>
-            <span className="island-agent-mini-time">
-              {fmtMiniTime(current)} / {fmtMiniTime(duration)}
-            </span>
+            <span className="island-agent-mini-time">0:00 / 0:00</span>
             {/* 音量 + 更多(2026-08-10 用户要求:定制 UI,与对话播放器/
                 多媒体库双向同步) */}
             <VideoExtras videoRef={videoRef} videoKey={media.name} />

@@ -31,6 +31,7 @@ import {
   onPlaylistItemRemoved,
   onSettingsChange,
   registerIslandSettingsBridge,
+  registerMusicControlBridge,
   readMediaWindowWidth,
 } from '../src/settingsBridge'
 import {
@@ -333,6 +334,21 @@ export default function WidgetApp() {
   // 外部模式同步/循环/seek 已收进 useIslandMedia 共享 hook)
   useEffect(() => {
     registerIslandSettingsBridge()
+    // 音乐控制桥(2026-08-12,QQ 远程控制/后台对话):主进程经
+    // executeJavaScript 调 window.__islandMusicControl 控制播放——
+    // 外部平台(SMTC)优先,本地播放器兜底;状态供 LLM 查询
+    registerMusicControlBridge({
+      getExternalActive: () => externalActive,
+      systemControl: (action) => system.control(action),
+      getPlayer: () => player,
+      // system 的公开播放状态字段是 isPlaying(意图驱动),映射到桥的 playing
+      getSystem: () => ({
+        track: system.track,
+        playing: system.isPlaying,
+        position: system.position,
+        duration: system.duration,
+      }),
+    })
   }, [])
 
   // Agent 模式文字区左滑/右滑:退出 Agent 切回音乐模式
@@ -501,17 +517,18 @@ export default function WidgetApp() {
     },
     [player],
   )
-  // LLM 工具 add_audio_to_playlist(2026-08-10):桥派发 island:playlist-import
-  // → 音频库条目导入播放列表(自动播首曲)+ 切音乐模式——用户能直接点播
-  // (import_audio_library 只进音频库,音乐模式播不了,是"LLM 说导入了
-  // 却无法播放"的根因修复)
+  // LLM 工具 add_audio_to_playlist(2026-08-10;2026-08-11 改语义):桥派发
+  // island:playlist-import → 音频库条目导入播放列表(**仅入列表,不自动
+  // 播、不切音乐模式**——用户要求"除非明确指定切换到音乐模式播放,音频
+  // 都在对话窗口播放";要在对话窗口播放 LLM 用 open_file,要切音乐模式
+  // 播放走 switch_to_music)
   useEffect(
     () =>
       onPlaylistImport((items) => {
         void player.addLibraryTracks(
           items.map((it) => ({ id: '', name: it.name, type: it.type, data: it.data, createdAt: 0 })),
+          { autoPlay: false },
         )
-        window.desktop?.setMode?.('music')
       }),
     [player],
   )

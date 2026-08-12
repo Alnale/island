@@ -13,6 +13,7 @@
  */
 
 import {
+  memo,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -197,10 +198,15 @@ const BATCH_RENDER = 12
  * 消息滚动条中间部分滚动抖动"):实测 content-visibility 的估算机制在
  * 滚动中必然修正 scrollHeight(60 条滚动 6 段波动 412px,估算精确到
  * 每条真实高度也一样,Chromium 行为)——滚动条抖动无解;而全量布局
- * 滚动条完全稳定(drift 0,实测)。阈值:≤100 条全量布局(文本消息
+ * 滚动条完全稳定(drift 0,实测)。阈值:≤200 条全量布局(文本消息
  * 布局成本低,滚动流畅);超过(长历史)才启用 content-visibility 保
- * 证滚动性能,接受滚动条轻微修正 */
-const AGENT_MSG_CV_THRESHOLD = 100
+ * 证滚动性能,接受滚动条轻微修正。
+ * **2026-08-12 阈值 100→200(用户实测 100+ 条"拖到底只滚一点" +
+ * 滚动中部抽搐)**:100-200 条启用 CV 时,屏外估算(120px/条默认,
+ * 长文本/媒体实际数百 px)远小于真实 → scrollHeight 低估 → thumb 大、
+ * 拖到底滚不满;滚动时真实化 → 高度修正 → 抽搐。提到 200 后 100-200
+ * 条全量布局(滚动条完全稳定、长度真实),超 200 才启用 CV */
+const AGENT_MSG_CV_THRESHOLD = 200
 
 /**
  * 平滑滚动到目标位置(自绘 rAF 插值,非线性):
@@ -312,6 +318,63 @@ function formatSessionTime(ts: number): string {
   if (d.toDateString() === yesterday.toDateString()) return '昨天'
   return `${d.getMonth() + 1}月${d.getDate()}日`
 }
+
+/**
+ * 工具列表行(2026-08-11 性能拆分:原 activeTools.map 里每次 AgentView
+ * 渲染都对**所有工具**同步执行 JSON.stringify(parameters)(exec_command/
+ * write_file/bili 等 schema 大,切视图必卡)且 <details> 折叠时 body
+ * 仍全量渲染。参数文本 useMemo(工具清单一次加载引用稳定,仅变化时
+ * 重算),**折叠时不渲染 body**(参数只在展开时出现);受控 details +
+ * onToggle 读 DOM 状态,交互与原生一致)
+ */
+const ToolsItem = memo(function ToolsItem({
+  tool,
+  animClass,
+  onDisable,
+}: {
+  tool: AgentToolInfo
+  animClass: string
+  onDisable: (name: string) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const paramsText = useMemo(() => JSON.stringify(tool.parameters, null, 2), [tool.parameters])
+  return (
+    <details
+      className={`island-agent-tools-item${animClass}`}
+      open={open}
+      onToggle={(event) => setOpen(event.currentTarget.open)}
+      onPointerDown={(event) => {
+        if (event.button === 0) event.stopPropagation()
+      }}
+    >
+      <summary>
+        <span className="island-agent-tools-name">{tool.name}</span>
+        <button
+          type="button"
+          className="island-tools-disable"
+          title="禁用此工具(对话中不可用)"
+          onClick={(event) => {
+            // preventDefault 阻止 summary 的展开/收起默认行为
+            event.preventDefault()
+            event.stopPropagation()
+            onDisable(tool.name)
+          }}
+        >
+          禁用
+        </button>
+        <span className="island-agent-tools-toggle" aria-hidden="true">
+          ▸
+        </span>
+      </summary>
+      {open && (
+        <div className="island-agent-tools-body">
+          <p className="island-agent-tools-desc">{tool.description}</p>
+          <pre className="island-agent-tool-code">{paramsText}</pre>
+        </div>
+      )}
+    </details>
+  )
+})
 
 export interface AgentViewProps extends AgentPanelProps {
   /** 收起为多媒体岛(视频/图片冻结为媒体小窗;音频播放中移交音乐模式) */
@@ -692,26 +755,37 @@ export function AgentView({
   // 工具禁用 / 恢复:先播离场动画(0.24s)再提交配置,行移入另一区时
   // 带入场动画(0.34s 回弹);动画期间禁止重复操作(动画未完成即卸载
   // 不残留,计时器统一收集)
-  const toggleToolDisabled = (name: string, disable: boolean) => {
-    const current = excludedTools ?? []
-    // 仅离场中拦截:入场动画期间允许再次操作(行还在原区,离场动画
-    // 会覆盖入场动画,无冲突)
-    if (toolsLeave.leavingIds.includes(name)) return
-    const next = disable
-      ? [...new Set([...current, name])]
-      : current.filter((n) => n !== name)
-    if (next.length === current.length) return
-    toolsLeave.beginLeave(name, () => {
-      onExcludedToolsChange?.(next)
-      // 行移入目标区(禁用区 / 可用区):回弹入场动画
-      setEnteringTools((prev) => [...prev, name])
-      toolAnimTimersRef.current.push(
-        window.setTimeout(() => {
-          setEnteringTools((prev) => prev.filter((n) => n !== name))
-        }, 460),
-      )
-    })
-  }
+  // useCallback(2026-08-11:传给 ToolsItem 的 onDisable 需稳定引用,
+  // 否则 AgentView 每次渲染把 ToolsItem 的 memo 打穿)
+  const toggleToolDisabled = useCallback(
+    (name: string, disable: boolean) => {
+      const current = excludedTools ?? []
+      // 仅离场中拦截:入场动画期间允许再次操作(行还在原区,离场动画
+      // 会覆盖入场动画,无冲突)
+      if (toolsLeave.leavingIds.includes(name)) return
+      const next = disable
+        ? [...new Set([...current, name])]
+        : current.filter((n) => n !== name)
+      if (next.length === current.length) return
+      toolsLeave.beginLeave(name, () => {
+        onExcludedToolsChange?.(next)
+        // 行移入目标区(禁用区 / 可用区):回弹入场动画
+        setEnteringTools((prev) => [...prev, name])
+        toolAnimTimersRef.current.push(
+          window.setTimeout(() => {
+            setEnteringTools((prev) => prev.filter((n) => n !== name))
+          }, 460),
+        )
+      })
+    },
+    [excludedTools, toolsLeave, onExcludedToolsChange],
+  )
+  // 禁用点击包装(2026-08-11:稳定引用——内联箭头会把 ToolsItem 的
+  // memo 打穿)
+  const disableTool = useCallback(
+    (name: string) => toggleToolDisabled(name, true),
+    [toggleToolDisabled],
+  )
 
   // ===== 右上角快捷菜单(2026-08-07 重构:通用 QuickMenu——整合按钮 +
   // 同行联通展开 + 滚轮逐格切换 + 高亮滑块,取代原 ⋯ 弹出菜单与
@@ -811,17 +885,30 @@ export function AgentView({
   // (measureHeight 逐子 offsetHeight + getComputedStyle),视频播放
   // 期间控件隐藏/交互显示 = 卡顿源之一;媒体高度由 width×aspect
   // 决定,类切换不改尺寸,安全跳过
+  // **动画结束补测(2026-08-11 修复"工具调用列表收起后窗口高度不实时
+  // 响应 + 收起动画卡")**:class 变化瞬间的 rAF 测量发生在 0fr↔1fr
+  // 过渡**起点**,测到的是过渡中间高度(≈旧值)——收起动画(0.28s)
+  // 结束后高度才到位,只测一次窗口永远停在旧值(直到下一条消息/工具
+  // 事件才重测);延迟 ~350ms(动画时长 + 余量)补测一次取终值,窗口
+  // 收缩走岛体 --agent-h 的 0.3s 平滑过渡,不再"动画播完窗口不动、
+  // 之后突然跳变"(卡感主因)。展开同款受益(动画结束高度才完整)
   useLayoutEffect(() => {
     const el = scrollRef.current
     if (!el || !onHeightChange) return
+    let settleTimer = 0
     const observer = new MutationObserver((records) => {
       for (const r of records) {
         if (r.target instanceof Element && r.target.closest('.island-media-frame')) return
       }
       requestAnimationFrame(measureHeight)
+      window.clearTimeout(settleTimer)
+      settleTimer = window.setTimeout(measureHeight, 350)
     })
     observer.observe(el, { subtree: true, attributes: true, attributeFilter: ['class'] })
-    return () => observer.disconnect()
+    return () => {
+      observer.disconnect()
+      window.clearTimeout(settleTimer)
+    }
   }, [measureHeight, onHeightChange])
 
   // 注:消息级 ResizeObserver 方案已删(2026-08-09 实测弃用)——屏外
@@ -1224,39 +1311,12 @@ export function AgentView({
               <div className="island-agent-welcome">没有匹配的工具</div>
             )}
             {activeTools.map((t) => (
-              <details
+              <ToolsItem
                 key={t.name}
-                className={`island-agent-tools-item${rowAnimClass(t.name)}`}
-                onPointerDown={(event) => {
-                  if (event.button === 0) event.stopPropagation()
-                }}
-              >
-                <summary>
-                  <span className="island-agent-tools-name">{t.name}</span>
-                  <button
-                    type="button"
-                    className="island-tools-disable"
-                    title="禁用此工具(对话中不可用)"
-                    onClick={(event) => {
-                      // preventDefault 阻止 summary 的展开/收起默认行为
-                      event.preventDefault()
-                      event.stopPropagation()
-                      toggleToolDisabled(t.name, true)
-                    }}
-                  >
-                    禁用
-                  </button>
-                  <span className="island-agent-tools-toggle" aria-hidden="true">
-                    ▸
-                  </span>
-                </summary>
-                <div className="island-agent-tools-body">
-                  <p className="island-agent-tools-desc">{t.description}</p>
-                  <pre className="island-agent-tool-code">
-                    {JSON.stringify(t.parameters, null, 2)}
-                  </pre>
-                </div>
-              </details>
+                tool={t}
+                animClass={rowAnimClass(t.name)}
+                onDisable={disableTool}
+              />
             ))}
             {/* 禁用区:被禁用的工具集中展示,可恢复(动画与禁用同款) */}
             {disabledRows.length > 0 && (

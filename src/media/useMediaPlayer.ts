@@ -43,8 +43,10 @@ export interface MediaPlayer {
   /** 上传音频文件加入播放列表(自动播放第一首新曲) */
   addTracks(files: File[]): void
   /** 从音频库导入播放列表(2026-08-08,单个/批量;自动播放第一首新曲;
-      不重复入库——音频库已是来源) */
-  addLibraryTracks(items: AudioLibraryItem[]): void
+      不重复入库——音频库已是来源)。opts.autoPlay=false = 仅入列表不
+      自动播(2026-08-11 LLM 工具 add_audio_to_playlist:音频默认在对话
+      窗口播放,切音乐模式只在用户明确要求时) */
+  addLibraryTracks(items: AudioLibraryItem[], opts?: { autoPlay?: boolean }): void
   /**
    * 以原始 URL 加入播放列表并播放(2026-08-11 音频移交优化):**不 fetch
    * 不转码,立即播放**——对话窗口播放中的音频切到音乐模式不中断;
@@ -255,7 +257,7 @@ export function useMediaPlayer(): MediaPlayer {
    * island-uploads(播放列表重启恢复);与 addTracks 同路径,但**不重复
    * 入库音频库**(来源即音频库);自动播放第一首新曲 */
   const addLibraryTracks = useCallback(
-    async (items: AudioLibraryItem[]) => {
+    async (items: AudioLibraryItem[], opts?: { autoPlay?: boolean }) => {
       if (items.length === 0) return
       const uploaded = await Promise.all(
         items.map(async (it) => {
@@ -274,7 +276,10 @@ export function useMediaPlayer(): MediaPlayer {
       const next = [...tracksRef.current, ...uploaded]
       tracksRef.current = next // 先同步 ref,playTrack 立即用新列表
       setTracks(next)
-      playTrack(next.length - uploaded.length) // 播放第一首新曲
+      // autoPlay=false = 仅入列表不自动播放(2026-08-11 LLM 工具
+      // add_audio_to_playlist:音频默认在对话窗口播放,切音乐模式只在
+      // 用户明确要求时——加入播放列表不再自动播首曲/切模式)
+      if (opts?.autoPlay !== false) playTrack(next.length - uploaded.length) // 播放第一首新曲
     },
     [playTrack],
   )

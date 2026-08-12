@@ -65,8 +65,25 @@ interface DesktopApi {
   dragMove(screenX: number, screenY: number): void
   /** 右键长按拖拽移动挂件:结束 */
   dragEnd(): void
-  /** Agent:发送一轮对话(引擎无状态,history 为完整历史) */
-  agentSend(text: string, history: unknown[]): void
+  /** Agent:发送一轮对话(引擎无状态,history 为完整历史;
+   * sessionId = 会话 ID,工具输出按对话分类存放,2026-08-12;
+   * source='qq'(target = QQ 号)/'group'(target = 群号)/'ask'(询问轮,
+   * target = 陌生人 QQ——回复发到主人 QQ 同步询问)= NapCat 触发轮,
+   * 2026-08-12) */
+  agentSend(text: string, history: unknown[], sessionId?: string, source?: 'qq' | 'group' | 'ask', target?: string): void
+  /** NapCat 私聊消息订阅(2026-08-12):payload = {qq, text, messageId,
+   * time, trusted};渲染端作为用户消息进入对话(同步上下文)。
+   * trusted: true = 白名单 QQ(自主回复,回复发回);false = 陌生人
+   * (文本已注入"先问主人"前缀,回复经 pendingQQReply 链路发回)。
+   * 返回取消订阅函数 */
+  onNapcatMessage(
+    callback: (msg: { qq: string; text: string; messageId: string; time: number; trusted?: boolean }) => void,
+  ): () => void
+  /** NapCat 群消息订阅(2026-08-12):payload = {groupId, qq, text,
+   * atMe};群消息经自主判断接话后进入对话(回复发回群) */
+  onNapcatGroupMessage(
+    callback: (msg: { groupId: string; qq: string; text: string; atMe: boolean }) => void,
+  ): () => void
   /** Agent:中止当前轮 */
   agentAbort(): void
   /** Agent:exec_command 确认门回执(用户允许/拒绝) */
@@ -101,6 +118,14 @@ interface DesktopApi {
         proactiveIntervalUnit?: 's' | 'm' | 'h'
         summaryStyle?: string
         mindPersona?: string
+        /** 工具输出根目录(2026-08-12,Agent 设置「工具与能力」配置) */
+        outputDir?: string
+        /** NapCat QQ 机器人(2026-08-12) */
+        napcatWsUrl?: string
+        napcatEnabled?: boolean
+        napcatAllowed?: string[]
+        napcatAllowedGroups?: string[]
+        napcatBotQQ?: string
       }
     >,
   ): Promise<IslandAgentConfig>
@@ -180,8 +205,13 @@ interface DesktopApi {
   /** Agent:心理揣测(独立 Sub Agent,紧凑态文字区展示) */
   agentMindGuess(messages: unknown[]): Promise<string>
   /** Agent:主动陪伴 tick(渲染端调度器触发;{started} 供 in-flight 复位,
-   * reason 'judge-no' 供回退 idle 时钟防高频判断调用) */
-  agentProactiveTick(messages: unknown[], idleMinutes: number): Promise<{ started: boolean; reason?: string }>
+   * reason 'judge-no' 供回退 idle 时钟防高频判断调用;sessionId =
+   * 当前会话 ID——主动回合的工具输出归属该对话,2026-08-12) */
+  agentProactiveTick(
+    messages: unknown[],
+    idleMinutes: number,
+    sessionId?: string,
+  ): Promise<{ started: boolean; reason?: string }>
   /** 模式切换(托盘右键菜单):订阅回调(payload = 目标模式 + 切换来源;
    * source 'tool' = Agent 工具 switch_to_music 触发的切换) */
   onSetMode(

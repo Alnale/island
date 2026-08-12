@@ -479,6 +479,8 @@ export function AgentSettingsView({
     // Sub Agent 设置(2026-08-07):文风/人格预设 id 或自定义 ≤100 字
     summaryStyle: '',
     mindPersona: '',
+    // 工具输出根目录(2026-08-12):空 = 未启用,工具保持默认位置
+    outputDir: '',
     mcpServers: [] as McpServerForm[],
     skillsDirs: [] as string[],
   })
@@ -666,6 +668,8 @@ export function AgentSettingsView({
         // Sub Agent 设置:旧配置无字段 → 空(默认文风/人格)
         summaryStyle: config.summaryStyle ?? '',
         mindPersona: config.mindPersona ?? '',
+        // 工具输出根目录(2026-08-12):旧配置无字段 → 空(未启用)
+        outputDir: config.outputDir ?? '',
         mcpServers: (config.mcpServers ?? []).map(fromConfigServer),
         skillsDirs: config.skillsDirs ?? [],
       })
@@ -744,6 +748,7 @@ export function AgentSettingsView({
       proactiveIntervalUnit: form.proactiveIntervalUnit,
       summaryStyle: form.summaryStyle,
       mindPersona: form.mindPersona,
+      outputDir: form.outputDir.trim(),
       mcpServers: form.mcpServers.map(toConfigServer),
       skillsDirs: form.skillsDirs.map((d) => d.trim()).filter(Boolean),
     })
@@ -1269,7 +1274,42 @@ export function AgentSettingsView({
         )}
         {tab === 2 && (
           <>
-            {/* 工具与能力:MCP 服务 / 技能目录 */}
+            {/* 工具与能力:输出目录 / MCP 服务 / 技能目录 */}
+        {/* 工具输出根目录(2026-08-12,用户要求"所有工具和文件的输出目录,
+            每个工具文件夹分类、文件按对话 ID 分类"):bili 下载 / xxt 截图 /
+            doc_convert 产物统一落 <根>/<工具名>/<当前对话ID>/;留空 =
+            未启用(默认 userData 下)。write_file / exec_command 是用户指定
+            路径的写入,不重定向 */}
+        <div className="island-agent-section">
+          <span className="island-agent-section-title">输出目录(工具产出的统一存放位置)</span>
+          <span className="island-agent-section-hint">
+            所有工具的产出文件按「工具文件夹 → 对话 ID」分类存放:如
+            输出根\bili\当前对话\视频.mp4、输出根\doc_convert\当前对话\转换.pdf。
+            留空 = 未启用,工具保持默认位置(用户数据目录下);也可对话中说
+            "把输出目录改成 D:\xxx" 让 Agent 配置
+          </span>
+          <div className="island-agent-scale-row">
+            <input
+              type="text"
+              value={form.outputDir}
+              placeholder="输出根目录绝对路径(留空 = 默认位置)"
+              spellCheck={false}
+              onChange={(event) => setForm((f) => ({ ...f, outputDir: event.target.value }))}
+            />
+            <button
+              type="button"
+              className="island-agent-scale-btn"
+              title="保存输出目录(保存配置一并生效;留空保存 = 恢复默认位置)"
+              onClick={(event) => {
+                event.stopPropagation()
+                save()
+              }}
+            >
+              保存
+            </button>
+          </div>
+        </div>
+
         {/* MCP 服务:stdio 进程 / sse 远程端点,每个服务暴露 mcp_<服务>_<工具> 工具 */}
         <div className="island-agent-section">
           <span className="island-agent-section-title">MCP 服务(MCP 服务端工具接入)</span>

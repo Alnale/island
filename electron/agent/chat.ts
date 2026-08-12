@@ -41,7 +41,7 @@
  * (首个 delta 带 id/name,后续只带 index + arguments 增量)。
  */
 
-import { parseSse, truncateResult } from './sse'
+import { parseSse, sanitizeJsonStrings, truncateResult } from './sse'
 import { apiErrorMessage } from './constants'
 import type { AgentConfig, AgentEvent, AgentMessage, AgentPart, AgentTool, ProviderOutcome } from './types'
 
@@ -184,7 +184,9 @@ export async function streamChatCompletion(params: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${config.apiKey.trim()}`,
       },
-      body: JSON.stringify(body),
+      // 请求体深度清洗孤立代理(2026-08-11,与 Responses 同款修复:
+      // 历史含孤立代理 → \udXXX 原样输出 → 服务器解析 400,见 sse.ts)
+      body: JSON.stringify(sanitizeJsonStrings(body)),
       signal,
     })
   } catch (err) {

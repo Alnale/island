@@ -6,7 +6,7 @@
  * 列表嵌套/有序 start/引用/围栏/表格对齐与转义)、行内(粗斜删/
  * 行内代码/链接/裸 URL/下划线词内不强调/转义)与流式退化场景。
  *
- * 用法:node scripts/test-markdown.mjs
+ * 用法:node tests/test-markdown.mjs
  */
 import { build } from 'esbuild'
 import { fileURLToPath } from 'node:url'

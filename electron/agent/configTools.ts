@@ -392,5 +392,88 @@ export function createConfigTools(deps: {
         throw new Error('action 仅支持 list/disable/enable')
       },
     },
+    {
+      name: 'set_output_dir',
+      description:
+        '查看/设置工具输出根目录(2026-08-12):所有工具的产出文件统一存放,' +
+        '目录结构 = <根>/<工具名>/<当前对话ID>——bili 下载/xxt 截图/doc_convert 转换产物' +
+        '按工具文件夹分类、文件按对话 ID 分类(用户可随时找到文件)。' +
+        'action=get 查询当前值;action=set 设置绝对路径(空串 = 恢复默认位置)。' +
+        '只在用户明确要求修改输出位置/询问输出目录时调用(不要自作主张改)。',
+      parameters: {
+        type: 'object',
+        properties: {
+          action: { type: 'string', enum: ['get', 'set'], description: 'get = 查询当前输出根目录;set = 设置' },
+          dir: { type: 'string', description: 'set:输出根目录绝对路径;空串 = 恢复默认位置' },
+        },
+        required: ['action'],
+      },
+      async execute(params: ToolParams) {
+        const action = String(params.action ?? '')
+        const current = deps.getConfig().outputDir?.trim() || ''
+        if (action === 'get') {
+          if (!current) {
+            return '(未设置工具输出目录:工具产出保持默认位置,即用户数据目录 userData 下的 bili/xxt 等子目录)'
+          }
+          return `当前工具输出根目录:${current}\n目录结构 = ${current}\\<工具名>\\<当前对话ID>。如 bili 下载落在 ${current}\\bili\\<当前对话ID>\\,doc_convert 产物落在 ${current}\\doc_convert\\<当前对话ID>\\`
+        }
+        if (action === 'set') {
+          const dir = String(params.dir ?? '').trim()
+          if (!deps.updateAgentConfig) throw new Error('配置写入不可用(未注入 updateAgentConfig)')
+          deps.updateAgentConfig({ outputDir: dir })
+          return dir
+            ? `已设置工具输出根目录为 ${dir}。之后的 bili 下载/xxt 截图/doc_convert 产物按 ${dir}\\<工具名>\\<当前对话ID> 分类存放(本次对话的产出立即落新目录)`
+            : '已恢复默认输出位置(工具产出回到默认 userData 目录)'
+        }
+        throw new Error('action 仅支持 get/set')
+      },
+    },
+    {
+      name: 'set_napcat_config',
+      description:
+        'NapCat QQ 机器人设置(2026-08-12):enabled 开关——开启后挂件连接 ' +
+        'NapCat(OneBot 11),收到 QQ 私聊消息自动进入对话并回复到 QQ;' +
+        'wsUrl = NapCat WebSocket 地址(默认 ws://127.0.0.1:3001);' +
+        'allowed = 只回复的 QQ 号数组(空 = 回复所有私聊,防骚扰可只填自己)。' +
+        '如"开启 QQ 机器人""只回复我自己的 QQ 消息"。开启后连接失败会提示 ' +
+        '(NapCat 需先启动并开放 WS 端口)。',
+      parameters: {
+        type: 'object',
+        properties: {
+          enabled: { type: 'boolean', description: '开关 NapCat QQ 机器人(缺省不改)' },
+          wsUrl: { type: 'string', description: 'NapCat WebSocket 地址,如 ws://127.0.0.1:3001(缺省不改)' },
+          allowed: { type: 'array', items: { type: 'string' }, description: 'QQ 号白名单(空数组 = 回复所有私聊;缺省不改)' },
+        },
+      },
+      async execute(params: ToolParams) {
+        const patch: Partial<AgentConfig> = {}
+        if (params.enabled !== undefined) patch.napcatEnabled = Boolean(params.enabled)
+        if (params.wsUrl !== undefined) {
+          const url = String(params.wsUrl).trim()
+          if (url && !/^ws:\/\//i.test(url)) throw new Error('wsUrl 需要是 ws:// 开头的 WebSocket 地址(如 ws://127.0.0.1:3001)')
+          patch.napcatWsUrl = url.slice(0, 500)
+        }
+        if (params.allowed !== undefined) {
+          if (!Array.isArray(params.allowed)) throw new Error('allowed 需要是 QQ 号字符串数组')
+          patch.napcatAllowed = params.allowed.map(String).map((s) => s.trim()).filter(Boolean).slice(0, 50)
+        }
+        if (Object.keys(patch).length === 0) {
+          throw new Error('至少提供一个参数:enabled / wsUrl / allowed')
+        }
+        if (!deps.updateAgentConfig) throw new Error('配置写入不可用(未注入 updateAgentConfig)')
+        deps.updateAgentConfig(patch)
+        const parts: string[] = []
+        if (patch.napcatEnabled !== undefined) {
+          parts.push(`NapCat QQ 机器人${patch.napcatEnabled ? '已开启' : '已关闭'}${patch.napcatEnabled ? '(需 NapCat 已启动并开放 WS 端口)' : ''}`)
+        }
+        if (patch.napcatWsUrl !== undefined) {
+          parts.push(`WS 地址 = ${patch.napcatWsUrl || '(默认 ws://127.0.0.1:3001)'}`)
+        }
+        if (patch.napcatAllowed !== undefined) {
+          parts.push(patch.napcatAllowed.length > 0 ? `白名单 = ${patch.napcatAllowed.join('、')}` : '白名单 = 空(回复所有私聊)')
+        }
+        return `已保存 NapCat 配置:${parts.join(';')}(立即生效,收到 QQ 消息自动进入对话并回复)`
+      },
+    },
   ]
 }

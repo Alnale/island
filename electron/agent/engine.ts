@@ -19,8 +19,9 @@ import { streamByConfig } from './provider'
 import { detectProvider, apiErrorMessage } from './constants'
 import { createTools, disposeTools } from './tools'
 import { getTasksStatusBlock } from './tasks'
-import { createSettingsTools } from './settingsTools'
+import { createMusicControlTools, createSettingsTools } from './settingsTools'
 import { createMCPManager, type MCPManager } from './mcp'
+import { createNapcatTools } from './napcat'
 import { createSkillLoader } from './skills'
 import { createMemoryTools, formatMemoryBlock } from './memory'
 import { createConfigTools } from './configTools'
@@ -49,6 +50,9 @@ export {
   extractJsonTitle,
   extractJsonObject,
   looksLikeCodeLiteral,
+  looksLikeSentenceTitle,
+  looksLikeIncompleteMind,
+  cutMindSentence,
   sanitizeMind,
   buildMindSystem,
   buildJudgeSystem,
@@ -64,6 +68,7 @@ export {
   resolveSubAgentStyle,
 } from './subagents'
 export { createConfigTools } from './configTools'
+export { createNapcatClient } from './napcat'
 
 /**
  * 工具循环迭代上限。
@@ -312,8 +317,12 @@ export interface AgentEngine {
   readonly busy: boolean
   /** 当前主对话输出预算(缺省 16384;set_output_budget 动态调整,测试/UI 读用) */
   readonly outputBudget: number
-  /** 发送一轮对话(引擎无状态,history = 完整历史) */
-  send(text: string, history: AgentMessage[]): void
+  /**
+   * 发送一轮对话(引擎无状态,history = 完整历史)。
+   * sessionId = 渲染端会话 ID(2026-08-12,工具输出按对话分类存放:
+   * 引擎记录为"当前会话",工具执行时读取拼输出目录;缺省 = 无会话层)
+   */
+  send(text: string, history: AgentMessage[], sessionId?: string): void
   /**
    * 主动陪伴回合(2026-08-07):无用户消息的**完整回合**——思考/流式/
    * 工具/子代理全保留,消息以正常助手气泡落定(message 事件带
@@ -321,7 +330,7 @@ export interface AgentEngine {
    * busy 时静默拒绝(不发 error 事件——内部操作被用户操作挤掉是正常
    * 情况,不排队,拒绝即丢弃)
    */
-  proactiveTurn(history: AgentMessage[], opts?: { hint?: string }): void
+  proactiveTurn(history: AgentMessage[], opts?: { hint?: string; sessionId?: string }): void
   /** 中止当前轮(工具执行中的命令不强制杀,由各工具自身超时兜底) */
   abort(): void
   /** 工具清单(名称/描述/参数 schema,供 UI 展示;不含执行函数) */
@@ -431,6 +440,13 @@ interface TurnCtx {
 export function createAgentEngine(deps: EngineDeps): AgentEngine {
   let running = false
   let ctl: AbortController | null = null
+  /**
+   * 当前会话 ID(2026-08-12,工具输出按对话 ID 分类):send/proactiveTurn
+   * 时更新(引擎无状态,会话由渲染端持有);工具执行读取它拼接输出目录
+   * (<根>/<工具>/<会话ID>)。缺省 null = 未指定(测试/历史调用),
+   * 输出回退到 <根>/<工具>
+   */
+  let currentSessionId: string | null = null
   /**
    * 主对话/子代理输出预算(2026-08-08 动态化):初始 = 持久化配置
    * (settings.json agent.maxOutputTokens,用户设置/LLM persist 写入)
@@ -767,12 +783,23 @@ export function createAgentEngine(deps: EngineDeps): AgentEngine {
       // bili 批量下载确认门(2026-08-10,用户要求"批量下载先征得同意";
       // 主进程注入 tool-confirm-request → 渲染端确认卡)
       confirmAction: deps.confirmAction,
+      // 工具输出目录(2026-08-12):根目录实时读配置(LLM 对话中经
+      // set_output_dir 修改下一轮即生效),会话 ID 由 send/proactiveTurn
+      // 更新——工具执行时按 <根>/<工具>/[<会话ID>] 落输出文件
+      getOutputDir: () => deps.getConfig().outputDir?.trim() || null,
+      getSessionId: () => currentSessionId,
     }),
     // 灵动岛设置工具(主题色/缩放/字体/背景图库):主进程注入了
     // runIslandSettings 才注册(挂件环境;Web 演示版无主进程)
     ...(deps.runIslandSettings
       ? createSettingsTools({ runIslandSettings: deps.runIslandSettings })
       : []),
+    // NapCat QQ 机器人工具(2026-08-12):main.cjs 注入 client 才注册
+    // (status/recent/send;QQ 消息自动回复是系统链路,不经本工具)
+    ...(deps.napcat ? createNapcatTools(deps.napcat) : []),
+    // 音乐控制工具(2026-08-12,QQ 远程控制/后台对话:主进程注入了
+    // runMusicControl 才注册——经 __islandMusicControl 桥控制播放)
+    ...(deps.runMusicControl ? createMusicControlTools(deps.runMusicControl) : []),
     delegateTool,
     // 记忆工具:getter 惰性实时获取(createMemoryTools 在引擎创建时组装
     // 一次,固定 store 引用会在清除数据后操作已删除记忆,见 getMemoryStore)
@@ -1180,7 +1207,7 @@ export function createAgentEngine(deps: EngineDeps): AgentEngine {
     get outputBudget() {
       return outputBudget
     },
-    send(text: string, history: AgentMessage[]) {
+    send(text: string, history: AgentMessage[], sessionId?: string) {
       if (running) {
         emit({ type: 'error', message: 'Agent 正在运行中,请先等待或中止' })
         return
@@ -1190,6 +1217,8 @@ export function createAgentEngine(deps: EngineDeps): AgentEngine {
         emit({ type: 'error', message: '尚未配置 DeepSeek API Key(托盘菜单 → 设置 → Agent 设置)' })
         return
       }
+      // 记录当前会话 ID(工具输出按对话分类;空串视为未指定)
+      currentSessionId = typeof sessionId === 'string' && sessionId ? sessionId : null
       running = true
       const turnCtl = new AbortController()
       ctl = turnCtl
@@ -1208,7 +1237,7 @@ export function createAgentEngine(deps: EngineDeps): AgentEngine {
           }
         })
     },
-    proactiveTurn(history: AgentMessage[], opts?: { hint?: string }) {
+    proactiveTurn(history: AgentMessage[], opts?: { hint?: string; sessionId?: string }) {
       // 与 send 互斥(共享 running):busy 时**静默返回**(不发 error 事件
       // ——内部操作被用户操作挤掉是正常情况,不打扰用户);不排队,
       // 拒绝即丢弃,避免积压。judge 阶段用户 send 天然优先:judge 结果
@@ -1216,6 +1245,9 @@ export function createAgentEngine(deps: EngineDeps): AgentEngine {
       if (running) return
       const config = deps.getConfig()
       if (!config.apiKey.trim()) return
+      // 与 send 同款:主动回合也归属当前会话(输出按对话分类)
+      currentSessionId =
+        typeof opts?.sessionId === 'string' && opts.sessionId ? opts.sessionId : null
       running = true
       const turnCtl = new AbortController()
       ctl = turnCtl

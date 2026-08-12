@@ -105,7 +105,6 @@ dynamic-island/
 │   ├── agent.cjs               # esbuild 产物(引擎,不入库)
 │   ├── bridge.cjs              # esbuild 产物(SMTC 桥,不入库)
 │   ├── settings-store.cjs      # 设置持久化(原子写/加密)
-│   ├── screenshot-tests.cjs    # UI 巡检(截图/断言,~1160 行)
 │   └── agent/                  # Agent 引擎源码(TypeScript)
 │       ├── engine.ts           # 引擎循环/工具执行/子代理/主动陪伴
 │       ├── provider.ts         # 三 provider 统一入口
@@ -128,11 +127,21 @@ dynamic-island/
 │   ├── bili/                   # bili-tool(Rust 单二进制)
 │   ├── xxt/                    # 超星答题(python 脚本)
 │   └── docflow/                # 文档转换 Flask 服务(python)
-├── scripts/
-│   ├── test-agent-core.mjs     # 引擎核心测试入口(93 用例)
+├── tests/                      # ★ 全部测试文件统一目录(2026-08-12 收拢)
+│   ├── test-agent-core.mjs     # 引擎核心测试入口(121 用例)
 │   ├── test-agent-core.ts      # 引擎测试源码
-│   ├── test-markdown.mjs       # Markdown 解析器测试(39 断言)
-│   ├── test-agent/             # mock MCP 服务器等测试辅助
+│   ├── test-agent-live.mjs/.ts # 真实 LLM 集成测试(隔离目录)
+│   ├── test-markdown.mjs       # Markdown 解析器测试(44 断言)
+│   ├── test-title-live.cjs     # 标题/心理揣测真实 API 测试(electron 跑)
+│   ├── test-bili-download.cjs  # bili 下载端到端测试
+│   ├── screenshot-tests.cjs    # UI 巡检(截图/断言,~1160 行,deps 注入)
+│   └── mocks/                  # mock MCP 服务器 + electron stub
+├── tsconfig/                   # ★ tsconfig 系列统一目录(2026-08-12 收拢)
+│   ├── tsconfig.json           # solution(tsc -b tsconfig/tsconfig.json)
+│   ├── tsconfig.app.json       # src + widget(渲染端)
+│   ├── tsconfig.node.json      # vite 配置
+│   └── tsconfig.electron.json  # electron 引擎 + tests/test-agent-core.ts
+├── scripts/
 │   ├── build-electron.mjs      # esbuild 打包 agent/bridge
 │   └── system-media-bridge.ts  # SMTC 桥源码
 ├── docs/TECH.md                # ★ 本文档
@@ -150,7 +159,7 @@ dynamic-island/
 - **`DynamicIsland.tsx` 是两端共享的岛体组件**:行为差异全部靠 CSS 覆盖
   (widget/widget.css 的 `.widget-stage` 选择器)与可选 props 区分。
   改动组件时必须同时考虑 Web 版(App.tsx)与挂件版(WidgetApp.tsx)两个调用方。
-- `tsconfig.app.json` include 含 `src` + `widget`;`pnpm build` 的 `tsc -b`
+- `tsconfig/tsconfig.app.json` include 含 `src` + `widget`;`pnpm build` 的 `tsc -b tsconfig/tsconfig.json`
   同时检查两端。
 
 ---
@@ -179,7 +188,7 @@ pnpm bridge          # 独立运行系统媒体桥接脚本(单独调试 SMTC)
 pnpm watch:electron  # 热重建 Agent 引擎/桥(监听 electron/agent/*.ts 与
                      # scripts/,自动 esbuild 重建 + 重启 electron;渲染端
                      # 仍用 dev:widget)
-node scripts/test-agent-core.mjs   # Agent 引擎核心测试(后端直测,109 用例)
+node tests/test-agent-core.mjs   # Agent 引擎核心测试(后端直测,109 用例)
 pnpm test:markdown    # 消息气泡 Markdown 解析器测试(39 断言)
 ```
 
@@ -213,7 +222,7 @@ pnpm test:markdown    # 消息气泡 Markdown 解析器测试(39 断言)
 - **巡检约定**:重新构建后**不要自动跑 WIDGET_SCREENSHOT 巡检**——完整巡检
   (agent 模式等)只在用户明确要求时执行(每轮全量巡检耗时 8-10 分钟且依赖
   真实 LLM)。默认完成标准 = 构建 + dev:widget 启动 + 类型检查 + lint
-  + 单测(`tsc -b` / `pnpm lint` / `node scripts/test-agent-core.mjs`)。
+  + 单测(`tsc -b tsconfig/tsconfig.json` / `pnpm lint` / `node tests/test-agent-core.mjs`)。
 
 ---
 
@@ -1345,7 +1354,7 @@ direction?('right'|'left'), wheelWhenOpen?}>`,四处复用:Agent 设置菜单 /
 - 桥的 deleteFontItem/deleteLibraryImage 不暴露给 LLM(防误删),巡检清理用。
 - 工具未注入桥时不注册(Web 演示版)。
 
-### 7.2 工具清单(21 个)
+### 7.2 工具清单(31+ 个,含音乐控制与 QQ 机器人)
 
 | 工具 | 说明 |
 | --- | --- |
@@ -1373,13 +1382,28 @@ direction?('right'|'left'), wheelWhenOpen?}>`,四处复用:Agent 设置菜单 /
   什么"的元知识(见 5.4 与第 11 章)。
 ---
 
+### 7.3 NapCat QQ 机器人(electron/agent/napcat.ts,2026-08-12)
+
+用户要求"灵动岛 LLM 接管 QQ 回复:同步上下文、调用长期记忆、偏袒主人、分会话人格、工具记忆备份"。在旧 Python 桥(NapCatQQNode/bridge/qq_bridge.py)的基础上整合,桥退役。
+
+#### 架构
+
+- **客户端**:OneBot 11 WS(全局 WebSocket 零依赖,断线指数退避重连,动作 echo 匹配 + 15s 超时);
+- **消息流**:QQ 私聊/群消息 → 系统通知 + 对话窗口(来源标签 `island-agent-msg-qq-tag`,注入指令段【群聊指令】/【私聊指令】渲染端剥离,LLM 可见)→ useAgent send(模式无关,音乐模式后台照常)→ LLM 回复;
+- **来源分级**(agent:send source):`qq` 白名单(默认 1178821869)自主回复发回;`group` 群消息**回复 = 向主人汇报**(不发群),回复群友由 LLM 调 `napcat` 工具 `send_group`(对公,两条消息各归其位);`ask` 陌生人私聊询问轮——回复发到主人 QQ 同步询问,pendingQQReply 待回复,主人 QQ/对话窗口指示后回复发回陌生人;
+- **群消息**:全部进对话(不预判断),LLM 看场合决定是否回复(@/提到/主人被贬低必回,回护找回场子;普通闲聊只汇报);带群上下文注入(最近 8 条);
+- **记忆**:QQ 轮强制记忆提取(`lastQQTurnAt` 标记,不受主动陪伴开关限制);联系人档案 `napcat-contacts.json` + 聊天记录备份 `napcat-chats.json`(appendNapcatChat 串行写队列,上限 500)+ 会话人格 `napcat-personas.json`(scope = private:<QQ>|group:<群号>);
+- **文件发送**:`send_group` 带 file → `upload_group_file` **上传文件本体**(非路径文本,中文名 JSON 直传无编码问题),文件存在校验;
+- **音乐控制**:`music_control` 工具经 `window.__islandMusicControl` 桥(WidgetApp registerMusicControlBridge,外部 SMTC 优先/本地播放器兜底,惰性 getter)控制播放——QQ 里说"暂停音乐"即可;
+- **白名单**:`agent.napcatAllowed`(私聊,默认 ['1178821869'])/ `napcatAllowedGroups`(群,默认 ['1045765371'])/ `napcatBotQQ`(自己发的消息过滤,防循环)。
+
 ## 第 8 章 测试体系
 
-### 8.1 引擎核心测试(scripts/test-agent-core.mjs)
+### 8.1 引擎核心测试(tests/test-agent-core.mjs)
 
 - 后端直测不经 UI:esbuild 打包测试 bundle(`electron` 别名 stub,
   Notification 记录到 global.__notifications 供断言),mock MCP 服务器
-  (scripts/test-agent/):stdio(新行 JSON-RPC,含自杀/慢响应/错误/图像工具)
+  (tests/mocks/):stdio(新行 JSON-RPC,含自杀/慢响应/错误/图像工具)
   + sse(GET 事件流 + POST 回传,含直接响应体与 bare 推送变体)。
 - **93 用例**,覆盖:记忆增删改查/去重/上限/串行写/并发互斥/导入合并
   importEntries(去重/置顶/超限淘汰最旧)、MCP 双传输握手/命名/参数转换/
@@ -1417,7 +1441,7 @@ direction?('right'|'left'), wheelWhenOpen?}>`,四处复用:Agent 设置菜单 /
 
 ### 8.3 UI 巡检(WIDGET_SCREENSHOT)
 
-主进程注入式 UI 巡检(electron/screenshot-tests.cjs,deps 注入,main.cjs
+主进程注入式 UI 巡检(tests/screenshot-tests.cjs,deps 注入,main.cjs
 2224 → 1090 行后抽离)。`WIDGET_SCREENSHOT_MODE` 支持:
 
 - 默认(mini):注入视频+图片,断言封面/自定义控件/折叠模式/全屏泄漏/退出
@@ -1780,7 +1804,7 @@ direction?('right'|'left'), wheelWhenOpen?}>`,四处复用:Agent 设置菜单 /
   agentSetConfig 返回共用具名 IslandAgentConfig;agentGetTools 的
   parameters 补成 schema 形状(原 unknown 与 AgentToolInfo 不匹配)→
   useAgent/AgentSettingsView 三处 as 强转全部移除。
-- electron 侧 TS 纳入编译检查(tsconfig.electron.json 并入 tsc -b):
+- electron 侧 TS 纳入编译检查(tsconfig/tsconfig.electron.json 并入 tsc -b):
   此前 esbuild 打包不查类型,electron/agent/*.ts 全部类型错误静默;修复了
   一批真实错误(MemoryStoreLike 缺 importEntries、evolution getLog 返回
   Promise、tools.ts 的 deps 悬空引用/exec 选项/fs.existsSync 错用、
@@ -1812,7 +1836,7 @@ direction?('right'|'left'), wheelWhenOpen?}>`,四处复用:Agent 设置菜单 /
   操作白名单(防原型链键命中);引擎事件转发统一 sendToWidget(isDestroyed
   守卫);system-media-bridge requestPS 写前判进程存活;文档修正(双岛并存
   模式标注为设计文档未实现);tsconfig 小项(vite.widget.config.ts 纳入
-  tsconfig.node.json)。
+  tsconfig/tsconfig.node.json)。
 - **第二轮(推荐项落地)**:engine.ts 拆分(1291 → 763 行,Sub Agent 全家 →
   subagents.ts;createConfigTools → configTools.ts;engine.ts re-export
   保持测试/main.cjs 导入路径零破坏;拆前用 diff 逐字节核对搬移块——曾误删
@@ -2117,7 +2141,7 @@ parts 重复回填(上下文成倍膨胀)。
 
 - **改了 electron/agent/*.ts 没生效**:必须重跑 pnpm build:electron
   (dev:widget 已前置,或 watch:electron 热重建);
-- **测试**:node scripts/test-agent-core.mjs(引擎)/ pnpm test:markdown
+- **测试**:node tests/test-agent-core.mjs(引擎)/ pnpm test:markdown
   (解析器);巡检见第 8 章。
 
 ---
@@ -2266,7 +2290,7 @@ WidgetApp
 | 日常开发 | pnpm dev:widget(构建 + 启动,前置 build:electron) |
 | 只测 Web UI | pnpm dev(浏览器) |
 | 改引擎/桥热重建 | pnpm watch:electron |
-| 引擎测试 | node scripts/test-agent-core.mjs(93 用例) |
+| 引擎测试 | node tests/test-agent-core.mjs(93 用例) |
 | Markdown 测试 | pnpm test:markdown(39 断言) |
 | 类型检查 | pnpm build(tsc -b + vite) |
 | lint | pnpm lint |
@@ -2305,7 +2329,7 @@ WidgetApp
 
 1. `pnpm build`(tsc -b 双端类型 + Web 构建);
 2. `pnpm lint`;
-3. `node scripts/test-agent-core.mjs`(引擎改动必须;新增工具/行为补用例);
+3. `node tests/test-agent-core.mjs`(引擎改动必须;新增工具/行为补用例);
 4. `pnpm test:markdown`(解析器改动);
 5. `pnpm dev:widget` 实机验证(默认完成标准,配 timeout 自动退出;
    完整巡检只在用户明确要求时跑,需 WIDGET_SCREENSHOT_QUIT=1);
@@ -2524,7 +2548,7 @@ DynamicIsland(进度条/歌词/控制)
 2. 需要主进程能力 → EngineDeps 加字段,main.cjs 注入;
 3. 需要持久状态 → settings.json agent 段(applyAgentConfigPatch 加字段
    校验)或 localStorage/IndexedDB(设置桥);
-4. 补测试(scripts/test-agent-core.ts:注册/参数校验/执行路径/错误路径);
+4. 补测试(tests/test-agent-core.ts:注册/参数校验/执行路径/错误路径);
 5. 文档同步(本文档 5.4 工具表 + 第 11 章引导小节)。
 
 ### 29.2 如何新增一个灵动岛设置工具操作
@@ -2984,7 +3008,7 @@ pnpm dev:widget      # 构建 + 启动挂件(默认完成标准)
 ```bash
 pnpm build            # tsc -b 双端类型
 pnpm lint
-node scripts/test-agent-core.mjs   # 93 用例
+node tests/test-agent-core.mjs   # 93 用例
 pnpm test:markdown    # 39 断言
 ```
 

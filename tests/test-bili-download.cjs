@@ -3,7 +3,7 @@
  * 直接驱动 electron/agent.cjs(主进程同款引擎),stub 掉 electron 依赖
  * (Notification/shell 在纯 Node 下不可用)。
  *
- * 用法:node scripts/test-bili-download.cjs ["测试文本"]
+ * 用法:node tests/test-bili-download.cjs ["测试文本"]
  * 缺省文本:打开B站搜索极客湾,下载第一条视频
  */
 const Module = require('module')

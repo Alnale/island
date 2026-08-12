@@ -63,9 +63,34 @@ contextBridge.exposeInMainWorld('desktop', {
   dragEnd() {
     ipcRenderer.send('widget:drag-end')
   },
-  /** Agent:发送一轮对话(引擎无状态,history 为完整历史) */
-  agentSend(text, history) {
-    ipcRenderer.send('agent:send', String(text), history)
+  /** Agent:发送一轮对话(引擎无状态,history 为完整历史;sessionId =
+   * 会话 ID——工具输出按对话分类存放,2026-08-12;source='qq'(私聊,
+   * target = QQ 号)/'group'(群聊,target = 群号)/'ask'(询问轮,target =
+   * 陌生人 QQ——回复发到主人 QQ 同步询问,2026-08-12)= NapCat 触发轮 */
+  agentSend(text, history, sessionId, source, target) {
+    ipcRenderer.send(
+      'agent:send',
+      String(text),
+      history,
+      typeof sessionId === 'string' ? sessionId : undefined,
+      source === 'qq' || source === 'group' || source === 'ask' ? source : undefined,
+      (source === 'qq' || source === 'group' || source === 'ask') && typeof target === 'string' ? target : undefined,
+    )
+  },
+  /** NapCat 私聊消息订阅(2026-08-12):payload = {qq, text, messageId,
+   * time}——收到 QQ 私聊消息,渲染端作为用户消息进入对话。返回取消
+   * 订阅函数 */
+  onNapcatMessage(callback) {
+    const listener = (_event, msg) => callback(msg)
+    ipcRenderer.on('napcat:message', listener)
+    return () => ipcRenderer.removeListener('napcat:message', listener)
+  },
+  /** NapCat 群消息订阅(2026-08-12):payload = {groupId, qq, text,
+   * atMe}——群消息经自主判断接话后进入对话(回复发回群) */
+  onNapcatGroupMessage(callback) {
+    const listener = (_event, msg) => callback(msg)
+    ipcRenderer.on('napcat:group-message', listener)
+    return () => ipcRenderer.removeListener('napcat:group-message', listener)
   },
   /** Agent:中止当前轮 */
   agentAbort() {
@@ -168,9 +193,15 @@ contextBridge.exposeInMainWorld('desktop', {
     return ipcRenderer.invoke('agent:config-set', patch)
   },
   /** Agent:主动陪伴 tick(渲染端调度器触发;返回 {started, reason?}
-   * 供 in-flight 复位与 judge 否决回退时钟) */
-  agentProactiveTick(messages, idleMinutes) {
-    return ipcRenderer.invoke('agent:proactive-tick', messages, Number(idleMinutes) || 0)
+   * 供 in-flight 复位与 judge 否决回退时钟;sessionId = 当前会话 ID,
+   * 主动回合的工具输出归属该对话,2026-08-12) */
+  agentProactiveTick(messages, idleMinutes, sessionId) {
+    return ipcRenderer.invoke(
+      'agent:proactive-tick',
+      messages,
+      Number(idleMinutes) || 0,
+      typeof sessionId === 'string' ? sessionId : undefined,
+    )
   },
   /** 模式切换(托盘右键菜单):订阅回调(payload = { mode, source })。
    * 返回取消订阅函数(dev StrictMode 双挂载防重复注册) */

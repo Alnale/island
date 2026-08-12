@@ -43,6 +43,7 @@ export type IslandSettingsOp =
   | 'setVideoPrefs'
   | 'setFullscreen'
   | 'setVideoState'
+  | 'setAudioState'
   | 'getConversationMedia'
   | 'deleteFontItem'
   | 'deleteLibraryImage'
@@ -659,8 +660,10 @@ export function createSettingsTools(deps: SettingsToolsDeps): AgentTool[] {
     {
       name: 'add_audio_to_playlist',
       description:
-        '把多媒体库**音频库**里的歌曲加入音乐模式**播放列表**(立即生效,自动开始播放首曲并切到音乐模式,' +
-        '用户可直接在音乐模式里点播/切歌)。id 用 list_audio_library 查询(可一次传多个 id 批量加入)。' +
+        '把多媒体库**音频库**里的歌曲加入音乐模式**播放列表**(加入后切到音乐模式即可见可点播;' +
+        '**不会自动切音乐模式、不会自动开始播放**——用户明确要求"切到音乐模式播放"时,加入后调 ' +
+        'switch_to_music(play:true);要在对话窗口直接播放,用 open_file 打开音频文件)。' +
+        'id 用 list_audio_library 查询(可一次传多个 id 批量加入)。' +
         '适合:用户说"把这首歌加入播放列表/加进歌单""下载的歌曲放进播放列表"——' +
         '注意 import_audio_library 只进音频库,**音乐模式播不了音频库里的歌**,必须经本工具加入播放列表。',
       parameters: {
@@ -685,7 +688,10 @@ export function createSettingsTools(deps: SettingsToolsDeps): AgentTool[] {
           names?: string[]
         }
         const names = res?.names ?? []
-        return `已将 ${res?.count ?? names.length} 首歌加入播放列表并切到音乐模式开始播放${names.length > 0 ? `:${names.join('、')}` : ''}(可在音乐模式播放列表里查看)`
+        return (
+          `已将 ${res?.count ?? names.length} 首歌加入播放列表(音乐模式侧)${names.length > 0 ? `:${names.join('、')}` : ''}` +
+          '(未切换模式;对话窗口直接播放可用 open_file 打开音频,切音乐模式播放需用户明确要求)'
+        )
       },
     },
     {
@@ -1002,14 +1008,76 @@ export function createSettingsTools(deps: SettingsToolsDeps): AgentTool[] {
       },
     },
     {
+      name: 'set_audio_config',
+      description:
+        '调整 Agent 对话窗口内音频(语音气泡)的播放设置(2026-08-12,立即生效):' +
+        '**target = 指定单条音频**(可选,名称为 list_conversation_media 返回的 ' +
+        'name;缺省 = 当前正在播放的音频,无播放取最后一条);' +
+        'volume = **灵动岛独立音量**(0-1,只影响岛内媒体播放,与系统音量互不影响——' +
+        '系统音量用 set_system_volume 工具调;带 target 只调该音频,其它音频不变);' +
+        'loop = 是否循环播放(true/false);' +
+        'playing = 播放/暂停开关(true = 播放,false = 暂停;带 target 控制指定音频,缺省控制当前正在播放的音频)。' +
+        '参数全部可选、至少给一个。适合:用户说"把这首歌声音调大/静音/循环播放/' +
+        '暂停这首歌/继续播放"。修改前可先调 list_conversation_media(查音频名字与当前状态)。',
+      parameters: {
+        type: 'object',
+        properties: {
+          target: { type: 'string', description: '目标音频名(list_conversation_media 返回的 name;可选,缺省 = 当前播放中的音频)' },
+          volume: { type: 'number', description: '灵动岛独立音量 0-1,如 0.6(可选)' },
+          loop: { type: 'boolean', description: '是否循环播放(可选)' },
+          playing: { type: 'boolean', description: '播放/暂停:true = 播放,false = 暂停(可选)' },
+        },
+        required: [],
+      },
+      async execute(params: ToolParams) {
+        const hasVolume = params.volume !== undefined
+        const hasLoop = params.loop !== undefined
+        const hasPlaying = params.playing !== undefined
+        const target = typeof params.target === 'string' && params.target.trim() ? params.target.trim() : undefined
+        if (!hasVolume && !hasLoop && !hasPlaying) {
+          throw new Error('需要至少提供一个参数:target / volume / loop / playing')
+        }
+        if (hasVolume) {
+          const vol = Number(params.volume)
+          if (!Number.isFinite(vol) || vol < 0 || vol > 1) {
+            throw new Error('volume 需要是 0-1 的数字(如 0.6 = 60%)')
+          }
+        }
+        const res = (await run('setAudioState', [
+          {
+            name: target,
+            volume: hasVolume ? Math.min(1, Math.max(0, Number(params.volume))) : undefined,
+            loop: hasLoop ? Boolean(params.loop) : undefined,
+            playing: hasPlaying ? Boolean(params.playing) : undefined,
+          },
+        ])) as {
+          ok?: boolean
+          name?: string
+          volume?: number
+          loop?: boolean
+          playing?: boolean
+        }
+        if (!res || res.ok !== true) {
+          throw new Error(res && 'error' in res ? String((res as { error: unknown }).error) : '音频设置失败')
+        }
+        const label = res.name ? `「${res.name}」` : '音频'
+        const parts: string[] = []
+        if (hasVolume) parts.push(`${label}音量已设为 ${res.volume ?? 0}%`)
+        if (hasLoop) parts.push(`${label}循环播放${res.loop ? '已开启' : '已关闭'}`)
+        if (hasPlaying) parts.push(res.playing ? `已播放 ${label}` : `已暂停 ${label}`)
+        return parts.join(';')
+      },
+    },
+    {
       name: 'list_conversation_media',
       description:
         '列出 Agent 对话窗口内**作为附件展示**的多媒体元素(图片/视频/音频,' +
         '含 LLM 在回复里 markdown 内嵌的 ![名字](路径));' +
         '视频带详细播放状态:是否正在播放、音量(0-100%)、播放速度(x)、' +
-        '是否循环播放、是否全屏、播放进度。' +
-        '适合:用户问"对话里有什么媒体""现在播的是什么""视频声音多大/几倍速/全屏没"' +
-        '等;配合 set_video_config 调整(如用户说"把声音调大"先查当前音量)。',
+        '是否循环播放、是否全屏、播放进度;' +
+        '音频带播放状态、音量(0-100%)、是否循环、播放进度。' +
+        '适合:用户问"对话里有什么媒体""现在播的是什么""声音多大/循环没"' +
+        '等;配合 set_video_config / set_audio_config 调整(如用户说"把声音调大"先查当前音量)。',
       parameters: { type: 'object', properties: {} },
       async execute() {
         const items = (await run('getConversationMedia', [])) as Array<{
@@ -1075,6 +1143,77 @@ export function createSettingsTools(deps: SettingsToolsDeps): AgentTool[] {
         const name = parseItemName(params.name)
         await run('renameLibraryImage', [id, name])
         return `已将图片 ${id} 改名为「${name}」`
+      },
+    },
+  ]
+}
+
+/**
+ * 音乐控制工具(2026-08-12,QQ 远程控制 / 后台对话:主进程经
+ * __islandMusicControl 桥 → 外部平台(SMTC)优先,本地播放器兜底)。
+ * 与设置工具分离——桥不同(runIslandSettings 调 __islandSettings)
+ */
+export function createMusicControlTools(run: (op: string, args: unknown[]) => Promise<unknown>): AgentTool[] {
+  return [
+    {
+      name: 'music_control',
+      description:
+        '控制灵动岛音乐播放(2026-08-12,QQ 远程控制 / 后台对话——即使当前是音乐模式也能用):' +
+        'play 播放 / pause 暂停 / next 下一首 / previous 上一首 / status 查询当前播放状态。' +
+        '外部平台(QQ音乐/网易云等,经 SMTC)与本地播放器自动适配。' +
+        '适合:用户(含 QQ 消息)说"暂停/播放/下一首/上一首/现在放的是什么"。' +
+        '注意:切回音乐模式用 switch_to_music;调系统音量用 set_system_volume。',
+      parameters: {
+        type: 'object',
+        properties: {
+          action: {
+            type: 'string',
+            enum: ['play', 'pause', 'next', 'previous', 'status'],
+            description: '操作:play/pause/next/previous 控制播放,status 查询当前播放状态',
+          },
+        },
+        required: ['action'],
+      },
+      async execute(params: ToolParams) {
+        const action = String(params.action ?? '')
+        const actions = ['play', 'pause', 'next', 'previous', 'status']
+        if (!actions.includes(action)) throw new Error(`action 仅支持:${actions.join('/')}`)
+        // 桥操作:status 查状态,其余 action 走 control(白名单只有这两个)
+        const op = action === 'status' ? 'status' : 'control'
+        const res = (await run(op, action === 'status' ? [] : [action])) as
+          | { ok?: boolean; action?: string; error?: string }
+          | {
+              ok?: boolean
+              external?: boolean
+              playing?: boolean
+              title?: string | null
+              artist?: string | null
+              position?: number
+              duration?: number
+            }
+        if (res && 'error' in res && typeof res.error === 'string') {
+          throw new Error(res.error)
+        }
+        if (action === 'status') {
+          const s = res as {
+            external?: boolean
+            playing?: boolean
+            title?: string | null
+            artist?: string | null
+            position?: number
+            duration?: number
+          }
+          const title = s.title || '(无曲目)'
+          const artist = s.artist ? ` - ${s.artist}` : ''
+          const mode = s.external ? '外部平台(QQ音乐等)' : '本地播放器'
+          const playing = s.playing ? '播放中' : '已暂停'
+          const pos = s.position != null ? Math.round(s.position) : 0
+          const dur = s.duration != null ? Math.round(s.duration) : 0
+          const progress = dur > 0 ? ` ${Math.floor(pos / 60)}:${String(pos % 60).padStart(2, '0')}/${Math.floor(dur / 60)}:${String(dur % 60).padStart(2, '0')}` : ''
+          return `当前播放:${title}${artist}(${mode},${playing}${progress})`
+        }
+        const label = action === 'play' ? '播放' : action === 'pause' ? '暂停' : action === 'next' ? '下一首' : '上一首'
+        return `已${label}`
       },
     },
   ]

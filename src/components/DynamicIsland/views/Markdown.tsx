@@ -29,6 +29,11 @@ import {
   onVideoPrefsChange,
   setVideoPrefs,
 } from '../../../media/videoPrefs'
+import {
+  loadAudioPrefs,
+  onAudioPrefsChange,
+  setAudioPrefs,
+} from '../../../media/audioPrefs'
 // 媒体窗口默认宽:键与读取定义在 settingsBridge(单一来源,与
 // readAgentScale 同款;LLM 设置工具与设置界面共用)
 import { readMediaWindowWidth } from '../../../settingsBridge'
@@ -257,7 +262,6 @@ function VoiceBubble({
   const audioRef = useRef<HTMLAudioElement>(null)
   const progressRef = useRef<HTMLSpanElement>(null)
   const [playing, setPlaying] = useState(false)
-  const [progress, setProgress] = useState(0)
   const [duration, setDuration] = useState<number | null>(null)
   const [err, setErr] = useState(false)
   const scrubbingRef = useRef(false)
@@ -266,6 +270,81 @@ function VoiceBubble({
   const [looping, setLooping] = useState(false)
   const loopingRef = useRef(false)
   loopingRef.current = looping
+  // 音量(2026-08-12 用户要求"像视频一样操控单条音频的播放/音量/循环"):
+  // 初始值 = 该音频个性化 prefs(缺省共享层);经 island:audio-prefs 事件
+  // 与工具/其它实例双向同步;key = alt(media part 名字,与桥
+  // getConversationMedia 的 name 同源,桥 setAudioState 按它定位)
+  const [volume, setVolume] = useState(() => loadAudioPrefs(alt).volume)
+  const [muted, setMuted] = useState(() => loadAudioPrefs(alt).volume === 0)
+  const volDraggingRef = useRef(false)
+  const volPopRef = useRef<HTMLSpanElement>(null)
+  // 挂载应用 prefs:音量/循环写到 audio 元素(否则 autoPlay 播出的音量
+  // 是浏览器默认 1,忽略用户设置过的音量)
+  useEffect(() => {
+    const p = loadAudioPrefs(alt)
+    const a = audioRef.current
+    if (a) {
+      a.volume = p.volume
+      a.muted = p.volume === 0
+      a.loop = p.loop
+    }
+    setVolume(p.volume)
+    setMuted(p.volume === 0)
+    setLooping(p.loop)
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅挂载一次
+  }, [])
+  // prefs 事件双向同步:个性化事件(key)只对匹配的音频生效,共享事件
+  // (无 key)只影响不带个性化 key 的音频——调一条不影响其它条
+  useEffect(
+    () =>
+      onAudioPrefsChange((p) => {
+        if (p.key && p.key !== alt) return
+        if (!p.key && alt) return
+        setVolume(p.volume)
+        setMuted(p.volume === 0)
+        setLooping(p.loop)
+        const a = audioRef.current
+        if (a) {
+          a.volume = p.volume
+          a.muted = p.volume === 0
+          a.loop = p.loop
+        }
+      }),
+    [alt],
+  )
+  // 音量按钮悬停滑杆:pointer 拖拽计算比例(与视频 island-video-vol 同款)
+  const changeVolume = (next: number) => {
+    const v = Math.min(1, Math.max(0, next))
+    setVolume(v)
+    setMuted(v === 0)
+    const a = audioRef.current
+    if (a) {
+      a.volume = v
+      a.muted = v === 0
+    }
+    setAudioPrefs({ volume: v }, alt)
+  }
+  const toggleMute = () => {
+    const nextMuted = !muted
+    setMuted(nextMuted)
+    const a = audioRef.current
+    if (a) a.muted = nextMuted
+    // 取消静音时恢复音量滑杆值(音量 0 视为静音,点击恢复默认 0.8)
+    if (!nextMuted) {
+      const target = volume > 0 ? volume : 0.8
+      setVolume(target)
+      if (a) a.volume = target
+      setAudioPrefs({ volume: target }, alt)
+    }
+  }
+  const setVolFromPointer = (event: ReactPointerEvent<HTMLSpanElement>) => {
+    const pop = volPopRef.current
+    if (!pop) return
+    const rect = pop.getBoundingClientRect()
+    if (rect.height <= 0) return
+    const ratio = 1 - Math.min(1, Math.max(0, (event.clientY - rect.top) / rect.height))
+    changeVolume(ratio)
+  }
   // 播放状态/进度上报(2026-08-11 音频移交同步进度):timeupdate 节流
   // ~1Hz(与视频一致)——doCollapse 移交时带 position,音乐模式从该
   // 位置续播,不从头
@@ -326,6 +405,25 @@ function VoiceBubble({
   // 进度条拖拽 seek(2026-08-08 用户要求"音频播放气泡支持拖拽进度"):
   // 点击/拖动进度条跳转播放位置;拦截左键(防整条气泡 toggle 与岛体
   // 长按收回)
+  // 播放进度 DOM 直写(2026-08-11 性能,与视频播放器同款:
+  // timeupdate 每 ~250ms,原 setProgress 重渲染整条语音气泡)
+  const renderProgress = (reset = false) => {
+    const a = audioRef.current
+    const bar = progressRef.current
+    if (!bar) return
+    const dur = a ? a.duration || 0 : 0
+    const cur = reset ? 0 : a ? a.currentTime || 0 : 0
+    const ratio = dur > 0 && Number.isFinite(dur) ? Math.min(1, cur / dur) : 0
+    const fill = bar.querySelector('.island-agent-voice-fill') as HTMLElement | null
+    const thumb = bar.querySelector('.island-agent-voice-thumb') as HTMLElement | null
+    if (fill) fill.style.width = `${ratio * 100}%`
+    if (thumb) thumb.style.left = `${ratio * 100}%`
+    bar.setAttribute('aria-valuenow', String(Math.round(ratio * dur)))
+  }
+  // 每次渲染提交后同步一次真实进度(JSX 静态,重渲染不覆盖直写值)
+  useEffect(() => {
+    renderProgress()
+  })
   const seekFromPointer = (event: ReactPointerEvent<HTMLSpanElement>) => {
     const bar = progressRef.current
     const a = audioRef.current
@@ -333,7 +431,7 @@ function VoiceBubble({
     const rect = bar.getBoundingClientRect()
     const ratio = Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width))
     a.currentTime = ratio * duration
-    setProgress(a.currentTime / duration)
+    renderProgress()
   }
   if (err) return <MediaError src={src} kind="audio" code={null} />
   const dur = duration != null && Number.isFinite(duration) ? Math.round(duration) : 0
@@ -346,6 +444,9 @@ function VoiceBubble({
       role="button"
       tabIndex={0}
       title={alt ? `语音:${alt}` : '语音消息'}
+      // 2026-08-12:桥 setAudioState 按 data-media-name 定位单条音频
+      // (与 getConversationMedia 的 name 同源 = media part alt)
+      data-media-name={alt || undefined}
       onClick={(event) => {
         event.stopPropagation()
         toggle()
@@ -401,7 +502,7 @@ function VoiceBubble({
           aria-label="播放进度"
           aria-valuemin={0}
           aria-valuemax={dur}
-          aria-valuenow={Math.round(progress * dur)}
+          aria-valuenow={0}
           onClick={(event) => event.stopPropagation()}
           onPointerDown={(event) => {
             if (event.button !== 0) return
@@ -423,12 +524,78 @@ function VoiceBubble({
             scrubbingRef.current = false
           }}
         >
-          <span className="island-agent-voice-fill" style={{ width: `${progress * 100}%` }} />
-          <span className="island-agent-voice-thumb" style={{ left: `${progress * 100}%` }} aria-hidden="true" />
+          {/* 进度由 renderProgress 直写(JSX 静态,重渲染不覆盖) */}
+          <span className="island-agent-voice-fill" />
+          <span className="island-agent-voice-thumb" aria-hidden="true" />
         </span>
       </span>
       <span className="island-agent-voice-dur">
         {dur >= 60 ? `${Math.floor(dur / 60)}'${String(dur % 60).padStart(2, '0')}″` : `${dur}″`}
+      </span>
+      {/* 音量(2026-08-12 用户要求"像视频一样操控单条音频的播放/音量/
+          循环"):复用视频音量控件形态(island-video-vol 类)——喇叭按钮
+          hover 展开向上竖直滑杆,拖拽即时生效,写该音频个性化 prefs */}
+      <span
+        className="island-video-vol"
+        onPointerDown={(event) => event.stopPropagation()}
+      >
+        <button
+          type="button"
+          className="island-video-vol-btn"
+          aria-label={muted ? '取消静音' : '静音'}
+          title={muted ? '取消静音' : '静音'}
+          onClick={(event) => {
+            event.stopPropagation()
+            toggleMute()
+          }}
+        >
+          {muted ? (
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" fill="currentColor" stroke="none" />
+              <line x1="23" y1="9" x2="17" y2="15" />
+              <line x1="17" y1="9" x2="23" y2="15" />
+            </svg>
+          ) : volume < 0.5 ? (
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" fill="currentColor" stroke="none" />
+              <path d="M15.5 8.5a5 5 0 0 1 0 7" />
+            </svg>
+          ) : (
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" fill="currentColor" stroke="none" />
+              <path d="M15.5 8.5a5 5 0 0 1 0 7" />
+              <path d="M19 5a10 10 0 0 1 0 14" />
+            </svg>
+          )}
+        </button>
+        <span
+          ref={volPopRef}
+          className="island-video-vol-pop"
+          onPointerDown={(event) => {
+            if (event.button !== 0) return
+            event.preventDefault()
+            event.stopPropagation()
+            volDraggingRef.current = true
+            event.currentTarget.setPointerCapture(event.pointerId)
+            setVolFromPointer(event)
+          }}
+          onPointerMove={(event) => {
+            if (volDraggingRef.current) setVolFromPointer(event)
+          }}
+          onPointerUp={() => {
+            volDraggingRef.current = false
+          }}
+          onPointerCancel={() => {
+            volDraggingRef.current = false
+          }}
+        >
+          <span className="island-video-vol-pop-track">
+            <span
+              className="island-video-vol-pop-fill"
+              style={{ height: `${Math.round((muted ? 0 : volume) * 100)}%` }}
+            />
+          </span>
+        </span>
       </span>
       {/* 循环按钮(2026-08-11 用户要求"支持切换播放模式(循环)"):切换
           audio.loop(播完自动重播),激活态强调色高亮;与音乐模式单曲
@@ -455,14 +622,15 @@ function VoiceBubble({
         onError={() => setErr(true)}
         onLoadedMetadata={(event) => setDuration(event.currentTarget.duration)}
         onTimeUpdate={(event) => {
-          const a = event.currentTarget
-          setProgress(a.duration > 0 ? a.currentTime / a.duration : 0)
+          // 进度 DOM 直写(2026-08-11 性能,见 renderProgress 注释)
+          renderProgress()
           // 播放进度节流上报(~1Hz;移交音乐模式时从该位置续播,不从头)
-          reportAudio(a)
+          reportAudio(event.currentTarget)
         }}
         onEnded={() => {
           setPlaying(false)
-          setProgress(0)
+          // ended 后 currentTime 停在时长,显式归零
+          renderProgress(true)
           lastPosReportRef.current = -1
           dispatchAgentMedia('play', { kind: 'audio', src, name: alt, playing: false, loop: loopingRef.current })
         }}
@@ -539,7 +707,6 @@ function VideoPlayer({
   const barRef = useRef<HTMLDivElement>(null)
   const [playing, setPlaying] = useState(false)
   const [duration, setDuration] = useState(0)
-  const [current, setCurrent] = useState(0)
   const [fullscreen, setFullscreen] = useState(false)
   // 退出全屏缩回动画(播完移除 class)
   const [leavingFs, setLeavingFs] = useState(false)
@@ -772,15 +939,39 @@ function VideoPlayer({
     const rect = bar.getBoundingClientRect()
     const ratio = Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width))
     v.currentTime = ratio * duration
-    setCurrent(v.currentTime)
+    renderProgress()
   }
+  // 播放进度 DOM 直写(2026-08-11 性能):timeupdate 每 ~250ms 触发,
+  // 原 setCurrent → 每次重渲染整个播放器子树(控件层/VideoExtras/
+  // 全屏按钮)——视频播放是软件渲染下最重的场景,任何非必要主线程
+  // 工作都直接掉帧。进度条/时间改直写 DOM(从 video 实时读),播放
+  // 期间零 React 重渲染;组件重渲染(播放状态/全屏切换)后由下方
+  // effect 同步一次真实进度(JSX 保持静态初始值,不会用旧值覆盖直写)
+  const renderProgress = (reset = false) => {
+    const v = videoRef.current
+    const bar = barRef.current
+    if (!bar) return
+    const dur = v ? v.duration || 0 : 0
+    const cur = reset ? 0 : v ? v.currentTime || 0 : 0
+    const pct = dur > 0 && Number.isFinite(dur) ? Math.min(100, (cur / dur) * 100) : 0
+    const fill = bar.querySelector('.island-video-bar-fill') as HTMLElement | null
+    const thumb = bar.querySelector('.island-video-bar-thumb') as HTMLElement | null
+    if (fill) fill.style.width = `${pct}%`
+    if (thumb) thumb.style.left = `${pct}%`
+    const timeEl = bar.parentElement?.querySelector('.island-video-time')
+    if (timeEl) timeEl.textContent = `${fmtMediaTime(cur)} / ${fmtMediaTime(dur)}`
+    bar.setAttribute('aria-valuenow', String(Math.round(cur)))
+  }
+  // 每次渲染提交后同步一次真实进度(JSX 静态,重渲染不覆盖直写值)
+  useEffect(() => {
+    renderProgress()
+  })
   const toggleFullscreen = () => {
     const p = playerRef.current
     if (!p) return
     if (document.fullscreenElement) void document.exitFullscreen().catch(() => {})
     else void p.requestFullscreen().catch(() => {})
   }
-  const pct = duration > 0 ? Math.min(100, (current / duration) * 100) : 0
   return (
     <div
       ref={playerRef}
@@ -813,12 +1004,15 @@ function VideoPlayer({
           if (v.videoWidth > 0 && v.videoHeight > 0) onAspect(v.videoWidth / v.videoHeight)
         }}
         onTimeUpdate={(event) => {
-          setCurrent(event.currentTarget.currentTime)
+          // 进度 DOM 直写(2026-08-11 性能,见 renderProgress 注释:
+          // 原 setCurrent 每 ~250ms 重渲染整个播放器子树)
+          renderProgress()
           onProgress?.(event.currentTarget.currentTime)
         }}
         onEnded={() => {
           setPlaying(false)
-          setCurrent(0)
+          // ended 后 currentTime 停在时长,显式归零
+          renderProgress(true)
           onProgress?.(0)
           onPlayingChange?.(false)
         }}
@@ -877,7 +1071,7 @@ function VideoPlayer({
           aria-label="播放进度"
           aria-valuemin={0}
           aria-valuemax={Math.round(duration)}
-          aria-valuenow={Math.round(current)}
+          aria-valuenow={0}
           onPointerDown={(event) => {
             if (event.button !== 0) return
             event.preventDefault()
@@ -898,12 +1092,11 @@ function VideoPlayer({
             restartHideTimer()
           }}
         >
-          <div className="island-video-bar-fill" style={{ width: `${pct}%` }} />
-          <span className="island-video-bar-thumb" style={{ left: `${pct}%` }} aria-hidden="true" />
+          {/* 进度由 renderProgress 直写(JSX 静态,重渲染不覆盖) */}
+          <div className="island-video-bar-fill" />
+          <span className="island-video-bar-thumb" aria-hidden="true" />
         </div>
-        <span className="island-video-time">
-          {fmtMediaTime(current)} / {fmtMediaTime(duration)}
-        </span>
+        <span className="island-video-time">0:00 / 0:00</span>
         {/* 音量 + 更多(2026-08-10 用户要求:定制 UI,与视频岛/多媒体库
             双向同步) */}
         <VideoExtras videoRef={videoRef} videoKey={videoKey} />

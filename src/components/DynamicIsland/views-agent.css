@@ -462,6 +462,23 @@
   min-width: 0;
 }
 
+/* QQ 来源标签(2026-08-12,NapCat 消息):小圆角胶囊,深底白字,
+   与强调色气泡区分(消息来自 QQ,回复会发回 QQ) */
+.island-agent-msg-qq-tag {
+  display: inline-block;
+  vertical-align: 1px;
+  margin-right: 5px;
+  padding: 0 5px;
+  border-radius: 6px;
+  font-size: 0.55rem;
+  line-height: 1.5;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid rgba(255, 255, 255, 0.25);
+}
+
 /* 复制按钮:气泡脚注小图标按钮,点击短暂显示 ✓ 反馈。
    拦截左键 pointerdown(消息区内交互元素,长按不触发岛体收回) */
 .island-agent-copy {
@@ -1384,6 +1401,20 @@
   color: var(--text-dim, rgba(255, 255, 255, 0.45));
   cursor: pointer;
   transition: background 0.15s ease, color 0.15s ease;
+}
+
+/* 音量按钮(2026-08-12,复用视频音量控件 island-video-vol 形态——喇叭
+   按钮 + hover 向上延伸竖直滑杆):气泡内与循环按钮同款淡色图标,保持
+   与强调色播放键的主从层次 */
+.island-agent-voice .island-video-vol-btn {
+  width: 24px;
+  height: 24px;
+  color: var(--text-dim, rgba(255, 255, 255, 0.45));
+}
+
+.island-agent-voice .island-video-vol-btn:hover {
+  background: rgba(255, 255, 255, 0.12);
+  color: var(--text-color, #fff);
 }
 
 .island-agent-voice-loop:hover {

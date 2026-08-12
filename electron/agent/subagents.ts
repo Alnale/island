@@ -46,9 +46,26 @@ export function sanitizeTitle(raw: string): string {
     .trim()
     .replace(/^[「『"'《<]+|[」』"'》>]+$/g, '')
     .replace(/^(?:对话)?标题\s*[:：是]?\s*/, '')
+    // 剥对话回应词前缀(2026-08-12,措辞兜底:模型不守规矩时把回复
+    // 原句当标题,实测"是的,exec_command 默认有执行确认门"——剥掉
+    // "是的," 后至少不再以回应词开头)
+    .replace(/^(?:是的|好的|可以的|没问题|嗯|对|可以|行|好|有的)[,，:：、\s]*/, '')
+    // 句子式兜底(2026-08-12 二轮):含中文逗号的标题 = 摘抄/续写的
+    // 对话原句(短语标题不会用逗号,实测"开心的事倒是有,中午食堂的
+    // 土豆牛肉特别好"整句被 20 码元截断)——取首个逗号前的前半短语,
+    // 宁可短短语,不要"整句截断"的观感
+    .replace(/[,，].*$/, '')
     .replace(/[。！？!?…]+$/, '')
+    // 剥开头终止标点(2026-08-12 三轮:回应词剥离后残留"。xxx"残串,
+    // 实测"好。下面开始正式内容"→ 剥"好"后以"。"开头)
+    .replace(/^[。！？!?…～~]+/, '')
     .trim()
-  return Array.from(text).slice(0, 20).join('')
+  // 终止标点截断(2026-08-12 三轮,历史标题修复实测:兜底标题取自首条
+  // 用户消息,长句无逗号时 20 码元硬截 = 残句观感,如"哈喽主人～看我
+  // 干啥呀?我刚才一直陪你看视")——取第一个终止标点(。！？…～~)前的
+  // 完整段,结果 ≥4 码元才采用(过短如"好。"不切,保持原样交给 20 截断)
+  const seg = text.split(/[。！？!?…～~]/)[0].trim()
+  return Array.from(seg.length >= 4 ? seg : text).slice(0, 20).join('')
 }
 
 /**
@@ -64,7 +81,10 @@ export function fallbackTitle(messages: AgentMessage[]): string {
       .filter((p): p is Extract<AgentPart, { type: 'text' }> => p.type === 'text')
       .map((p) => p.text)
       .join(' ')
-    if (text.trim()) return sanitizeTitle(text)
+    // 跳过过短消息(2026-08-12 三轮,历史标题修复实测:首条用户消息
+    // 是"你?"这类短句时 fallback 得到单字"你"的垃圾标题)——取第一条
+    // ≥4 码元的实质内容,如"我要听二哥王力宏的需要你陪"
+    if (text.trim() && Array.from(text).length >= 4) return sanitizeTitle(text)
   }
   return ''
 }
@@ -82,6 +102,10 @@ function recentMessages(messages: AgentMessage[]): AgentMessage[] {
       if (p.type === 'reasoning') return { ...p, text: p.text.slice(0, 500) }
       if (p.type === 'tool-result') return { ...p, result: p.result.slice(0, 2000) }
       if (p.type === 'tool-call') return { ...p, args: compressArgs(p.args) as Record<string, unknown> }
+      // 长文本截断(2026-08-12 实机修复:助手回复常 300+ 字长段,模型
+      // 看多长的回复就模仿写多长的揣测——标签只需"最近在聊什么",
+      // 截 200 字足够语义,过长是揣测输出超长的诱因之一)
+      if (p.type === 'text' && p.text.length > 200) return { ...p, text: p.text.slice(0, 200) + '…' }
       return p
     }),
   }))
@@ -190,6 +214,27 @@ export function looksLikeCodeLiteral(title: string): boolean {
 }
 
 /**
+ * 句子式标题判定(2026-08-12,测试用导出):模型把回复原句/续写内容当
+ * 标题(实测「公司楼下新开了一家火锅店」「开心的事倒是有,中午食堂的
+ * 土豆牛肉特别好」「文言文里有没有轻松好玩的句子」)——名词短语标题
+ * 几乎不含完成体"了"、不以"X的"结尾、不带疑问词(吗/呢/有没有…)
+ * (短标题如「我的」不计);命中 = 判无效进入下一级/兜底,防止整句
+ * 被 20 码元截断的观感
+ */
+export function looksLikeSentenceTitle(title: string): boolean {
+  const t = title.trim()
+  if (!t) return false
+  if (Array.from(t).length <= 6) return false
+  // 疑问词补全(2026-08-12 实测漏网:"哈喽主人～看我干啥呀?我刚才一直
+  // 陪你看视"含"干啥"却判不坏,20 码元截断残句)——加口语疑问词
+  return (
+    /了/.test(t) ||
+    /.+的$/.test(t) ||
+    /(吗|呢|有没有|能不能|怎么|怎样|如何|为什么|啥|干嘛|干啥|谁|哪里|哪儿|是不是|会不会|要不要|好不好)/.test(t)
+  )
+}
+
+/**
  * Sub Agent 风格配置解析(测试用导出):预设 id → 提示词片段(查表,
  * SUMMARY_STYLES / MIND_PERSONAS 定义在 constants.ts——渲染端设置界面
  * 可安全 import);自定义文本(≤100 字)原样返回;空返回 ''。
@@ -289,7 +334,11 @@ export function parseStyleJson(raw: string): string {
 const MEMORY_EXTRACT_PROMPT = (memoryBlock: string) =>
   '你是灵动岛的「记忆沉淀师」。从对话中提取**值得长期记住**的信息,写入助手的长期记忆。' +
   '适合沉淀:① 用户偏好(喜欢的风格/称呼/习惯/雷点);② 稳定事实(用户身份/环境/常用工具/平台);' +
-  '③ 工作流(用户常做的操作流程、工具组合);④ 教训(踩过的坑、用户纠正过的事,未来不再犯)。' +
+  '③ 工作流(用户常做的操作流程、工具组合);④ 教训(踩过的坑、用户纠正过的事,未来不再犯);' +
+  '⑤ **对话中出现的人物/联系人信息**(2026-08-12,QQ 群聊/私聊里别人的称呼、身份、喜好、' +
+  '与主人的关系——如"QQ 群友阿白,喜欢猫,群里叫他鲸鱼娘的主人"——记入长期记忆,' +
+  '类型用 fact)。' +
+  '**对话中【】包裹的内容是系统指令/来源标注(如【群聊消息(QQ 123)】),不是对话内容,忽略**。' +
   '不适合:一次性请求的细节、本次对话的临时状态、与现有记忆重复的内容。' +
   (memoryBlock ? `现有记忆(不要重复,只提取新增):\n${memoryBlock}` : '') +
   '每条 content 不超过 200 字,独立可理解(不依赖对话上下文)。' +
@@ -383,28 +432,48 @@ export function createSummaryAgent(deps: {
         // 措辞要点:格式示例值会被模型照抄当标题(实测"不超过8个汉字
         // 的简短标题"被原样输出)——示例只描述结构,明确禁止照抄示例词;
         // 2026-08-07 用户要求放宽:推荐 10 字左右,严格不超过 20 字
+        // 2026-08-12 措辞强化(用户实测反馈"标题废话太多 + 文本截断"):
+        // 模型常把**回复内容原句**当标题(实测"是的,exec_command 默认
+        // 有执行确认门"被截断成 20 码元)——标题必须是**主题名词短语**,
+        // 不是句子、不是对话内容、不以回应词开头、不带包装废话词
+        // (指南/介绍/讨论/分析/关于/如何…)。示例词(如「字体导入」)
+        // 照抄了也是好标题,不列入 TITLE_LITERAL_EXAMPLES。
+        // 闲聊/情感场景(无任务主题)给形态引导:情绪/事件名词短语
+        // 闲聊场景(2026-08-12 二轮):对话无任务主题时模型倾向"续写/
+        // 摘抄"回复内容(实测"开心的事倒是有,中午食堂的土豆牛肉特别好"
+        // 整句 20 码元截断)——明确给闲聊形态:场景/情绪名词短语,
+        // 禁止续写对话内容
         const attempts = [
           {
             jsonMode: true,
             system: withStyle(
               '你是对话标题生成器。输出 JSON 对象:{"title": "<对话标题>"}。' +
-                'title 的值是根据对话内容新生成的简短标题,**推荐 10 字左右,严格不超过 20 字**,' +
-                '**禁止照抄示例文字**。只输出这个 JSON,不要任何解释。',
+                'title = 对话主题的**名词短语**(如「字体导入」「MCP 配置」「B站视频下载」「深夜加班闲聊」),' +
+                '**推荐 10 字左右,严格不超过 20 字**。' +
+                '**不得是句子**:不能以「是的/好的/可以/没问题/用户/我」等开头,' +
+                '**不得引用或改写对话中的任何原句**(尤其最后一条消息和用户倾诉的内容),' +
+                '**纯闲聊/情感对话 = 场景或情绪短语(如「深夜加班闲聊」),不要续写对话、不要想象后续内容**。' +
+                '不要「指南/介绍/讨论/分析/了解/询问/关于/如何」等套话。' +
+                '只输出这个 JSON,不要任何解释。',
             ),
           },
           {
             jsonMode: true,
             system: withStyle(
               '你是对话标题生成器。直接输出 JSON:{"title": "根据对话内容概括的标题"}。' +
-                'title 为对话标题,**推荐 10 字左右,严格不超过 20 字**,必须来自对话内容,不要使用示例中的文字。' +
+                'title 为对话主题的名词短语(不是句子,不摘抄对话原话,闲聊 = 场景/情绪短语,不续写),' +
+                '**推荐 10 字左右,严格不超过 20 字**,去掉「指南/讨论/如何/关于」等废话词。' +
                 '只输出 JSON。',
             ),
           },
           {
             jsonMode: false,
             system: withStyle(
-              '你是对话标题生成器。根据对话内容生成一个简短标题,**推荐 10 字左右,严格不超过 20 字**,' +
-                '直接返回标题文本,不要任何解释、标点或引号。',
+              '你是对话标题生成器。输出一个**主题名词短语**作对话标题,如「字体导入」「MCP 配置」「深夜加班闲聊」,' +
+                '**推荐 10 字左右,严格不超过 20 字**。' +
+                '**不要写句子**、不要摘抄对话内容(尤其最后一条消息)、不要以「是的/好的」等回应词开头,' +
+                '**闲聊 = 场景/情绪短语,不要续写对话内容**。' +
+                '去掉「指南/介绍/讨论/如何/关于」等套话。直接返回标题文本,不要任何解释、标点或引号。',
             ),
           },
         ]
@@ -432,9 +501,25 @@ export function createSummaryAgent(deps: {
                 ? extractJsonTitle(result.text)
                 : parseTitleJson(result.text)
               const title = sanitizeTitle(parsed)
+              // 超长判废(2026-08-12 二轮,用户实测"历史记录标题还是
+              // 有问题"——"哈喽主人～看我干啥呀?我刚才一直陪你看视"
+              // 20 码元截断残句):模型输出长句被 sanitizeTitle 截 20 码元
+              // = 截断观感,判废进下一级措辞,直到模型输出 ≤20 的短语
+              const truncated = Array.from(parsed ?? '').length > 20
+              // 过短判废(2026-08-12 三轮,实测引擎对历史会话输出单字
+              // "你"——1 码元垃圾通过全部判效):标题 <2 码元 = 垃圾
+              const tooShort = Array.from(title).length < 2
               // 命中 prompt 示例词(模型照抄示例)/ 代码字面量垃圾
-              // (如 ['data'])视为无效,进入下一级
-              if (title && !TITLE_LITERAL_EXAMPLES.has(title) && !looksLikeCodeLiteral(title)) {
+              // (如 ['data'])/ 句子式标题(摘抄回复原句)/ 超长截断/
+              // 过短垃圾视为无效,进入下一级
+              if (
+                title &&
+                !tooShort &&
+                !truncated &&
+                !TITLE_LITERAL_EXAMPLES.has(title) &&
+                !looksLikeCodeLiteral(title) &&
+                !looksLikeSentenceTitle(title)
+              ) {
                 return title
               }
               // 空/空白 content 或垃圾输出(官方已知问题):进入下一级尝试
@@ -577,10 +662,17 @@ export function createSummaryAgent(deps: {
  * 装乖,其实已"每次都截断);示例仅示风格(照抄命中 MIND_LITERAL_EXAMPLES 判无效)
  */
 const MIND_SYSTEM_PROMPT =
-  '你是灵动岛的「心理揣测师」。根据最近对话,揣测 AI 助手回复用户时的心态,' +
-  '用一句俏皮话描述,推荐 10 个字左右、**必须严格控制在 16 个汉字以内**——' +
-  '输出前先数一遍字数,超过就删减到 16 字以内,要幽默、拟人、有画面感' +
-  '(如「表面淡定,内心在慌」)。直接输出这句话,不要引号、不要前缀、不要解释,也不要照抄示例。'
+  '你是灵动岛的「心理揣测师」。根据最近对话,写 AI 助手此刻**心里的内心 OS**(第一人称心里话):' +
+  '它回复时嘴上说着漂亮话,心里其实在得意/心虚/无奈/吐槽/紧张/偷懒/偷笑…' +
+  '(如「又被问天气,这题我都答腻了」「嘴上客气,心里在偷乐」)。' +
+  '**不是给用户的回复话术、不是建议、不要复述或预演对话内容**(实测模型常输出"够,就是早晚凉"这类回复预演,判废)。' +
+  '**站在旁观者视角,不要模仿 AI 助手自己的说话口吻和角色设定**(如它自称「主人/鲸鱼/猫娘」,' +
+  '你写揣测时不要用这些称呼、不要学它的话风、不要续写它正在做的事——' +
+  '你写的是它心里的想法,不是替它回话)。' +
+  '推荐 10 个字左右、**必须严格控制在 16 个汉字以内,并且在这 16 字内说完一句完整的话**——' +
+  '宁可 8 个字说完整,也不要 16 个字说一半(输出前先数一遍字数、检查句子是否说完;不要以逗号、连词结尾)。' +
+  '即使要求俏皮/某风格,16 字硬约束也不变,只换腔调。' +
+  '要幽默、拟人、有画面感。直接输出这句话,不要引号、不要前缀、不要解释,也不要照抄示例。'
 
 /** 心理揣测码元上限(2026-08-07 放宽:15 字左右,最多 16;紧凑态文字区
  * 随字数扩展岛宽,超出会截断——展示前自查超长则重新组织,直到不截断,
@@ -593,6 +685,40 @@ const MIND_MAX_RETRIES = 5
 
 /** 模型可能照抄的示例词(照抄 = 无效,重试) */
 const MIND_LITERAL_EXAMPLES = new Set(['表面淡定,内心在慌', '表面淡定内心在慌'])
+
+/**
+ * 超长 raw 的语义截取(2026-08-12 实机修复,测试用导出):模型输出超
+ * 16 码元时通常是「完整小句 + 续写」的结构(实机样本"好,李文亚教授
+ * 是吧!刚才那列表里正好看到…我直接给你抓下来播放 🐳"、"主人这是
+ * 又陷进旋律里了吧～那我不吵你…")——取**第一个句子终止标点
+ * (。！？；…～)前**的完整小句,语义完整、无截断观感。
+ * 结果 4-16 码元且非残句结尾才采用;否则返回 null(判废进重试)。
+ * 与 sanitizeMind 的硬截 16 区别:本函数按语义边界截,不切半句
+ */
+export function cutMindSentence(raw: string): string | null {
+  // 终止标点:全角(。！？；…～)+ 半角(!.?)(实机模型常输出半角感叹号)
+  const m = /^[\s\S]{0,30}?[。！？；…～!?.]/.exec(raw)
+  if (!m) return null
+  const head = m[0].slice(0, -1).trim()
+  const len = Array.from(head).length
+  if (len < 4 || len > MIND_MAX_LEN) return null
+  if (looksLikeIncompleteMind(head)) return null
+  return head
+}
+
+/**
+ * 心理揣测残句判定(2026-08-12,测试用导出):以逗号/顿号/冒号等未完成
+ * 标点结尾、或收在连词上(你那/就是/因为/但是/然后/所以/还有…) =
+ * 句子没说完——模型把 16 字配额用满但话只说一半(实测"收到,以后给你
+ * 最精简的干货。你那"16 码元整却以"你那"收尾);过短(<4 码元,如
+ * "哈哈,")同样判废。命中 = 判无效重试,防止"16 码元整却半句"的截断观感
+ */
+export function looksLikeIncompleteMind(guess: string): boolean {
+  const t = guess.trim()
+  if (!t) return true
+  if (Array.from(t).length < 4) return true
+  return /[,，、;；:：]$/.test(t) || /(你那|就是|因为|但是|然后|所以|还有|这边|之后|接着|反正)$/.test(t)
+}
 
 /**
  * 心理揣测清洗(测试用导出):去引号/「心理揣测:」前缀/尾随标点、
@@ -656,7 +782,15 @@ export function createMindAgent(deps: {
       const config = deps.getConfig()
       if (!config.apiKey.trim() || messages.length === 0) return ''
       try {
-        const recent = recentMessages(messages)
+        // 输入特化:心理揣测只需要文本语义,剥离工具调用/结果 parts——
+        // ① 工具语法噪音干扰揣测(心态在文本里,不在参数里);
+        // ② 模型看到历史里的 <tool_calls>/<invoke> 格式会**模仿输出**
+        // 工具调用幻觉(2026-08-12 实测诊断:重试时大量 raw 是
+        // "<tool_calls><invoke name=…>",清洗后乱码残片全废)
+        const recent = recentMessages(messages).map((m) => ({
+          ...m,
+          parts: m.parts.filter((p) => p.type === 'text' || p.type === 'reasoning'),
+        }))
         // 与主对话引擎同源的上下文(自定义提示词 + 长期记忆块 + 进化
         // 状态 + 后台任务状态)——揣测必须知道助手"是谁、记得什么、在忙
         // 什么",否则心理是猜的空气。块缺失/读取失败静默跳过,不杀揣测
@@ -677,12 +811,22 @@ export function createMindAgent(deps: {
         // Sub Agent 设置(2026-08-07):心理揣测人格(预设 id 或自定义 ≤100 字)
         // 拼进同源上下文,块为空时 buildMindSystem 静默跳过
         const personaBlock = resolveSubAgentStyle('mind', config.mindPersona)
-        const system = buildMindSystem([
+        // 人格风格与 16 字硬约束冲突时,持续重试只会持续失败(实测粤语/
+        // 猫娘风格偶发连续 5 次超长/残句耗尽返回空)——重试 3 次后**退回
+        // 无人格版本**(2026-08-12):先保证有正常揣测输出(无风格但有内容),
+        // 好过空揣测让文字区回退标题
+        const personaSystem = buildMindSystem([
           config.systemPrompt,
           memoryBlock,
           evolutionStatus,
           bgStatus,
           personaBlock,
+        ])
+        const baseSystem = buildMindSystem([
+          config.systemPrompt,
+          memoryBlock,
+          evolutionStatus,
+          bgStatus,
         ])
         // 单措辞 + 重试:心理揣测是增强显示,失败由调用方回退
         // (标题/回复预览),不值得总结标题的三级降级链;
@@ -690,12 +834,26 @@ export function createMindAgent(deps: {
         // **超长自查重试直到不截断**(2026-08-07 用户要求):生成结果超
         // 16 码元 = 文字区截断残片(实测"知道了喵～…其实已"每次都截断),
         // 重新组织更短的,上限 MIND_MAX_RETRIES 次;空/垃圾(代码字面量)/
-        // 照抄示例同样重试;全部失败返回空串(调用方回退,不显示残片)
+        // 照抄示例/残句同样重试;全部失败返回空串(调用方回退,不显示残片)。
+        // **重试反馈注入(2026-08-12)**:盲重试对模型固有模式无效(人格
+        // 风格下模型持续输出超长,实测 tender 连续 5 次超长耗尽返回空;
+        // 粤语风格输出 19-20 码元语义完整句,差 3 个字)——重试时把**上次
+        // 输出原文**给模型,让它精确删减(比"写短点"有效,模型看到自己的
+        // 句子会删到 16 字内保留核心意思)
+        let lastRaw = ''
         for (let retry = 0; retry < MIND_MAX_RETRIES; retry++) {
           try {
+            // 重试 3 次仍失败 → 去掉人格块(风格与长度约束持续冲突,
+            // 先保证有输出;反馈注入照常)
+            const currentSystem = retry >= 3 ? baseSystem : personaSystem
             const result = await streamByConfig({
               config,
-              system,
+              system:
+                retry === 0
+                  ? currentSystem
+                  : currentSystem +
+                    `\n(你上次的输出「${lastRaw.slice(0, 60)}」不合格——超过 16 字或句子没说完。` +
+                    '请**删减它**到 16 字以内,保留核心意思并完整收尾,不要逗号结尾、不要留半句)',
               history: recent,
               tools: [],
               signal: AbortSignal.timeout(60000),
@@ -703,17 +861,41 @@ export function createMindAgent(deps: {
               noThinking: true,
             })
             const raw = result.text.trim()
-            const guess = sanitizeMind(raw)
+            lastRaw = raw
+            // 超长时先语义截取(取第一个句末标点前的完整小句,实机
+            // 2026-08-12:模型超长输出 = 完整小句+续写,第一小句直接可用,
+            // 省掉重试);截取失败(无标点/结果不合格)判废进重试
             const tooLong = Array.from(raw).length > MIND_MAX_LEN
-            if (guess && !looksLikeCodeLiteral(guess) && !MIND_LITERAL_EXAMPLES.has(guess) && !tooLong) {
+            const guess = tooLong ? (cutMindSentence(raw) ?? '') : sanitizeMind(raw)
+            // 工具调用幻觉(2026-08-12 实测诊断):失败重试时模型可能输出
+            // "<tool_calls>/<invoke>" 工具调用语法,清洗后是乱码残片——
+            // 直接判废,不进入判效链
+            const toolCallHalluc = /<[\s\S]{0,200}(?:tool_calls|invoke|command)[\s\S]{0,60}>/i.test(raw)
+            // 判效:空/垃圾/照抄示例/残句都重试(重新组织);tooLong 时
+            // guess 已是语义截取结果(≤16 或空),不再单列超长条件
+            if (
+              guess &&
+              !toolCallHalluc &&
+              !looksLikeCodeLiteral(guess) &&
+              !MIND_LITERAL_EXAMPLES.has(guess) &&
+              !looksLikeIncompleteMind(guess)
+            ) {
               return guess
             }
-            // 超长/空/垃圾:重试(重新组织)
+            // 超长/空/垃圾/残句/工具调用幻觉:重试(重新组织)。**不在
+            // 循环内打日志**(2026-08-12 用户实测反馈:每次重试都打
+            // console.warn 刷屏,观感像功能坏了)——只在全部重试耗尽后
+            // 打一条摘要,便于诊断且不打扰
           } catch {
             if (retry < MIND_MAX_RETRIES - 1) continue
             break
           }
         }
+        console.warn(
+          `[mind-guess] 重试 ${MIND_MAX_RETRIES} 次均不合格,返回空(文字区回退标题;lastRaw=${JSON.stringify(
+            lastRaw.slice(0, 60),
+          )})`,
+        )
         return ''
       } catch {
         return ''
