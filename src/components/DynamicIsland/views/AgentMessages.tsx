@@ -337,7 +337,10 @@ export const AssistantBlock = memo(function AssistantBlock({
     <div className="island-agent-msg-assistant">
       {textParts.map((p, i) => (
         <div key={`t-${i}`} className="island-agent-text">
-          <Markdown text={p.text} mediaAutoPlay={mediaAutoPlay && i === grantTextIdx} />
+          {/* 执行回复标记剥离(2026-08-13 串台根治):「【回复对方】」是
+              给主进程路由用的标记(带标记才发给待回复陌生人),气泡里
+              不显示——首个文本段开头剥离 */}
+          <Markdown text={i === 0 ? p.text.replace(/^【回复对方】\s*/, '') : p.text} mediaAutoPlay={mediaAutoPlay && i === grantTextIdx} />
         </div>
       ))}
       {/* 工具图片附件(如 bili 登录二维码):引擎注入的 image part,

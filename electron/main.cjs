@@ -646,6 +646,10 @@ let lastQQTurnAt = 0
  * 主人 → 主人指示后的回复落定发回该 QQ;30 分钟超时作废 */
 let pendingQQReply = null
 const PENDING_QQ_TIMEOUT_MS = 30 * 60 * 1000
+/** 本轮开始前已发给待回复陌生人的私聊消息数(2026-08-13 防重发快照:
+ * agent:send 时记录,落定路由时对比——LLM 已用 send 工具发过则跳过
+ * pending 路由,对方不再收到 2-3 条重复) */
+let pendingTurnSentBefore = 0
 /** NapCat 客户端状态(懒加载单例:active = 已连接开关,client = 客户端) */
 let napcatClientState = null
 
@@ -761,6 +765,14 @@ function getNapcatClient() {
         `**询问轮的回复只发给主人(不是发给对方)**;` +
         `**得到主人指示后的执行回复 = 只写发给对方的那一句话**——不要重复询问选项、` +
         `不要出现「主人…我建议…」「你定,我就发」这类给主人看的文字(那些只在询问轮出现,发到主人 QQ)。` +
+        `**执行回复必须以「【回复对方】」开头**(第一行就是这五个字,后面直接写发给对方的话)——` +
+        `没有这个标记,对方就收不到你的回复(回复会留在主人这里);` +
+        `主人日常聊天/「嗯/让我想想」这类应答的回复**不要**带此标记。` +
+        `**执行轮禁止调用 napcat send/send_group 工具**(你的回复文字会自动发给对方,` +
+        `再调用工具会发出第二条消息;2026-08-13 用户实测对方收到 2-3 条重复);` +
+        `只有确实需要附带图片时,才用 send 的 image 参数且 message 参数留空。` +
+        `**执行轮不要给主人(${MASTER_QQ})发任何 QQ 消息**——执行结果直接发对方,` +
+        `主人在对话窗口能看到全过程;询问只发生在询问轮。` +
         `③ 回复就是直接发给对方的话:以第二人称对对方说话——不第三人称转述对方、不向主人汇报、不描述你做了什么。` +
         `④ 只给结论:不输出思考过程,不叙述工具调用过程(查了什么/怎么查的对方不需要知道)。` +
         `⑤ 不泄露主人隐私:长期记忆里的私人话题、对话窗口的私聊内容、主人的真实信息都不得向对方透露。` +
@@ -865,6 +877,33 @@ function getNapcatClient() {
 // 私聊 QQ,'group' 触发的发回群;**本地轮(用户指示)若有待回复的
 // 陌生人消息(非白名单),该轮回复也发回(2026-08-12 二轮:LLM 询问
 // 主人后,主人指示轮的回复落定即发回对方)**
+// **防重发检查(2026-08-13 用户实测"对方收到 2-3 条")**:本轮开始前
+// (agent:send 快照 pendingTurnSentBefore)到落定之间,LLM 是否已用
+// send 工具给该陌生人发过私聊消息——发过则跳过 pending 路由
+/** 执行回复标记(2026-08-13 串台根治,用户实测"串台后陌生人收不到
+ * 消息"):主人指示轮的回复必须以「【回复对方】」开头——**只有带标记的
+ * 回复才会路由给待回复陌生人**;无标记的回复(主人"嗯/让我想想"这类
+ * 应答、日常闲聊)留在主人侧且**不消耗 pending**,等真正的指示轮。
+ * 此前任何主人 QQ/窗口轮都会消费 pending——主人先回了句"嗯",这轮
+ * 应答被路由给陌生人(串台)+ pending 被清空,真正指示轮的回复反而
+ * 发回主人,陌生人什么都收不到 */
+const REPLY_TO_STRANGER_MARK = '【回复对方】'
+
+/** 检查并剥离执行回复标记;无标记返回 null */
+function extractReplyToStranger(text) {
+  if (!String(text).startsWith(REPLY_TO_STRANGER_MARK)) return null
+  return String(text).slice(REPLY_TO_STRANGER_MARK.length).trim()
+}
+
+function turnAlreadySentToPending(qq) {
+  try {
+    const sent = getNapcatClient().client.getSentMessages()
+    return sent.filter((s) => s.type === 'private' && s.target === qq).length > pendingTurnSentBefore
+  } catch {
+    return false
+  }
+}
+
 function handleEngineMessageForNapcat(message) {
   let text = (message?.parts ?? [])
     .filter((p) => p && p.type === 'text')
@@ -888,7 +927,9 @@ function handleEngineMessageForNapcat(message) {
   // 询问**(不只在对话窗口);pendingQQReply 保留(等主人指示)
   if (lastAskTurn) {
     lastAskTurn = false
-    c.sendToQQ(MASTER_QQ, text).catch(() => {})
+    // 询问轮回复只发主人;防御性剥离误带的执行标记
+    const stripped = extractReplyToStranger(text)
+    c.sendToQQ(MASTER_QQ, stripped ?? text).catch(() => {})
     return
   }
   // 来源触发轮(白名单私聊 / 群消息)
@@ -902,13 +943,21 @@ function handleEngineMessageForNapcat(message) {
     if (source === 'group') {
       return
     }
-    // 白名单(主人 QQ)消息轮:若有待回复的陌生人消息 → 该轮回复 =
-    // 主人指示的执行结果,发回陌生人(2026-08-12 询问同步闭环:
-    // 主人在 QQ 里回复指示,LLM 回复直接发给对方);无则发回主人
-    if (pendingQQReply && Date.now() - pendingQQReply.at < PENDING_QQ_TIMEOUT_MS) {
+    // 白名单(主人 QQ)消息轮:**只有带【回复对方】标记的回复**才是
+    // 主人指示的执行结果 → 剥离标记后发回待回复陌生人(2026-08-12
+    // 询问同步闭环 + 2026-08-13 标记化串台根治);无标记 = 主人日常
+    // 聊天/应答 → 照常发回主人,pending 保留等真正的指示轮
+    const marked = extractReplyToStranger(text)
+    if (marked !== null && pendingQQReply && Date.now() - pendingQQReply.at < PENDING_QQ_TIMEOUT_MS) {
       const qq = pendingQQReply.qq
       pendingQQReply = null
-      c.sendToQQ(qq, text).catch(() => {})
+      // **防重发(2026-08-13 用户实测"对方收到 2-3 条")**:本轮 LLM 已
+      // 用 send 工具发过私聊给该陌生人 → 跳过路由(工具消息即回复),
+      // 不再把回复文字再发一遍
+      if (!turnAlreadySentToPending(qq)) {
+        c.sendToQQ(qq, marked).catch(() => {})
+        showMainNotify('🐳 已回复对方', marked.length > 60 ? marked.slice(0, 60) + '…' : marked)
+      }
       return
     }
     const done = () => {
@@ -917,17 +966,23 @@ function handleEngineMessageForNapcat(message) {
     c.sendToQQ(target, text).then(done).catch(() => {})
     return
   }
-  // 本地轮(对话窗口直发)+ 待回复的陌生人消息 → 该轮回复 = 主人指示
-  // 的执行结果,发回陌生人(**一次性消费**)。**2026-08-13 泄露修复**:
-  // 只有 source='window'(主人亲自在窗口输入)才路由——此前任何本地轮
-  // (后台下载完成/主动陪伴/主人日常聊天)的回复都被发给陌生人
-  // (用户实测:《需要人陪》下载完成的窗口回复、询问内容都泄露给了
-  // 对方);system 轮在 agent:send 已置 null,不会走到这里
-  if (lastSendSource === 'window' && pendingQQReply && Date.now() - pendingQQReply.at < PENDING_QQ_TIMEOUT_MS) {
+  // 本地轮(对话窗口直发)+ 待回复的陌生人消息 + **【回复对方】标记**
+  // → 该轮回复 = 主人指示的执行结果,剥离标记后发回陌生人。
+  // **2026-08-13 泄露修复 + 标记化串台根治**:
+  // - 只有 source='window'(主人亲自在窗口输入)才路由——后台下载完成/
+  //   主动陪伴等轮永不路由(system 轮在 agent:send 已置 null);
+  // - 无标记的窗口回复不路由且**不消耗 pending**(等真正的指示轮)
+  const markedWin = extractReplyToStranger(text)
+  if (lastSendSource === 'window' && markedWin !== null && pendingQQReply && Date.now() - pendingQQReply.at < PENDING_QQ_TIMEOUT_MS) {
     const qq = pendingQQReply.qq
     pendingQQReply = null
     lastSendSource = null
-    c.sendToQQ(qq, text).catch(() => {})
+    // **防重发(2026-08-13)**:与 qq/MASTER 分支同款——本轮已用 send
+    // 工具发过则跳过路由
+    if (!turnAlreadySentToPending(qq)) {
+      c.sendToQQ(qq, markedWin).catch(() => {})
+      showMainNotify('🐳 已回复对方', markedWin.length > 60 ? markedWin.slice(0, 60) + '…' : markedWin)
+    }
   }
   // 无论是否路由,轮次标记清零(防陈旧状态串到下一轮)
   lastSendSource = null
@@ -1694,6 +1749,19 @@ ipcMain.on('agent:send', (_event, text, history, sessionId, source, target) => {
   // done/主动陪伴/普通窗口聊天的回复都被 pendingQQReply 发给了陌生人)
   lastSendSource = source === 'qq' || source === 'group' || source === 'window' ? source : null
   lastSendTarget = (lastSendSource === 'qq' || lastSendSource === 'group') && typeof target === 'string' ? target : null
+  // **防重发快照(2026-08-13 用户实测"对方收到 2-3 条")**:执行轮可能
+  // 同时走两条发送路径——LLM 用 napcat send 工具主动发(第一条)+ 回复
+  // 落定后被 pending 路由再发(第二条)。快照本轮开始前已发给该陌生人的
+  // 私聊消息数,落定路由时对比:本轮已用工具发过则跳过路由
+  pendingTurnSentBefore = 0
+  if (pendingQQReply && (source === 'window' || source === 'qq')) {
+    try {
+      const sent = getNapcatClient().client.getSentMessages()
+      pendingTurnSentBefore = sent.filter((s) => s.type === 'private' && s.target === pendingQQReply.qq).length
+    } catch {
+      pendingTurnSentBefore = 0
+    }
+  }
   getAgentEngine().send(text, asArray(history), typeof sessionId === 'string' ? sessionId : undefined)
 })
 

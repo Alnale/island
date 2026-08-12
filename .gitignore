@@ -46,3 +46,6 @@ tools/bili/config/login-qrcode.png
 
 # 测试产物
 /tests/title-test-result.log
+
+# bili-tool 登录态与本地配置(含敏感 cookie,严禁入库)
+tools/bili/config/

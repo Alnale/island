@@ -155,16 +155,33 @@ export const MessageWindow = memo(function MessageWindow({
       acc += h + gap
     }
     if (start > 0) start = Math.max(0, start - OVERSCAN_TOP)
+    // end:从 start 累加直到 offset 越过可视区底部 + overscan
+    let end = start
+    let offAcc = 0
+    for (let i = 0; i < start; i++) offAcc += (heights.get(msgs[i].id) ?? estH(msgs[i])) + gap
+    for (let i = start; i < n; i++) {
+      if (offAcc > scrollTop + clientH + OVERSCAN_BOTTOM) break
+      offAcc += (heights.get(msgs[i].id) ?? estH(msgs[i])) + gap
+      end = i + 1
+    }
+    // **媒体消息常驻(2026-08-13 用户实测"下方出现几个新消息就要从头
+    // 播放,所有状态丢失")**:含 media part 的消息(视频/音频气泡)即使
+    // 滚出可视区也不卸载——否则播放中的视频被卸载销毁,进度/音量/倍速/
+    // 播放态全丢;新消息插入下方把媒体顶出 overscan 是主场景。媒体
+    // 消息数量少,常驻成本可接受;渲染范围扩到覆盖全部媒体消息
+    for (let i = 0; i < n; i++) {
+      const parts = (msgs[i] as AgentMessage).parts
+      if (Array.isArray(parts) && parts.some((p) => p && p.type === 'media')) {
+        if (i < start) start = i
+        if (i + 1 > end) end = i + 1
+      }
+    }
     // start 的虚拟偏移(重新累加;消息数百-数千,微秒级,无需前缀和缓存)
     let sOff = 0
     for (let i = 0; i < start; i++) sOff += (heights.get(msgs[i].id) ?? estH(msgs[i])) + gap
-    // end:从 start 累加直到 offset 越过可视区底部 + overscan
-    let end = start
+    // end 之后的偏移(媒体常驻扩大的范围不再收缩)
     let off = sOff
-    for (; end < n; end++) {
-      if (off > scrollTop + clientH + OVERSCAN_BOTTOM) break
-      off += (heights.get(msgs[end].id) ?? estH(msgs[end])) + gap
-    }
+    for (let i = start; i < end; i++) off += (heights.get(msgs[i].id) ?? estH(msgs[i])) + gap
     // spacer 数学:窗口布局高恒等于 total(组件头注释有推导)
     const top = start > 0 ? sOff - gap : 0
     const bottom = end < n ? total - off - gap : 0
