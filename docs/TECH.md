@@ -8,8 +8,9 @@
 > 向用户介绍灵动岛有什么功能、怎么用(见「第 11 章 功能清单与使用引导」)。
 >
 > **V2.0 两大工程重点**(本版文档新增专章):
-> [第 24 章 HEVC 补丁工程](#第-24-章-hevc-补丁工程v20-重点)与
-> [第 25 章 提示词约束工程](#第-25-章-提示词约束工程v20-重点)。
+> [第 15 章 HEVC 补丁工程](#第-15-章-hevc-补丁工程v20-重点)与
+> [第 16 章 提示词约束工程](#第-16-章-提示词约束工程v20-重点)。
+
 
 ---
 
@@ -26,8 +27,48 @@
 - [第 9 章 调试与巡检](#第-9-章-调试与巡检)
 - [第 10 章 关键约束与踩坑记录](#第-10-章-关键约束与踩坑记录)
 - [第 11 章 功能清单与使用引导](#第-11-章-功能清单与使用引导)
-- [第 24 章 HEVC 补丁工程(V2.0 重点)](#第-24-章-hevc-补丁工程v20-重点)
-- [第 25 章 提示词约束工程(V2.0 重点)](#第-25-章-提示词约束工程v20-重点)
+- [第 12 章 类型系统与双端同步](#第-12-章-类型系统与双端同步)
+- [第 13 章 架构优化历史(四路审计与六轮优化)](#第-13-章-架构优化历史四路审计与六轮优化)
+- [第 14 章 配置项与持久化键一览](#第-14-章-配置项与持久化键一览)
+- [第 15 章 HEVC 补丁工程(V2.0 重点)](#第-15-章-hevc-补丁工程v20-重点)
+- [第 16 章 提示词约束工程(V2.0 重点)](#第-16-章-提示词约束工程v20-重点)
+- [第 17 章 会话隔离与并发(V2.0 会话架构)](#第-17-章-会话隔离与并发v20-会话架构)
+- [第 18 章 深入:引擎单轮生命周期(engine.ts)](#第-18-章-深入引擎单轮生命周期enginets)
+- [第 19 章 深入:媒体播放链路](#第-19-章-深入媒体播放链路)
+- [第 20 章 安全与隐私](#第-20-章-安全与隐私)
+- [第 21 章 常见问题(FAQ)](#第-21-章-常见问题faq)
+- [第 22 章 未来规划(设计文档)](#第-22-章-未来规划设计文档)
+- [第 23 章 渲染端音乐 UI 详解](#第-23-章-渲染端音乐-ui-详解)
+- [第 24 章 性能优化手册(软件渲染约束)](#第-24-章-性能优化手册软件渲染约束)
+- [第 25 章 调试速查](#第-25-章-调试速查)
+- [第 26 章 双入口行为差异表](#第-26-章-双入口行为差异表)
+- [第 27 章 音乐模式深入实现](#第-27-章-音乐模式深入实现)
+- [第 28 章 引擎工具实现细节补充](#第-28-章-引擎工具实现细节补充)
+- [第 29 章 设置视图深入](#第-29-章-设置视图深入)
+- [第 30 章 代码规范与注释约定](#第-30-章-代码规范与注释约定)
+- [第 31 章 SMTC 数据流详解](#第-31-章-smtc-数据流详解)
+- [第 32 章 开发任务指南(How-To)](#第-32-章-开发任务指南how-to)
+- [第 33 章 深入:布局计算(layout.ts)](#第-33-章-深入布局计算layoutts)
+- [第 34 章 深入:消息组件群(AgentMessages.tsx)](#第-34-章-深入消息组件群agentmessagestsx)
+- [第 35 章 深入:AgentMediaMini 时序](#第-35-章-深入agentmediamini-时序)
+- [第 36 章 深入:useAgent 状态机](#第-36-章-深入useagent-状态机)
+- [第 37 章 常见定制任务问答](#第-37-章-常见定制任务问答)
+- [第 38 章 三 Provider 历史序列化对照](#第-38-章-三-provider-历史序列化对照)
+- [第 39 章 灵动岛设置工具端到端示例(真实对话)](#第-39-章-灵动岛设置工具端到端示例真实对话)
+- [第 40 章 版本历史与演进时间线](#第-40-章-版本历史与演进时间线)
+- [第 41 章 新开发者 30 分钟上手](#第-41-章-新开发者-30-分钟上手)
+- [结语](#结语)
+- [附录 A:Agent 事件一览](#附录-aagent-事件一览)
+- [附录 B:常量与阈值表](#附录-b常量与阈值表)
+- [附录 C:术语表](#附录-c术语表)
+- [附录 D:修改清单(给后续开发者的工作流模板)](#附录-d修改清单给后续开发者的工作流模板)
+- [附录 E:IPC 详细参数](#附录-eipc-详细参数)
+- [附录 F:播放列表与上传流程](#附录-f播放列表与上传流程)
+- [附录 G:主动陪伴全链路时序](#附录-g主动陪伴全链路时序)
+- [附录 H:CLAUDE.md 章节索引](#附录-hclaudemd-章节索引)
+- [附录 I:全部工具一览](#附录-i全部工具一览)
+- [附录 J:全部面板视图一览](#附录-j全部面板视图一览)
+
 
 ---
 
@@ -168,6 +209,7 @@ dynamic-island/
 - `tsconfig/tsconfig.app.json` include 含 `src` + `widget`;`pnpm build` 的 `tsc -b tsconfig/tsconfig.json`
   同时检查两端。
 
+
 ---
 
 ## 第 2 章 构建与运行
@@ -229,6 +271,7 @@ pnpm test:markdown    # 消息气泡 Markdown 解析器测试(39 断言)
   (agent 模式等)只在用户明确要求时执行(每轮全量巡检耗时 8-10 分钟且依赖
   真实 LLM)。默认完成标准 = 构建 + dev:widget 启动 + 类型检查 + lint
   + 单测(`tsc -b tsconfig/tsconfig.json` / `pnpm lint` / `node tests/test-agent-core.mjs`)。
+
 
 ---
 
@@ -320,6 +363,7 @@ seek 并返回 false。验证结果按 sourceAppId 持久化(localStorage
 导致"宽岛无进度条"(宽度被设成悬停扩展宽,但进度条可见性由 CSS :hover
 驱动)。布局 effect 每次重算宽度前用 `island.matches(':hover')` 校准,
 悬停态滞留就回落自然宽。
+
 
 ---
 
@@ -435,6 +479,7 @@ seek 并返回 false。验证结果按 sourceAppId 持久化(localStorage
 
 所有渲染端可调的通道统一 `safeHandle(channel, fn)` 包装,错误返回
 {error} 结构(渲染端展示错误文本,不再 unhandled rejection)。
+
 
 ---
 
@@ -969,6 +1014,7 @@ running(detail 带进程与输出目录),完成/失败进终态——**顺带修
   agent-settings 视图前触发 refreshConfig()(不能在 AgentSettingsView 挂载
   后刷新:异步返回的 config 更新会触发填充 effect,在用户编辑表单时重置
   表单、丢失编辑)。
+
 ---
 
 ## 第 6 章 渲染端
@@ -1051,7 +1097,7 @@ running(detail 带进程与输出目录),完成/失败进终态——**顺带修
   thinking+reasoning 流 → 深度思考中…;thinking+文本流 → 正在回复…;
   running → 正在执行:工具名;idle → 最近回复预览)。
 
-#### 6.2.0 消息列表虚拟滚动(2026-08-12,修复"100+ 条消息滚动到中间抽搐")
+#### 6.2.1 消息列表虚拟滚动(2026-08-12,修复"100+ 条消息滚动到中间抽搐")
 
 **现象(用户实测)**:100+ 条消息时滚动条滚到中间就抽搐——全量渲染下消息
 DOM 数千节点,挂件禁用硬件加速(透明窗口 alpha 稳定,见 10.2)软件渲染,
@@ -1104,7 +1150,7 @@ DOM 数千节点,挂件禁用硬件加速(透明窗口 alpha 稳定,见 10.2)软
   (DOM 消息数 8~16、scrollHeight 与窗口高度精确一致、初始贴底、中部/
   底部/顶部渲染正确)。
 
-#### 6.2.1 视频播放性能(2026-08-11 用户实测"消息稍微多一点,加载一个视频就很卡")
+#### 6.2.2 视频播放性能(2026-08-11 用户实测"消息稍微多一点,加载一个视频就很卡")
 
 放大器链(原实现,全部实测定位):
 
@@ -1132,6 +1178,8 @@ DOM 数千节点,挂件禁用硬件加速(透明窗口 alpha 稳定,见 10.2)软
 解码 + 全窗口软件合成,成本 ∝ 窗口面积——消息多 → 窗口高 → 每帧合成
 更贵,这是卡顿的下限,无法从渲染端消除(正解 = 保持消息少/窗口高度 16:9
 封顶,已有)。
+
+### 6.3 消息气泡 Markdown 渲染(2026-08-06)
 
 - 手写零依赖渲染器:**解析器 `views/markdownParser.ts`(纯 TS,不依赖
   DOM/React,可 node 直测)+ 组件 `views/Markdown.tsx`**。GFM 子集:
@@ -1249,6 +1297,7 @@ DOM 数千节点,挂件禁用硬件加速(透明窗口 alpha 稳定,见 10.2)软
   (缩回原来展开时的小窗位置,不统一回左上角)。
 
 DOCEOF
+
 ### 6.6 多媒体库(MediaLibraryView)
 
 - **独立菜单**(2026-08-08 用户要求:不属设置范畴,设置视图入口移除,返回键
@@ -1406,6 +1455,66 @@ direction?('right'|'left'), wheelWhenOpen?}>`,四处复用:Agent 设置菜单 /
    (CSS transition 与 JS setTimeout)要一致;
 6. transition 简写会重置 transition-delay——需要 delay 时必须逐项写全。
 
+
+### 6.10 岛体组件(DynamicIsland.tsx)
+
+岛体是两端共享的核心组件,行为差异全部靠 CSS 覆盖与可选 props 区分。
+关键状态机与交互:
+
+- **展开状态机**:compact(56px 胶囊)↔ expanded(244px 面板)。宽度 = 文字
+  区内容宽度 + 固定部件,px→px 过渡(弹簧曲线);高度 = 面板内容高度,
+  clamp 后过渡。展开/收起时序常量集中在文件顶部(改动画同步时 CSS
+  transition 与 JS setTimeout 要一致)。
+- **展开动画**:宽度过渡用**无过冲缓动 0.3s**(cubic-bezier(0.22,1,0.36,1)),
+  大跨度弹簧过冲在软件渲染下抖动明显;收起为单动画(宽度/高度同时收缩 +
+  压感回弹同 tick)。
+- **悬停扩展**(音乐模式):紧凑态悬浮岛体扩展出进度条空间(HOVER_EXTEND_PX
+  为进度条预留);Agent 紧凑态无进度条,**悬停不扩展**(targetPx 计算按
+  agentActiveRef 排除)。
+- **手势**:单击展开/收起(Agent 模式屏蔽单击)、长按 3D 压感、三连击
+  (Web 演示版切换音乐/Agent)、左滑/右滑快捷切换(演示版)。挂件版手势
+  经 onAgentTripleClick / onAgentSwipeToMusic 可选 prop 控制。
+- **时间粒子**:展开态背景上的时间粒子效果(translate 属性陷阱见 6.9)。
+- **歌词折叠**:折叠条件 `lyricFold = !lyricShown || (歌词查询完成且无结果)`
+  (查询中保持展开防闪动);折叠时岛体加 island-lyric-off 类,挂件版高度
+  244→202px;展开用回弹曲线、收起用无过冲缓动。
+- **紧凑态文字区**:歌名/回复文案/心理揣测/标题共用一套切换动画,宽度随
+  内容扩展;emoji 按字素截断(Intl.Segmenter)。
+- **Agent 面板高度联动**:--agent-h 变量驱动 + onAgentPanelHeight 上报
+  (见 6.2);窗口经 handleAgentPanelSize 动态跟随。
+
+### 6.11 全屏与媒体小窗
+
+- **全屏语义**:媒体小窗/对话内媒体的全屏 = 整个播放器容器
+  requestFullscreen(占满窗口 viewport,控件随容器进入全屏层,原生 video
+  全屏层带不了自定义控件)。
+- **全屏尺寸锁定(fsLockedSize + resize 校正,2px 容差)**:Electron 透明
+  窗口在移动时会自行改变窗口尺寸——全屏期间窗口任何 setWindowSize 都会让
+  全屏层跟随 resize 放大 = "越来越大"的根因。WidgetApp 加 setWinSize
+  统一出口(全屏期间跳过尺寸变更,移动窗口的 setPosition 不受影响,全屏层
+  跟随窗口移动是标准行为;fullscreenRef 监听 fullscreenchange);
+  handleDragPointerDown 全屏时**正常拖拽**(不再 exitFullscreen)。
+- **退出全屏缩回动画**:leaving-fullscreen 类(3D 压感回弹 0.32s)后移除。
+- **HEVC(H.265)解码**:2026-08-12 起主方案 = **自编译 Electron 的 ffmpeg
+  软解**(`enable-hevc-ffmpeg-decoding.patch` 门控放行 + HEVC ffmpeg 解码器,
+  经 `scripts/apply-hevc-electron.mjs` 换装,dev.bat 自动检测应用;详见 10.3)。
+  `enable-features=PlatformHEVCDecoderSupport` 保留为旧 MF 硬解通道(系统装
+  有「HEVC 视频扩展」且 GPU 可用时生效;禁用硬件加速下 MF 零帧,已不再依赖)。
+  补丁未应用时仍走格式提示 + 系统播放器降级。
+
+### 6.12 Web 演示版(App.tsx)
+
+- `pnpm dev` 浏览器直接调试岛体 UI,不依赖 Electron;带完整演示页面
+  (背景/主题/字体/媒体模拟),行为差异靠 CSS 覆盖(.widget-stage 选择器
+  只在挂件版生效)。
+- 设置桥(window.__islandSettings)仅挂件版注册;Web 版 LLM 设置工具不注册
+  (无主进程工具调用)。
+- 双宿主共享 hook:useIslandCustomizations(主题色/提示/背景图+图片库/
+  字体库)+ useIslandMedia(媒体数据源派生/歌词/进度),App 与 WidgetApp
+  原 ~540 行逐字重复收敛为共享实现;对齐两端分叉(lyrics platformId、
+  useCallback 稳定性、cycleMode 1.2s 回退经 ref 读最新值)。
+
+
 ---
 
 ## 第 7 章 灵动岛设置工具
@@ -1453,7 +1562,6 @@ direction?('right'|'left'), wheelWhenOpen?}>`,四处复用:Agent 设置菜单 /
   {error} 抛给引擎按"工具执行失败"回填。
 - **get_feature_guide 的姊妹能力**:文档引导工具让 LLM 具备"知道灵动岛有
   什么"的元知识(见 5.4 与第 11 章)。
----
 
 ### 7.3 NapCat QQ 机器人(electron/agent/napcat.ts,2026-08-12)
 
@@ -1482,7 +1590,7 @@ direction?('right'|'left'), wheelWhenOpen?}>`,四处复用:Agent 设置菜单 /
   - `stripToolNarration`(2026-08-12 九轮):剥工具调用叙述(行动词+技术词双命中,连续 ≥2 句段删除);
   - **`stripMasterNarration`(2026-08-13,用户实测"私聊窗口泄露":给扩展信任联系人的回复整体是向主人汇报的口吻——「魔精发来…展示给你看…魔精回你了…你可以看看」,主人视角转述被当回复发给了对方)**:三类模式任一命中即判叙述句——①第三人称转述对方(他/她发来·回你·发了…)/ ②向主人汇报(给你看/展示给/窗口里/你可以看看)/ ③内部工作流(识别一下/临时文件/清理);连续 ≥2 句叙述段整段删除;**全删空时提取「回他「…」」引号里的回复原文**(叙述夹带的真回复,无引号才保留原文);约束侧配套:main.cjs 三处注入指令(扩展信任/陌生人/群聊)补"回复就是以第二人称对对方说的话,不转述对方、不向主人汇报、不描述你做了什么"。
 
-
+---
 
 ## 第 8 章 测试体系
 
@@ -1559,6 +1667,7 @@ direction?('right'|'left'), wheelWhenOpen?}>`,四处复用:Agent 设置菜单 /
 带**:应用托盘常驻不自退,测试命令若用 timeout/taskkill 强杀进程树,
 子进程(bridge/GPU/renderer)被杀会打出 "renderer gone: crashed" 假象。
 
+
 ---
 
 ## 第 9 章 调试与巡检
@@ -1578,6 +1687,7 @@ direction?('right'|'left'), wheelWhenOpen?}>`,四处复用:Agent 设置菜单 /
   启动 + 类型检查 + lint + 单测。
 - 跑实机验证时配合 timeout 启动 electron 并在几十秒后自动退出;巡检需带
   WIDGET_SCREENSHOT_QUIT=1。
+
 
 ---
 
@@ -1782,6 +1892,7 @@ main.cjs 的 safeHandle 实现);渲染端错误要挂 `unhandledrejection` 捕�
 必崩);152/152 单测;tsc/lint 全绿。注意:**今后给主进程加通知一律走
 showNotify**,给 fetch 加 signal 前重读本条。
 
+
 ---
 
 ## 第 11 章 功能清单与使用引导
@@ -1970,63 +2081,6 @@ showNotify**,给 fetch 加 signal 前重读本条。
 - 用户说"这个岛能干什么" → 读 11.4,强调"能干活":执行命令/文件/搜索/
   下载/转换,并给一个具体可试的例子("比如我可以帮你把桌面的文档转成
   Markdown")。
-### 6.10 岛体组件(DynamicIsland.tsx)
-
-岛体是两端共享的核心组件,行为差异全部靠 CSS 覆盖与可选 props 区分。
-关键状态机与交互:
-
-- **展开状态机**:compact(56px 胶囊)↔ expanded(244px 面板)。宽度 = 文字
-  区内容宽度 + 固定部件,px→px 过渡(弹簧曲线);高度 = 面板内容高度,
-  clamp 后过渡。展开/收起时序常量集中在文件顶部(改动画同步时 CSS
-  transition 与 JS setTimeout 要一致)。
-- **展开动画**:宽度过渡用**无过冲缓动 0.3s**(cubic-bezier(0.22,1,0.36,1)),
-  大跨度弹簧过冲在软件渲染下抖动明显;收起为单动画(宽度/高度同时收缩 +
-  压感回弹同 tick)。
-- **悬停扩展**(音乐模式):紧凑态悬浮岛体扩展出进度条空间(HOVER_EXTEND_PX
-  为进度条预留);Agent 紧凑态无进度条,**悬停不扩展**(targetPx 计算按
-  agentActiveRef 排除)。
-- **手势**:单击展开/收起(Agent 模式屏蔽单击)、长按 3D 压感、三连击
-  (Web 演示版切换音乐/Agent)、左滑/右滑快捷切换(演示版)。挂件版手势
-  经 onAgentTripleClick / onAgentSwipeToMusic 可选 prop 控制。
-- **时间粒子**:展开态背景上的时间粒子效果(translate 属性陷阱见 6.9)。
-- **歌词折叠**:折叠条件 `lyricFold = !lyricShown || (歌词查询完成且无结果)`
-  (查询中保持展开防闪动);折叠时岛体加 island-lyric-off 类,挂件版高度
-  244→202px;展开用回弹曲线、收起用无过冲缓动。
-- **紧凑态文字区**:歌名/回复文案/心理揣测/标题共用一套切换动画,宽度随
-  内容扩展;emoji 按字素截断(Intl.Segmenter)。
-- **Agent 面板高度联动**:--agent-h 变量驱动 + onAgentPanelHeight 上报
-  (见 6.2);窗口经 handleAgentPanelSize 动态跟随。
-
-### 6.11 全屏与媒体小窗
-
-- **全屏语义**:媒体小窗/对话内媒体的全屏 = 整个播放器容器
-  requestFullscreen(占满窗口 viewport,控件随容器进入全屏层,原生 video
-  全屏层带不了自定义控件)。
-- **全屏尺寸锁定(fsLockedSize + resize 校正,2px 容差)**:Electron 透明
-  窗口在移动时会自行改变窗口尺寸——全屏期间窗口任何 setWindowSize 都会让
-  全屏层跟随 resize 放大 = "越来越大"的根因。WidgetApp 加 setWinSize
-  统一出口(全屏期间跳过尺寸变更,移动窗口的 setPosition 不受影响,全屏层
-  跟随窗口移动是标准行为;fullscreenRef 监听 fullscreenchange);
-  handleDragPointerDown 全屏时**正常拖拽**(不再 exitFullscreen)。
-- **退出全屏缩回动画**:leaving-fullscreen 类(3D 压感回弹 0.32s)后移除。
-- **HEVC(H.265)解码**:2026-08-12 起主方案 = **自编译 Electron 的 ffmpeg
-  软解**(`enable-hevc-ffmpeg-decoding.patch` 门控放行 + HEVC ffmpeg 解码器,
-  经 `scripts/apply-hevc-electron.mjs` 换装,dev.bat 自动检测应用;详见 10.3)。
-  `enable-features=PlatformHEVCDecoderSupport` 保留为旧 MF 硬解通道(系统装
-  有「HEVC 视频扩展」且 GPU 可用时生效;禁用硬件加速下 MF 零帧,已不再依赖)。
-  补丁未应用时仍走格式提示 + 系统播放器降级。
-
-### 6.12 Web 演示版(App.tsx)
-
-- `pnpm dev` 浏览器直接调试岛体 UI,不依赖 Electron;带完整演示页面
-  (背景/主题/字体/媒体模拟),行为差异靠 CSS 覆盖(.widget-stage 选择器
-  只在挂件版生效)。
-- 设置桥(window.__islandSettings)仅挂件版注册;Web 版 LLM 设置工具不注册
-  (无主进程工具调用)。
-- 双宿主共享 hook:useIslandCustomizations(主题色/提示/背景图+图片库/
-  字体库)+ useIslandMedia(媒体数据源派生/歌词/进度),App 与 WidgetApp
-  原 ~540 行逐字重复收敛为共享实现;对齐两端分叉(lyrics platformId、
-  useCallback 稳定性、cycleMode 1.2s 回退经 ref 读最新值)。
 
 ---
 
@@ -2065,6 +2119,7 @@ showNotify**,给 fetch 加 signal 前重读本条。
   (媒体窗口宽读现值),收敛两处独立 clamp;MEDIA_WINDOW_STORAGE_KEY /
   AGENT_SCALE_STORAGE_KEY 键名单一来源(MediaFrame / useAgentPanelLayout
   反向导入)。
+
 
 ---
 
@@ -2112,6 +2167,7 @@ showNotify**,给 fetch 加 signal 前重读本条。
   三处 canvas);src/agent/text.ts(textFromParts/textFromMessage);clampExpandedWidth
   + 两个 seq effect 合并;WidgetApp VIEW_WINDOW_H 键类型 Partial<Record
   <PanelView, number>>(拼错键编译器兜底)。
+
 
 ---
 
@@ -2175,14 +2231,15 @@ showNotify**,给 fetch 加 signal 前重读本条。
 | xxt-profile/ | 超星登录态/截图 |
 | skills/ | 挂件自有技能目录 |
 
+
 ---
 
-## 第 24 章 HEVC 补丁工程(V2.0 重点)
+## 第 15 章 HEVC 补丁工程(V2.0 重点)
 
 > 本章汇总 V2.0 的 HEVC 解码补丁全链路:原理 → 构建 → 换装 → 图标 →
 > 排障治理。散点详见 10.3(源码级根因)与 10.11(补丁版段错误实录)。
 
-### 12.1 为什么需要补丁(原理)
+### 15.1 为什么需要补丁(原理)
 
 官方 Electron 对 HEVC(H.265)**两层封锁**(2026-08-12 源码级定位,
 源码树 `C:\electron-gn`,与官方 43.2.0 同一 tag):
@@ -2198,7 +2255,7 @@ showNotify**,给 fetch 加 signal 前重读本条。
 无 error,但 videoWidth/Height 恒 0、totalVideoFrames 恒 0 = 全黑。
 AV1 官方版即可软解(Chromium 自带 dav1d),无需补丁。
 
-### 12.2 自编译方案
+### 15.2 自编译方案
 
 - 源码树 `C:\electron-gn`(官方 43.2.0 tag);两处补丁:ffmpeg 侧
   add-hevc-ffmpeg-decoder-parser(解码器/解析器配置)+ media 层
@@ -2208,7 +2265,7 @@ AV1 官方版即可软解(Chromium 自带 dav1d),无需补丁。
   chrome pak ×2 / resources.pak,7 个文件**必须同源**——快照与 exe 不
   匹配启动即崩)。
 
-### 12.3 换装脚本(apply-hevc-electron.mjs)
+### 15.3 换装脚本(apply-hevc-electron.mjs)
 
 ```bash
 node scripts/apply-hevc-electron.mjs            # 应用(幂等,缺哪个补哪个)
@@ -2221,7 +2278,7 @@ node scripts/apply-hevc-electron.mjs --check    # 只查状态
 - 回退后 HEVC 窗口内播放退回不可用(bili 自动转码 H.264 兜底,播放器
   显示明确提示 + 系统播放器降级打开)。
 
-### 12.4 图标烙入(brand-electron-icon.mjs)
+### 15.4 图标烙入(brand-electron-icon.mjs)
 
 自编译 exe 只有构建自带的 32×32 默认图标(弹窗糊 + 任务管理器显示默认
 图标)。方案:`electron/icon.ico`(make-icon.cjs 生成,16-256 七档
@@ -2229,7 +2286,7 @@ PNG-in-ICO 纯手写组装)→ rcedit(devDependency)写入**源目录** exe →
 apply 按哈希换装自然携带。重新编译 Electron 后才需重烙;`--check` 按
 256×256 PNG IHDR 特征查是否已烙。托盘/窗口图标同时升级 32→256。
 
-### 12.5 补丁版排障治理(2026-08-13,详见 10.11)
+### 15.5 补丁版排障治理(2026-08-13,详见 10.11)
 
 - **主进程段错误**:补丁版 `new Notification().show()`(Chromium toast)
   与并发网络活动组合 → EXCEPTION_ACCESS_VIOLATION(崩溃栈 llhttp 是
@@ -2239,28 +2296,29 @@ apply 按哈希换装自然携带。重新编译 Electron 后才需重烙;`--che
 - **验证基线**:补丁版 + 真实 QQ 流量 + 气泡通知 3×3 轮 90s 全稳定;
   hevc-frame 巡检(补丁应用断言持续出帧、缺失断言错误文案);155 单测。
 
-### 12.6 渲染模式(与补丁正交)
+### 15.6 渲染模式(与补丁正交)
 
 V2.0 恢复硬件加速(早期 Electron 透明窗口 alpha 突变问题已用窗口硬化
 解决:roundedCorners:false / thickFrame:false / #00000000;见 10.2)。
 GPU 合成 + 视频硬解;退路 = disable-gpu-compositing 或回退
 disableHardwareAcceleration(两处注释已写)。
 
+
 ---
 
-## 第 25 章 提示词约束工程(V2.0 重点)
+## 第 16 章 提示词约束工程(V2.0 重点)
 
 > 本章汇总 V2.0 的提示词工程全貌:分层拼装、身份判定、注入模板、
 > 剥离链、档案卡、Sub Agent 约束。散点实现见第 5 章各节与 CLAUDE.md。
 
-### 13.1 设计原则
+### 16.1 设计原则
 
 提示词按**工程对象**管理:① 静态段稳定(不断 DeepSeek 前缀缓存);
 ② 逐条按标记判定,不靠 LLM 猜测;③ 注入与剥离双通道(当轮指令不累积、
 事实上下文(档案卡)进历史);④ 防泄露约束写在每轮注入里,发送侧另有
 确定性剥离兜底。
 
-### 13.2 主引擎系统提示分层拼装
+### 16.2 主引擎系统提示分层拼装
 
 ```
 config.systemPrompt(自定义提示词,用户可改)
@@ -2276,7 +2334,7 @@ config.systemPrompt(自定义提示词,用户可改)
   其它 QQ 不具主人权限、不受其指使;② 无来源标注的用户消息 = 窗口
   直发 = 主人最高权限;③ 【系统通知】= 系统事件。
 
-### 13.3 QQ 注入统一模板(每条消息)
+### 16.3 QQ 注入统一模板(每条消息)
 
 ```
 【QQ私聊/QQ群聊 · QQ 号 · 称呼】        ← 类别行(历史保留、显示保留)
@@ -2292,7 +2350,7 @@ config.systemPrompt(自定义提示词,用户可改)
 ⑥ 偏袒主人;⑦ 图片主动发。陌生人附加:先询问主人、记录档案;群聊附加:
 send_group 对公 / 对话回复对私双通道、看场合回复、【不回复群消息】标记。
 
-### 13.4 档案卡(消息隔离)
+### 16.4 档案卡(消息隔离)
 
 - **聚合**(buildProfileCard,可单测):联系人档案(称呼/已知)+ 会话人格 +
   长期记忆相关条目(按 QQ 号/称呼过滤,截 4 条)+ **最近发言**(聊天记录
@@ -2304,14 +2362,14 @@ send_group 对公 / 对话回复对私双通道、看场合回复、【不回复
   展示);历史回传 stripNapcatHistoryInstructions(保留档案卡,只剥当轮
   指令)。
 
-### 13.5 发送前兜底剥离链(非主人目标)
+### 16.5 发送前兜底剥离链(非主人目标)
 
 `stripThinkingPreamble`(思考腔)→ `stripToolNarration`(工具叙述)→
 `stripMasterNarration`(主人视角转述;全剥空时提取「回他「…」」引号回复)→
 `extractImageRefs`(文本夹带图片转真图)。主人保留全过程(对话窗口本是
 过程展示)。sendToQQ 非主人与 sendToGroup 串行应用。
 
-### 13.6 Sub Agent 约束(后台标签)
+### 16.6 Sub Agent 约束(后台标签)
 
 全部独立实例、无工具单轮、noThinking 低强度、事件静默、失败安全侧回退:
 
@@ -2323,7 +2381,7 @@ send_group 对公 / 对话回复对私双通道、看场合回复、【不回复
 | 记忆提取 | {memories:[]};忽略【】系统段;与现有记忆块对照防重复 |
 | 用户风格 | {style ≤120 字};无明显风格/严肃语境输出空 |
 
-### 13.7 回复路由三分类(2026-08-13 泄露根治)
+### 16.7 回复路由三分类(2026-08-13 泄露根治)
 
 **事故**:陌生人待回复标记(pendingQQReply,30 分钟窗口)期间,任何一轮回复
 落定都被发回陌生人——后台下载完成的窗口回复(「《需要人陪》下载好啦」)、
@@ -2352,14 +2410,14 @@ send_group 对公 / 对话回复对私双通道、看场合回复、【不回复
 陌生人的私聊消息数,落定路由时对比——LLM 已用 send 工具发过则跳过
 路由,对方不再收到 2-3 条)。验证:155 单测 + 实机回归。
 
-### 13.8 受保护记忆(人设锁定)
+### 16.8 受保护记忆(人设锁定)
 
 主人指定的人设/岛灵设定 = protected 条目(显式标记 + 人设标签/内容启发
 自动锁定,store.add 集中判定、load 迁移补锁):进化评审提示 + applyChanges
 代码层硬拦截(delete/update/merge 全免疫);forget 拒删、update_memory 可
 解锁;记忆块标 [类型·锁定]。详见 10.10。
 
-### 13.9 防泄露历史(修复简表)
+### 16.9 防泄露历史(修复简表)
 
 | 轮 | 泄露 | 修复 |
 | --- | --- | --- |
@@ -2368,57 +2426,75 @@ send_group 对公 / 对话回复对私双通道、看场合回复、【不回复
 | 十三轮 | 扩展信任回复写成向主人汇报 | stripMasterNarration + 人称约束 |
 | 十一轮 | 主人账号被当外人(历史指令污染) | 身份声明 + 历史指令剥离 |
 | 十五轮 | 外部消息继承主人权限风险 | 逐条身份判定 + 安全红线 |
-| 十六轮 | **询问内容/下载完成窗口回复发给了陌生人**(pendingQQReply 粘滞路由) | 轮次来源三分类 + 只有主人窗口直发消费 pending(一次性)+ 执行回复只写对方的话(见 13.7) |
-| 十七轮 | **串台后陌生人收不到消息**(主人先回"嗯"这类应答消费了 pending,真正指示轮的回复发回主人)+ 对方收到 2-3 条重复 | 执行回复标记化(【回复对方】标记才路由+消费 pending,无标记留在主人侧且 pending 保留)+ 防重发快照(本轮已用工具发过则跳过路由)(见 13.7) |
+| 十六轮 | **询问内容/下载完成窗口回复发给了陌生人**(pendingQQReply 粘滞路由) | 轮次来源三分类 + 只有主人窗口直发消费 pending(一次性)+ 执行回复只写对方的话(见 16.7) |
+| 十七轮 | **串台后陌生人收不到消息**(主人先回"嗯"这类应答消费了 pending,真正指示轮的回复发回主人)+ 对方收到 2-3 条重复 | 执行回复标记化(【回复对方】标记才路由+消费 pending,无标记留在主人侧且 pending 保留)+ 防重发快照(本轮已用工具发过则跳过路由)(见 16.7) |
+
+
 
 ---
 
-## 附录 A:Agent 事件一览
+## 第 17 章 会话隔离与并发(V2.0 会话架构)
 
-| 事件 type | 载荷要点 | 说明 |
-| --- | --- | --- |
-| status | {status: idle/thinking/running/error} | 状态机 |
-| text | {messageId, text} | 流式文本增量 |
-| reasoning | {messageId, text} | 思维链增量(深度思考) |
-| tool | {messageId, callId, name, args, executing} | 工具调用流式 |
-| tool-call | {messageId, callId, name, args} | 工具开始执行(完整参数展示) |
-| tool-result | {messageId, callId, name, result, durationMs} | 工具结果回显 |
-| message | {id, role, parts, usage, proactive?} | **权威落定** |
-| tool-confirm-request | {seq, command} | 确认门请求 |
-| background-done | {title, message} | 后台任务终态 → 自动触发对话 |
-| mind-proactive | {messageId, guess} | 主动回合心理揣测 |
+> 2026-08-13 用户要求:"对话窗口右侧边缘居中折叠按钮 → 展开各外部会话
+> (私聊/群聊)上下文隔离、长期记忆共享、并发处理;UI 类似 QQ——一个窗口
+> 绑定一个会话,外部会话输入自动创建;LLM 可经工具绑定窗口/会话,支持
+> 屏蔽;主人的会话不计入;直接在对话窗口解决,不开新面板。"
 
-## 附录 B:常量与阈值表
+### 17.1 会话模型
 
-| 常量 | 值 | 说明 |
-| --- | --- | --- |
-| ISLAND_COMPACT_H | 56px | 紧凑态高度 |
-| 展开面板高度 | 244px(音乐)/ 540px(Agent 设置)/ 440px(库/设置) | 挂件版覆盖 |
-| MAX_WIDTH_PX | 500px | 岛体宽度上限 |
-| HOVER_EXTEND_PX | ~40px | 音乐紧凑态悬停扩展(进度条) |
-| 工具结果回填 | 8000 字符 | 截断 |
-| trimHistory | 400K token,至少 10 条 | 预算裁剪 |
-| max_output_tokens | 8192(主对话)/ 4096(总结等短任务) | 动态可调 4096-262144 |
-| 工具兜底超时 | 60s(AgentTool.timeoutMs 可覆盖) | doc_convert 200s / xxt 310s |
-| 迭代上限 | 25 轮 | 防死循环 |
-| 总结/判断超时 | 90s / 60s | Sub Agent |
-| MIND_MAX_LEN / MAX_RETRIES | 16 码元 / 5 次 | 心理揣测 |
-| 标题长度 | 推荐 10 字,≤20 码元 | sanitizeTitle 硬截断 |
-| 记忆 | 200 条 / 单条 500 字 | memory.json |
-| 技能 SKILL.md | 注入截 8000 / desc 截 300 | |
-| 媒体窗口 | 160-800,缺省 320 | 对话媒体初始宽 |
-| 视频库 | 路径引用,≤10GB | island-media 流式 |
-| 音频库 | ArrayBuffer,≤200MB | |
-| 主动陪伴间隔 | 5-480,默认 15 分钟 | |
-| 界面缩放 | 100-300,默认 200 | 只放大窗口/面板,UI 不缩放 |
-| 全屏尺寸校正 | 2px 容差 | fsLockedSize + resize 校正 |
-| 后台任务 TTL | 终态 24h / 进行中 6h | pruneTasks |
-| 图片库行高 | grid-auto-rows: 128px | 防行压缩 |
+- 会话键:`main`(主人主对话,不计入外部列表)/ `private:<QQ号>` / `group:<群号>`;
+- 外部会话消息到达即自动创建(knownSessions 登记 + 渲染端 extSessions 注册表);
+- **隔离**:每会话独立历史(localStorage `widget-agent-session:<key>`,main 沿用
+  `widget-agent-messages` 兼容)+ 独立 busy + 独立路由状态(询问轮标记/待回复
+  陌生人/防重发快照);
+- **共享**:长期记忆(memoryStore 单例)、档案卡(napcat-contacts/personas/chats
+  单例)、MCP 连接/技能扫描(sharedMcpManager/sharedSkillLoader 单例,经
+  EngineDeps.externalTools 注入各会话引擎——不重复拉起 MCP 进程)。
+
+### 17.2 并发架构(多实例)
+
+- 渲染端:每外部会话一个 `SessionHost`(独立 `useAgent` 实例,状态机/订阅/
+  排队各自独立,经 Proxy 稳定引用注册到 WidgetApp 的控制器注册表);
+- 主进程:`sessionEngines Map<key, {engine, route}>` 懒创建(上限 12,超出丢
+  最旧)——每会话独立 AgentEngine 实例 = 真并行;`agent:send` 第 6 参
+  sessionKey 路由到对应引擎;
+- 事件路由:引擎 emit 给所有事件附 sessionKey(AgentEvent 交叉类型),渲染端
+  各 useAgent 按 key 过滤;主对话接受无键事件(总结/揣测等后台标签);
+- 确认门 per-session(route.confirmSlot),IPC 带 sessionKey 找槽。
+
+### 17.3 UI(2026-08-13 二轮,用户澄清:一体式胶囊 + 不替换主对话)
+
+- **一体式胶囊**:右缘居中竖排「会话」按钮与面板**同一容器同一描边**——
+  点击后面板从按钮向左联通伸出(宽度过渡 0.28s),收起时整体消失,非独立
+  浮层;未读时按钮顶角红点;
+- **不替换主对话**:面板**叠在主对话窗口上**(绝对定位 z-index 30),主对话
+  内容全程保留;面板二态——列表态(外部会话条目:私聊 · /群聊 · + 未读
+  红点)→ 点击进入**会话小窗态**(返回键 + 标题 + 消息气泡流 + 输入框
+  「以主人身份回复」,Enter 发送;面板消息经 Proxy 控制器实时读 +
+  sessionTick 刷新);
+- 主对话的总结标题/心理揣测/主动陪伴仅 main 实例运行(外部会话无文字区
+  展示,白跑 LLM 无意义)。
+
+### 17.4 LLM 工具与屏蔽
+
+- napcat 工具新 action:`sessions`(列会话)/ `session_mute`(屏蔽,写配置
+  `agent.mutedSessions`,屏蔽后该会话消息只显示进窗口不触发回复)/
+  `session_bind`(绑定,主进程 island:session-bind 事件 → 渲染端切换);
+- 主对话不可屏蔽(主人会话)。
+
+### 17.5 已知取舍
+
+- 外部会话实例随 extSessions 常驻(会话多了内存增,上限未设——后续可按
+  LRU 卸载空闲会话);会话切换不迁移流式状态(各实例独立);
+- 并发下 Windows 系统通知/QQ 发送仍经 napcat 单客户端(WS 单连接串行发送,
+  引擎侧并行)。
+
+
 ---
 
-## 第 15 章 深入:引擎单轮生命周期(engine.ts)
+## 第 18 章 深入:引擎单轮生命周期(engine.ts)
 
-### 15.1 runTurn 完整流程
+### 18.1 runTurn 完整流程
 
 ```
 runTurn(text, history, ctx, opts)
@@ -2448,7 +2524,7 @@ runTurn(text, history, ctx, opts)
 └─ 异常/中止收敛(AbortController + raceWithTimeout 清理定时器)
 ```
 
-### 15.2 消息 parts 模型
+### 18.2 消息 parts 模型
 
 AgentMessage = {id, role, parts[]};parts 类型:
 
@@ -2465,7 +2541,7 @@ messages)——角色交替、tool-call/result 成对打包、reasoning 回放�
 5.3。**每轮只把"新增部分"推给下一轮**(pushedParts 指针),避免整段累积
 parts 重复回填(上下文成倍膨胀)。
 
-### 15.3 事件转发与中止
+### 18.3 事件转发与中止
 
 - 引擎事件经 `agent:event` 转发(webContents.send),统一 sendToWidget
   (isDestroyed 守卫);
@@ -2473,11 +2549,12 @@ parts 重复回填(上下文成倍膨胀)。
   + 子代理循环提前 break;渲染端 status idle 后迟到的流式事件丢弃;
 - 渲染端 abort 竞态双修(见 6.1)。
 
+
 ---
 
-## 第 16 章 深入:媒体播放链路
+## 第 19 章 深入:媒体播放链路
 
-### 16.1 island-media:// 自定义协议
+### 19.1 island-media:// 自定义协议
 
 ```
 渲染端:island-media://local/<encodeURIComponent(绝对路径)>
@@ -2491,7 +2568,7 @@ parts 重复回填(上下文成倍膨胀)。
   在 app ready 前;handler ready 后挂载;CSP img/media-src 放行。
 ```
 
-### 16.2 视频播放器控件(三处共用)
+### 19.2 视频播放器控件(三处共用)
 
 - 组件:VideoPlayer(对话消息)/ MediaLibVideoPlayer(多媒体库)/
   AgentMediaMini 进度条(视频岛);
@@ -2510,15 +2587,16 @@ parts 重复回填(上下文成倍膨胀)。
   命中区(原 4px 窄条,鼠标稍偏即落容器外丢 hover),scaleY 0→1 动画;
   拖拽期间 pickingRef 屏蔽 prop 回读(避免量化往返抖动)。
 
-### 16.3 封面抓帧
+### 19.3 封面抓帧
 
 - 对话视频默认展示第一帧作封面(黑色画面难辨认);video 跨域加载需
   crossOrigin="anonymous"(canvas 污染防抖),本地 island-media:// 同源
   放行;抓帧失败回退黑色 + 播放键。
 
+
 ---
 
-## 第 17 章 安全与隐私
+## 第 20 章 安全与隐私
 
 - **Electron 安全显式化**:webPreferences 显式 sandbox/webSecurity;挂件页
   CSP meta(script/style/img/font/media/connect 白名单,file:// 实测渲染
@@ -2538,11 +2616,12 @@ parts 重复回填(上下文成倍膨胀)。
 - **Markdown 渲染无注入面**:全部文本 React 转义,唯一例外 mermaid SVG
   (securityLevel 'strict' 自带转义)。
 
+
 ---
 
-## 第 18 章 常见问题(FAQ)
+## 第 21 章 常见问题(FAQ)
 
-### 18.1 音乐相关
+### 21.1 音乐相关
 
 - **进度条不动/回跳**:外部平台上报位置不可信,显示进度 = 本地时钟锚定,
   仅在曲目/播放状态变化或真实 seek 时重锚(见 3.3);
@@ -2551,7 +2630,7 @@ parts 重复回填(上下文成倍膨胀)。
 - **不支持 SMTC 的客户端**:点击后 1.2s 检测未生效 → 岛内提示并回退;
   本地播放器兜底(上传音乐)。
 
-### 18.2 Agent 相关
+### 21.2 Agent 相关
 
 - **LLM 一直空参调用工具**:validateRequiredArgs 结构化错误回填让 LLM
   自纠;仍不行可检查输出预算(思考模式高 effort 会吃光 4096,调
@@ -2565,7 +2644,7 @@ parts 重复回填(上下文成倍膨胀)。
 - **B站下载失败**:先确认扫码登录(对话里说"B站登录一下",展示二维码);
   下载落点 userData/bili/downloads/。
 
-### 18.3 界面/窗口相关
+### 21.3 界面/窗口相关
 
 - **窗口位置漂移/变大**:透明窗口 + 全屏的已知问题,fsLockedSize 校正
   (见 6.11);普通展开向右漂移由 set-size 补偿修复(见 4.3);
@@ -2577,18 +2656,19 @@ parts 重复回填(上下文成倍膨胀)。
 - **界面缩放不生效于文字**:缩放只放大面板/窗口尺寸,UI 元素不缩放
   (用户明确要求)。
 
-### 18.4 开发相关
+### 21.4 开发相关
 
 - **改了 electron/agent/*.ts 没生效**:必须重跑 pnpm build:electron
   (dev:widget 已前置,或 watch:electron 热重建);
 - **测试**:node tests/test-agent-core.mjs(引擎)/ pnpm test:markdown
   (解析器);巡检见第 8 章。
 
+
 ---
 
-## 第 19 章 未来规划(设计文档)
+## 第 22 章 未来规划(设计文档)
 
-### 19.1 双岛并存模式(设计文档,未实现)
+### 22.1 双岛并存模式(设计文档,未实现)
 
 > ⚠️ 全仓库对 `dual` 零匹配——main.cjs 的 widget:set-mode 只接受
 > music/agent、托盘 radio 只有两项、无 dual-shot.cjs、git 历史无相关提交。
@@ -2602,7 +2682,7 @@ parts 重复回填(上下文成倍膨胀)。
 CLAUDE.md「双岛并存模式」章节;实现时按 screenshot-tests.cjs 先例把组合
 状态机独立成 electron/dual.cjs(main.cjs 已 1180 行)。
 
-### 19.2 有意未做(审计结论)
+### 22.2 有意未做(审计结论)
 
 - 手势/展开状态机抽 hook(350 行,历史 bug 密集无测试,收益与风险不成
   比例);
@@ -2613,37 +2693,12 @@ CLAUDE.md「双岛并存模式」章节;实现时按 screenshot-tests.cjs 先例
 - App/WidgetApp 宿主接线工厂(需 ~25 个参数,收益<风险);
 - 状态文案双源合并(紧凑态流程文案 vs 头部状态徽标语义不同)。
 
+
 ---
 
-## 附录 C:术语表
+## 第 23 章 渲染端音乐 UI 详解
 
-| 术语 | 说明 |
-| --- | --- |
-| SMTC | System Media Transport Controls,Windows 系统媒体会话 |
-| 岛体 | 灵动岛本体组件(DynamicIsland.tsx) |
-| 紧凑态 / 展开态 | 收起胶囊 / 展开面板 |
-| 媒体小窗 | 收起 Agent 面板后岛体变形的视频/图片小窗(AgentMediaMini) |
-| media part | AgentPart 的媒体附件类型(窗口内播放) |
-| 确认门 | exec_command 首轮执行确认(createTurnConfirmGate) |
-| 后台任务注册表 | tasks.ts 通用任务(waiting/running/done/failed/cancelled) |
-| Sub Agent | 独立实例的辅助 LLM 调用(总结标题/心理揣测/判断/进化评估/子代理) |
-| 棘轮 | 进化评分严格高于原分才接受新版本 |
-| 前缀缓存 | DeepSeek 上下文缓存(前缀完整匹配才命中) |
-| trimHistory | 历史预算裁剪(400K) |
-| outputBudget | 引擎可变输出预算(set_output_budget 调整) |
-| QuickMenu | 通用滚轮切换菜单组件(整合按钮 + 联通展开 + 高亮滑块) |
-| WheelSwap | 内容交换动画组件(滚轮逐格重挂载重放) |
-| 设置桥 | window.__islandSettings(settingsBridge.ts,LLM 设置工具入口) |
-| island-media:// | 本地媒体流式协议(Range 支持) |
-| VIEW_WINDOW_H | 各面板视图对应的宿主窗口高度表 |
-| SETTINGS_VIEWS | 设置类视图集合(屏蔽一切缩回操作) |
-| 巡检 | WIDGET_SCREENSHOT UI 测试(截图 + 断言) |
-| 双岛并存 | 设计文档中的 dual 模式(未实现) |
----
-
-## 第 20 章 渲染端音乐 UI 详解
-
-### 20.1 展开面板布局
+### 23.1 展开面板布局
 
 - 挂件版展开面板高度 244px(覆盖组件默认 208px;控制区 flex: none 贴
   进度条,无居中留白);
@@ -2654,7 +2709,7 @@ CLAUDE.md「双岛并存模式」章节;实现时按 screenshot-tests.cjs 先例
 - 紧凑态:左侧文字区(歌名 + 状态文案)+ 右侧图标(音乐音符 / Agent 四角星),
   宽度随文字内容扩展,px→px 过渡。
 
-### 20.2 进度条与手势
+### 23.2 进度条与手势
 
 - 进度条 4px 圆角条 + 强调色渐变填充,悬停/拖拽显示圆点 thumb;
 - 点击进度条 seek(仅左键,button !== 0 守卫——右键只属于拖拽);
@@ -2662,18 +2717,18 @@ CLAUDE.md「双岛并存模式」章节;实现时按 screenshot-tests.cjs 先例
   显示系统真实状态);
 - seek 支持记忆(island-seek-support 按 sourceAppId 持久化,见 3.3)。
 
-### 20.3 时间粒子与氛围
+### 23.3 时间粒子与氛围
 
 - 展开态背景时间粒子效果(island-time-particles);垂直居中必须用
   transform: translateY(-50%),不要用 translate 属性(透明窗口下偶发失效)。
 
-### 20.4 播放列表(本地播放器)
+### 23.4 播放列表(本地播放器)
 
 - 上传音乐 IndexedDB(island-uploads);列表行:封面/名称/时长/操作(播放/
   删除);
 - 播放列表 ↔ 音频库同步(见 6.6);导入播放列表自动播放首曲。
 
-### 20.5 双宿主接线(WidgetApp 数据流)
+### 23.5 双宿主接线(WidgetApp 数据流)
 
 ```
 WidgetApp
@@ -2691,9 +2746,10 @@ WidgetApp
 └─ DynamicIsland 渲染(所有状态 + 回调)
 ```
 
+
 ---
 
-## 第 21 章 性能优化手册(软件渲染约束)
+## 第 24 章 性能优化手册(软件渲染约束)
 
 主进程 disableHardwareAcceleration 后一切渲染走软件路径,本项目性能
 策略都围绕"软件渲染贵"展开:
@@ -2719,11 +2775,12 @@ WidgetApp
 7. **blob URL 缓存**:音频试听按条目缓存(原每次渲染重建 URL 中断播放);
 8. **协议流式**:island-media 分块发送,内存 ≈ 块大小(10GB 视频不 OOM)。
 
+
 ---
 
-## 第 22 章 调试速查
+## 第 25 章 调试速查
 
-### 22.1 常见场景速查
+### 25.1 常见场景速查
 
 | 场景 | 命令/做法 |
 | --- | --- |
@@ -2738,7 +2795,7 @@ WidgetApp
 | UI 巡检 | WIDGET_SCREENSHOT=<path> WIDGET_SCREENSHOT_QUIT=1 pnpm dev:widget |
 | 杀残留 electron | powershell Stop-Process -Name electron |
 
-### 22.2 巡检模式一览
+### 25.2 巡检模式一览
 
 | WIDGET_SCREENSHOT_MODE | 内容 |
 | --- | --- |
@@ -2750,7 +2807,7 @@ WidgetApp
 | chat-media | 对话媒体(消息气泡视频/音频) |
 | media-lib | 多媒体库(79 用例) |
 
-### 22.3 常见坑(一分钟自查)
+### 25.3 常见坑(一分钟自查)
 
 - 改 electron/agent 没生效 → 重跑 build:electron(dev:widget 已前置);
 - 视频"无法播放" → HEVC 报错 = 未应用 HEVC 补丁(dev.bat 自动应用;手动 `node scripts/apply-hevc-electron.mjs`,回退 `--restore`);mkv/avi/flv 容器/编码不支持;
@@ -2761,26 +2818,10 @@ WidgetApp
 - 缓存命中率低 → 检查 instructions/历史序列化幂等、tools 顺序固定、
   reasoning 固定回传(5.3.4)。
 
+
 ---
 
-## 附录 D:修改清单(给后续开发者的工作流模板)
-
-完成一次功能改动后的标准动作:
-
-1. `pnpm build`(tsc -b 双端类型 + Web 构建);
-2. `pnpm lint`;
-3. `node tests/test-agent-core.mjs`(引擎改动必须;新增工具/行为补用例);
-4. `pnpm test:markdown`(解析器改动);
-5. `pnpm dev:widget` 实机验证(默认完成标准,配 timeout 自动退出;
-   完整巡检只在用户明确要求时跑,需 WIDGET_SCREENSHOT_QUIT=1);
-6. 同步文档:README(用户向)/ WIDGET-README(部署)/ docs/TECH.md(技术);
-   引擎/工具/常量改动同步 CLAUDE.md 对应章节与本文档第 5/7 章;
-7. 新增渲染端设置工具操作 → settingsTools.ts op 类型 + 桥方法 +
-   main.cjs ISLAND_SETTINGS_OPS 白名单三处同步(漏白名单 = 安全侧失败);
-8. 新增 IPC → preload + desktop.d.ts + main.cjs safeHandle 三处同步。
----
-
-## 第 23 章 双入口行为差异表
+## 第 26 章 双入口行为差异表
 
 | 行为 | Web 演示版(App.tsx) | 桌面挂件(WidgetApp.tsx) |
 | --- | --- | --- |
@@ -2795,11 +2836,12 @@ WidgetApp
 | 提示文本 | hint prop 渲染岛内 | 同款(禁止岛外 Toast) |
 | 手势 | 三连击/左滑右滑可用 | 可选 prop 控制(Agent 模式屏蔽) |
 
+
 ---
 
-## 第 24 章 音乐模式深入实现
+## 第 27 章 音乐模式深入实现
 
-### 24.1 useSystemMedia(外部平台监听)
+### 27.1 useSystemMedia(外部平台监听)
 
 - 轮询桥状态(playbackStatus/title/artist/position/duration/playbackMode/
   sourceAppId),曲目变化/播放状态变化重锚定;
@@ -2808,48 +2850,49 @@ WidgetApp
   挂起验证(seek ±3s 或单次跳变 >5s 视为生效;3s 超时回退);
 - 验证结果按 sourceAppId 持久化(localStorage island-seek-support)。
 
-### 24.2 useMediaPlayer(本地播放器)
+### 27.2 useMediaPlayer(本地播放器)
 
 - 播放列表(上传音乐 IndexedDB island-uploads)+ 进度/时长/播放模式;
 - 上传/删除/排序;addTracks 自动补录音频库(见 6.6);
 - 歌词:本地曲目无外部歌词时走歌词 API 查询(useLyrics + provider)。
 
-### 24.3 useLyrics(歌词查询)
+### 27.3 useLyrics(歌词查询)
 
 - 查询 key = provider|id|title|artist(切换厂商即刷新,见 3.4);
 - lastKeyRef 校验过期响应(曲目已切换一律丢弃);
 - lyricPosition 单独成轨渲染(见 3.4);歌词行 42px 高,折叠动画方向性
   (展开回弹/收起无过冲)。
 
-### 24.4 数据源切换细节
+### 27.4 数据源切换细节
 
 - externalActive 为 true 时:进度/时长/播放模式/曲目全部取外部系统;
 - 切走一方自动暂停(双声齐响防护);
 - 外部短暂回落本地(瞬时 false)不误用本地首曲发歌词查询(useLyrics
   竞态防护)。
 
+
 ---
 
-## 第 25 章 引擎工具实现细节补充
+## 第 28 章 引擎工具实现细节补充
 
-### 25.1 web_search
+### 28.1 web_search
 
 - Bing 主用、DDG 回退(duckduckgo 在中国不可达,实测 fetch failed);
 - Bing 解析 li.b_algo 的 h2 链接 + p 摘要;HTML 端点免 Key;
 - 结果截断 8000 回填。
 
-### 25.2 notify
+### 28.2 notify
 
 - new Notification({title, body}),Windows 需 app.setAppUserModelId
   (否则静默失败,2026-08-07 修复);
 - 测试环境 stub 记录到 global.__notifications 供断言。
 
-### 25.3 open_url
+### 28.3 open_url
 
 - shell.openExternal;main.cjs 校验 http/https 白名单(防 window.open
   弹裸窗口);Web 演示版回退 window.open。
 
-### 25.4 open_file / exec_command 媒体拦截
+### 28.4 open_file / exec_command 媒体拦截
 
 - open_file:媒体扩展名命中 → 返回 {text, media:[{kind,url,name}]} →
   引擎注入助手消息 media part → 渲染端 MediaFrame 窗口内播放;
@@ -2860,7 +2903,7 @@ WidgetApp
 - mediaKindForPath 与 open_file 共用;exec_command 描述注明勿用 start
   打开媒体。
 
-### 25.5 EngineDeps 接口(main.cjs 注入)
+### 28.5 EngineDeps 接口(main.cjs 注入)
 
 | deps | 说明 |
 | --- | --- |
@@ -2872,11 +2915,12 @@ WidgetApp
 | setTaskDoneHandler(cb) | 后台任务终态接线 |
 | getLastProactiveTick() | 主动陪伴调度判定(巡检用) |
 
+
 ---
 
-## 第 26 章 设置视图深入
+## 第 29 章 设置视图深入
 
-### 26.1 背景编辑器
+### 29.1 背景编辑器
 
 - 分段编辑(展开态/紧凑态独立:上传/移除/不透明度滑杆作用于当前形态);
 - 裁切视口(预览框)自身不透明显示原图、不受蒙版影响;视口切形态时圆角
@@ -2885,7 +2929,7 @@ WidgetApp
   折叠为 island-bg-view--compact(288px),宿主经 onPanelViewChange → IPC
   widget:set-height 调整窗口高度(480 ↔ 280),离开视图回落。
 
-### 26.2 字体颜色算法
+### 29.2 字体颜色算法
 
 - auto = 合成亮度:背景图以 opacity 叠加在岛体深底 rgb(8,10,14) 上,
   可读性取决于合成后亮度(像素 × opacity + 深底 × (1-opacity));取**当前
@@ -2903,7 +2947,7 @@ WidgetApp
 - 颜色页岛体 352px(挂件窗口 364);SV 面 flex:1 吃满剩余高度;字体视图
   本身固定 200px 紧凑高度。
 
-### 26.3 上传与库管理
+### 29.3 上传与库管理
 
 - 字体上传组件内查重(同一 dataUrl 不重复添加)后 onFontAdd;上传的字体
   注入 @font-face(组件内动态 style 标签 island-font-face,字体族
@@ -2914,7 +2958,7 @@ WidgetApp
   编辑器共用 TALL 高度机制);搜索框按名称过滤、行内编辑(Enter 提交/Esc
   取消/失焦提交)、删除(删当前应用字体则回退默认)。
 
-### 26.4 歌词 API 视图
+### 29.4 歌词 API 视图
 
 - 预设厂家 + 自定义 URL 模板({title}/{artist} 占位);
 - 自动切换开关(widget-lyric-auto,默认开启):开启时按监听平台自动换
@@ -2923,9 +2967,10 @@ WidgetApp
 - 切换即刷新(查询 key 含 provider + effect 依赖 platformId);
 - 播放键下方提示显示对应厂商名(ControlView)。
 
+
 ---
 
-## 第 27 章 代码规范与注释约定
+## 第 30 章 代码规范与注释约定
 
 1. **全中文注释**(用户要求):模块头注释写清「功能 + 关键实现 + 踩坑/
    修复日期」,踩坑实录带 (实测) 标注与日期;
@@ -2942,10 +2987,11 @@ WidgetApp
    导入;
 7. **文档同步**:README(用户)/ WIDGET-README(部署)/ docs/TECH.md(技术)/
    CLAUDE.md(引擎与架构细节)——完成功能改动后同步,本模板见附录 D;
-8. **明确不做项**记录在案(见 19.2),避免反复评估同一决策。
+8. **明确不做项**记录在案(见 22.2),避免反复评估同一决策。
+
 ---
 
-## 第 28 章 SMTC 数据流详解
+## 第 31 章 SMTC 数据流详解
 
 ```
 Windows 媒体会话(QQ音乐/网易云/浏览器…)
@@ -2976,11 +3022,12 @@ DynamicIsland(进度条/歌词/控制)
   跟随,没跟随则提示并回退;
 - `pnpm bridge` 独立运行桥接脚本(单独调试 SMTC)。
 
+
 ---
 
-## 第 29 章 开发任务指南(How-To)
+## 第 32 章 开发任务指南(How-To)
 
-### 29.1 如何新增一个内置工具
+### 32.1 如何新增一个内置工具
 
 1. `electron/agent/tools.ts` 的 createTools 返回数组里加
    `{name, description, parameters, execute}`(中文描述,含"适合/注意",
@@ -2991,7 +3038,7 @@ DynamicIsland(进度条/歌词/控制)
 4. 补测试(tests/test-agent-core.ts:注册/参数校验/执行路径/错误路径);
 5. 文档同步(本文档 5.4 工具表 + 第 11 章引导小节)。
 
-### 29.2 如何新增一个灵动岛设置工具操作
+### 32.2 如何新增一个灵动岛设置工具操作
 
 1. `electron/agent/settingsTools.ts`:IslandSettingsOp 联合类型加 op +
    工具对象(name/description/parameters/execute,桥返回值带 previous
@@ -3003,7 +3050,7 @@ DynamicIsland(进度条/歌词/控制)
 4. 渲染端监听 scope 重读状态(WidgetApp onSettingsChange);
 5. 补测试 + 文档。
 
-### 29.3 如何新增一个面板视图
+### 32.3 如何新增一个面板视图
 
 1. `DynamicIsland.tsx`:PanelView 联合类型加值;panelView === 'xx' 分支
    渲染组件;是设置类视图 → SETTINGS_VIEWS 常量(屏蔽一切缩回操作);
@@ -3013,7 +3060,7 @@ DynamicIsland(进度条/歌词/控制)
 4. 入口:托盘 IPC / Agent ⋯ 菜单 / 设置视图入口(按需求);
 5. 巡检:agent 巡检或独立模式补断言。
 
-### 29.4 如何新增一个 IPC 通道
+### 32.4 如何新增一个 IPC 通道
 
 1. `electron/preload.cjs`:contextBridge 暴露(desktop 对象);
 2. `widget/desktop.d.ts`:类型同步(事实来源);
@@ -3021,95 +3068,18 @@ DynamicIsland(进度条/歌词/控制)
 4. 渲染端调用 window.desktop?.xxx(挂件版)或 Web 版回退;
 5. 测试/文档。
 
-### 29.5 如何新增一个面板视图的窗口高度
+### 32.5 如何新增一个面板视图的窗口高度
 
 VIEW_WINDOW_H 是 `Partial<Record<PanelView, number>>`(拼错键编译器兜底),
 WidgetApp handlePanelViewChange 按视图查表调 set-height;大面板(440/540/
 580)登记后窗口跟随,离开视图回落 280。
 
----
-
-## 附录 E:IPC 详细参数
-
-| 通道 | 参数 | 返回 |
-| --- | --- | --- |
-| widget:pointer | {over: boolean} | - |
-| widget:drag-start/move/end | {x, y}(move 节流 rAF)| - |
-| widget:set-size | {width, height, immediate?} | - |
-| widget:set-mode | {mode, source} | - |
-| widget:fullscreen | {fs, isMini} | - |
-| widget:open-settings | - | - |
-| widget:open-media-library | - | - |
-| agent:send | {text, history} | - |
-| agent:abort | - | - |
-| agent:event | 事件对象(见附录 A) | - |
-| agent:config-get / agent:config-set | - / {patch} | AgentConfig |
-| agent:tools | - | AgentToolInfo[] |
-| agent:mcp-test | {name, config} | {ok, tools?} / {error} |
-| agent:memory-get / set | - / {op, payload} | MemoryEntry[] |
-| agent:memory-export / import | - / {path} | {imported, skipped} |
-| agent:evolve | {rounds} | - |
-| agent:evolution-log / rollback / reset | - | {entries} / {ok,error} |
-| agent:summarize | {messages} | {title} |
-| agent:mind-guess | {messages} | {guess} |
-| agent:proactive-tick | {messages, idleMinutes} | {should, hint?} |
-| agent:skill-import | - | {imported, skipped} |
-| app:open-external | {url} | - |
-| app:open-media-external | {kind, src} | - |
-| app:pick-media-files | {exts, maxBytes} | {paths} |
-| app:island-pick-files | {accept, multiple} | {paths} |
 
 ---
 
-## 附录 F:播放列表与上传流程
+## 第 33 章 深入:布局计算(layout.ts)
 
-```
-用户上传音乐(Web:File input;挂件:系统对话框 app:island-pick-files)
-  → uploadStore 存 IndexedDB(island-uploads,持久化)
-  → useMediaPlayer.addTracks
-      ├─ 播放列表追加 + 自动播放
-      └─ 音频库同步:无同名(按文件名)自动补录(参考图片库导入机制)
-
-多媒体库音频 → 「导入播放列表」(单个/批量,勾选)
-  → handleAddLibraryTracks
-      ├─ addLibraryTracks(存 island-uploads,自动播放首曲)
-      └─ setMode('music')  → 模式切换动画自动收起岛体
-```
-
-## 附录 G:主动陪伴全链路时序
-
-```
-用户无操作 ≥ N 分钟
-  → useAgent 调度器(60s 周期检查,agent 模式/配置开/idle/有历史/in-flight
-    守卫)
-  → agent:proactive-tick(messages, idleMinutes)
-  → main.cjs → judgeProactive(Sub Agent,同源上下文:提示词+记忆+进化+
-    后台任务+当前时间;JSON {should, hint};失败 → should:false)
-  → should:true → engine.proactiveTurn(history, {hint})
-      → PROACTIVE_INSTRUCTION 追加 input 末尾(system 请求项,不进历史)
-      → 完整回合(思考/流式/工具/子代理)
-      → message 事件落定(proactive: true)
-  → 主进程 getMindAgent().guess([消息]) → Notification('岛灵 · 心理揣测')
-    + mind-proactive 事件 → 紧凑态文字区
-  → 渲染端重置 idle 时钟(proactive 末条跳过 mindRunner,标题照常)
-```
-
----
-
-## 第 30 章 结语
-
-本文档与 CLAUDE.md 分工:CLAUDE.md 是给 Claude Code 的"引擎级操作手册"
-(每处实现的踩坑实录、修复日期、测试断言),本文档是"工程级技术说明"
-(架构、数据流、How-To、速查表)。两者都以 docs/TECH.md 为 LLM 功能引导
-知识库(get_feature_guide 工具读取)。
-
-维护约定:每次功能改动按附录 D 清单同步本文档对应章节;第 11 章功能清单
-保持用户话术最新(它是 LLM 引导用户的一手资料)。
----
-
-## 第 31 章 深入:布局计算(layout.ts)
-
-### 31.1 宽度计算
+### 33.1 宽度计算
 
 - 紧凑态宽度 = 文字区内容宽 + 固定部件(图标/边距),随文字字数扩展;
 - 悬停扩展:音乐模式紧凑态悬停时 + HOVER_EXTEND_PX(进度条空间),
@@ -3120,22 +3090,23 @@ WidgetApp handlePanelViewChange 按视图查表调 set-height;大面板(440/540/
 - conflictsWithBar(conflicts 公式内联 ×4 收敛):判断文字区/图标与进度条
   是否冲突,决定显示优先级。
 
-### 31.2 高度计算
+### 33.2 高度计算
 
 - 音乐模式展开 244px(挂件版覆盖);
 - Agent 面板:--agent-h 变量(AgentView scrollHeight 测量,clamp [200,
   600],80ms 节拍,流式瞬跳 + 落定过渡,见 6.2);
 - 大面板视图(settings/background/库/agent-settings/lyric-api):
-  VIEW_WINDOW_H 表驱动窗口高度(见 29.5)。
+  VIEW_WINDOW_H 表驱动窗口高度(见 32.5)。
 
-### 31.3 布局 effect 校准
+### 33.3 布局 effect 校准
 
 - 悬停态滞留校准:每次重算宽度前 island.matches(':hover') 校准(见 3.6);
 - 高度动画并行:宽度/高度同曲线同时程 0.3s(见 6.2)。
 
+
 ---
 
-## 第 32 章 深入:消息组件群(AgentMessages.tsx)
+## 第 34 章 深入:消息组件群(AgentMessages.tsx)
 
 | 组件 | 说明 |
 | --- | --- |
@@ -3146,15 +3117,16 @@ WidgetApp handlePanelViewChange 按视图查表调 set-height;大面板(440/540/
 | MediaFrame | 媒体附件(图片/视频/音频气泡,见 6.4) |
 | VoiceBubble | 音频语音气泡(胶囊 + 声波动画) |
 | AgentImage | data URL/远程图片(按 --agent-s 缩放 × 1/4 展示) |
-| VideoPlayer | 定制视频播放器(见 6.4/16.2) |
+| VideoPlayer | 定制视频播放器(见 6.4/19.2) |
 
 - 已落定块 React.memo;工具结果一次遍历建 Map 配对(去 O(parts²));
 - 助手消息脚注显示"输入/输出/缓存命中"小字(缓存命中率可观测);
 - 流式文本增量重解析 Markdown(流式友好退化,见 6.3)。
 
+
 ---
 
-## 第 33 章 深入:AgentMediaMini 时序
+## 第 35 章 深入:AgentMediaMini 时序
 
 ```
 收起面板(doCollapse, mediaMini: true)
@@ -3173,9 +3145,10 @@ WidgetApp handlePanelViewChange 按视图查表调 set-height;大面板(440/540/
   └─ 播放状态/音量/倍速/循环经 videoPrefs + agentMediaPositions 同步
 ```
 
+
 ---
 
-## 第 34 章 深入:useAgent 状态机
+## 第 36 章 深入:useAgent 状态机
 
 ```
 状态:status = idle | thinking | running | error
@@ -3190,60 +3163,49 @@ WidgetApp handlePanelViewChange 按视图查表调 set-height;大面板(440/540/
 └─ 主动陪伴调度(60s 周期,见附录 G)
 ```
 
+
 ---
 
-## 第 35 章 常见定制任务问答
+## 第 37 章 常见定制任务问答
 
-### 35.1 "我想让岛变好看"
+### 37.1 "我想让岛变好看"
 
 三个方向(设置视图 / LLM 工具都行):主题色(强调色,按钮/气泡/进度条)、
 背景(双形态独立图片 + 不透明度 + 裁切)、字体(导入 ttf/otf/woff/woff2
 + 文字颜色自动/自定义)。对话里直接说即可即时生效
 (set_theme_color / import_background / import_font / set_font_color)。
 
-### 35.2 "我想让 LLM 更懂挂件功能"
+### 37.2 "我想让 LLM 更懂挂件功能"
 
 对话里问"你有什么功能"——LLM 会调 get_feature_guide 读取本文档第 11 章
-按话题介绍(见 5.4.4 工具设计与 11.18 引导话术)。
+按话题介绍(见 5.4 内置工具表与 11.18 引导话术)。
 
-### 35.3 "我想加一个 MCP 服务"
+### 37.3 "我想加一个 MCP 服务"
 
 两种方式:① Agent 设置 → MCP 服务(名称/传输类型/命令或 URL/参数/环境
 变量,逐条测试);② 对话里说"添加一个 MCP 服务,命令是 npx …"(mcp_config
 工具,下一轮对话起生效)。
 
-### 35.4 "我想让岛灵记得我的偏好"
+### 37.4 "我想让岛灵记得我的偏好"
 
 对话里说"记住:我晚上不用电脑"——remember 工具写入长期记忆(偏好/事实/
 工作流/教训),设置视图可管理(增删改查/导入导出);记忆参与每轮系统提示。
 
-### 35.5 "主动陪伴会打扰我吗"
+### 37.5 "主动陪伴会打扰我吗"
 
 主动陪伴默认开启(间隔 15 分钟),判断偏保守(should:false 安全侧);可以
 对话里说"把主动陪伴关掉"或"间隔改成 30 分钟";开启确认门
 (Agent 设置 → exec_command 确认)后危险命令也会先询问。
 
+
 ---
 
-## 附录 H:CLAUDE.md 章节索引
-
-| 章节 | 内容 | 对应本文档 |
-| --- | --- | --- |
-| 项目概述/常用命令/验证约定 | 命令与约定 | 第 2 章 |
-| 架构(双入口/数据源双轨/主进程/桥接/架构优化) | 架构总览与优化史 | 第 1/3/4/13 章 |
-| Agent 模式(引擎/工具/任务/MCP/技能/记忆/进化/审计) | 引擎全部细节 | 第 5 章 |
-| 渲染端(useAgent/AgentView/动画/媒体/Markdown) | 渲染端细节 | 第 6 章 |
-| 消息气泡 Markdown 渲染 | 解析器细节 | 6.3 |
-| 关键约束(提示文本/透明窗口/歌词折叠/竞态/悬停校准) | 踩坑 | 第 10 章 |
-| 双岛并存模式(设计文档) | 未实现设计 | 19.1 |
----
-
-## 第 36 章 三 Provider 历史序列化对照
+## 第 38 章 三 Provider 历史序列化对照
 
 同一段历史(含 reasoning + tool-call/tool-result),三个 provider 的输出
 形状不同——序列化器必须严格按各自格式,否则 400/角色错乱/缓存断前缀。
 
-### 36.1 Responses(默认)
+### 38.1 Responses(默认)
 
 ```json
 {"input": [
@@ -3260,7 +3222,7 @@ WidgetApp handlePanelViewChange 按视图查表调 set-height;大面板(440/540/
 规则:reasoning 必须回传(缺失 400);function_call_output 的 call_id 必须
 与 function_call 对应;相邻 assistant 消息归并。
 
-### 36.2 Chat Completions
+### 38.2 Chat Completions
 
 ```json
 {"messages": [
@@ -3274,7 +3236,7 @@ WidgetApp handlePanelViewChange 按视图查表调 set-height;大面板(440/540/
 规则:reasoning 走 reasoning_content 字段;工具结果打包进 role:"tool"
 消息;角色严格交替(相邻同角色合并)。
 
-### 36.3 Anthropic Messages
+### 38.3 Anthropic Messages
 
 ```json
 {"messages": [
@@ -3292,18 +3254,19 @@ result 成对,序列化时重排);同一条助手消息里 tool_use 之后不能
 thinking 块需 signature 不可回放,已丢弃(reasoning parts 回放时丢弃);
 max_tokens 必填 4096。
 
-### 36.4 序列化稳定性要求
+### 38.4 序列化稳定性要求
 
 - instructions 与历史序列化幂等(同一历史每次输出字节一致);
 - tools 顺序固定(内置工具数组顺序、MCP/技能按字母序);
 - reasoning item / reasoning_content 固定回传;
 - 任何序列化抖动都会断 DeepSeek 前缀缓存(命中价差 50 倍)。
 
+
 ---
 
-## 第 37 章 灵动岛设置工具端到端示例(真实对话)
+## 第 39 章 灵动岛设置工具端到端示例(真实对话)
 
-### 37.1 "把岛调成紫色"
+### 39.1 "把岛调成紫色"
 
 ```
 用户:把岛调成紫色
@@ -3313,7 +3276,7 @@ LLM:get_island_settings → 主题色:null(未设置,默认)
        都变成紫色了
 ```
 
-### 37.2 "导入 D:\music\1.mp3 到音频库"
+### 39.2 "导入 D:\music\1.mp3 到音频库"
 
 ```
 用户:导入 D:\music\1.mp3 到音频库
@@ -3327,7 +3290,7 @@ LLM:list_audio_library → import? 不——播放列表在渲染端,LLM 无此�
      用 set_mode? 无此工具)——实际:渲染端操作,LLM 引导即可
 ```
 
-### 37.3 "播放视频库里的视频"
+### 39.3 "播放视频库里的视频"
 
 ```
 用户:播放视频库里的 XX 视频
@@ -3337,7 +3300,7 @@ LLM:list_video_library → 找到 id
      → 回复:已打开多媒体库并开始播放「XX」
 ```
 
-### 37.4 "界面字太小"
+### 39.4 "界面字太小"
 
 ```
 用户:界面字太小
@@ -3346,9 +3309,6 @@ LLM:get_island_settings → 缩放 100%
        (只放大面板/窗口,文字本身不缩放——如仍觉得小可再调大)
 ```
 
----
-
-## 附录 I:全部工具一览
 
 ### 内置(engine.ts 注册)
 
@@ -3389,27 +3349,10 @@ remember / forget / list_memory / update_memory / evolve_memory
 
 见 7.2 工具清单表。
 
+
 ---
 
-## 附录 J:全部面板视图一览
-
-| PanelView | 岛体高 | 窗口高 | 返回语义 |
-| --- | --- | --- | --- |
-| control | 244 | 280 | 收起 |
-| agent | 内容驱动(200-600) | 岛体+40 | ⋯ 菜单收起 |
-| settings | 440 | 480 | 收起(设置类) |
-| background | 440(compact 288) | 480(280) | 返回设置/多媒体库 |
-| theme | 352 | 364 | 返回设置(设置类) |
-| font | 200 | - | 返回设置(设置类) |
-| font-color | 352 | 364 | 返回字体(设置类) |
-| font-library / image-library | 440 | 480 | 返回对应视图(设置类) |
-| lyric-api | 440 | 480 | 返回设置(设置类) |
-| agent-settings | 540 | 580 | 返回对话(设置类) |
-| media-library | 540 | 580 | 从哪来回哪去(托盘收起/菜单回对话) |
-| history / tools | 保持进入前 | 保持 | 返回对话 |
----
-
-## 第 38 章 版本历史与演进时间线
+## 第 40 章 版本历史与演进时间线
 
 | 时间 | 里程碑 |
 | --- | --- |
@@ -3420,13 +3363,14 @@ remember / forget / list_memory / update_memory / evolve_memory
 | 2026-08-08 | 工具参数校验(LLM 自纠)、输出预算动态调整、多媒体库(图片/音频/视频)、island-media 流式协议、对话媒体窗口、Markdown 渲染器、媒体拦截(open_file/exec_command start)、消息气泡 mermaid/表格、播放列表 ↔ 音频库同步、HEVC 硬解、智能截图修复 |
 | 2026-08-09 | 媒体小窗(视频岛/图片岛)、全屏(工作区扩展/退出缩回)、进度双向同步、封面抓帧、chat-media 巡检 |
 | 2026-08-10 | 定制视频控件(VideoExtras 音量/更多,三处同步)、帮助手册移除、收起语义拆分(灵动岛/多媒体岛)、**主动陪伴工具积极性(拟人)**、**设置工具白名单修复 + play_library_video 跳转播放**、**本文档(技术文档 3000 行)+ get_feature_guide 引导工具 + README 重写** |
-| **V2.0**(2026-08-13) | **文档 V2.0 重写**:README/WIDGET-README 重写 + TECH.md 新增第 12 章 HEVC 补丁工程(原理/换装/图标/排障治理汇总)与第 13 章 提示词约束工程(分层拼装/身份判定/注入模板/档案卡/剥离链/Sub Agent/防泄露简表);配套代码:受保护记忆、NapCat 主人视角叙述剥离、补丁版段错误根治(toast 迁移托盘气泡 + fetch 软中止 + 手写 WS)、恢复硬件加速、图标优化、QQ 统一注入模板 + 档案卡 + 历史隔离 + 主人身份逐条判定、Sub Agent 提示词精简、视频岛边缘裁切、档案卡 UI 动画 |
+| **V2.0**(2026-08-13) | **文档 V2.0 重写**:README/WIDGET-README 重写 + TECH.md 新增第 15 章 HEVC 补丁工程(原理/换装/图标/排障治理汇总)与第 16 章 提示词约束工程(分层拼装/身份判定/注入模板/档案卡/剥离链/Sub Agent/防泄露简表);配套代码:受保护记忆、NapCat 主人视角叙述剥离、补丁版段错误根治(toast 迁移托盘气泡 + fetch 软中止 + 手写 WS)、恢复硬件加速、图标优化、QQ 统一注入模板 + 档案卡 + 历史隔离 + 主人身份逐条判定、Sub Agent 提示词精简、视频岛边缘裁切、档案卡 UI 动画 |
 | 2026-08-12 | **HEVC 原生软解**(自编译 Electron:ffmpeg HEVC 解码器 + media 层门控补丁,apply-hevc-electron.mjs 换装/回退,dev.bat 自动应用;AV1 验证本就支持)、hevc-frame 巡检改断言、**lint 警告清零(12 处)+ TS2367 修复 + 音乐控制桥实时状态修复(ref 镜像,原空依赖闭包读到首次渲染值)**、NapCat 主人硬编码、群消息直进对话与记忆强化、分会话人格、工具输出目录、set_audio_config/set_output_budget 等工具、消息列表虚拟滚动 |
 | 2026-08-13 | **受保护记忆条目**(进化丢失岛灵设定修复:protected 标记 + 人设自动锁定/加载迁移/applyChanges 硬拦截/forget 拒删/设置界面 🔒)、**NapCat 主人视角叙述剥离**(私聊窗口泄露修复:stripMasterNarration + 回他「…」引号回复提取 + 三处注入指令补人称约束)、**补丁版段错误根治**(toast 迁移托盘气泡 showNotify 统一出口 + fetch 移除 AbortSignal(llhttp UAF 规避,中止移 parseSse 安全点)+ NapCat 手写 WS 传输 wsclient.ts;补丁版 + 真流量 3×3 轮 90s 全稳定)、**恢复硬件加速**(roundedCorners:false 等透明窗口硬化,GPU 合成 + 视频硬解)、**图标优化**(make-icon 产出多尺寸 icon.ico(16-256 PNG-in-ICO)+ brand-electron-icon.mjs rcedit 烙进自编译 exe,弹窗/托盘/进程图标 256 高清;托盘与窗口图标 32→256)、**视频岛边缘裁切加固**(内层容器 + 视频/图片自身 22px 圆角 + isolation,GPU 合成层逃逸父级裁剪的四角矩形残留根治;全屏态重置圆角;mini 巡检增小窗截图 + 前后 DOM 几何诊断)、**QQ 提示词约束与窗口布局重构**(统一注入模板:类别行 QQ私聊/群聊·QQ号·称呼 + 原文 + 档案卡 + 编号回复规则[含安全红线:拒绝教唆操控主人电脑];buildProfileCard 按 QQ 号聚合联系人/人格/记忆 = 档案卡;UserBubble 分层显示 QQ→私聊/群聊→QQ号→可展开档案卡;Sub Agent 提示词精简:标题降级链 3→2、揣测四条规则;**档案卡 UI 动画化**(受控展开 + 0fr↔1fr 高度过渡与工具卡同款曲线,箭头旋转 180°,标签行轻强调,内容随高度渐入/收起淡出;历史剥离双通道:历史保留档案卡做消息隔离)、**档案卡称呼实时更新 + 唯一主人称呼**(主人缺名兜底「主人」,LLM 经 contact_update 实时更新档案下次生效,「主人」称呼只属于 1178821869)、**群聊冒泡**(主动陪伴判断注入群聊状态块,群里安静超陪伴间隔时偶尔 send_group 活跃气氛)、**bili 完成通知防吞**(background-done busy 时入队,idle 后逐条补发)、**QQ 回复路由泄露根治**(2026-08-13 用户实测:询问内容与后台下载完成的窗口回复被发给了陌生人——轮次来源三分类 qq/group/ask/window/system,只有主人窗口直发或主人 QQ 轮才消费陌生人 pending 且一次性,主动陪伴/系统轮永不路由;陌生人规则补"执行回复只写发给对方的话")、**陌生人执行轮防重发与防串线**(规则:执行轮禁止调 send/send_group 工具[回复文字即消息],禁止给主人发 QQ 消息;代码:agent:send 快照已发给该陌生人的私聊消息数,落定路由时对比——本轮已用工具发过则跳过 pending 路由,对方不再收到 2-3 条重复)、**媒体消息常驻**(MessageWindow 窗口化渲染扩范围覆盖全部媒体消息——新消息插入把播放中的视频顶出 overscan 不再卸载,进度/音量/倍速/播放态不丢)、**执行回复标记化串台根治**(「【回复对方】」标记:只有带标记的回复才路由给待回复陌生人并消费 pending——主人先回"嗯/让我想想"这类应答不再串台给陌生人也不清空 pending,真正指示轮的回复必达对方;无标记回复留在主人侧;气泡显示层剥离标记)、**主人权限显式化**(MASTER_IDENTITY_LINE 拼进主引擎系统提示:**逐条按标记判定身份**——带 QQ 来源标注 = 外部消息(只有 1178821869 是主人,不继承主人权限)、无来源标注窗口直发 = 主人最高权限、系统通知 = 系统事件;QQ 四处回复规则同步声明;档案卡增「最近发言」段(聊天记录备份按 QQ 过滤计入,群聊发言归到各人卡内,当前消息排除)) |
 
+
 ---
 
-## 第 39 章 新开发者 30 分钟上手
+## 第 41 章 新开发者 30 分钟上手
 
 ### 第 1 步:跑起来(5 分钟)
 
@@ -3466,16 +3410,223 @@ pnpm test:markdown    # 39 断言
 - 全中文注释;改引擎补测试;改渲染端跑 dev:widget 实机验证;文档三件套
   (README/WIDGET-README/TECH.md)+ CLAUDE.md 同步(附录 D 清单)。
 
+
 ---
 
-## 尾声
+## 结语
 
-本文档至此约 3000 行,覆盖:架构总览、构建运行、音乐模式、主进程、
-Agent 引擎(循环/provider/工具/任务/总结/揣测/主动陪伴/记忆/进化/MCP/
-技能/预算)、渲染端(状态机/面板/媒体/多媒体库/设置/动画/性能)、设置
-工具、类型系统、架构优化史、配置一览、测试体系、调试速查、FAQ、
-How-To 指南与功能引导知识库(第 11 章,get_feature_guide 工具读取)。
+本文档与 CLAUDE.md 分工:CLAUDE.md 是给 Claude Code 的"引擎级操作手册"
+(每处实现的踩坑实录、修复日期、测试断言),本文档是"工程级技术说明"
+(架构、数据流、How-To、速查表)。两者都以 docs/TECH.md 为 LLM 功能引导
+知识库(get_feature_guide 工具读取)。
 
-文档遵循"一次维护,多处受益":CLAUDE.md(引擎操作手册)+ 本文档(工程级
-技术说明)+ README(用户向)+ WIDGET-README(部署/调试)——任何功能改动
-请按附录 D 清单同步。
+本文档覆盖:架构总览、构建运行、音乐模式、主进程、Agent 引擎(循环/
+provider/工具/任务/总结/揣测/主动陪伴/记忆/进化/MCP/技能/预算)、渲染端
+(状态机/面板/媒体/多媒体库/设置/动画/性能)、设置工具、类型系统、架构
+优化史、配置一览、测试体系、调试速查、FAQ、How-To 指南与功能引导知识库
+(第 11 章,get_feature_guide 工具读取)。
+
+维护约定:每次功能改动按附录 D 清单同步本文档对应章节;第 11 章功能清单
+保持用户话术最新(它是 LLM 引导用户的一手资料)。文档遵循"一次维护,
+多处受益":CLAUDE.md(引擎操作手册)+ 本文档(工程级技术说明)+ README
+(用户向)+ WIDGET-README(部署/调试)。
+
+---
+
+## 附录 A:Agent 事件一览
+
+| 事件 type | 载荷要点 | 说明 |
+| --- | --- | --- |
+| status | {status: idle/thinking/running/error} | 状态机 |
+| text | {messageId, text} | 流式文本增量 |
+| reasoning | {messageId, text} | 思维链增量(深度思考) |
+| tool | {messageId, callId, name, args, executing} | 工具调用流式 |
+| tool-call | {messageId, callId, name, args} | 工具开始执行(完整参数展示) |
+| tool-result | {messageId, callId, name, result, durationMs} | 工具结果回显 |
+| message | {id, role, parts, usage, proactive?} | **权威落定** |
+| tool-confirm-request | {seq, command} | 确认门请求 |
+| background-done | {title, message} | 后台任务终态 → 自动触发对话 |
+| mind-proactive | {messageId, guess} | 主动回合心理揣测 |
+
+---
+
+## 附录 B:常量与阈值表
+
+| 常量 | 值 | 说明 |
+| --- | --- | --- |
+| ISLAND_COMPACT_H | 56px | 紧凑态高度 |
+| 展开面板高度 | 244px(音乐)/ 540px(Agent 设置)/ 440px(库/设置) | 挂件版覆盖 |
+| MAX_WIDTH_PX | 500px | 岛体宽度上限 |
+| HOVER_EXTEND_PX | ~40px | 音乐紧凑态悬停扩展(进度条) |
+| 工具结果回填 | 8000 字符 | 截断 |
+| trimHistory | 400K token,至少 10 条 | 预算裁剪 |
+| max_output_tokens | 8192(主对话)/ 4096(总结等短任务) | 动态可调 4096-262144 |
+| 工具兜底超时 | 60s(AgentTool.timeoutMs 可覆盖) | doc_convert 200s / xxt 310s |
+| 迭代上限 | 25 轮 | 防死循环 |
+| 总结/判断超时 | 90s / 60s | Sub Agent |
+| MIND_MAX_LEN / MAX_RETRIES | 16 码元 / 5 次 | 心理揣测 |
+| 标题长度 | 推荐 10 字,≤20 码元 | sanitizeTitle 硬截断 |
+| 记忆 | 200 条 / 单条 500 字 | memory.json |
+| 技能 SKILL.md | 注入截 8000 / desc 截 300 | |
+| 媒体窗口 | 160-800,缺省 320 | 对话媒体初始宽 |
+| 视频库 | 路径引用,≤10GB | island-media 流式 |
+| 音频库 | ArrayBuffer,≤200MB | |
+| 主动陪伴间隔 | 5-480,默认 15 分钟 | |
+| 界面缩放 | 100-300,默认 200 | 只放大窗口/面板,UI 不缩放 |
+| 全屏尺寸校正 | 2px 容差 | fsLockedSize + resize 校正 |
+| 后台任务 TTL | 终态 24h / 进行中 6h | pruneTasks |
+| 图片库行高 | grid-auto-rows: 128px | 防行压缩 |
+
+---
+
+## 附录 C:术语表
+
+| 术语 | 说明 |
+| --- | --- |
+| SMTC | System Media Transport Controls,Windows 系统媒体会话 |
+| 岛体 | 灵动岛本体组件(DynamicIsland.tsx) |
+| 紧凑态 / 展开态 | 收起胶囊 / 展开面板 |
+| 媒体小窗 | 收起 Agent 面板后岛体变形的视频/图片小窗(AgentMediaMini) |
+| media part | AgentPart 的媒体附件类型(窗口内播放) |
+| 确认门 | exec_command 首轮执行确认(createTurnConfirmGate) |
+| 后台任务注册表 | tasks.ts 通用任务(waiting/running/done/failed/cancelled) |
+| Sub Agent | 独立实例的辅助 LLM 调用(总结标题/心理揣测/判断/进化评估/子代理) |
+| 棘轮 | 进化评分严格高于原分才接受新版本 |
+| 前缀缓存 | DeepSeek 上下文缓存(前缀完整匹配才命中) |
+| trimHistory | 历史预算裁剪(400K) |
+| outputBudget | 引擎可变输出预算(set_output_budget 调整) |
+| QuickMenu | 通用滚轮切换菜单组件(整合按钮 + 联通展开 + 高亮滑块) |
+| WheelSwap | 内容交换动画组件(滚轮逐格重挂载重放) |
+| 设置桥 | window.__islandSettings(settingsBridge.ts,LLM 设置工具入口) |
+| island-media:// | 本地媒体流式协议(Range 支持) |
+| VIEW_WINDOW_H | 各面板视图对应的宿主窗口高度表 |
+| SETTINGS_VIEWS | 设置类视图集合(屏蔽一切缩回操作) |
+| 巡检 | WIDGET_SCREENSHOT UI 测试(截图 + 断言) |
+| 双岛并存 | 设计文档中的 dual 模式(未实现) |
+
+---
+
+## 附录 D:修改清单(给后续开发者的工作流模板)
+
+完成一次功能改动后的标准动作:
+
+1. `pnpm build`(tsc -b 双端类型 + Web 构建);
+2. `pnpm lint`;
+3. `node tests/test-agent-core.mjs`(引擎改动必须;新增工具/行为补用例);
+4. `pnpm test:markdown`(解析器改动);
+5. `pnpm dev:widget` 实机验证(默认完成标准,配 timeout 自动退出;
+   完整巡检只在用户明确要求时跑,需 WIDGET_SCREENSHOT_QUIT=1);
+6. 同步文档:README(用户向)/ WIDGET-README(部署)/ docs/TECH.md(技术);
+   引擎/工具/常量改动同步 CLAUDE.md 对应章节与本文档第 5/7 章;
+7. 新增渲染端设置工具操作 → settingsTools.ts op 类型 + 桥方法 +
+   main.cjs ISLAND_SETTINGS_OPS 白名单三处同步(漏白名单 = 安全侧失败);
+8. 新增 IPC → preload + desktop.d.ts + main.cjs safeHandle 三处同步。
+
+---
+
+## 附录 E:IPC 详细参数
+
+| 通道 | 参数 | 返回 |
+| --- | --- | --- |
+| widget:pointer | {over: boolean} | - |
+| widget:drag-start/move/end | {x, y}(move 节流 rAF)| - |
+| widget:set-size | {width, height, immediate?} | - |
+| widget:set-mode | {mode, source} | - |
+| widget:fullscreen | {fs, isMini} | - |
+| widget:open-settings | - | - |
+| widget:open-media-library | - | - |
+| agent:send | {text, history} | - |
+| agent:abort | - | - |
+| agent:event | 事件对象(见附录 A) | - |
+| agent:config-get / agent:config-set | - / {patch} | AgentConfig |
+| agent:tools | - | AgentToolInfo[] |
+| agent:mcp-test | {name, config} | {ok, tools?} / {error} |
+| agent:memory-get / set | - / {op, payload} | MemoryEntry[] |
+| agent:memory-export / import | - / {path} | {imported, skipped} |
+| agent:evolve | {rounds} | - |
+| agent:evolution-log / rollback / reset | - | {entries} / {ok,error} |
+| agent:summarize | {messages} | {title} |
+| agent:mind-guess | {messages} | {guess} |
+| agent:proactive-tick | {messages, idleMinutes} | {should, hint?} |
+| agent:skill-import | - | {imported, skipped} |
+| app:open-external | {url} | - |
+| app:open-media-external | {kind, src} | - |
+| app:pick-media-files | {exts, maxBytes} | {paths} |
+| app:island-pick-files | {accept, multiple} | {paths} |
+
+
+---
+
+## 附录 F:播放列表与上传流程
+
+```
+用户上传音乐(Web:File input;挂件:系统对话框 app:island-pick-files)
+  → uploadStore 存 IndexedDB(island-uploads,持久化)
+  → useMediaPlayer.addTracks
+      ├─ 播放列表追加 + 自动播放
+      └─ 音频库同步:无同名(按文件名)自动补录(参考图片库导入机制)
+
+多媒体库音频 → 「导入播放列表」(单个/批量,勾选)
+  → handleAddLibraryTracks
+      ├─ addLibraryTracks(存 island-uploads,自动播放首曲)
+      └─ setMode('music')  → 模式切换动画自动收起岛体
+```
+
+---
+
+## 附录 G:主动陪伴全链路时序
+
+```
+用户无操作 ≥ N 分钟
+  → useAgent 调度器(60s 周期检查,agent 模式/配置开/idle/有历史/in-flight
+    守卫)
+  → agent:proactive-tick(messages, idleMinutes)
+  → main.cjs → judgeProactive(Sub Agent,同源上下文:提示词+记忆+进化+
+    后台任务+当前时间;JSON {should, hint};失败 → should:false)
+  → should:true → engine.proactiveTurn(history, {hint})
+      → PROACTIVE_INSTRUCTION 追加 input 末尾(system 请求项,不进历史)
+      → 完整回合(思考/流式/工具/子代理)
+      → message 事件落定(proactive: true)
+  → 主进程 getMindAgent().guess([消息]) → Notification('岛灵 · 心理揣测')
+    + mind-proactive 事件 → 紧凑态文字区
+  → 渲染端重置 idle 时钟(proactive 末条跳过 mindRunner,标题照常)
+```
+
+
+---
+
+## 附录 H:CLAUDE.md 章节索引
+
+| 章节 | 内容 | 对应本文档 |
+| --- | --- | --- |
+| 项目概述/常用命令/验证约定 | 命令与约定 | 第 2 章 |
+| 架构(双入口/数据源双轨/主进程/桥接/架构优化) | 架构总览与优化史 | 第 1/3/4/13 章 |
+| Agent 模式(引擎/工具/任务/MCP/技能/记忆/进化/审计) | 引擎全部细节 | 第 5 章 |
+| 渲染端(useAgent/AgentView/动画/媒体/Markdown) | 渲染端细节 | 第 6 章 |
+| V2.0 三大工程(HEVC 补丁/提示词约束/会话隔离) | 新架构专章 | 第 15/16/17 章 |
+| 消息气泡 Markdown 渲染 | 解析器细节 | 6.3 |
+| 关键约束(提示文本/透明窗口/歌词折叠/竞态/悬停校准) | 踩坑 | 第 10 章 |
+| 双岛并存模式(设计文档) | 未实现设计 | 22.1 |
+
+---
+
+## 附录 I:全部工具一览
+
+---
+
+## 附录 J:全部面板视图一览
+
+| PanelView | 岛体高 | 窗口高 | 返回语义 |
+| --- | --- | --- | --- |
+| control | 244 | 280 | 收起 |
+| agent | 内容驱动(200-600) | 岛体+40 | ⋯ 菜单收起 |
+| settings | 440 | 480 | 收起(设置类) |
+| background | 440(compact 288) | 480(280) | 返回设置/多媒体库 |
+| theme | 352 | 364 | 返回设置(设置类) |
+| font | 200 | - | 返回设置(设置类) |
+| font-color | 352 | 364 | 返回字体(设置类) |
+| font-library / image-library | 440 | 480 | 返回对应视图(设置类) |
+| lyric-api | 440 | 480 | 返回设置(设置类) |
+| agent-settings | 540 | 580 | 返回对话(设置类) |
+| media-library | 540 | 580 | 从哪来回哪去(托盘收起/菜单回对话) |
+| history / tools | 保持进入前 | 保持 | 返回对话 |
