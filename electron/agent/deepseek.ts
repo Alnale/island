@@ -213,7 +213,10 @@ export async function streamResponse(params: {
       // JSON.stringify 原样输出 \udXXX,服务器 serde_json 解析报 400
       // "unexpected end of hex escape"(见 sse.ts sanitizeUnpairedSurrogates)
       body: JSON.stringify(sanitizeJsonStrings(body)),
-      signal,
+      // **不传 signal(2026-08-13,llhttp UAF 规避)**:fetch 的中止在
+      // HTTP 解析中途销毁 socket = Node 22 use-after-free(nodejs#62095)
+      // → 主进程段错误(实测崩溃栈 llhttp_message_needs_eof)。中止判定
+      // 移到 parseSse 的安全点(sse.ts),语义不变
     })
   } catch (err) {
     if ((err as Error).name === 'AbortError') throw err

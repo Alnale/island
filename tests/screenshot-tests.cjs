@@ -3779,6 +3779,54 @@ function runScreenshotTests({ win, app, fs, path, settingsPath, runIslandSetting
                   }
                 })()`)
                 out.collapseMedia = collapseMedia
+                // 5.0 小窗状态截图 + DOM 几何诊断(2026-08-13 边缘 UI
+                // 巡检:圆角外矩形残留检查)——与最终截图错开保存
+                out.miniGeom = await js(`(() => {
+                  const island = document.querySelector('.island-demo')
+                  const mini = document.querySelector('.island-agent-mini')
+                  const v = document.querySelector('.island-agent-mini video')
+                  const cs = island ? getComputedStyle(island) : null
+                  const r = (el) => el ? el.getBoundingClientRect() : null
+                  const ir = r(island); const mr = r(mini); const vr = r(v)
+                  return {
+                    islandRect: ir ? { x: Math.round(ir.x), y: Math.round(ir.y), w: Math.round(ir.width), h: Math.round(ir.height) } : null,
+                    islandRadius: cs ? cs.borderRadius : null,
+                    islandOverflow: cs ? cs.overflow : null,
+                    islandPadding: cs ? cs.padding : null,
+                    islandBg: cs ? cs.backgroundColor : null,
+                    miniRect: mr ? { w: Math.round(mr.width), h: Math.round(mr.height) } : null,
+                    miniRadius: mini ? getComputedStyle(mini).borderRadius : null,
+                    miniOverflow: mini ? getComputedStyle(mini).overflow : null,
+                    videoRect: vr ? { w: Math.round(vr.width), h: Math.round(vr.height) } : null,
+                    videoNatural: v ? v.videoWidth + 'x' + v.videoHeight : null,
+                    classes: island ? island.className : null,
+                  }
+                })()`)
+                try {
+                  const miniImg = await win.webContents.capturePage()
+                  const shotPath = process.env.WIDGET_SCREENSHOT
+                  const miniShotPath = shotPath
+                    ? shotPath.replace(/\.png$/i, '') + '-mini.png'
+                    : path.join(app.getPath('temp'), 'mini-island.png')
+                  fs.writeFileSync(miniShotPath, miniImg.toPNG())
+                  console.log(`[widget] screenshot(mini-island) saved → ${miniShotPath}`)
+                } catch {
+                  // 截图失败不影响巡检
+                }
+                // 截图后再取一次几何(诊断:截图与 DOM 状态是否一致)
+                out.miniGeomAfter = await js(`(() => {
+                  const island = document.querySelector('.island-demo')
+                  const v = document.querySelector('.island-agent-mini video')
+                  const ir = island?.getBoundingClientRect()
+                  const vr = v?.getBoundingClientRect()
+                  return {
+                    islandRect: ir ? { x: Math.round(ir.x), y: Math.round(ir.y), w: Math.round(ir.width), h: Math.round(ir.height) } : null,
+                    videoRect: vr ? { x: Math.round(vr.x), y: Math.round(vr.y), w: Math.round(vr.width), h: Math.round(vr.height) } : null,
+                    bodyW: document.body.getBoundingClientRect().width,
+                    bodyH: document.body.getBoundingClientRect().height,
+                  }
+                })()`)
+                out.miniWindowSize = win.getSize()
                 // 5. 小窗断言:进度条存在 + 播放中 + 进度条填充随播放前进
                 const miniProbe1 = JSON.parse(await js(`(() => {
                   const bar = document.querySelector('.island-agent-mini-bar')

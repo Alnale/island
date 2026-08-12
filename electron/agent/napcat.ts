@@ -29,6 +29,7 @@ import path from 'node:path'
 import { app } from 'electron'
 import type { AgentConfig, AgentTool, ToolParams } from './types'
 import { MASTER_QQ } from './constants'
+import { createWsSocket, type WsConn } from './wsclient'
 
 /** OneBot 消息 → 文本(兼容 string 与段数组;测试用导出):text 段拼接,
  * face/emoji 标注,@ 段标注(机器人自身 = @鲸鱼娘),其它段(图片等)标注类型 */
@@ -180,6 +181,67 @@ export interface NapcatContact {
   source?: 'private' | 'group'
   /** 更新时间戳(秒) */
   updatedAt: number
+}
+
+/**
+ * 档案卡聚合(2026-08-13,用户要求"将不同的 QQ 号的所有涉及发言汇总成
+ * 一个档案卡,包含性格/兴趣爱好/不良嗜好等基本信息 + 该人所有已知信息
+ * 的简单总结"):联系人档案(name/info)+ 会话人格(persona)+ 长期记忆
+ * 相关条目(内容含该 QQ 号或称呼)——单函数纯聚合,main.cjs 消息到达时
+ * 组装,随消息注入 LLM(每条消息带档案卡,LLM 正确区分人)并下发渲染端
+ * 展示。所有已知信息汇总 = 档案 info + 相关记忆条目正文,格式稳定
+ * (缓存前缀友好)
+ */
+export function buildProfileCard(
+  qq: string,
+  data: {
+    contact?: NapcatContact | null
+    persona?: string
+    memories?: Array<{ content: string }>
+    /** 该人的聊天记录备份(napcat-chats,私聊/群聊都记;按 QQ 过滤后取
+     * 最近几条 = "所有涉及发言汇总"的原始层) */
+    chats?: Array<{ id?: string; text: string; type?: string }>
+    /** 排除的聊天记录 id(当前正在处理的消息,避免卡内重复) */
+    excludeId?: string
+  },
+): string {
+  const lines: string[] = []
+  const name = data.contact?.name?.trim()
+  const info = data.contact?.info?.trim()
+  const persona = data.persona?.trim()
+  // **主人称呼兜底(2026-08-13 用户实测"我是主人但称呼未知")**:自动
+  // 建档只记 QQ 号与来源,没有名字字段——主人缺名字时称呼恒为「主人」
+  // (档案里记录过名字则优先用名字);其它 QQ 缺名字仍显示(未知)
+  const displayName = name || (qq === MASTER_QQ ? '主人' : '(未知)')
+  lines.push(`称呼:${displayName}`)
+  if (info) lines.push(`已知:${info.slice(0, 300)}`)
+  // 会话人格(私聊/群聊分会话,该 QQ 会话设置过人格时展示)
+  if (persona) lines.push(`会话人格:${persona.slice(0, 200)}`)
+  // 长期记忆相关条目(内容含 QQ 号或称呼 = 该人已知信息;截 4 条防过长)
+  const mems = (data.memories ?? [])
+    .map((m) => m.content.trim())
+    .filter((c) => c && (c.includes(qq) || (name ? c.includes(name) : false)))
+    .slice(0, 4)
+  if (mems.length > 0) {
+    lines.push('记忆相关:')
+    for (const c of mems) lines.push(`- ${c.slice(0, 120)}`)
+  }
+  // **最近发言(2026-08-13 用户要求"群聊里的各个消息也能正确计入个人
+  // 的档案卡")**:聊天记录备份按 QQ 号过滤取最近 3 条(私聊/群聊标记
+  // 渠道),该人的实际发言进档案卡——群聊里每个人说的话都归到各自的卡
+  const chats = (data.chats ?? [])
+    .filter((c) => c && typeof c.text === 'string' && c.text.trim() && c.id !== data.excludeId)
+    .slice(-3)
+  if (chats.length > 0) {
+    lines.push('最近发言:')
+    for (const c of chats) {
+      const channel = c.type === 'group' ? '群聊' : '私聊'
+      lines.push(`- [${channel}] ${c.text.replace(/\s+/g, ' ').trim().slice(0, 50)}`)
+    }
+  }
+  // 无任何已知信息时给空卡提示(LLM 可经 contact_update 补充)
+  if (lines.length === 1) lines.push('(尚无已知信息,交流中可用 contact_update 记录)')
+  return lines.join('\n')
 }
 
 /** 用户数据目录(测试回退临时路径) */
@@ -360,6 +422,165 @@ export function gtkFromCookie(cookie: string): string {
   return String(hash & 0x7fffffff)
 }
 
+/** 工具调用叙述句判定(2026-08-12,用户实测"和主人外的人聊天会暴露
+ * 工具调用"——LLM 把内部工作流写进对外回复:「我来找实时数据源,先
+ * 探测 KPL 数据中心的接口。找到了 API 路径…」):第一人称行动词 +
+ * 技术/过程词**同时命中**才判叙述(行动词收窄防误伤正常口吻) */
+const TOOL_NARRATION_ACTION =
+  /(我去|我来|我直接|我先|我再|我换|我细看|我用|我基于|我拿到|拿到|我找到|找到|拿到了|发现|定位|我挖|我探|我绘|我调用|我搜|我开|我拼|我测|我下载|我解析|我查|探测|拼接|绘制|下载|解析|抓取|爬取|请求|接口是|接口走)/
+const TOOL_NARRATION_WORD =
+  /(接口|API|api|数据源|数据端点|端点|路径|域名|JS|脚本|命令|直播间|URL|网址|matplotlib|环境|胜率曲线|曲线|cookies|二维码|数据库|服务器|fetch|请求|响应|解析|网页|抓|爬|绘图|拼接|打开网页|打开浏览器|数据)/
+
+/** 剥离回复文本里的**工具调用过程叙述段**(2026-08-12,用户实测"和
+ * 主人外的人聊天会暴露工具调用"——LLM 思考模式把内部工作流写进对
+ * 外回复:「我来找实时数据源,先探测 KPL 数据中心的接口。找到了 API
+ * 路径…」,外人看到探测接口/绘图/搜索等内部动作)。规则(保守):
+ * - 按句末标点(。！？!?/换行)切句,标记「行动词+技术词」双命中的
+ *   叙述句;
+ * - **连续 ≥2 句**的叙述段整体删除(单句如「我刚帮你查了下比分」
+ *   是正常口吻,不删——误伤风险大于收益);
+ * - 删除后为空则保留原文(不把回复删没);
+ * - 约束侧配套:main.cjs 注入指令要求对外人只给结论不叙述工具调用。
+ */
+export function stripToolNarration(text: string): string {
+  const t = String(text ?? '').trim()
+  if (!t) return t
+  const sentences = t
+    .split(/(?<=[。！？!?\n])/)
+    .map((s) => s.trim())
+    .filter(Boolean)
+  if (sentences.length < 2) return t
+  const isNarration = (s: string) => TOOL_NARRATION_ACTION.test(s) && TOOL_NARRATION_WORD.test(s)
+  const flags = sentences.map(isNarration)
+  const keep: string[] = []
+  let i = 0
+  while (i < sentences.length) {
+    if (flags[i]) {
+      let j = i
+      while (j < sentences.length && flags[j]) j++
+      if (j - i >= 2) {
+        i = j // 连续叙述段整段删除
+        continue
+      }
+    }
+    keep.push(sentences[i])
+    i++
+  }
+  const out = keep.join('').trim()
+  return out || t
+}
+
+/** 主人视角叙述句判定(2026-08-13,用户实测"私聊窗口泄露"——给扩展
+ * 信任联系人的回复整体是向主人汇报的口吻:「魔精发来一张图片,我先
+ * 展示给你看,同时识别一下图里的内容。…魔精回你了——他发了张…,
+ * 图片已经展示在窗口里了,你可以看看。」,主人视角的叙述被当回复发给
+ * 了对方)。三类模式任一命中即判叙述句(比 stripToolNarration 的行动词
+ * +技术词双命中更宽:主人视角叙述不需要技术词):
+ * ① 第三人称转述对方(他/她发来·回你·发了…)/ ② 向主人汇报(给你看/
+ * 展示给/窗口里/你可以看看)/ ③ 内部工作流(识别一下/临时文件/清理) */
+const MASTER_NARRATION_RE =
+  /(他|她)(回你|回我|发来|发的是|发了|在回|回应)|(回你|回你了|发来)|(给你看|展示给|展示在|先展示)|(窗口里|你可以看看)|(识别一下|识别出来|临时文件|清理掉|清理了|顺便把)/
+
+/** 剥离回复里「向主人汇报/第三人称转述对方」的叙述句(2026-08-13,
+ * 用户实测"私聊窗口泄露":给扩展信任联系人的回复整体是向主人汇报的
+ * 口吻——「魔精发来…展示给你看…魔精回你了…你可以看看」,对方看到的
+ * 是主人视角的转述)。规则(保守,与 stripToolNarration 同款):
+ * - 按句末标点(。！？!?/换行)切句,叙述句(任一模式命中)标记;
+ * - **连续 ≥2 句**的叙述段整体删除(单句「我刚帮你查了下比分」是
+ *   正常口吻,不删——误伤风险大于收益);
+ * - 删除后为空:**优先提取「回他/回复他「…」」引号里的回复原文**
+ *   (叙述「我认出来后就回他「晚上好呀~图收到啦…」」——引号部分就是
+ *   真正要发给对方的话);无引号才保留原文(宁可不删也不把正常回复
+ *   删没);
+ * - 约束侧配套:main.cjs 注入指令要求回复就是以第二人称对对方说的话
+ *   (onMessage trusted 分支【私聊指令】)。仅对非主人目标应用
+ *   (sendToQQ 非 MASTER / sendToGroup;主人保留过程,对话窗口本就是
+ *   过程展示)
+ */
+export function stripMasterNarration(text: string): string {
+  const t = String(text ?? '').trim()
+  if (!t) return t
+  const sentences = t
+    .split(/(?<=[。！？!?\n])/)
+    .map((s) => s.trim())
+    .filter(Boolean)
+  if (sentences.length < 2) return t
+  const flags = sentences.map((s) => MASTER_NARRATION_RE.test(s))
+  const keep: string[] = []
+  let i = 0
+  while (i < sentences.length) {
+    if (flags[i]) {
+      let j = i
+      while (j < sentences.length && flags[j]) j++
+      if (j - i >= 2) {
+        i = j // 连续叙述段整段删除
+        continue
+      }
+    }
+    keep.push(sentences[i])
+    i++
+  }
+  const out = keep.join('').trim()
+  if (out) return out
+  // 全部是叙述:提取「回他「…」」的引用回复(叙述里夹带的真正回复)
+  const quoted = /回(他|她|对方)[^。！？!?\n]{0,20}[「"“]([\s\S]{2,120}?)[」"”]/.exec(t)
+  if (quoted && quoted[2].trim()) return quoted[2].trim()
+  return t // 无引号兜底:保留原文(宁可不删也不把正常回复删没)
+}
+
+/** 从消息文本中提取夹带的图片路径/URL(2026-08-12,用户质疑"发送图片
+ * 应该不是只发个路径吧"——LLM 可能把图片路径写进 message 文本而非
+ * image 参数,那样对方只会收到一串路径文字):提取本地绝对路径
+ * (D:/x.png)或 http(s) 链接 + 图片扩展名(png/jpg/jpeg/gif/webp/bmp,
+ * 括号包裹的也提取),从文本移除返回。**发送时转 image 段真发图**;
+ * 本地路径的存在性由调用方校验(不存在的回填文本,不发假图) */
+export function extractImageRefs(text: string): { text: string; images: string[] } {
+  const images: string[] = []
+  // 结构:前缀(盘符/协议)→ 共用字符集(排除 ? 防贪婪吞查询串)→ 显式
+  // 图片扩展名 → 可选查询串([?#&] 开头,防回溯截断 URL 的 ?x=1&y=2)
+  const cleaned = String(text ?? '').replace(
+    /(?:[（(]\s*)?((?:[A-Za-z]:[\\/]|https?:\/\/)[^\s，,。;；!！?？"'“”‘’【】()（）]+\.(?:png|jpe?g|gif|webp|bmp)(?:[?#&][^\s，,。;；!！"'“”‘’【】()（）？]*)?)(?:\s*[）)])?/gi,
+    (_m, p: string) => {
+      images.push(p)
+      return ''
+    },
+  )
+  return { text: cleaned.replace(/\s+/g, ' ').trim(), images }
+}
+
+/** 思考腔开头(语气词 + 思考动词,如「好的,我先梳理一下…」;
+ * 「先」可插在动词前——"让我先分析"是常见形式) */
+const THINK_LEAD =
+  /^(好的|好|嗯|嗯嗯|OK|ok|okay|可以的|可以|没问题|收到|明白了|行|行吧)[,，、\s]*(让我|我先|我|让我来|我来)先?(分析|梳理|思考|想想|整理|回顾|总结|看一下|看看|确认|理一下|查一下|研究)/
+/** 直接以思考动词开头(如「让我先分析一下…」) */
+const THINK_START = /^(让我|我先|我(来)?|容我)先?(分析|梳理|思考|想想|整理|回顾|总结|看一下|看看|理一下)/
+
+/** 剥离回复文本开头的「思考腔」段落(2026-08-12,用户实测 QQ 机器人
+ * 私聊收到的回复带思考过程——LLM 思考模式输出常以「好的,我先梳理
+ * 一下你的需求…」这类思考腔开头再给结论,QQ 客户端看到的就是思考
+ * 过程)。规则(保守,防误伤正常回复):
+ * - 只剥离**第一段**(非贪婪到首个句末标点 。！？!? 换行或冒号),
+ *   段尾无句末符(如整句以逗号结尾)不剥;
+ * - 第一段必须是明显思考腔(语气词+思考动词,或以思考动词直接开头)
+ *   才剥;剥后文本为空则保留原文(不把结论误删光);
+ * - 第一段超 40 字不剥(长句多为正式开场,不是思考腔)。
+ * 约束侧配套:main.cjs 注入指令要求 LLM 直接给结论不写思考过程。
+ */
+export function stripThinkingPreamble(text: string): string {
+  const t = String(text ?? '').trim()
+  if (!t) return t
+  const m = /^([\s\S]*?[。！？!?\n:：])/.exec(t)
+  if (!m) return t
+  const head = m[1]
+  if (head.length > 40) return t
+  const headTrimmed = head.replace(/[。！？!?\n:：]+$/, '').trim()
+  if (!headTrimmed) return t
+  const isThink = THINK_LEAD.test(headTrimmed) || THINK_START.test(headTrimmed)
+  if (!isThink) return t
+  const rest = t.slice(m[1].length).trim()
+  return rest || t
+}
+
 /** 写入联系人档案(原子写) */
 export async function saveNapcatContacts(contacts: Record<string, NapcatContact>): Promise<void> {
   try {
@@ -374,7 +595,7 @@ export async function saveNapcatContacts(contacts: Record<string, NapcatContact>
 }
 
 export function createNapcatClient(deps: NapcatDeps) {
-  let ws: WebSocket | null = null
+  let ws: WsConn | null = null
   let stopped = false
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null
   let reconnectDelay = 1000
@@ -407,16 +628,18 @@ export function createNapcatClient(deps: NapcatDeps) {
     const url = cfg().napcatWsUrl?.trim() || DEFAULT_WS_URL
     try {
       lastError = ''
-      const socket = new WebSocket(url)
-      ws = socket
-      socket.onopen = () => {
-        reconnectDelay = 1000
-        deps.notify?.('NapCat 已连接', `QQ 消息桥就绪(${url})`)
-      }
-      socket.onmessage = (ev) => {
+      // **手写 WS 传输(2026-08-13,见 wsclient.ts)**:替换 undici 全局
+      // WebSocket——补丁版 Electron 的 undici WS(llhttp 握手)实测必崩
+      // (段错误),net.Socket 直连 + 手写 Upgrade/帧编解码不经过 llhttp
+      const socket = createWsSocket(url, {
+        onOpen: () => {
+          reconnectDelay = 1000
+          deps.notify?.('NapCat 已连接', `QQ 消息桥就绪(${url})`)
+        },
+        onMessage: (text) => {
         let data: unknown
         try {
-          data = JSON.parse(String(ev.data))
+          data = JSON.parse(String(text))
         } catch {
           return // 非 JSON(心跳二进制等)忽略
         }
@@ -504,14 +727,16 @@ export function createNapcatClient(deps: NapcatDeps) {
           }
           deps.onGroupMessage(msg)
         }
-      }
-      socket.onerror = () => {
-        lastError = '连接错误(请确认 NapCat 已启动且 WS 端口开放)'
-      }
-      socket.onclose = () => {
-        if (ws === socket) ws = null
-        scheduleReconnect()
-      }
+      },
+      onError: (message) => {
+          lastError = message || '连接错误(请确认 NapCat 已启动且 WS 端口开放)'
+        },
+        onClose: () => {
+          if (ws === socket) ws = null
+          scheduleReconnect()
+        },
+      })
+      ws = socket
     } catch (e) {
       lastError = (e as Error).message
       scheduleReconnect()
@@ -530,7 +755,7 @@ export function createNapcatClient(deps: NapcatDeps) {
   /** 调 OneBot 动作(带 echo 等待响应);超时 reject */
   function callAction<T = unknown>(action: string, params: Record<string, unknown>): Promise<T> {
     return new Promise((resolve, reject) => {
-      if (!ws || ws.readyState !== WebSocket.OPEN) {
+      if (!ws || !ws.open) {
         reject(new Error('NapCat 未连接(请确认 NapCat 已启动)'))
         return
       }
@@ -641,9 +866,23 @@ export function createNapcatClient(deps: NapcatDeps) {
      * image 可选(2026-08-12 发图链路):本地路径或 URL → 组装 image 段
      * 一并发送(文本 + 图);file 可选:upload_private_file 发文件本体 */
     async sendToQQ(qq: string, text: string, opts?: { image?: string; file?: string }): Promise<string> {
-      const image = typeof opts?.image === 'string' && opts.image.trim() ? opts.image.trim() : ''
+      // **对外人剥离工具调用叙述(2026-08-12,用户实测"和主人外的人
+      // 聊天会暴露工具调用")**:LLM 把「我来找实时数据源,先探测接口」
+      // 这类内部工作流写进回复,外人可见;主人(MASTER_QQ)保留过程
+      // (对话窗口本就是过程展示)。询问轮发主人、白名单主人回复不受影响。
+      // **主人视角叙述剥离(2026-08-13,用户实测"私聊窗口泄露")**:
+      // 「魔精发来…展示给你看…魔精回你了…你可以看看」这类向主人汇报
+      // 的口吻也不能发给对方——两段剥离串行,先工具叙述再主人视角
+      if (qq !== MASTER_QQ) text = stripMasterNarration(stripToolNarration(text))
+      const paramImage = typeof opts?.image === 'string' && opts.image.trim() ? opts.image.trim() : ''
       const file = typeof opts?.file === 'string' && opts.file.trim() ? opts.file.trim() : ''
-      if (!text.trim() && !image && !file) return ''
+      // **文本夹带图片兜底(2026-08-12,用户质疑"发送图片应该不是只发
+      // 个路径吧")**:LLM 可能把图片路径写进 message 文本而非 image 参数
+      // ——提取出来转 image 段真发图(对方收到图片不是路径文字);显式
+      // image 参数仍校验存在(报错 LLM 可自纠),提取的本地路径不存在的
+      // 回填文本(不发假图、信息不丢)
+      const { text: cleanText, images: refImages } = extractImageRefs(text)
+      if (!cleanText.trim() && refImages.length === 0 && !paramImage && !file) return ''
       if (file) {
         // 校验文件存在(与 send_group 同款)
         if (!existsSync(file)) {
@@ -658,15 +897,28 @@ export function createNapcatClient(deps: NapcatDeps) {
           throw new Error(`文件上传失败(${up?.retcode ?? '未知'})`)
         }
       }
-      // 组装消息段:文本 + 图片(本地路径/URL 校验存在)
-      let message: unknown = text
-      if (image) {
-        if (!/^https?:|^data:image\//.test(image) && !existsSync(image)) {
-          throw new Error(`图片不存在:${image}(image 需要本地绝对路径或 http(s) 链接)`)
-        }
+      // 显式 image 参数校验存在(与 send_group 同款)
+      if (paramImage && !/^https?:|^data:image\//.test(paramImage) && !existsSync(paramImage)) {
+        throw new Error(`图片不存在:${paramImage}(image 需要本地绝对路径或 http(s) 链接)`)
+      }
+      // 合并显式 + 提取图片(去重);提取的本地路径不存在 → 回填文本
+      const seen = new Set<string>()
+      const finalImages: string[] = []
+      const backToText: string[] = []
+      for (const p of [paramImage, ...refImages].filter(Boolean)) {
+        if (seen.has(p)) continue
+        seen.add(p)
+        if (/^[A-Za-z]:[\\/]/.test(p) && !existsSync(p)) backToText.push(p)
+        else finalImages.push(p)
+      }
+      const finalText = [cleanText, ...backToText].join(' ').trim()
+      // 组装消息段:文本 + 图片段(多个)(file 传路径/URL,NapCat 读取
+      // 上传——**对方收到的是真图片,不是路径文本**)
+      let message: unknown = finalText
+      if (finalImages.length > 0) {
         const segs: unknown[] = []
-        if (text.trim()) segs.push({ type: 'text', data: { text } })
-        segs.push({ type: 'image', data: { file: image } })
+        if (finalText) segs.push({ type: 'text', data: { text: finalText } })
+        for (const img of finalImages) segs.push({ type: 'image', data: { file: img } })
         message = segs
       }
       const res = (await callAction<{ status?: string; data?: { message_id?: number } }>('send_private_msg', {
@@ -679,7 +931,7 @@ export function createNapcatClient(deps: NapcatDeps) {
       const id = String(res?.data?.message_id ?? '')
       // 记录发出的消息(2026-08-12 撤回修复:自动回复/主动发送都走本方法,
       // 记下 message_id 后 LLM 经 sent action 查到即可撤回)
-      recordSent({ messageId: id, type: 'private', target: qq, text: text.slice(0, 100) || '(图片/文件)' })
+      recordSent({ messageId: id, type: 'private', target: qq, text: finalText.slice(0, 100) || '(图片/文件)' })
       repliedCount++
       return id
     },
@@ -721,9 +973,17 @@ export function createNapcatClient(deps: NapcatDeps) {
      * 参数直传,中文文件名/路径无编码问题),文件上传后再发文字;
      * image 可选(2026-08-12 发图链路):本地路径/URL → 组装 image 段 */
     async sendToGroup(groupId: string, text: string, filePath?: string, image?: string): Promise<string> {
+      // **群友全外人:剥离工具调用叙述(2026-08-12,与 sendToQQ 同款)**——
+      // LLM 经 send_group 发回群的 message 也可能带内部工作流叙述;
+      // **主人视角叙述剥离(2026-08-13,与 sendToQQ 同款)**——「展示给你
+      // 看」「XX 回你了」「你可以看看」这类向主人汇报的口吻同样不能发群里
+      text = stripMasterNarration(stripToolNarration(text))
+      const paramImage = typeof image === 'string' && image.trim() ? image.trim() : ''
       const file = typeof filePath === 'string' && filePath.trim() ? filePath.trim() : ''
-      const img = typeof image === 'string' && image.trim() ? image.trim() : ''
-      if (!text.trim() && !file && !img) return ''
+      // **文本夹带图片兜底(2026-08-12,与 sendToQQ 同款)**:message 文本
+      // 里夹带的图片路径自动提取转 image 段(对方收到真图不是路径文字)
+      const { text: cleanText, images: refImages } = extractImageRefs(text)
+      if (!cleanText.trim() && refImages.length === 0 && !file && !paramImage) return ''
       if (file) {
         // 校验文件存在(不存在报错,LLM 可自纠路径)
         if (!existsSync(file)) {
@@ -738,19 +998,31 @@ export function createNapcatClient(deps: NapcatDeps) {
           throw new Error(`群文件上传失败(${up?.retcode ?? '未知'})`)
         }
       }
-      // 组装消息段:文本 + 图片(本地路径/URL 校验存在)
-      let message: unknown = text
-      if (img) {
-        if (!/^https?:|^data:image\//.test(img) && !existsSync(img)) {
-          throw new Error(`图片不存在:${img}(send_group 的 image 需要本地绝对路径或 http(s) 链接)`)
-        }
+      // 显式 image 参数校验存在
+      if (paramImage && !/^https?:|^data:image\//.test(paramImage) && !existsSync(paramImage)) {
+        throw new Error(`图片不存在:${paramImage}(send_group 的 image 需要本地绝对路径或 http(s) 链接)`)
+      }
+      // 合并显式 + 提取图片(去重);提取的本地路径不存在 → 回填文本
+      const seen = new Set<string>()
+      const finalImages: string[] = []
+      const backToText: string[] = []
+      for (const p of [paramImage, ...refImages].filter(Boolean)) {
+        if (seen.has(p)) continue
+        seen.add(p)
+        if (/^[A-Za-z]:[\\/]/.test(p) && !existsSync(p)) backToText.push(p)
+        else finalImages.push(p)
+      }
+      const finalText = [cleanText, ...backToText].join(' ').trim()
+      // 组装消息段:文本 + 图片段(多个)
+      let message: unknown = finalText
+      if (finalImages.length > 0) {
         const segs: unknown[] = []
-        if (text.trim()) segs.push({ type: 'text', data: { text } })
-        segs.push({ type: 'image', data: { file: img } })
+        if (finalText) segs.push({ type: 'text', data: { text: finalText } })
+        for (const img of finalImages) segs.push({ type: 'image', data: { file: img } })
         message = segs
       }
       let messageId = ''
-      if (text.trim() || img) {
+      if (finalText.trim() || finalImages.length > 0) {
         const res = (await callAction<{ status?: string; data?: { message_id?: number } }>('send_group_msg', {
           group_id: groupId,
           message,
@@ -763,7 +1035,7 @@ export function createNapcatClient(deps: NapcatDeps) {
       // 记录发出的消息(2026-08-12 撤回修复):群消息也留 message_id——
       // 原实现恒返回 'ok',工具回显的 message_id 是假的,LLM 无法撤回
       // 自己发的群消息;只发文件(upload_group_file 无 message_id)不记
-      recordSent({ messageId, type: 'group', target: groupId, text: text.slice(0, 100) || '(图片/文件)' })
+      recordSent({ messageId, type: 'group', target: groupId, text: finalText.slice(0, 100) || '(图片/文件)' })
       repliedCount++
       return messageId
     },
@@ -960,7 +1232,7 @@ export function createNapcatClient(deps: NapcatDeps) {
     },
     status(): NapcatStatus {
       return {
-        connected: !!ws && ws.readyState === WebSocket.OPEN,
+        connected: !!ws && ws.open,
         url: cfg().napcatWsUrl?.trim() || DEFAULT_WS_URL,
         lastError,
         receivedCount,
@@ -1061,7 +1333,10 @@ export function createNapcatTools(client: {
             type: 'string',
             description:
               'send/send_group:要一并发送的图片(本地绝对路径或 http(s) 链接,如 bili 下载的封面/截图)' +
-              '——文本+图片一起发;本地路径必须存在(报错可自纠)',
+              '——**传本参数 = 真正发送图片给对方(NapCat 上传,对方看到的是图片)**,' +
+              '文本+图片一起发;本地路径必须存在(报错可自纠);' +
+              '**不要把图片路径写进 message 文本**(那样对方只会收到一串路径文字,看不到图——' +
+              '即使写了也会被自动提取转成图片发送,但请规范用 image 参数)',
           },
           file: {
             type: 'string',

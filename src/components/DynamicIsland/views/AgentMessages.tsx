@@ -8,7 +8,7 @@
 
 import { memo, useEffect, useRef, useState } from 'react'
 import type { AgentMessage, AgentPart } from '../../../agent/types'
-import { textFromMessage, textFromParts } from '../../../agent/text'
+import { stripNapcatInstructions, textFromMessage, textFromParts } from '../../../agent/text'
 import { firstMediaKindInText } from './markdownParser'
 import { AgentImage, CopyButton, Markdown, MediaFrame } from './Markdown'
 
@@ -18,33 +18,76 @@ import { AgentImage, CopyButton, Markdown, MediaFrame } from './Markdown'
 /** 剥离 NapCat 注入指令段(2026-08-12 修复"提示词泄露"):main.cjs
  * 群/陌生人消息的注入文本 = 【来源】消息 + 【群聊指令/私聊指令】…——
  * 指令段只给 LLM 看(引擎历史回传完整),对话窗口显示剥离,用户只见
- * 来源标注与原始消息 */
-function stripNapcatInstructions(text: string): string {
-  return text
-    .replace(/【群聊指令】[\s\S]*$/, '')
-    .replace(/【私聊指令】[\s\S]*$/, '')
-    .trim()
-}
+ * 来源标注与原始消息(实现已抽到 src/agent/text.ts,与 useAgent 历史
+ * 发送防污染共用) */
 
 export const UserBubble = memo(function UserBubble({ m }: { m: AgentMessage }) {
   const text = stripNapcatInstructions(textFromMessage(m))
   // 收到的 QQ/群图片(2026-08-12 收图链路):用户消息 media part →
   // MediaFrame 展示图片(main.cjs 已下载到本地路径)
   const mediaParts = m.parts.filter((p): p is Extract<AgentPart, { type: 'media' }> => p.type === 'media')
+  // 档案卡展开态(2026-08-13 优化:受控展开 + 0fr↔1fr 高度动画,
+  // 与工具卡同款曲线;原 details 原生折叠无动画)
+  const [cardOpen, setCardOpen] = useState(false)
   return (
     <div className="island-agent-msg-user">
       <div className="island-agent-msg-user-text">
-        {/* NapCat 来源标签(2026-08-12):QQ 私聊('QQ')/ 群聊('群聊')
-            消息进入对话显示来源,与本地输入区分(回复会发回对应 QQ/群) */}
-        {m.source === 'qq' && (
-          <span className="island-agent-msg-qq-tag" title={m.qq ? `来自 QQ ${m.qq}` : '来自 QQ'}>
-            QQ
-          </span>
-        )}
-        {m.source === 'group' && (
-          <span className="island-agent-msg-qq-tag" title={m.qq ? `来自群聊(QQ ${m.qq})` : '来自群聊'}>
-            群聊
-          </span>
+        {/* NapCat 来源头(2026-08-13 布局细分重构,用户要求"总体 QQ →
+            私聊/群聊 → 发言 QQ 号 → 档案卡"):第一行 类别 + QQ 号 +
+            档案卡按钮;档案卡展开为全宽块(每条消息都带,主人/外人
+            一眼区分);ask(陌生人询问轮)同私聊类别显示 */}
+        {(m.source === 'qq' || m.source === 'group' || m.source === 'ask') && (
+          <div className="island-agent-msg-qq-head">
+            <span className="island-agent-msg-qq-cat">QQ · {m.source === 'group' ? '群聊' : '私聊'}</span>
+            <span className="island-agent-msg-qq-num">{m.qq ? `QQ ${m.qq}` : ''}</span>
+            {m.profileCard && (
+              <div className={`island-agent-msg-qq-card${cardOpen ? ' open' : ''}`}>
+                <button
+                  type="button"
+                  className="island-agent-msg-qq-card-summary"
+                  aria-expanded={cardOpen}
+                  onClick={() => setCardOpen((o) => !o)}
+                >
+                  <span>档案卡</span>
+                  <svg
+                    className="island-agent-msg-qq-card-arrow"
+                    viewBox="0 0 16 16"
+                    width="9"
+                    height="9"
+                    aria-hidden="true"
+                  >
+                    <path
+                      d="M4 6l4 4 4-4"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="1.6"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                </button>
+                <div className="island-agent-msg-qq-card-wrap">
+                  <div className="island-agent-msg-qq-card-body">
+                    {m.profileCard.split('\n').map((line, i) => {
+                      const label = /^([^:：]{1,8}[:：])(.*)$/.exec(line)
+                      return (
+                        <div key={i} className="island-agent-msg-qq-card-line">
+                          {label ? (
+                            <>
+                              <span className="island-agent-msg-qq-card-label">{label[1]}</span>
+                              {label[2]}
+                            </>
+                          ) : (
+                            line || ' '
+                          )}
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
         )}
         <Markdown text={text} plainMermaid />
         {mediaParts.map((p, i) => (

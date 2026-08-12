@@ -882,6 +882,15 @@ export function AgentSettingsView({
       .catch(() => setMemoryError('写入失败'))
     setMemoryDraft((d) => ({ ...d, content: '' }))
   }
+  // 锁定/解锁记忆(2026-08-13 受保护条目):锁定后自我进化不会修改/删除/
+  // 合并该条目(人设/岛灵设定由主人指定,进化不得改写);主进程按
+  // protected 标记拦截,engine 侧 forget 工具同样拒绝删除锁定条目
+  const toggleMemoryLock = (entry: MemoryEntry) => {
+    window.desktop
+      ?.agentMemorySet?.({ update: { id: entry.id, protected: !entry.protected } })
+      .then(refreshMemory)
+      .catch(() => setMemoryError('切换锁定失败'))
+  }
   const removeMemory = (id: string) => {
     // 先播离场动画,再真正删除(精致缓动:收起后再移除)
     memoryLeave.beginLeave(id, () => {
@@ -1465,7 +1474,7 @@ export function AgentSettingsView({
         <div className="island-agent-section">
           <span className="island-agent-section-title">长期记忆({memory.length} 条,自动附加到系统提示)</span>
           <span className="island-agent-section-hint">
-            对话中可直接说"记住:…"让 Agent 写入;记忆条目也参与自我进化
+            对话中可直接说"记住:…"让 Agent 写入;记忆条目也参与自我进化——人设等主人指定条目建议点 🔒 锁定(进化不会改动锁定条目)
           </span>
           {memory.map((entry) => (
             <div
@@ -1497,6 +1506,18 @@ export function AgentSettingsView({
                   <span className="island-memory-content" title={entry.content}>
                     {entry.content}
                   </span>
+                  <button
+                    type="button"
+                    className={`island-agent-scale-btn${entry.protected ? ' on' : ''}`}
+                    title={
+                      entry.protected
+                        ? '已锁定:自我进化不会修改/删除/合并这条记忆(点击解锁)'
+                        : '未锁定:自我进化可能整合/删除这条记忆(点击锁定,人设等主人设定建议锁定)'
+                    }
+                    onClick={() => toggleMemoryLock(entry)}
+                  >
+                    {entry.protected ? '🔒' : '🔓'}
+                  </button>
                   <button
                     type="button"
                     className="island-agent-scale-btn"

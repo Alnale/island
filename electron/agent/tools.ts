@@ -19,7 +19,8 @@ import { exec, spawn, type ChildProcess } from 'node:child_process'
 import { existsSync, mkdirSync, promises as fs } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { app, Notification, shell } from 'electron'
+import { app, shell } from 'electron'
+import { showNotify } from './notify'
 import { listTasks, registerTask, setTaskDoneHandler, updateTask } from './tasks'
 import type { AgentTool, ToolParams } from './types'
 
@@ -320,10 +321,7 @@ function runBiliBackground(args: string[]): string {
       biliJobs.delete(pid)
       const label = biliJobLabel(job.args)
       if (code !== 0) {
-        new Notification({
-          title: 'B站下载结束',
-          body: `${label}异常退出(退出码 ${code}),请用 bili saved 查看记录或重试`,
-        }).show()
+        showNotify('B站下载结束', `${label}异常退出(退出码 ${code}),请用 bili saved 查看记录或重试`)
         // 失败也进入终态 → background-done → 自动对话告知用户(失败
         // 不再"只弹通知",LLM 与用户都在对话里知道结果)
         updateTask(taskId, {
@@ -337,7 +335,7 @@ function runBiliBackground(args: string[]): string {
         job.outputPaths = files
         const message =
           files.length > 0 ? `${label}已完成:\n${files.join('\n')}` : `${label}已完成,输出目录:${outdir}`
-        new Notification({ title: 'B站下载完成', body: message }).show()
+        showNotify('B站下载完成', message)
         updateTask(taskId, { status: 'done', detail: message })
       })
     })
@@ -382,10 +380,10 @@ function startBiliLoginPoll(key: string): void {
   child.unref()
   child.on('exit', (code) => {
     if (code === 0) {
-      new Notification({ title: 'B站登录成功', body: '扫码确认完成,已登录 B 站' }).show()
+      showNotify('B站登录成功', '扫码确认完成,已登录 B 站')
       updateTask(taskId, { status: 'done', detail: '用户已扫码确认,已登录 B 站' })
     } else {
-      new Notification({ title: 'B站登录未完成', body: '二维码已过期或未扫码确认,可重新生成' }).show()
+      showNotify('B站登录未完成', '二维码已过期或未扫码确认,可重新生成')
       updateTask(taskId, { status: 'failed', detail: '二维码已过期或未扫码确认,可重新生成' })
     }
   })
@@ -1344,11 +1342,7 @@ export function createTools(deps: {
         required: ['title', 'message'],
       },
       async execute(params: ToolParams) {
-        if (!Notification.isSupported()) return '(当前系统不支持通知)'
-        new Notification({
-          title: String(params.title ?? 'Agent'),
-          body: String(params.message ?? ''),
-        }).show()
+        showNotify(String(params.title ?? 'Agent'), String(params.message ?? ''))
         return '通知已发送'
       },
     },

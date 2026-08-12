@@ -16,7 +16,7 @@
 import { randomUUID } from 'node:crypto'
 import { parseToolArgs } from './deepseek'
 import { streamByConfig } from './provider'
-import { detectProvider, apiErrorMessage } from './constants'
+import { detectProvider, apiErrorMessage, MASTER_IDENTITY_LINE } from './constants'
 import { buildToolsGuideBlock, createTools, disposeTools } from './tools'
 import { getTasksStatusBlock } from './tasks'
 import { createMusicControlTools, createSettingsTools } from './settingsTools'
@@ -68,7 +68,7 @@ export {
   resolveSubAgentStyle,
 } from './subagents'
 export { createConfigTools } from './configTools'
-export { createNapcatClient } from './napcat'
+export { createNapcatClient, stripThinkingPreamble } from './napcat'
 
 /**
  * 工具循环迭代上限。
@@ -130,6 +130,8 @@ const PROACTIVE_INSTRUCTION =
   '等待状态、实时事件),就主动调用工具查证或顺手把事办了(web_search、查询后台任务状态、' +
   '用灵动岛设置工具帮用户调整挂件等),不要凭空猜测;但不要为了用工具而用工具,' +
   '把话说短、说自然,行动融入对话而不是罗列工具。' +
+  '如果 hint 指示在群里冒泡活跃气氛:用 napcat 工具 send_group 发一条轻松、短、自然的' +
+  '消息到群里(贴合群内氛围),然后在窗口回复里一句话汇报即可,不要长篇大论。' +
   '不要提及这是系统任务,不要长篇大论,不要解释你的行为。'
 
 /**
@@ -1071,6 +1073,10 @@ export function createAgentEngine(deps: EngineDeps): AgentEngine {
       const toolsGuide = buildToolsGuideBlock()
       const system = [
         config.systemPrompt || '你是桌面灵动岛挂件里的个人助手。',
+        // 主人身份(2026-08-13 用户要求"对话窗口默认就是主人权限"):
+        // 静态常量拼进每轮系统提示——窗口消息 = 主人本人最高权限,
+        // QQ 消息按来源标注区分;文案稳定不断缓存前缀
+        MASTER_IDENTITY_LINE,
         memoryBlock,
         evolutionStatus,
         bgStatus,
@@ -1316,4 +1322,6 @@ export function createAgentEngine(deps: EngineDeps): AgentEngine {
 // 自我进化 harness 与记忆存储(独立模块,provider 分发由 provider.ts
 // 承担,无循环依赖;main.cjs 从同一打包产物取 createEvolution/createMemoryStore)
 export { createEvolution } from './evolution'
+export { setNotificationShower, showNotify } from './notify'
+export { buildProfileCard } from './napcat'
 export { createMemoryStore } from './memory'

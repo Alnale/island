@@ -15,7 +15,8 @@ import { promises as fs } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
-import { createMemoryStore, formatMemoryBlock } from '../electron/agent/memory'
+import { createMemoryStore, createMemoryTools, formatMemoryBlock } from '../electron/agent/memory'
+import { isProtectedEntry, PERSONA_TAGS } from '../electron/agent/constants'
 import { createMCPManager } from '../electron/agent/mcp'
 import { createSkillLoader } from '../electron/agent/skills'
 import {
@@ -42,10 +43,22 @@ import {
   fallbackTitle,
 } from '../electron/agent/engine'
 import { buildToolsGuideBlock, createTools, toolOutputDir } from '../electron/agent/tools'
-import { createNapcatTools, gtkFromCookie, napcatMessageImages, napcatMessageText } from '../electron/agent/napcat'
-import { MASTER_QQ } from '../electron/agent/constants'
+import {
+  buildProfileCard,
+  createNapcatTools,
+  extractImageRefs,
+  gtkFromCookie,
+  napcatMessageImages,
+  napcatMessageText,
+  stripMasterNarration,
+  stripThinkingPreamble,
+  stripToolNarration,
+} from '../electron/agent/napcat'
+import { MASTER_IDENTITY_LINE, MASTER_QQ } from '../electron/agent/constants'
 import { streamResponse } from '../electron/agent/deepseek'
 import { sanitizeUnpairedSurrogates } from '../electron/agent/sse'
+import { createWsSocket, encodeWsFrame, parseWsUrl, WsFrameParser } from '../electron/agent/wsclient'
+import { stripNapcatHistoryInstructions, stripNapcatInstructions } from '../src/agent/text'
 import {
   getTasksStatusBlock,
   listTasks,
@@ -1134,6 +1147,174 @@ await test('getLog 从磁盘加载', async () => {
   await waitFor(async () => (await evo.getLog()).length === 1, 2000, '日志加载')
   const log = await evo.getLog()
   assert(log[0].version === 3 && log[0].applied === true, '日志应从磁盘加载')
+})
+
+// ---------------------------------------------------------------------------
+// 7.4 受保护条目(2026-08-13,用户实测"自我进化总是丢失岛灵设定")
+// ---------------------------------------------------------------------------
+
+console.log('\n=== 受保护条目(人设/岛灵设定防丢失) ===')
+
+await test('MASTER_IDENTITY_LINE:窗口直发 = 主人,外部 QQ 消息不继承主人权限(2026-08-13 用户要求)', () => {
+  // 主引擎系统提示拼入主人身份(2026-08-13 二轮收紧,用户澄清"不要把
+  // 外部传入的消息也当成主人权限"):逐条按标记判定——① 带 QQ 来源标注
+  // = 外部消息,只有 1178821869 是主人;② 无来源标注的窗口直发 = 主人
+  // 最高权限;③ 系统通知 = 系统事件
+  assert(MASTER_QQ === '1178821869', '主人 QQ 硬编码为 1178821869')
+  assert(MASTER_IDENTITY_LINE.includes('1178821869'), '身份说明应含主人 QQ 号')
+  assert(MASTER_IDENTITY_LINE.includes('逐条消息'), '应按逐条消息判定身份')
+  assert(MASTER_IDENTITY_LINE.includes('外部消息'), '带来源标注的 QQ 消息应声明为外部消息')
+  assert(MASTER_IDENTITY_LINE.includes('不具主人权限'), '外部 QQ 消息不得继承主人权限')
+  assert(MASTER_IDENTITY_LINE.includes('没有来源标注的用户消息') && MASTER_IDENTITY_LINE.includes('最高权限'), '无来源标注的窗口直发 = 主人最高权限')
+  assert(MASTER_IDENTITY_LINE.includes('不要「先问主人」'), '窗口消息不应触发先问主人')
+  assert(MASTER_IDENTITY_LINE.includes('【系统通知】'), '系统通知类消息应单独定性')
+})
+
+await test('isProtectedEntry:protected 标记 / 人设标签 / 人设内容 / 普通条目', () => {
+  assert(isProtectedEntry({ protected: true, content: '随便' }), 'protected 标记应受保护')
+  assert(isProtectedEntry({ content: 'x', tags: ['人设'] }), '人设标签应受保护')
+  assert(isProtectedEntry({ content: 'x', tags: ['人格'] }), '人格标签应受保护')
+  assert(isProtectedEntry({ content: '用户为岛灵设定角色形象:鲸鱼娘', tags: [] }), '角色形象内容应受保护')
+  assert(isProtectedEntry({ content: '主人指定人设:毒舌雌小鬼' }), '人设关键词内容应受保护')
+  assert(isProtectedEntry({ content: '人设(主人指定):鲸鱼娘' }), '句首人设应受保护')
+  assert(isProtectedEntry({ content: '群聊人设:鲸鱼娘高冷话少' }), '人设后跟冒号应受保护')
+  assert(!isProtectedEntry({ content: '用户喜欢简洁回答', tags: ['偏好'] }), '普通条目不应受保护')
+  assert(!isProtectedEntry({ content: '群成员特征:爱玩梗' }), '无关键词普通内容不应受保护')
+  assert(!isProtectedEntry({ content: '群聊人设之外的普通条目' }), '字面含人设但无语境不应误判')
+  // 显式解锁是权威:标签/内容命中也被覆盖
+  assert(!isProtectedEntry({ protected: false, content: '主人指定人设:猫娘', tags: ['人设'] }), '显式解锁应覆盖标签/内容判定')
+  assert(PERSONA_TAGS.includes('人设') && PERSONA_TAGS.includes('人格'), '人设类标签表应含人设/人格')
+})
+
+await test('store.add:人设条目自动锁定;显式 protected 覆盖;普通条目不锁', async () => {
+  const store = createMemoryStore(() => memoryFile(11))
+  const p1 = await store.add({ content: '人设:鲸鱼娘,高冷话少', type: 'preference', tags: ['人设'] })
+  assert(p1.entry.protected === true, '人设标签条目应自动锁定')
+  const p2 = await store.add({ content: '用户为岛灵设定角色形象:毒舌雌小鬼', type: 'fact' })
+  assert(p2.entry.protected === true, '人设关键词内容应自动锁定(无标签)')
+  const p3 = await store.add({ content: '主人指定人设:猫娘', type: 'fact', protected: false })
+  assert(p3.entry.protected === false, '显式 protected:false 应豁免自动锁定')
+  const n1 = await store.add({ content: '用户喜欢简洁回答', type: 'preference' })
+  assert(n1.entry.protected !== true, '普通条目不应锁定')
+  // update 可切换锁定状态
+  const u = await store.update(n1.entry.id, { protected: true })
+  assert(u?.protected === true, 'update 应可锁定')
+  const u2 = await store.update(n1.entry.id, { protected: false })
+  assert(u2?.protected === false, 'update 应可解锁')
+})
+
+await test('加载迁移:旧数据人设条目(无 protected)自动补锁并落盘', async () => {
+  // 旧版 memory.json 的人设条目只有标签/关键词,无 protected 字段——
+  // 加载时自动补锁(2026-08-13 迁移),此后 protected 是权威来源
+  await fs.writeFile(
+    memoryFile(12),
+    JSON.stringify({
+      entries: [
+        { id: 'old-1', type: 'preference', content: '主人指定人设:鲸鱼娘', tags: ['人设'], createdAt: 1, updatedAt: 1 },
+        { id: 'old-2', type: 'fact', content: '普通旧条目', createdAt: 2, updatedAt: 2 },
+      ],
+    }),
+  )
+  const store = createMemoryStore(() => memoryFile(12))
+  const list = await store.list()
+  const persona = list.find((e) => e.id === 'old-1')!
+  const normal = list.find((e) => e.id === 'old-2')!
+  assert(persona.protected === true, '旧人设条目应自动补锁')
+  assert(normal.protected !== true, '旧普通条目不应补锁')
+  // 迁移结果应落盘(轮询等待串行写队列)
+  await waitFor(async () => {
+    try {
+      const onDisk = (await readJson(memoryFile(12))) as { entries: MemoryEntry[] }
+      return onDisk.entries.some((e) => e.id === 'old-1' && e.protected === true)
+    } catch {
+      return false
+    }
+  }, 5000, '迁移补锁落盘')
+})
+
+await test('applyChanges:delete/update/merge 目标为受保护条目全部跳过(硬拦截)', async () => {
+  // 2026-08-13 用户实测:清理类轮次免复评直接接受,评审把人设重写成
+  // "整体切换为鲸鱼娘模式"——代码层必须拦截,LLM 无视提示词也不生效。
+  // 显式时间戳定序:list 按 updatedAt 倒序 → 人设 = 序号 1
+  const store = createMemoryStore(() => memoryFile(13))
+  await store.replaceAll([
+    { id: 'p', type: 'preference' as const, content: '主人指定人设:海澜之家=毒舌雌小鬼,异象局=鲸鱼娘', tags: ['人设'], protected: true, createdAt: 1, updatedAt: 3 },
+    { id: 'g1', type: 'fact' as const, content: '海澜之家群成员:李天宇等', createdAt: 1, updatedAt: 2 },
+    { id: 'g2', type: 'fact' as const, content: '异象局群成员特征:鹤翔叔叔爱整活', createdAt: 1, updatedAt: 1 },
+  ])
+  const before = await store.list()
+  assert(before.length === 3 && before[0].id === 'p' && before[0].protected === true, '预置:序号 1 = 受保护人设')
+  const n = await applyChanges(
+    [
+      // 评审改写人设(merge:true,免假说——最危险的清理路径)
+      { op: 'update', id: '1', content: '人设(评审擅自改写):整体切换为鲸鱼娘模式,毒舌作废', merge: true },
+      // 评审删除人设
+      { op: 'delete', id: '1' },
+      // 评审把成员条目合并进人设条目(update 目标 = 人设)
+      { op: 'update', id: '1', content: '人设+成员大杂烩', merge: true },
+      // 正常清理:删除成员条目(序号 2)
+      { op: 'delete', id: '2' },
+    ],
+    store,
+  )
+  assert(n === 1, `应只应用 1 条(人设相关的 3 条全部硬跳过),实际 ${n}`)
+  const after = await store.list()
+  assert(after.length === 2, `人设不可删、成员删 1 → 剩 2 条,实际 ${after.length}`)
+  const persona = after.find((e) => e.id === 'p')!
+  assert(persona.content.includes('毒舌雌小鬼'), `人设内容应原样保留,实际:${persona.content}`)
+})
+
+await test('applyChanges:内容片段回退删除跳过受保护条目,普通条目照删', async () => {
+  // 兼容路径:评审不传序号直接传内容片段——原实现 store.remove(fragment)
+  // 会把包含片段的受保护条目一起删掉;现改为逐条按 id 删并过滤受保护
+  const store = createMemoryStore(() => memoryFile(14))
+  await store.replaceAll([
+    { id: 'p', type: 'preference' as const, content: '群聊人设:鲸鱼娘高冷话少', tags: ['人设'], protected: true, createdAt: 1, updatedAt: 2 },
+    { id: 'n', type: 'fact' as const, content: '群聊人设之外的普通条目', createdAt: 1, updatedAt: 1 },
+  ])
+  const n = await applyChanges([{ op: 'delete', content: '群聊人设' }], store)
+  assert(n === 1, `片段命中的受保护条目应跳过、只删普通条目,实际 ${n}`)
+  const after = await store.list()
+  assert(after.length === 1 && after[0].id === 'p' && after[0].protected === true, '受保护人设应原样保留')
+})
+
+await test('formatMemoryBlock:锁定条目带·锁定标记', () => {
+  const entries: MemoryEntry[] = [
+    { id: '1', type: 'preference', content: '主人指定人设:鲸鱼娘', protected: true, createdAt: 1, updatedAt: 1 },
+    { id: '2', type: 'fact', content: '普通条目', createdAt: 2, updatedAt: 2 },
+  ]
+  const block = formatMemoryBlock(entries)
+  assert(block.includes('[偏好·锁定] 主人指定人设'), `锁定条目应有标记,实际:${block}`)
+  assert(block.includes('[事实] 普通条目') && !block.includes('[事实·锁定]'), '普通条目不应有标记')
+})
+
+await test('记忆工具:remember 人设自动锁定 / forget 拒删锁定 / update_memory 解锁后可删', async () => {
+  const store = createMemoryStore(() => memoryFile(15))
+  await store.replaceAll([]) // 隔离:测试共用同一 memory.json,清空残留
+  const tools = createMemoryTools(() => store)
+  const remember = tools.find((t) => t.name === 'remember')!
+  const forget = tools.find((t) => t.name === 'forget')!
+  const updateMemory = tools.find((t) => t.name === 'update_memory')!
+  // remember 带人设标签 → 自动锁定
+  const out = String(await remember.execute({ content: '主人指定人设:毒舌雌小鬼', type: 'preference', tags: ['人设'] }))
+  assert(out.includes('已锁定'), `remember 应提示已锁定,实际:${out}`)
+  const entry = (await store.list()).find((e) => e.content.includes('毒舌雌小鬼'))!
+  assert(entry.protected === true, 'remember 的人设条目应已锁定')
+  // forget 直接删 → 拒绝
+  let refused = false
+  try {
+    await forget.execute({ key: '毒舌雌小鬼' })
+  } catch (err) {
+    refused = String(err).includes('锁定') || String(err).includes('受保护')
+  }
+  assert(refused, 'forget 删除锁定条目应拒绝并提示解锁')
+  assert((await store.list()).length === 1, '拒绝后条目应保留')
+  // update_memory 解锁 → forget 成功
+  const u = await updateMemory.execute({ id: entry.id, protected: false })
+  assert(String(u).includes('已更新'), '解锁 update 应成功')
+  const n = await forget.execute({ key: '毒舌雌小鬼' })
+  assert(String(n).includes('已删除 1 条'), '解锁后 forget 应成功')
+  assert((await store.list()).length === 0, '解锁删除后应清空')
 })
 
 // ---------------------------------------------------------------------------
@@ -3398,6 +3579,96 @@ await test('napcatMessageImages:图片段提取(收图链路)', () => {
   assert(napcatMessageImages([{ type: 'text', data: { text: 'x' } }]).length === 0, '纯文本段无图片')
 })
 
+await test('stripNapcat 双通道:显示剥离档案卡/历史保留档案卡(消息隔离)', () => {
+  // 2026-08-13 用户澄清"档案卡与消息分类是给历史消息隔离的":
+  // 显示层剥离一切指令段(档案卡经 profileCard 字段展示,不重复);
+  // 历史回传保留【档案卡】(LLM 跨轮次区分人),只剥当轮指令段
+  const msg =
+    '【QQ私聊 · QQ 1536057397 · 魔精】你好\n' +
+    '【图片已下载】1. D:/x.png\n' +
+    '【档案卡】\n称呼:魔精\n已知:喜欢王者/KPL\n' +
+    '【回复规则】\n① 岛灵的主人 = QQ 1178821869(唯一,硬编码);当前对方不是主人。\n② 你的回复就是直接发给对方的话…'
+  // 显示剥离:档案卡与回复规则都去掉,保留类别行 + 原文 + 图片行
+  const shown = stripNapcatInstructions(msg)
+  assert(shown.startsWith('【QQ私聊 · QQ 1536057397 · 魔精】你好'), `显示应保留类别行与原文,实际:${shown.slice(0, 40)}`)
+  assert(!shown.includes('档案卡') && !shown.includes('回复规则'), '显示应剥离档案卡与回复规则')
+  assert(shown.includes('【图片已下载】'), '图片标注应保留')
+  // 历史剥离:档案卡保留,回复规则剥离(当轮指令不累积)
+  const hist = stripNapcatHistoryInstructions(msg)
+  assert(hist.includes('【档案卡】') && hist.includes('称呼:魔精') && hist.includes('已知:喜欢王者/KPL'), `历史应保留档案卡,实际:${hist.slice(0, 60)}`)
+  assert(!hist.includes('回复规则') && !hist.includes('岛灵的主人'), '历史应剥离回复规则')
+  // 旧格式兼容:【私聊指令】/【群聊指令】/【主人消息】两函数都剥
+  const old = '【QQ 123 发来私聊消息】你好\n【私聊指令】先问主人再回复'
+  assert(stripNapcatInstructions(old) === '【QQ 123 发来私聊消息】你好', '显示剥离旧私聊指令')
+  assert(stripNapcatHistoryInstructions(old) === '【QQ 123 发来私聊消息】你好', '历史剥离旧私聊指令')
+  // 群聊模板:【群聊上下文】与【回复规则】剥,档案卡留(历史)
+  const group =
+    '【QQ群聊 · 群 1045765371 · QQ 20001】消息\n【档案卡】\n称呼:群友\n【回复规则】\n① …\n最近群聊记录:\n20001: 你好'
+  assert(stripNapcatHistoryInstructions(group).includes('称呼:群友') && !stripNapcatHistoryInstructions(group).includes('最近群聊记录'), '群聊历史保留档案卡剥规则与群上下文')
+  // 空输入
+  assert(stripNapcatInstructions('') === '' && stripNapcatHistoryInstructions('  ') === '', '空输入返回空')
+})
+
+await test('buildProfileCard:档案卡聚合(联系人/人格/记忆相关/空档案)', () => {
+  // 2026-08-13 用户要求"将不同 QQ 号的所有涉及发言汇总成一个档案卡":
+  // 称呼 + 已知信息 + 会话人格 + 长期记忆相关条目(按 QQ 号/称呼过滤)
+  const full = buildProfileCard('1536057397', {
+    contact: { qq: '1536057397', name: '魔精', info: '喜欢王者/KPL,可玩KPL梗', source: 'private', updatedAt: 1 },
+    persona: '毒舌傲娇',
+    memories: [
+      { content: '魔精(QQ 1536057397)是私聊白名单成员,喜欢王者/KPL' },
+      { content: '与本题无关的普通记忆' },
+      { content: '魔精今晚约了打王者' },
+    ],
+  })
+  assert(full.includes('称呼:魔精'), `应有称呼,实际:${full}`)
+  assert(full.includes('已知:喜欢王者/KPL'), '应有已知信息')
+  assert(full.includes('会话人格:毒舌傲娇'), '应有会话人格')
+  assert(full.includes('记忆相关:'), '应有记忆相关段')
+  assert(full.includes('魔精(QQ 1536057397)') && full.includes('魔精今晚约了打王者'), '记忆应按 QQ 号/称呼过滤')
+  assert(!full.includes('与本题无关的普通记忆'), '无关记忆不应进档案卡')
+  // 记忆相关最多 4 条
+  const many = buildProfileCard('1', {
+    memories: Array.from({ length: 6 }, (_, i) => ({ content: `QQ 1 相关记忆 ${i}` })),
+  })
+  assert((many.match(/相关记忆/g) ?? []).length <= 4, '记忆相关条目应截断到 4 条')
+  // 空档案:只有称呼行 → 兜底提示
+  const empty = buildProfileCard('9', {})
+  assert(empty.includes('称呼:(未知)') && empty.includes('尚无已知信息'), `空档案应给兜底提示,实际:${empty}`)
+  // **主人称呼兜底(2026-08-13 用户实测"我是主人但称呼未知")**:主人
+  // 缺档案名字时称呼恒为「主人」;档案里记过名字则名字优先
+  const masterCard = buildProfileCard(MASTER_QQ, {})
+  assert(masterCard.includes('称呼:主人') && !masterCard.includes('(未知)'), `主人缺名应兜底「主人」,实际:${masterCard}`)
+  const masterNamed = buildProfileCard(MASTER_QQ, { contact: { qq: MASTER_QQ, name: '小岛', source: 'private', updatedAt: 1 } })
+  assert(masterNamed.includes('称呼:小岛'), '主人档案有名字时名字优先')
+  // 无人格/无联系人不崩
+  const bare = buildProfileCard('8', { memories: [{ content: '普通内容' }] })
+  assert(bare.includes('称呼:(未知)') && !bare.includes('会话人格'), '缺项不崩且不输出空段')
+  // 最近发言(2026-08-13 用户要求"群聊里的各个消息也能正确计入个人的
+  // 档案卡"):聊天记录备份计入档案卡,私聊/群聊标渠道,当前消息排除
+  const withChats = buildProfileCard('20001', {
+    chats: [
+      { id: 'm1', text: '早前的发言', type: 'group' },
+      { id: 'm2', text: '今晚开黑吗', type: 'group' },
+      { id: 'm3', text: '当前消息', type: 'group' },
+    ],
+    excludeId: 'm3',
+  })
+  assert(withChats.includes('最近发言:'), `应有最近发言段,实际:${withChats}`)
+  assert(withChats.includes('[群聊] 早前的发言') && withChats.includes('[群聊] 今晚开黑吗'), '群聊发言应按 QQ 计入档案卡')
+  assert(!withChats.includes('当前消息'), '当前消息应排除(卡内不重复)')
+  // 私聊渠道标记 + 最多 3 条(取最近)
+  const priv = buildProfileCard('9', {
+    chats: [
+      { id: 'a', text: '1', type: 'private' },
+      { id: 'b', text: '2', type: 'private' },
+      { id: 'c', text: '3', type: 'private' },
+      { id: 'd', text: '4', type: 'private' },
+    ],
+  })
+  assert(priv.includes('[私聊] 2') && !priv.includes('[私聊] 1'), '应取最近 3 条且带私聊渠道标记')
+})
+
 await test('napcat 工具:contacts 档案查询与 contact_update 记录', async () => {
   const contactWrites: Array<{ qq: string; name?: string; info?: string }> = []
   let contacts: Record<string, { qq: string; name?: string; info?: string; source?: 'private' | 'group'; updatedAt: number }> = {
@@ -3589,6 +3860,235 @@ await test('gtkFromCookie:QQ Cookie 计算 g_tk(QQ 空间接口认证)', () => {
   assert(gtkFromCookie('uin=o123; skey=xyz;') !== '', 'skey 兜底应能计算 g_tk')
   assert(gtkFromCookie('uin=o123; p_skey=abc;') === gtkFromCookie('p_skey=abc'), '只取 p_skey 值,与其它 cookie 无关')
   assert(gtkFromCookie('no keys here') === '', '无 p_skey/skey 返回空串')
+})
+
+await test('stripThinkingPreamble:剥离回复开头的思考腔(QQ 收到带思考过程)', () => {
+  // 语气词 + 思考动词开头 → 剥第一段
+  assert(
+    stripThinkingPreamble('好的,我先梳理一下你的需求。然后我给你下载链接。') === '然后我给你下载链接。',
+    '语气词+思考动词应剥离第一段',
+  )
+  // 冒号段尾的思考腔
+  assert(
+    stripThinkingPreamble('嗯,让我想想:你的视频下载到 D 盘了。') === '你的视频下载到 D 盘了。',
+    '冒号段尾应剥离',
+  )
+  // 直接以思考动词开头
+  assert(
+    stripThinkingPreamble('让我先分析一下这个问题。答案是 X。') === '答案是 X。',
+    '思考动词直接开头应剥离',
+  )
+  // 正常回复(无思考腔)不动
+  assert(stripThinkingPreamble('好的,我会帮你下载。') === '好的,我会帮你下载。', '正常回复不应误剥')
+  assert(stripThinkingPreamble('下载完成了。') === '下载完成了。', '直接结论不应误剥')
+  // 剥后为空 → 保留原文(不把结论误删光)
+  assert(stripThinkingPreamble('好的,我先想想。') === '好的,我先想想。', '剥空应保留原文')
+  // 超长第一段不剥(长句多为正式开场)
+  const longThink = '好的,我先梳理一下' + '非常长'.repeat(15) + '的细节,然后给出结论。'
+  assert(stripThinkingPreamble(longThink) === longThink, '超长段不应剥')
+  // 空输入
+  assert(stripThinkingPreamble('') === '' && stripThinkingPreamble('  ') === '', '空输入返回空')
+})
+
+await test('stripToolNarration:剥离工具调用过程叙述(和外人聊天不暴露内部动作)', () => {
+  // 用户实测例子:连续叙述句全删 → 空 → 保留原文(不把回复删没)
+  const full = '我来找实时数据源,先探测 KPL 数据中心的接口。找到了 API 路径,现在探测实时数据端点。'
+  assert(stripToolNarration(full) === full, '叙述段全删光应保留原文')
+  // 叙述句 + 结论混合:只删叙述句,结论保留
+  assert(
+    stripToolNarration('我来找实时数据源,先探测接口。拿到了实时数据!现在 SYG 1:0 KSG。') === '现在 SYG 1:0 KSG。',
+    '应删除叙述句保留结论',
+  )
+  // 连续三句叙述段删除
+  assert(
+    stripToolNarration('我先探测接口。然后拼接 URL。最后绘制曲线图。后面是结论。') === '后面是结论。',
+    '连续叙述段应整段删除',
+  )
+  // 单句叙述(正常口吻)不删——"我刚帮你查了下比分"是自然的
+  assert(stripToolNarration('我刚帮你查了下比分,现在 KSG 领先。') === '我刚帮你查了下比分,现在 KSG 领先。', '单句叙述不应误删')
+  // 正常回复不删
+  assert(stripToolNarration('比分 2:1,KSG 暂时领先。第二局还在打。') === '比分 2:1,KSG 暂时领先。第二局还在打。', '正常回复不应误删')
+  // 空输入
+  assert(stripToolNarration('') === '' && stripToolNarration('   ') === '', '空输入返回空')
+})
+
+await test('wsclient:帧编解码/长度/分片/掩码(手写 WS 传输,2026-08-13)', () => {
+  // 客户端帧必须带掩码(0x80),载荷掩码还原后一致
+  const f = encodeWsFrame(0x1, Buffer.from('你好'))
+  assert((f[1] & 0x80) !== 0, '客户端帧应带掩码位')
+  const parser = new WsFrameParser()
+  const frames = parser.push(f)
+  assert(frames.length === 1 && frames[0].opcode === 0x1 && frames[0].fin, '掩码帧应解析成功')
+  assert(frames[0].payload.toString('utf8') === '你好', '掩码还原后载荷一致')
+  // 126(2 字节扩展长度)与 127(8 字节扩展长度)
+  const big126 = Buffer.alloc(200, 0x61)
+  const f126 = parser.push(encodeWsFrame(0x1, big126))
+  assert(f126.length === 1 && f126[0].payload.length === 200, '126 长度帧解析正确')
+  const big127 = Buffer.alloc(70000, 0x62)
+  const f127 = parser.push(encodeWsFrame(0x1, big127))
+  assert(f127.length === 1 && f127[0].payload.length === 70000, '127 长度帧解析正确')
+  // 半帧累积:分两次喂入,第二次才出帧
+  const split = encodeWsFrame(0x1, Buffer.from('半帧测试'))
+  const p2 = new WsFrameParser()
+  assert(p2.push(split.subarray(0, 5)).length === 0, '半帧不应出结果')
+  const done = p2.push(split.subarray(5))
+  assert(done.length === 1 && done[0].payload.toString('utf8') === '半帧测试', '补齐后应解析出完整帧')
+  // 服务端不掩码帧(fin=0 分片 + 续帧)
+  const unfragmented = Buffer.concat([
+    Buffer.from([0x01, 0x03]), Buffer.from('abc'),
+    Buffer.from([0x80, 0x03]), Buffer.from('def'),
+  ])
+  const p3 = new WsFrameParser()
+  const ff = p3.push(unfragmented)
+  assert(ff.length === 2 && ff[0].fin === false && ff[1].opcode === 0x0 && ff[1].fin === true, '分片帧应逐帧解析')
+  // URL 解析
+  const u1 = parseWsUrl('ws://127.0.0.1:3001')
+  assert(u1.host === '127.0.0.1' && u1.port === 3001 && u1.path === '/', `ws URL 解析,实际:${JSON.stringify(u1)}`)
+  const u2 = parseWsUrl('ws://localhost:8080/onebot')
+  assert(u2.host === 'localhost' && u2.port === 8080 && u2.path === '/onebot', '带路径 URL 解析')
+  let threw = false
+  try {
+    parseWsUrl('not-a-url')
+  } catch {
+    threw = true
+  }
+  assert(threw, '非法 URL 应抛错')
+})
+
+await test('wsclient:端到端连接假 OneBot 服务器(握手/收发/ping-pong/关闭)', async () => {
+  // 本地 net 服务器模拟 OneBot:101 握手 → 推送文本帧 + ping → 收客户端帧
+  const net = await import('node:net')
+  const crypto = await import('node:crypto')
+  const received: string[] = [] // 服务器收到的客户端帧(payload 文本 / PONG:)
+  const server = net.createServer((sock) => {
+    let upgraded = false
+    let buf = Buffer.alloc(0)
+    sock.on('data', (chunk: Buffer) => {
+      buf = Buffer.concat([buf, chunk])
+      if (!upgraded) {
+        const idx = buf.indexOf('\r\n\r\n')
+        if (idx === -1) return
+        const req = buf.subarray(0, idx).toString('utf8')
+        const key = /Sec-WebSocket-Key:\s*(.+)\r?\n/i.exec(req)?.[1]?.trim() ?? ''
+        const accept = crypto.createHash('sha1').update(key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64')
+        sock.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`)
+        buf = buf.subarray(idx + 4)
+        upgraded = true
+        // 推送一条文本消息 + 一个 ping(期望客户端回 pong);
+        // 帧头长度 = UTF-8 字节数(不能用字符数,中文 3 字节/字)
+        const payload = Buffer.from(
+          JSON.stringify({ post_type: 'message', message_type: 'private', user_id: 1178821869, raw_message: '集成测试' }),
+          'utf8',
+        )
+        sock.write(Buffer.concat([Buffer.from([0x81, payload.length]), payload]))
+        sock.write(Buffer.from([0x89, 0x00]))
+        return
+      }
+      const parser = new WsFrameParser()
+      const frames = parser.push(buf)
+      buf = Buffer.alloc(0)
+      for (const f of frames) {
+        if (f.opcode === 0x1) received.push(f.payload.toString('utf8'))
+        if (f.opcode === 0xa) received.push('PONG:' + f.payload.toString('utf8'))
+        if (f.opcode === 0x8) sock.end()
+      }
+    })
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
+  const port = (server.address() as { port: number }).port
+  const events: string[] = []
+  const messages: string[] = []
+  const conn = createWsSocket(`ws://127.0.0.1:${port}`, {
+    onOpen: () => events.push('open'),
+    onMessage: (text) => messages.push(text),
+    onError: (m) => events.push(`error:${m}`),
+    onClose: () => events.push('close'),
+  })
+  // 握手 + 收到服务器推送
+  await waitFor(() => events.includes('open'), 5000, 'WS 握手成功')
+  assert(messages.length === 1 && messages[0].includes('集成测试'), `应收到服务器推送,实际:${JSON.stringify(messages)}`)
+  // 客户端发送(掩码帧,服务器侧解析出载荷);ping → pong 由服务器侧确认
+  conn.send('客户端问候')
+  await waitFor(() => received.some((r) => r.includes('客户端问候')), 5000, '服务器应收到客户端文本帧')
+  await waitFor(() => received.some((r) => r.startsWith('PONG:')), 5000, '服务器应收到 pong')
+  // 关闭:客户端发 close 帧,服务器 end → onClose
+  conn.close()
+  await waitFor(() => events.includes('close'), 5000, '关闭回调')
+  server.close()
+  assert(!events.some((e) => e.startsWith('error')), `不应有错误事件,实际:${JSON.stringify(events)}`)
+  assert(events[0] === 'open' && events[events.length - 1] === 'close', '事件顺序 open→close')
+})
+
+await test('stripMasterNarration:主人视角汇报剥离(私聊窗口泄露,2026-08-13 实测原文)', () => {
+  // 用户实测泄露原文:给扩展信任联系人(魔精)的回复整体是向主人汇报
+  // 的口吻——全部叙述句删除后,提取「回他「…」」引号里的真正回复
+  const leaked =
+    '魔精发来一张图片,我先展示给你看,同时识别一下图里的内容。' +
+    '识别出来了,魔精发的是张写着「晚 上 好」的图——他在回我之前那句「晚上好」。' +
+    '我回他一句,顺便把临时文件清理掉。' +
+    '魔精回你了——他发了张写着「晚上好」的图(回应之前那句),我认出来后就回他「晚上好呀~图收到啦,今晚是打王者还是看KPL呀」,顺带把识别用的临时文件清了。' +
+    '图片已经展示在窗口里了,你可以看看。'
+  assert(
+    stripMasterNarration(leaked) === '晚上好呀~图收到啦,今晚是打王者还是看KPL呀',
+    `应提取引号里的真回复,实际:${stripMasterNarration(leaked)}`,
+  )
+  // 叙述段 + 真回复混合:删叙述段,保留直接对对方说的话
+  assert(
+    stripMasterNarration('魔精发来一张图,我先识别一下。顺便把临时文件清理了。图上的「晚上好」收到啦~今晚打王者还是看KPL呀?') ===
+      '图上的「晚上好」收到啦~今晚打王者还是看KPL呀?',
+    '应删除叙述段保留对对方的回复',
+  )
+  // 第三人称转述对方(连续 ≥2 句)整段删除
+  assert(
+    stripMasterNarration('他回你了——他发了张图。他回你说今晚要上分。好的,那我帮你约他组队。') ===
+      '好的,那我帮你约他组队。',
+    '转述对方的叙述段应整段删除',
+  )
+  // 向主人汇报口吻(识别/展示在窗口/你可以看看,连续 ≥2 句)删除
+  assert(
+    stripMasterNarration('识别出来了,是张写着「晚上好」的图。图片已经展示在窗口里了,你可以看看。图收到啦,写的是「晚上好」。') ===
+      '图收到啦,写的是「晚上好」。',
+    '向主人汇报叙述段应删除',
+  )
+  // 单句叙述(正常口吻)不删——"我刚帮你查了下比分"是自然的
+  assert(
+    stripMasterNarration('我刚帮你查了下比分,现在 KSG 领先。') === '我刚帮你查了下比分,现在 KSG 领先。',
+    '单句不应误删',
+  )
+  // 正常回复不删(你/你的 是对对方说话,不是汇报)
+  assert(
+    stripMasterNarration('你发的图收到啦,写的是「晚上好」。今晚打王者还是看KPL呀?') ===
+      '你发的图收到啦,写的是「晚上好」。今晚打王者还是看KPL呀?',
+    '正常回复不应误删',
+  )
+  // 全叙述且无引号 → 保留原文兜底
+  const noQuote = '魔精发来一张图,我先展示给你看。图片已经展示在窗口里了。'
+  assert(stripMasterNarration(noQuote) === noQuote, '无引号兜底应保留原文')
+  // 空输入
+  assert(stripMasterNarration('') === '' && stripMasterNarration('   ') === '', '空输入返回空')
+})
+
+await test('extractImageRefs:文本夹带的图片路径自动提取转 image 段(发真图不是路径)', async () => {
+  // 本地路径 + URL 混合提取,文本清理
+  const r1 = extractImageRefs('图在这: D:/x.png 和 https://a.com/b.jpg 都发一下')
+  assert(r1.images.length === 2 && r1.images[0] === 'D:/x.png' && r1.images[1] === 'https://a.com/b.jpg', `应提取本地路径与 URL,实际:${JSON.stringify(r1)}`)
+  assert(!r1.text.includes('D:/x.png') && !r1.text.includes('https://a.com/b.jpg'), '提取后文本应移除路径')
+  assert(r1.text.includes('图在这') && r1.text.includes('都发一下'), '文本其余内容保留')
+  // 括号包裹的路径
+  const r2 = extractImageRefs('封面(D:/cover.jpg)已下载')
+  assert(r2.images.length === 1 && r2.images[0] === 'D:/cover.jpg', `括号包裹应提取,实际:${JSON.stringify(r2)}`)
+  assert(r2.text === '封面已下载', `括号移除后文本,实际:${r2.text}`)
+  // URL 带查询参数完整保留
+  const r3 = extractImageRefs('看这里 https://a.com/1.png?x=1&y=2 不错')
+  assert(r3.images.length === 1 && r3.images[0] === 'https://a.com/1.png?x=1&y=2', `带查询参数 URL 应完整提取,实际:${JSON.stringify(r3)}`)
+  // 无图片路径 → 原样
+  const r4 = extractImageRefs('今天的比分 2:1')
+  assert(r4.images.length === 0 && r4.text === '今天的比分 2:1', '无图片路径应原样')
+  // 扩展名不匹配(如 .mp4)不提取
+  const r5 = extractImageRefs('视频 D:/x.mp4 看')
+  assert(r5.images.length === 0, '非图片扩展名不应提取')
+  // 空输入
+  assert(extractImageRefs('').images.length === 0 && extractImageRefs('  ').text === '', '空输入')
 })
 
 // ---------------------------------------------------------------------------

@@ -12,6 +12,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { stripNapcatHistoryInstructions } from '../agent/text'
 import type {
   AgentConfig,
   AgentEvent,
@@ -387,9 +388,16 @@ export function useAgent(opts?: { allowProactive?: boolean }): AgentController {
           // (实测:下载完成后用户不提问就不知道结果)。
           // 复用 send 的 silent 模式(2026-08-08 用户要求):系统提示
           // 不作为用户消息气泡出现在对话窗口(通知由主进程 Windows
-          // 通知展示),LLM 回复照常落定。busy 时忽略(对话中的状态块
-          // 已覆盖);send 引用稳定(useCallback []),事件订阅闭包安全
+          // 通知展示),LLM 回复照常落定。
+          // **busy 时入队(2026-08-13 用户实测"下载太快,上个消息没回完,
+          // 完成通知被吞")**:原实现 busy 直接忽略——下载在回复中途完成
+          // 时通知永久丢失(在途回合的状态块是旧快照,不会提及)。
+          // 与 NapCat 消息同款排队:status idle 后逐条补发
           const text = `【系统通知】${event.title}:${event.message}。请根据当前任务状态,用一两句话主动告知用户结果。`
+          if (statusRef.current === 'thinking' || statusRef.current === 'running') {
+            silentQueueRef.current.push(text)
+            break
+          }
           send(text, { silent: true })
           break
         }
@@ -727,7 +735,7 @@ export function useAgent(opts?: { allowProactive?: boolean }): AgentController {
   }, [config?.proactiveEnabled, config?.proactiveInterval, config?.proactiveIntervalUnit, opts?.allowProactive])
 
   const send = useCallback(
-    (text: string, opts?: { silent?: boolean; source?: 'qq' | 'group' | 'ask'; target?: string; media?: string[] }) => {
+    (text: string, opts?: { silent?: boolean; source?: 'qq' | 'group' | 'ask'; target?: string; media?: string[]; profileCard?: string }) => {
     const trimmed = text.trim()
     if (!trimmed) return
     if (statusRef.current === 'thinking' || statusRef.current === 'running') return
@@ -743,6 +751,25 @@ export function useAgent(opts?: { allowProactive?: boolean }): AgentController {
     // 要求:原合并实现把新输入并进旧消息,旧请求内容已过时还占上下文;
     // 替换后 LLM 只答复新请求,历史干净)
     const base = last && last.role === 'user' ? prev.slice(0, -1) : prev
+    // **历史指令段剥离(2026-08-12 用户实测"主人账号发消息被当外人"
+    // 根因)**:main.cjs 注入的【回复规则】/【群聊上下文】/旧式
+    // 【私聊指令】【群聊指令】【主人消息】段只对该轮生效——历史消息
+    // 的指令段若不剥离,LLM 每轮都读到旧指令(陌生人链路的「先问
+    // 主人/按指示回他」),新消息(如主人发来)被误沿用旧语境。
+    // **【档案卡】保留(2026-08-13 用户澄清"档案卡与消息分类是给历史
+    // 消息隔离的")**:历史里每条 QQ 消息都带着说话人的档案卡,LLM
+    // 跨轮次正确区分人——用 stripNapcatHistoryInstructions(与显示层
+    // 的 stripNapcatInstructions 区别仅在此);当前轮消息的注入指令
+    // 保留(本轮要听)
+    const history = base.map((m) => {
+      if (m.role === 'user' && (m.source === 'qq' || m.source === 'group' || m.source === 'ask')) {
+        return {
+          ...m,
+          parts: m.parts.map((p) => (p.type === 'text' ? { ...p, text: stripNapcatHistoryInstructions(p.text) } : p)),
+        }
+      }
+      return m
+    })
     // 注意:不递增会话版本(连续对话时总结基于最新消息,旧结果主题一致
     // 仍有效;递增会把每轮总结都作废,标题永远等不到)
     // **图片附件(2026-08-12 收图链路)**:opts.media = 本地图片路径列表
@@ -757,12 +784,15 @@ export function useAgent(opts?: { allowProactive?: boolean }): AgentController {
       role: 'user',
       parts: [{ type: 'text', text: trimmed }, ...mediaParts],
       // NapCat 来源标记(2026-08-12):QQ 私聊('qq',target = QQ 号)/
-      // 群聊('group',target = 群号)/ 询问轮('ask',target = 陌生人 QQ)
-      // 消息进入对话,气泡显示来源标签
-      source: opts?.source === 'qq' || opts?.source === 'group' ? opts.source : undefined,
+      // 群聊('group',target = 群号)/ 询问轮('ask',target = 陌生人 QQ,
+      // 2026-08-13 起保留字段以显示私聊类别头;回复路由走主进程
+      // lastAskTurn,与此字段无关)。档案卡(2026-08-13)随消息展示
+      source:
+        opts?.source === 'qq' || opts?.source === 'group' || opts?.source === 'ask' ? opts.source : undefined,
       qq: opts?.target,
+      profileCard: opts?.profileCard,
     }
-    const next = [...base, userMessage]
+    const next = [...history, userMessage]
     if (opts?.silent) {
       // 静默模式(2026-08-08 用户要求:background-done 等系统提示不作为
       // 用户气泡):**不落渲染端历史**(对话窗口不出现"【系统通知】…"
@@ -771,8 +801,9 @@ export function useAgent(opts?: { allowProactive?: boolean }): AgentController {
       messagesRef.current = prev
       setLastError(null)
       // 引擎无状态:回传完整历史(末尾 = 系统通知,引擎不再追加);
-      // 带会话 ID(工具输出按对话分类存放)
-      window.desktop?.agentSend?.(trimmed, next, sessionIdRef.current)
+      // 带会话 ID;**source='system'(2026-08-13 泄露修复)**:系统轮回复
+      // 永不路由到 QQ(此前被 pendingQQReply 当主人指示发给了陌生人)
+      window.desktop?.agentSend?.(trimmed, next, sessionIdRef.current, 'system', undefined)
       return
     }
     // 同步更新引用:连续 send 之间(React 尚未渲染)也能拿到最新历史,
@@ -781,14 +812,18 @@ export function useAgent(opts?: { allowProactive?: boolean }): AgentController {
     setMessages(next)
     setLastError(null)
     // 引擎无状态:回传完整历史(含刚加入的用户消息);带会话 ID 与
-    // NapCat 来源('qq' 私聊 / 'group' 群聊 / 'ask' 询问轮——2026-08-12:
-    // 询问轮回复由 main.cjs 发到主人 QQ)
+    // 来源标记(2026-08-13 泄露修复,三分类):
+    // - 'qq'/'group'/'ask' = QQ 触发(回复路由见 main.cjs);
+    // - 'window' = 主人在对话窗口直接输入(唯一可消费陌生人 pending
+    //   的窗口轮);
+    // - 'system' = 系统通知轮(background-done 等,永不路由 QQ)
+    const routed = opts?.source === 'qq' || opts?.source === 'group' || opts?.source === 'ask' ? opts.source : undefined
     window.desktop?.agentSend?.(
       trimmed,
       next,
       sessionIdRef.current,
-      opts?.source === 'qq' || opts?.source === 'group' || opts?.source === 'ask' ? opts.source : undefined,
-      opts?.source === 'qq' || opts?.source === 'group' || opts?.source === 'ask' ? opts.target : undefined,
+      routed ?? 'window',
+      routed ? opts?.target : undefined,
     )
   },
     [],
@@ -804,7 +839,10 @@ export function useAgent(opts?: { allowProactive?: boolean }): AgentController {
   //   先问主人】"前缀,本侧**不带 source**——LLM 先询问主人,主人
   //   指示后的回复由主进程 pendingQQReply 链路发回;
   // - 群接话 = 带 source='group'(回复发回群)
-  const napcatQueueRef = useRef<Array<{ text: string; source?: 'qq' | 'group' | 'ask'; target?: string; media?: string[] }>>([])
+  const napcatQueueRef = useRef<Array<{ text: string; source?: 'qq' | 'group' | 'ask'; target?: string; media?: string[]; profileCard?: string }>>([])
+  // 系统通知队列(2026-08-13:background-done busy 时入队,idle 后逐条
+  // 补发——防"下载太快通知被吞")
+  const silentQueueRef = useRef<string[]>([])
   useEffect(() => {
     const offs: Array<() => void> = []
     const push = (
@@ -812,13 +850,14 @@ export function useAgent(opts?: { allowProactive?: boolean }): AgentController {
       source: 'qq' | 'group' | 'ask' | undefined,
       target: string | undefined,
       media?: string[],
+      profileCard?: string,
     ) => {
       if (!text.trim()) return
       if (statusRef.current === 'thinking' || statusRef.current === 'running') {
-        napcatQueueRef.current.push({ text, source, target, media })
+        napcatQueueRef.current.push({ text, source, target, media, profileCard })
         return
       }
-      send(text, source && target ? { source, target, media } : { media })
+      send(text, source && target ? { source, target, media, profileCard } : { media, profileCard })
     }
     const off1 = window.desktop?.onNapcatMessage?.((msg) => {
       if (!msg || typeof msg.text !== 'string') return
@@ -826,24 +865,33 @@ export function useAgent(opts?: { allowProactive?: boolean }): AgentController {
       // false = 陌生人(带 source='ask'——2026-08-12 询问同步:该轮回复
       // 是"询问主人怎么回复",main.cjs 把它发到主人 QQ,同时对话窗口
       // 显示;主人指示后(QQ 或对话窗口)回复发回陌生人)
-      // media(2026-08-12 收图):消息图片本地路径 → 对话展示
-      push(msg.text, msg.trusted === false ? 'ask' : 'qq', msg.qq, msg.media)
+      // media(2026-08-12 收图):消息图片本地路径 → 对话展示;
+      // profileCard(2026-08-13):发送者档案卡 → 气泡头部分层展示
+      push(msg.text, msg.trusted === false ? 'ask' : 'qq', msg.qq, msg.media, msg.profileCard)
     })
     if (typeof off1 === 'function') offs.push(off1)
     const off2 = window.desktop?.onNapcatGroupMessage?.((msg) => {
-      if (msg && typeof msg.text === 'string') push(msg.text, 'group', msg.groupId, msg.media)
+      if (msg && typeof msg.text === 'string') push(msg.text, 'group', msg.groupId, msg.media, msg.profileCard)
     })
     if (typeof off2 === 'function') offs.push(off2)
     return () => {
       for (const off of offs) off()
     }
   }, [send])
-  // busy 结束(idle)后处理排队的 NapCat 消息
+  // busy 结束(idle)后处理排队的 NapCat 消息与系统通知(bili 完成等;
+  // 2026-08-13:后台任务完成通知 busy 时入队,idle 后逐条补发,不再被吞)。
+  // 每条 send 会重新进入 busy → 下一轮 idle 再取下一条,天然串行
   useEffect(() => {
     if (status !== 'idle') return
-    if (napcatQueueRef.current.length === 0) return
-    const next = napcatQueueRef.current.shift()!
-    send(next.text, next.source && next.target ? { source: next.source, target: next.target, media: next.media } : { media: next.media })
+    const napcat = napcatQueueRef.current.shift()
+    if (napcat) {
+      send(napcat.text, napcat.source && napcat.target ? { source: napcat.source, target: napcat.target, media: napcat.media, profileCard: napcat.profileCard } : { media: napcat.media, profileCard: napcat.profileCard })
+      return
+    }
+    const silent = silentQueueRef.current.shift()
+    if (silent) {
+      send(silent, { silent: true })
+    }
   }, [status, send])
 
   const confirmTool = useCallback((approved: boolean) => {

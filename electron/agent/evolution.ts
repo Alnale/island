@@ -26,7 +26,8 @@
 
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
-import { Notification } from 'electron'
+import { isProtectedEntry } from './constants'
+import { showNotify } from './notify'
 import { streamByConfig } from './provider'
 import type { AgentConfig, AgentEvent, MemoryEntry, MemoryStoreLike } from './types'
 
@@ -110,7 +111,13 @@ export function isCleanupChange(ch: EvolutionChange): boolean {
  *   同例豁免 hypothesis(确定性整合,见 isCleanupChange)——原实现把
  *   合并 update 当普通 update 强制假说,LLM 忘写假说时整个整合被跳过,
  *   残留的重复条目永远清理不掉(用户实测)。导出供测试(store 参数化,
- *   与 createEvolution 闭包版行为一致) */
+ *   与 createEvolution 闭包版行为一致);
+ * **2026-08-13 受保护条目硬拦截(用户实测"进化总是丢失岛灵设定")**:
+ *   主人指定的人设/岛灵设定(protected 标记或人设标签/内容,见
+ *   constants.isProtectedEntry)对 delete/update/merge 全部免疫——
+ *   评审提示词禁止触碰(见 reviewSystemPrompt)+ 本层代码硬跳过,
+ *   双保险;清理类轮次免复评直接接受,评审误改人设会直接落盘,
+ *   必须在此拦截(实测 v26→v28 把人设重写成"整体切换为鲸鱼娘模式") */
 export async function applyChanges(
   changes: EvolutionChange[],
   store: MemoryStoreLike | null,
@@ -132,12 +139,21 @@ export async function applyChanges(
         changeCount++
       } else if (ch.op === 'delete' || (ch.op === 'update' && ch.id)) {
         const target = mapSeqToEntry(original, ch.id)
+        // 受保护条目硬拦截(2026-08-13):delete/update/merge 的目标是
+        // 人设/岛灵设定 → 直接跳过(LLM 无视提示词也不生效)
+        if (target && isProtectedEntry(target)) continue
         if (ch.op === 'delete') {
           if (target) {
             changeCount += await store.remove(target.id)
           } else if (ch.content?.trim()) {
-            // 兼容直接传内容片段(旧语义,评审偶发输出内容而非序号)
-            changeCount += await store.remove(ch.content)
+            // 兼容直接传内容片段(旧语义,评审偶发输出内容而非序号);
+            // **锁定过滤(2026-08-13)**:原样调 store.remove(content) 会把
+            // 包含该片段的受保护条目一起删掉——改为逐条按 id 删,
+            // 受保护条目跳过
+            const fragment = ch.content.trim()
+            for (const m of original.filter((e) => e.content.includes(fragment) && !isProtectedEntry(e))) {
+              changeCount += await store.remove(m.id)
+            }
           }
         } else if (target && ch.content?.trim()) {
           await store.update(target.id, { content: ch.content, type: ch.type })
@@ -269,12 +285,18 @@ export function createEvolution(deps: {
     return file
   }
 
-  /** 记忆清单文本(评审/复评的输入) */
+  /** 记忆清单文本(评审/复评的输入)。
+   * **受保护标记(2026-08-13,用户实测"进化总是丢失岛灵设定")**:人设/
+   * 岛灵设定条目标注【受保护·主人设定】——评审提示词禁止触碰,且
+   * applyChanges 代码层硬拦截,双保险 */
   function memoryDump(entries: MemoryEntry[]): string {
     if (entries.length === 0) return '(暂无记忆)'
     const typeLabel: Record<string, string> = { preference: '偏好', fact: '事实', workflow: '工作流', lesson: '教训' }
     return entries
-      .map((e, i) => `${i + 1}. [${typeLabel[e.type] ?? e.type}] ${e.content}`)
+      .map((e, i) => {
+        const lock = isProtectedEntry(e) ? '【受保护·主人设定】' : ''
+        return `${i + 1}. [${typeLabel[e.type] ?? e.type}]${lock} ${e.content}`
+      })
       .join('\n')
   }
 
@@ -347,6 +369,12 @@ export function createEvolution(deps: {
       '{"op": "update", "id": 该条序号, "content": 整合全部要点后的精炼内容(保留各条的全部信息点,不丢失任何信息), "merge": true},' +
       '该主题其余条目逐条输出 {"op": "delete", "id": 序号}。**合并后逐条核对:同一主题必须只剩一条,' +
       '不允许残留任何重复**;不同主题不要互相合并(垂直细分,不是大杂烩)。' +
+      '**受保护条目(清单中带【受保护·主人设定】标记)是主人指定的岛灵设定/人设/角色,绝对不可触碰**(2026-08-13):' +
+      '任何 change 都不得以受保护条目为目标——不得 delete、不得 update/merge 改写其内容、' +
+      '不得把其它条目合并进它、也不得把它并入其它条目;主题整合时受保护条目原样保留。' +
+      '若其它条目与受保护条目看似冲突,**以受保护条目为准,修改其它条目**,' +
+      '绝不为"协调一致/精简表述/消除冲突"而改写或删除受保护条目。' +
+      '不要 add 人设/人格/角色相关的新条目(人设只能由主人指定,不是评审的权限)。' +
       '合并的 update(带 "merge": true)与 delete 都是显然的清理,不需要 hypothesis。' +
       '其他规则:措辞可优化但内容有价值的 update(必须带 hypothesis);缺失的重要维度 add(必须带 hypothesis)。' +
       '每条非 delete、非 merge 的 change 必须带 hypothesis(预测改进后 Agent 行为/回答质量的具体变化)——' +
@@ -527,10 +555,10 @@ export function createEvolution(deps: {
           const body =
             `${n} 轮应用,最近一轮 ${last.summary}` +
             (n === 0 ? '(评分未严格提高,已回滚,无改动)' : '。可在 Agent 设置 → 自我进化 里查看或回滚')
-          new Notification({ title, body }).show()
+          showNotify(title, body)
         })
         .catch((err: Error) => {
-          new Notification({ title: '记忆进化失败', body: err.message.slice(0, 120) }).show()
+          showNotify('记忆进化失败', err.message.slice(0, 120))
         })
         .finally(() => {
           busy = false

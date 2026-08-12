@@ -480,6 +480,130 @@
   border: 1px solid rgba(255, 255, 255, 0.25);
 }
 
+/* QQ 消息来源头(2026-08-13 布局细分:QQ → 私聊/群聊 → QQ 号 → 档案卡) */
+.island-agent-msg-qq-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-bottom: 3px;
+}
+
+.island-agent-msg-qq-cat {
+  padding: 0 6px;
+  border-radius: 6px;
+  font-size: 0.55rem;
+  line-height: 1.6;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  color: #fff;
+  background: rgba(77, 107, 254, 0.55);
+  border: 1px solid rgba(77, 107, 254, 0.8);
+}
+
+.island-agent-msg-qq-num {
+  font-size: 0.55rem;
+  line-height: 1.6;
+  font-weight: 600;
+  color: var(--text-dim, rgba(255, 255, 255, 0.65));
+}
+
+/* 档案卡(2026-08-13 优化:受控展开 + 0fr↔1fr 高度动画,与工具卡同款
+   曲线):按钮 + 箭头 + 展开块;内容等宽展示聚合的已知信息 */
+.island-agent-msg-qq-card {
+  flex-basis: 100%;
+  font-size: 0.56rem;
+  color: var(--text-dim, rgba(255, 255, 255, 0.6));
+}
+
+/* 摘要按钮:与类别行同排的轻量胶囊;箭头随展开旋转 180°(下→上) */
+.island-agent-msg-qq-card-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 0 6px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-dim, rgba(255, 255, 255, 0.55));
+  font-family: inherit;
+  font-size: 0.55rem;
+  line-height: 1.6;
+  cursor: pointer;
+  user-select: none;
+  transition:
+    background 0.15s ease,
+    border-color 0.15s ease,
+    color 0.15s ease;
+}
+
+.island-agent-msg-qq-card-summary:hover {
+  background: rgba(255, 255, 255, 0.11);
+  border-color: rgba(255, 255, 255, 0.26);
+  color: var(--text-color, #fff);
+}
+
+.island-agent-msg-qq-card-arrow {
+  transition: transform 0.28s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.island-agent-msg-qq-card.open .island-agent-msg-qq-card-arrow {
+  transform: rotate(180deg);
+}
+
+/* 高度动画载体:0fr 折叠 / 1fr 展开(内容高度自适应,无需 JS 测量;
+   overflow hidden 裁剪折叠态;曲线与工具卡一致) */
+.island-agent-msg-qq-card-wrap {
+  display: grid;
+  grid-template-rows: 0fr;
+  overflow: hidden;
+  transition: grid-template-rows 0.28s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.island-agent-msg-qq-card.open .island-agent-msg-qq-card-wrap {
+  grid-template-rows: 1fr;
+}
+
+/* 内容层:min-height 0 让 0fr 真折叠;透明度/位移动画——展开随高度
+   渐入(轻延迟,先长高再浮现),收起立即淡出 */
+.island-agent-msg-qq-card-body {
+  min-height: 0;
+  margin-top: 3px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.28);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  font-size: 0.56rem;
+  line-height: 1.55;
+  word-break: break-word;
+  color: var(--text-dim, rgba(255, 255, 255, 0.62));
+  max-height: 150px;
+  overflow-y: auto;
+  opacity: 0;
+  transform: translateY(-4px);
+  transition:
+    opacity 0.2s ease,
+    transform 0.24s cubic-bezier(0.22, 1, 0.36, 1),
+    padding 0.28s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.island-agent-msg-qq-card.open .island-agent-msg-qq-card-body {
+  opacity: 1;
+  transform: translateY(0);
+  transition-delay: 0.05s;
+}
+
+/* 行内标签(称呼/已知/会话人格等)轻强调,记忆相关条目前导连字符保留 */
+.island-agent-msg-qq-card-line {
+  white-space: pre-wrap;
+}
+
+.island-agent-msg-qq-card-label {
+  font-weight: 600;
+  color: var(--text-color, rgba(255, 255, 255, 0.92));
+  margin-right: 1px;
+}
+
 /* 复制按钮:气泡脚注小图标按钮,点击短暂显示 ✓ 反馈。
    拦截左键 pointerdown(消息区内交互元素,长按不触发岛体收回) */
 .island-agent-copy {
@@ -1102,16 +1226,25 @@
   justify-content: center;
   /* 铺满容器(无包边);contain 露出区黑底,与视频内容无缝 */
   background: #000;
+  /* **边缘裁切加固(2026-08-13,用户实测"四周圆角外部的矩形残留UI")**:
+   * 视频元素在 GPU 合成下是独立合成层,仅靠父级(.island-demo)
+   * overflow:hidden 裁剪不可靠(Chromium 合成层逃逸父级圆角裁剪的
+   * 已知坑,透明窗口 + 硬件加速下偶发四角矩形残影)——内层容器自带
+   * 同值圆角 + overflow,直接裁剪合成层子树 */
+  border-radius: 22px;
+  overflow: hidden;
+  isolation: isolate;
 }
 
-/* 媒体内容:直接铺满,由岛体胶囊圆角裁剪(无自身圆角) */
+/* 媒体内容:直接铺满,岛体胶囊圆角裁剪 + **自身圆角兜底**(视频层即使
+   逃逸容器裁剪,自身角也是圆的;全屏态 .fullscreen 重置为 0 见下) */
 .island-agent-mini video,
 .island-agent-mini img {
   width: 100%;
   height: 100%;
   object-fit: contain;
   display: block;
-  border-radius: 0;
+  border-radius: 22px;
   background: #000;
   cursor: pointer;
   user-select: none;
@@ -1263,11 +1396,14 @@
    JS 加 leaving-fullscreen class,播完移除) */
 .island-agent-mini:fullscreen {
   background: #000;
+  /* 全屏容器铺满屏幕,圆角重置(小窗态 22px 的裁切加固不适用) */
+  border-radius: 0;
   animation: agent-mini-fs-in 0.32s cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
 .island-agent-mini.fullscreen {
   padding: 0;
+  border-radius: 0;
 }
 
 .island-agent-mini.fullscreen video,

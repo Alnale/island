@@ -10,9 +10,58 @@ export interface SseFrame {
 }
 
 /**
+ * 读取一块数据,期间中止则返回 aborted 标记(**不销毁 socket**——销毁由
+ * 调用方在安全点执行)。中止与 read() 竞态时,先到者胜;read() 被
+ * 取消产生的 AbortError 拒绝被吞掉(由 abort 分支完成结算)
+ */
+async function readOrAborted(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  signal: AbortSignal,
+): Promise<{ aborted: true } | { aborted: false; done: boolean; value?: Uint8Array }> {
+  if (signal.aborted) return { aborted: true }
+  return await new Promise((resolve) => {
+    let settled = false
+    const finish = (r: { aborted: true } | { aborted: false; done: boolean; value?: Uint8Array }) => {
+      if (settled) return
+      settled = true
+      resolve(r)
+    }
+    const onAbort = () => {
+      signal.removeEventListener('abort', onAbort)
+      finish({ aborted: true })
+    }
+    signal.addEventListener('abort', onAbort, { once: true })
+    reader.read().then(
+      (r) => {
+        signal.removeEventListener('abort', onAbort)
+        finish({ aborted: false, done: r.done, value: r.value })
+      },
+      () => {
+        // 取消产生的 AbortError 拒绝:中止分支已结算则忽略;未结算
+        // (异常情况)按中止处理
+        signal.removeEventListener('abort', onAbort)
+        finish({ aborted: true })
+      },
+    )
+  })
+}
+
+/**
  * 解析 SSE 字节流:按空行分帧,取 data: 行的 JSON(OpenAI 兼容格式)。
- * 非 JSON 帧 / 无 type 字段 / 注释心跳跳过;中止抛 AbortError。
+ * 非 JSON 帧 / 无 type 字段 / 注释心跳跳过;中止时在安全点取消读取并
+ * 正常结束(不再抛 AbortError——调用方按 signal.aborted 判定中止)。
  * 三个 provider(deepseek / chat / anthropic)共用
+ *
+ * **中止安全点(2026-08-13,Electron 43 内置 Node 22 llhttp UAF 规避)**:
+ * Node 的 llhttp HTTP 解析器存在 use-after-free(nodejs/node#62095,
+ * Node v25.8.1 才修复):解析执行(llhttp_execute)在栈上时销毁连接
+ * (freeParser)会 EXCEPTION_ACCESS_VIOLATION。fetch(url, {signal})
+ * 的中止恰好在解析中途销毁 socket——实测挂件主进程段错误(崩溃栈
+ * llhttp_message_needs_eof,流量越大越频繁)。规避:fetch 不再传
+ * signal(见三个 provider),中止判定移到这里——read() 返回即当前
+ * 分块解析完毕(execute 不在栈上),此刻 cancel 销毁 socket 安全;
+ * 中止时 read() 挂起(无数据到达,解析器空闲)同样安全。语义不变:
+ * 中止后流立即结束,provider 按 signal.aborted 返回 aborted 结果。
  */
 export async function* parseSse(
   body: ReadableStream<Uint8Array>,
@@ -23,9 +72,19 @@ export async function* parseSse(
   let buffer = ''
   try {
     while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-      buffer += decoder.decode(value, { stream: true })
+      if (signal.aborted) {
+        // 安全点取消:上一块已解析完(或尚未开始),销毁 socket 不撞 UAF
+        await reader.cancel()
+        break
+      }
+      const r = await readOrAborted(reader, signal)
+      if (r.aborted) {
+        // 中止先于数据到达:取消挂起的读取(解析器空闲,安全)
+        await reader.cancel()
+        break
+      }
+      if (r.done) break
+      buffer += decoder.decode(r.value!, { stream: true })
       let sep: number
       while ((sep = buffer.search(/\r?\n\r?\n/)) !== -1) {
         const frame = buffer.slice(0, sep)
@@ -49,10 +108,13 @@ export async function* parseSse(
           // 非 JSON 帧(注释/心跳)跳过
         }
       }
-      if (signal.aborted) throw new DOMException('aborted', 'AbortError')
     }
   } finally {
-    reader.releaseLock()
+    try {
+      reader.releaseLock()
+    } catch {
+      // 已 cancel 的 reader 可能处于 released 状态,忽略
+    }
   }
 }
 

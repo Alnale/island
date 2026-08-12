@@ -15,6 +15,7 @@
 
 import { randomUUID } from 'node:crypto'
 import { promises as fs } from 'node:fs'
+import { isProtectedEntry } from './constants'
 import type { AgentTool, MemoryEntry, ToolParams } from './types'
 
 const MAX_ENTRIES = 200
@@ -52,6 +53,18 @@ export function createMemoryStore(getPath: () => string) {
                 !!e && typeof e === 'object' && typeof (e as MemoryEntry).content === 'string',
             )
             .slice(0, MAX_ENTRIES)
+          // **人设条目加载迁移(2026-08-13,用户实测"进化总是丢失岛灵
+          // 设定")**:旧数据的人设条目无 protected 标记(只带人设标签/
+          // 人设关键词内容)——加载时自动补锁并落盘,此后 protected
+          // 是唯一权威来源(自我进化/forget 都按它拦截)
+          let migrated = false
+          for (const e of entries) {
+            if (!e.protected && isProtectedEntry(e)) {
+              e.protected = true
+              migrated = true
+            }
+          }
+          if (migrated) scheduleWrite()
         }
       } catch {
         entries = []
@@ -86,6 +99,7 @@ export function createMemoryStore(getPath: () => string) {
       type: MemoryEntry['type']
       source?: MemoryEntry['source']
       tags?: string[]
+      protected?: boolean
     }): Promise<{ entry: MemoryEntry; created: boolean }> {
       await ensureLoaded()
       const content = input.content.trim().slice(0, MAX_CONTENT_CHARS)
@@ -99,12 +113,21 @@ export function createMemoryStore(getPath: () => string) {
         if (oldest) entries = entries.filter((e) => e.id !== oldest.id)
       }
       const now = Date.now()
+      // **人设条目自动锁定(2026-08-13,集中在此,所有写入路径统一)**:
+      // 未显式传 protected 时,人设类标签/内容(主人指定的岛灵设定)
+      // 自动 protected:true——remember 工具/静默记忆提取/手动添加
+      // 都受益;显式 protected:false 可豁免
+      const locked =
+        typeof input.protected === 'boolean'
+          ? input.protected
+          : isProtectedEntry({ content, tags: input.tags })
       const entry: MemoryEntry = {
         id: randomUUID(),
         type: input.type || 'fact',
         content,
         tags: input.tags?.slice(0, 8),
         source: input.source ?? 'agent',
+        protected: locked,
         createdAt: now,
         updatedAt: now,
       }
@@ -123,7 +146,7 @@ export function createMemoryStore(getPath: () => string) {
     },
     async update(
       id: string,
-      patch: { content?: string; type?: MemoryEntry['type']; tags?: string[] },
+      patch: { content?: string; type?: MemoryEntry['type']; tags?: string[]; protected?: boolean },
     ): Promise<MemoryEntry | null> {
       await ensureLoaded()
       const target = entries.find((e) => e.id === id)
@@ -135,6 +158,7 @@ export function createMemoryStore(getPath: () => string) {
       }
       if (patch.type) target.type = patch.type
       if (patch.tags) target.tags = patch.tags.slice(0, 8)
+      if (typeof patch.protected === 'boolean') target.protected = patch.protected
       target.updatedAt = Date.now()
       scheduleWrite()
       return { ...target }
@@ -186,14 +210,17 @@ export function formatMemoryBlock(entries: MemoryEntry[]): string {
   const lines: string[] = []
   for (const type of ['preference', 'fact', 'workflow', 'lesson'] as const) {
     for (const e of entries.filter((x) => x.type === type)) {
-      lines.push(`- [${TYPE_LABEL[type]}] ${e.content}`)
+      // 锁定标记(2026-08-13):主人指定的人设/岛灵设定,对话中也不得擅自
+      // 修改——LLM 从记忆块就能看到哪些是受保护的
+      const lock = isProtectedEntry(e) ? '·锁定' : ''
+      lines.push(`- [${TYPE_LABEL[type]}${lock}] ${e.content}`)
     }
   }
   let body = lines.join('\n')
   if (body.length > BLOCK_MAX) {
     body = body.slice(0, BLOCK_MAX) + `\n…(记忆过长,已截断)`
   }
-  return `【长期记忆(对话中遵守,别自相矛盾;与你对话的是同一用户)】\n${body}`
+  return `【长期记忆(对话中遵守,别自相矛盾;与你对话的是同一用户;标注「锁定」的条目是主人指定的人设/岛灵设定,不得擅自修改或删除)】\n${body}`
 }
 
 /** 记忆工具(LLM 对话中读写记忆,自然语言沉淀)
@@ -209,7 +236,9 @@ export function createMemoryTools(getStore: () => MemoryStore | null): AgentTool
       description:
         '把用户偏好/事实/工作流/教训写入长期记忆(永久生效,后续所有对话都遵守)。' +
         '适合:用户表达的偏好("我喜欢简洁回答")、重要事实("我的项目在 D:/xxx")、' +
-        '学到的教训。注意:可复用的规律才记,一次性信息不要记;已有相同内容不会重复添加。',
+        '学到的教训。注意:可复用的规律才记,一次性信息不要记;已有相同内容不会重复添加。' +
+        '用户指定的人设/岛灵设定(角色形象、说话风格、人格)应带「人设」标签写入——' +
+        '这类条目会自动锁定(受保护),自我进化不会修改或删除它。',
       parameters: {
         type: 'object',
         properties: {
@@ -219,7 +248,11 @@ export function createMemoryTools(getStore: () => MemoryStore | null): AgentTool
             enum: ['preference', 'fact', 'workflow', 'lesson'],
             description: '类型:preference 偏好 / fact 事实 / workflow 工作流 / lesson 教训,缺省 fact',
           },
-          tags: { type: 'array', items: { type: 'string' }, description: '可选:标签' },
+          tags: { type: 'array', items: { type: 'string' }, description: '可选:标签;人设类条目用「人设」标签' },
+          protected: {
+            type: 'boolean',
+            description: '可选:锁定该记忆(受保护,自我进化不可修改/删除);人设/岛灵设定应锁定,缺省时带人设标签自动锁定',
+          },
         },
         required: ['content'],
       },
@@ -230,20 +263,28 @@ export function createMemoryTools(getStore: () => MemoryStore | null): AgentTool
         if (!['preference', 'fact', 'workflow', 'lesson'].includes(type)) {
           throw new Error('type 仅支持 preference/fact/workflow/lesson')
         }
+        const content = String(params.content ?? '')
+        const tags = Array.isArray(params.tags) ? params.tags.map(String) : undefined
+        // 人设条目自动锁定(2026-08-13,store.add 内集中判定):带人设标签/
+        // 人设关键词内容 = 主人指定的岛灵设定——除非 LLM 显式传
+        // protected:false
         const r = await store.add({
-          content: String(params.content ?? ''),
+          content,
           type,
           source: 'agent',
-          tags: Array.isArray(params.tags) ? params.tags.map(String) : undefined,
+          tags,
+          protected: typeof params.protected === 'boolean' ? params.protected : undefined,
         })
         return r.created
-          ? `已写入长期记忆([${TYPE_LABEL[type]}] ${r.entry.content})`
+          ? `已写入长期记忆([${TYPE_LABEL[type]}] ${r.entry.content}${r.entry.protected ? ',已锁定(受保护,自我进化不会改动)' : ''})`
           : '(记忆已存在相同内容,未重复添加)'
       },
     },
     {
       name: 'forget',
-      description: '删除长期记忆(按内容片段或条目 id;记错/过时的记忆用它修正)。',
+      description:
+        '删除长期记忆(按内容片段或条目 id;记错/过时的记忆用它修正)。' +
+        '受保护(锁定)的人设/岛灵设定条目不能直接删除——如确需删除,先用 update_memory 设 protected:false 解锁。',
       parameters: {
         type: 'object',
         properties: {
@@ -254,7 +295,17 @@ export function createMemoryTools(getStore: () => MemoryStore | null): AgentTool
       async execute(params: ToolParams) {
         const store = getStore()
         if (!store) throw new Error('记忆功能不可用(未注入记忆存储)')
-        const n = await store.remove(String(params.key ?? '').trim())
+        const key = String(params.key ?? '').trim()
+        // 锁定拦截(2026-08-13):匹配到受保护条目即整体拒绝——人设/岛灵
+        // 设定不能经 LLM 工具误删(自我进化同样拦截,见 evolution.ts)
+        const matches = (await store.list()).filter((e) => e.id === key || e.content.includes(key))
+        if (matches.some(isProtectedEntry)) {
+          throw new Error(
+            '该记忆是受保护(锁定)的主人指定人设/岛灵设定,不能删除;' +
+              '如主人确要删除,请先用 update_memory 设 protected:false 解锁',
+          )
+        }
+        const n = await store.remove(key)
         if (n === 0) throw new Error('未找到匹配的记忆')
         return `已删除 ${n} 条记忆`
       },
@@ -290,7 +341,9 @@ export function createMemoryTools(getStore: () => MemoryStore | null): AgentTool
     },
     {
       name: 'update_memory',
-      description: '修改已有记忆(按 id;纠正措辞、合并重复、换类型)。',
+      description:
+        '修改已有记忆(按 id;纠正措辞、合并重复、换类型)。protected 参数可切换锁定状态:' +
+        '主人明确要求改动人设时直接改写内容(锁定保持),确需删除锁定条目先 protected:false 解锁。',
       parameters: {
         type: 'object',
         properties: {
@@ -301,6 +354,7 @@ export function createMemoryTools(getStore: () => MemoryStore | null): AgentTool
             enum: ['preference', 'fact', 'workflow', 'lesson'],
             description: '新类型',
           },
+          protected: { type: 'boolean', description: '可选:锁定(true)/解锁(false)' },
         },
         required: ['id'],
       },
@@ -310,9 +364,10 @@ export function createMemoryTools(getStore: () => MemoryStore | null): AgentTool
         const updated = await store.update(String(params.id ?? ''), {
           content: params.content ? String(params.content) : undefined,
           type: params.type as MemoryEntry['type'] | undefined,
+          protected: typeof params.protected === 'boolean' ? params.protected : undefined,
         })
         if (!updated) throw new Error(`未找到条目 ${String(params.id ?? '')}`)
-        return `已更新:${updated.content}`
+        return `已更新:${updated.content}${updated.protected ? '(锁定,受保护)' : ''}`
       },
     },
   ]

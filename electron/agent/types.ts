@@ -133,6 +133,12 @@ export interface MemoryEntry {
   tags?: string[]
   /** 来源:manual = 设置界面手写 / agent = LLM 对话沉淀 / evolution = 自我进化 */
   source?: 'manual' | 'agent' | 'evolution'
+  /**
+   * 受保护(锁定,2026-08-13 用户实测"进化总是丢失岛灵设定"):主人指定
+   * 的岛灵设定/人设条目——自我进化绝对不可修改/删除/合并;人设类标签
+   * 或内容在加载时自动补锁(见 constants.ts isProtectedEntry)
+   */
+  protected?: boolean
   createdAt: number
   updatedAt: number
 }
@@ -360,9 +366,13 @@ export interface MemoryStoreLike {
     type: MemoryEntry['type']
     source?: MemoryEntry['source']
     tags?: string[]
+    protected?: boolean
   }): Promise<{ entry: MemoryEntry; created: boolean }>
   remove(key: string): Promise<number>
-  update(id: string, patch: { content?: string; type?: MemoryEntry['type']; tags?: string[] }): Promise<MemoryEntry | null>
+  update(
+    id: string,
+    patch: { content?: string; type?: MemoryEntry['type']; tags?: string[]; protected?: boolean },
+  ): Promise<MemoryEntry | null>
   replaceAll(next: MemoryEntry[]): Promise<MemoryEntry[]>
   snapshot(backupPath: string): Promise<void>
   importEntries(next: MemoryEntry[]): Promise<{ imported: number; skipped: number }>

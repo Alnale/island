@@ -142,7 +142,7 @@ export async function streamAnthropic(params: {
       // 请求体深度清洗孤立代理(2026-08-11,与 DeepSeek 同款修复:
       // 历史含孤立代理 → 服务器解析 400,见 sse.ts sanitizeUnpairedSurrogates)
       body: JSON.stringify(sanitizeJsonStrings(body)),
-      signal,
+      // 不传 signal(2026-08-13,llhttp UAF 规避,见 sse.ts parseSse 注释)
     })
   } catch (err) {
     if ((err as Error).name === 'AbortError') throw err
