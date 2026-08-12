@@ -28,6 +28,9 @@ function stripNapcatInstructions(text: string): string {
 
 export const UserBubble = memo(function UserBubble({ m }: { m: AgentMessage }) {
   const text = stripNapcatInstructions(textFromMessage(m))
+  // 收到的 QQ/群图片(2026-08-12 收图链路):用户消息 media part →
+  // MediaFrame 展示图片(main.cjs 已下载到本地路径)
+  const mediaParts = m.parts.filter((p): p is Extract<AgentPart, { type: 'media' }> => p.type === 'media')
   return (
     <div className="island-agent-msg-user">
       <div className="island-agent-msg-user-text">
@@ -44,6 +47,9 @@ export const UserBubble = memo(function UserBubble({ m }: { m: AgentMessage }) {
           </span>
         )}
         <Markdown text={text} plainMermaid />
+        {mediaParts.map((p, i) => (
+          <MediaFrame key={`media-${i}`} kind={p.kind} src={p.url} alt={p.name} />
+        ))}
       </div>
       <CopyButton text={text} />
     </div>

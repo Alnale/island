@@ -75,14 +75,16 @@ interface DesktopApi {
    * time, trusted};渲染端作为用户消息进入对话(同步上下文)。
    * trusted: true = 白名单 QQ(自主回复,回复发回);false = 陌生人
    * (文本已注入"先问主人"前缀,回复经 pendingQQReply 链路发回)。
-   * 返回取消订阅函数 */
+   * media(2026-08-12 收图):消息携带的图片已下载到本地的路径列表,
+   * 渲染端注入对话图片附件。返回取消订阅函数 */
   onNapcatMessage(
-    callback: (msg: { qq: string; text: string; messageId: string; time: number; trusted?: boolean }) => void,
+    callback: (msg: { qq: string; text: string; messageId: string; time: number; trusted?: boolean; media?: string[] }) => void,
   ): () => void
   /** NapCat 群消息订阅(2026-08-12):payload = {groupId, qq, text,
-   * atMe};群消息经自主判断接话后进入对话(回复发回群) */
+   * atMe};群消息经自主判断接话后进入对话(回复发回群)。
+   * media(2026-08-12 收图):同上,群消息图片路径列表 */
   onNapcatGroupMessage(
-    callback: (msg: { groupId: string; qq: string; text: string; atMe: boolean }) => void,
+    callback: (msg: { groupId: string; qq: string; text: string; atMe: boolean; media?: string[] }) => void,
   ): () => void
   /** Agent:中止当前轮 */
   agentAbort(): void

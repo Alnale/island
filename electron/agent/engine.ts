@@ -17,7 +17,7 @@ import { randomUUID } from 'node:crypto'
 import { parseToolArgs } from './deepseek'
 import { streamByConfig } from './provider'
 import { detectProvider, apiErrorMessage } from './constants'
-import { createTools, disposeTools } from './tools'
+import { buildToolsGuideBlock, createTools, disposeTools } from './tools'
 import { getTasksStatusBlock } from './tasks'
 import { createMusicControlTools, createSettingsTools } from './settingsTools'
 import { createMCPManager, type MCPManager } from './mcp'
@@ -1064,11 +1064,17 @@ export function createAgentEngine(deps: EngineDeps): AgentEngine {
       const bgStatus = getTasksStatusBlock()
       const memoryBlock = await getMemoryBlock()
       const evolutionStatus = (await deps.getEvolution?.()?.getStatus()) ?? ''
+      // 工具路径清单(2026-08-12,用户要求"LLM 不知道各个工具的存放
+      // 路径和使用说明"):静态块(路径运行时求值,文案稳定不断缓存前缀),
+      // 拼在系统提示末尾——LLM 每轮都知道本机工具在哪、怎么用
+      // exec_command 直接操作,不必猜或问用户
+      const toolsGuide = buildToolsGuideBlock()
       const system = [
         config.systemPrompt || '你是桌面灵动岛挂件里的个人助手。',
         memoryBlock,
         evolutionStatus,
         bgStatus,
+        toolsGuide,
       ]
         .filter(Boolean)
         .join('\n\n')

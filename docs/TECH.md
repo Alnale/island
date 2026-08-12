@@ -617,13 +617,15 @@ send(text, history)
 - **登录态热搜修复**:登录过期时 nav 接口无 wbi_img → 空 mixin →
   `orig.as_bytes()[i]` 越界 panic——wbi_keys 提取失败降级游客 nav 重试,
   仍失败返回明确错误;sign_wbi 加长度防御。
-- **HEVC/AV1 自动转码(2026-08-11)**:B 站高清流多为 HEVC/AV1,而挂件
-  窗口在禁用硬件加速下无法呈现 HEVC 帧(播放全黑,详见 10.x 黑屏诊断;
-  AV1 只能软件解码,4K 掉帧)——下载合并时检测视频流编码,hev/av01
-  自动转 H.264(libx264 veryfast,~17-20× 实时);`--codec copy` 或 config
-  `codec=copy` 保留原编码。**convert 子命令**:`bili convert <path...>`
-  把已有 HEVC/AV1 文件就地转码为 H.264(引擎 bili 工具 `convert` action,
-  后台执行;含磁盘空间预检),转码后窗口内直接可播。
+- **HEVC/AV1 自动转码(2026-08-11;2026-08-12 语义更新)**:B 站高清流多为
+  HEVC/AV1。2026-08-12 起对话窗口已可原生软解 HEVC(自编译 ffmpeg 补丁,
+  见 10.3)——自动转码保留为**性能/通用性兜底**(软解 HEVC 1080p 占 CPU;
+  官方 Electron/刚重装未应用补丁时 HEVC 不可播):下载合并时检测视频流
+  编码,hev/av01 默认自动转 H.264(libx264 veryfast,~17-20× 实时);
+  `--codec copy` 或 config `codec=copy` 保留原编码(补丁后窗口内直接可播)。
+  **convert 子命令**:`bili convert <path...>` 把已有 HEVC/AV1 文件就地
+  转码为 H.264(引擎 bili 工具 `convert` action,后台执行;含磁盘空间预检),
+  转码后窗口内直接可播。
 - **实时下载进度(2026-08-11)**:`--progress-file <path>` 让 bili-tool 每
   1.5s 原子写进度 JSON(stage/label/done/total/percent);引擎对单视频
   下载自动追加该参数,轮询器每 2s 读文件更新任务状态块 detail——LLM
@@ -1565,19 +1567,44 @@ direction?('right'|'left'), wheelWhenOpen?}>`,四处复用:Agent 设置菜单 /
   42px 高(防 j/g/y 下沿裁切);主进程 disableHardwareAcceleration(避免
   半透明 alpha 突变)。
 
-### 10.3 HEVC 视频黑屏(2026-08-11)
+### 10.3 HEVC 视频黑屏(2026-08-11 诊断 → 2026-08-12 根治)
 
 - **症状**:bili 下载的 HEVC(H.265)视频在对话窗口"播放中全黑"——时间轴/
   音频正常、readyState 4、无 error 事件,但 videoWidth/videoHeight 恒 0、
   totalVideoFrames 恒 0 = **解码器零帧呈现**。
-- **根因**:挂件 `disableHardwareAcceleration()`(透明窗口 alpha 稳定需要)
-  下,HEVC 只能走 Media Foundation 解码,而 MF 路径在无 GPU 进程时无法
-  投帧(开关矩阵实测:全 GPU 可靠出帧但 alpha 闪烁风险回归;disable-gpu-
-  compositing 出帧数秒后随机停滞;Electron 自带 ffmpeg 无 HEVC 软件解码器)。
-  H.264 走 ffmpeg 软件解码不受影响。
-- **处置**:① bili 下载时 HEVC 自动转码 H.264(见 5.4.1);② 已有 HEVC 文件
-  用 `bili convert` 就地转码;③ 播放器零帧检测(播放中 2.5s videoWidth 恒 0
-  → onError(9))显示明确文案 + 系统播放器打开,不再静默黑屏。
+- **根因(两层,2026-08-12 源码级定位,源码树 C:\electron-gn)**:
+  ① **ffmpeg 无 HEVC 解码器**:官方 Electron 的 ffmpeg 按 Chromium 默认
+  配置排除专有编码(ffmpeg.dll 无 HEVC),软解路径不可用;
+  ② **media 层门控**(更深的拦路虎):即便 ffmpeg.dll 带 HEVC 解码器,
+  `media/base/supported_types.cc` 的 `IsDecoderHevcProfileSupported` 在
+  Windows(`PLATFORM_HAS_OPTIONAL_HEVC_DECODE_SUPPORT=1`)上返回
+  `GetSupplementalDecoderVideoProfileCache()->IsProfileSupported(...)`——
+  该缓存由渲染端 `content/renderer/media/render_media_client.cc` 的
+  `SetGpuFeatureInfoInternal` 填充:**ACCELERATED_VIDEO_DECODE feature 未
+  enabled 时直接清空缓存**(`UpdateDefaultDecoderSupportedVideoProfiles({})`)。
+  `app.disableHardwareAcceleration()` 恰好把该 feature 关掉 → 缓存恒空 →
+  HEVC 被无条件拒绝(实测:换 HEVC ffmpeg.dll 无效;`--disable-gpu-compositing`
+  也一样 `DecoderStatus::kUnsupportedConfig`)——Chromium 刻意不提供
+  Windows 上的 HEVC 软解兜底,开关矩阵(全 GPU 出帧但 alpha 闪烁风险/
+  disable-gpu-compositing 数秒后随机停滞)只是表层现象。
+- **根治(2026-08-12)**:自编译 Electron(源码树 C:\electron-gn,与官方
+  43.2.0 同一 tag)应用两个补丁:① `add-hevc-ffmpeg-decoder-parser.patch`
+  (ffmpeg 侧:启用 HEVC 解码器/解析器,win-msvc 配置 + ffmpeg_generated.gni);
+  ② `enable-hevc-ffmpeg-decoding.patch`(media 层:
+  `IsDecoderHevcProfileSupported` 改 `#if BUILDFLAG(ENABLE_FFMPEG_VIDEO_DECODERS)
+  return true`——有 ffmpeg 软解即放行,绕过平台缓存门控;
+  `GetAllowedVideoDecoders()` 白名单补 "hevc";`ffmpeg_video_decoder.cc`
+  kHEVC 走默认线程)。换装 `scripts/apply-hevc-electron.mjs`(7 个构建产物,
+  官方备份可 --restore;dev.bat 自动检测应用)。
+- **注意**:补丁必须在源码树**实际应用**(git apply)后重建——只拷贝
+  15:34 的自编译 dist 无效(其 media 层未打门控补丁,HEVC 仍被拒,实测
+  kUnsupportedConfig)。
+- **处置(保留为兜底)**:① bili 下载时 HEVC 自动转码 H.264(见 5.4.1,
+  性能/通用性考量,HEVC 已可播仍可关闭);② 已有 HEVC 文件 `bili convert`
+  就地转码;③ 播放器零帧检测(播放中 2.5s videoWidth 恒 0 → onError(9))
+  显示明确文案 + 系统播放器打开——补丁未应用(如刚重装 node_modules)时
+  兜底生效,不再静默黑屏。AV1 自始支持(libgav1 软解内置,官方版即可;
+  4K 掉帧是性能问题)。
 
 ### 10.4 歌词查询竞态(useLyrics)
 
@@ -1709,6 +1736,24 @@ main.cjs 的 safeHandle 实现);渲染端错误要挂 `unhandledrejection` 捕�
 - doc_convert:文档转换(Word/PDF 等 → Markdown,输出到文档同目录);
 - xxt:超星学习通自动答题;
 - get_feature_guide:本工具(读取本文档介绍功能)。
+
+**工具存放路径与用法(2026-08-12,LLM 对话中随时可用 exec_command
+直接操作;引擎每轮系统提示也会注入同款清单)**:
+
+- `tools/bili/bili-tool.exe` — B站工具二进制。用法:`bili-tool <action>
+  [参数] --json`,动作 search/open/trending/comments/download/convert/
+  saved/progress/login/whoami/config 等;工作目录 `userData/bili`
+  (登录态 cookies.json、下载都在这,下载落 `userData/bili/downloads/`)。
+- `tools/docflow/server.py`(或 `tools/docflow/dist/docflow/docflow.exe`)
+  — DocFlow 文档转换服务,HTTP 127.0.0.1:5000,引擎 doc_convert 工具
+  首次调用自动拉起(系统 python),一般无需手动启动。
+- `tools/xxt/auto_answer.py`(或 `tools/xxt/dist/xxt/xxt.exe`)— 超星
+  学习通工具,子命令 login/crawl/fill/check/submit/screenshot,浏览器
+  走系统 Edge,登录态隔离在 userData/xxt-profile/。
+- `electron/system-volume.ps1` — 系统音量读写脚本(set_system_volume
+  工具后端)。
+- `userData/memory.json` — 长期记忆文件(remember/list_memory 工具
+  操作它);`userData/napcat-*.json` — QQ 联系人档案/聊天备份/会话人格。
 
 ### 11.7 B站助手
 
@@ -1851,10 +1896,12 @@ main.cjs 的 safeHandle 实现);渲染端错误要挂 `unhandledrejection` 捕�
   跟随窗口移动是标准行为;fullscreenRef 监听 fullscreenchange);
   handleDragPointerDown 全屏时**正常拖拽**(不再 exitFullscreen)。
 - **退出全屏缩回动画**:leaving-fullscreen 类(3D 压感回弹 0.32s)后移除。
-- **HEVC(H.265)硬解**:Chromium 默认不支持 HEVC;系统装有「HEVC 视频
-  扩展」(Win11 常见)时经 Media Foundation 硬解(`enable-features`,
-  PlatformHEVCDecoderSupport),对话窗口内即可播放 HEVC mp4——无扩展时此
-  开关静默无效(仍走格式提示 + 系统播放器降级)。
+- **HEVC(H.265)解码**:2026-08-12 起主方案 = **自编译 Electron 的 ffmpeg
+  软解**(`enable-hevc-ffmpeg-decoding.patch` 门控放行 + HEVC ffmpeg 解码器,
+  经 `scripts/apply-hevc-electron.mjs` 换装,dev.bat 自动检测应用;详见 10.3)。
+  `enable-features=PlatformHEVCDecoderSupport` 保留为旧 MF 硬解通道(系统装
+  有「HEVC 视频扩展」且 GPU 可用时生效;禁用硬件加速下 MF 零帧,已不再依赖)。
+  补丁未应用时仍走格式提示 + 系统播放器降级。
 
 ### 6.12 Web 演示版(App.tsx)
 
@@ -2213,8 +2260,9 @@ parts 重复回填(上下文成倍膨胀)。
 
 - **窗口位置漂移/变大**:透明窗口 + 全屏的已知问题,fsLockedSize 校正
   (见 6.11);普通展开向右漂移由 set-size 补偿修复(见 4.3);
-- **视频格式不支持**:窗口内只支持 H.264 mp4 / webm(vp8-vp9)/ ogg;
-  HEVC 需系统「HEVC 视频扩展」;其它格式点"在系统播放器中打开"降级;
+- **视频格式不支持**:窗口内支持 H.264/HEVC/AV1 的 mp4 与 webm(vp8-vp9)/ ogg;
+  HEVC/AV1 靠自编译 ffmpeg 软解(apply-hevc-electron.mjs,见 10.3);mkv/avi/flv
+  等其它格式点"在系统播放器中打开"降级;
 - **点击穿透导致按钮点不到**:鼠标必须悬停岛体(岛体 mouseenter 切换
   接收);岛体边缘部分区域为穿透设计;
 - **界面缩放不生效于文字**:缩放只放大面板/窗口尺寸,UI 元素不缩放
@@ -2396,7 +2444,7 @@ WidgetApp
 ### 22.3 常见坑(一分钟自查)
 
 - 改 electron/agent 没生效 → 重跑 build:electron(dev:widget 已前置);
-- 视频"无法播放" → 格式限制(H.264 mp4/webm/ogg)或 HEVC 扩展缺失;
+- 视频"无法播放" → HEVC 报错 = 未应用 HEVC 补丁(dev.bat 自动应用;手动 `node scripts/apply-hevc-electron.mjs`,回退 `--restore`);mkv/avi/flv 容器/编码不支持;
 - 窗口越拖越大 → 全屏期间 setWinSize 出口(6.11);
 - 点击穿透点不到 → 鼠标悬停岛体;
 - LLM 设置工具报"未知的操作" → main.cjs ISLAND_SETTINGS_OPS 白名单
@@ -3063,6 +3111,7 @@ remember / forget / list_memory / update_memory / evolve_memory
 | 2026-08-08 | 工具参数校验(LLM 自纠)、输出预算动态调整、多媒体库(图片/音频/视频)、island-media 流式协议、对话媒体窗口、Markdown 渲染器、媒体拦截(open_file/exec_command start)、消息气泡 mermaid/表格、播放列表 ↔ 音频库同步、HEVC 硬解、智能截图修复 |
 | 2026-08-09 | 媒体小窗(视频岛/图片岛)、全屏(工作区扩展/退出缩回)、进度双向同步、封面抓帧、chat-media 巡检 |
 | 2026-08-10 | 定制视频控件(VideoExtras 音量/更多,三处同步)、帮助手册移除、收起语义拆分(灵动岛/多媒体岛)、**主动陪伴工具积极性(拟人)**、**设置工具白名单修复 + play_library_video 跳转播放**、**本文档(技术文档 3000 行)+ get_feature_guide 引导工具 + README 重写** |
+| 2026-08-12 | **HEVC 原生软解**(自编译 Electron:ffmpeg HEVC 解码器 + media 层门控补丁,apply-hevc-electron.mjs 换装/回退,dev.bat 自动应用;AV1 验证本就支持)、hevc-frame 巡检改断言、NapCat 主人硬编码、群消息直进对话与记忆强化、分会话人格、工具输出目录、set_audio_config/set_output_budget 等工具、消息列表虚拟滚动 |
 
 ---
 

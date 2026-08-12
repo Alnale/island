@@ -3,7 +3,7 @@
 // Chromium 主仓库是最大头),所以单轮超时要给足(90 分钟),重试次数少而精。
 // 用法:node scripts/sync-electron.mjs <max-attempts> [log-file]
 import { spawn } from 'node:child_process'
-import { writeFileSync, appendFileSync } from 'node:fs'
+import { appendFileSync } from 'node:fs'
 
 const maxAttempts = Number(process.argv[2] || 4)
 const logFile = process.argv[3] || 'C:\\electron-gn\\sync.log'

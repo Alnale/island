@@ -411,6 +411,13 @@
 }
 .island-msgs-item {
   flex-shrink: 0;
+  /* 2026-08-12 修复"用户气泡跑左侧":原消息组件直接挂在
+     .island-agent-messages(flex column)下,用户气泡靠右靠
+     align-self: flex-end;虚拟滚动后每条消息被包进本 item(普通
+     块),align-self 失去 flex 上下文失效 → 气泡回落到左。改回
+     同方向 column flex,子项(气泡)的 align-self 重新生效 */
+  display: flex;
+  flex-direction: column;
 }
 .island-agent-tail {
   flex-shrink: 0;

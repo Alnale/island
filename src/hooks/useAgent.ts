@@ -727,7 +727,7 @@ export function useAgent(opts?: { allowProactive?: boolean }): AgentController {
   }, [config?.proactiveEnabled, config?.proactiveInterval, config?.proactiveIntervalUnit, opts?.allowProactive])
 
   const send = useCallback(
-    (text: string, opts?: { silent?: boolean; source?: 'qq' | 'group' | 'ask'; target?: string }) => {
+    (text: string, opts?: { silent?: boolean; source?: 'qq' | 'group' | 'ask'; target?: string; media?: string[] }) => {
     const trimmed = text.trim()
     if (!trimmed) return
     if (statusRef.current === 'thinking' || statusRef.current === 'running') return
@@ -745,10 +745,17 @@ export function useAgent(opts?: { allowProactive?: boolean }): AgentController {
     const base = last && last.role === 'user' ? prev.slice(0, -1) : prev
     // 注意:不递增会话版本(连续对话时总结基于最新消息,旧结果主题一致
     // 仍有效;递增会把每轮总结都作废,标题永远等不到)
+    // **图片附件(2026-08-12 收图链路)**:opts.media = 本地图片路径列表
+    // (main.cjs 下载的 QQ/群消息图片)→ 用户消息 parts 追加 media part,
+    // 对话窗口展示图片(引擎 historyToItems 只序列化 text part,LLM 侧
+    // 经文本标注【图片已下载】知晓路径)
+    const mediaParts = (opts?.media ?? [])
+      .filter((p) => typeof p === 'string' && p.trim())
+      .map((p, i) => ({ type: 'media' as const, kind: 'img' as const, url: p, name: `QQ图片${i + 1}` }))
     const userMessage: AgentMessage = {
       id: `u-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       role: 'user',
-      parts: [{ type: 'text', text: trimmed }],
+      parts: [{ type: 'text', text: trimmed }, ...mediaParts],
       // NapCat 来源标记(2026-08-12):QQ 私聊('qq',target = QQ 号)/
       // 群聊('group',target = 群号)/ 询问轮('ask',target = 陌生人 QQ)
       // 消息进入对话,气泡显示来源标签
@@ -797,16 +804,21 @@ export function useAgent(opts?: { allowProactive?: boolean }): AgentController {
   //   先问主人】"前缀,本侧**不带 source**——LLM 先询问主人,主人
   //   指示后的回复由主进程 pendingQQReply 链路发回;
   // - 群接话 = 带 source='group'(回复发回群)
-  const napcatQueueRef = useRef<Array<{ text: string; source?: 'qq' | 'group' | 'ask'; target?: string }>>([])
+  const napcatQueueRef = useRef<Array<{ text: string; source?: 'qq' | 'group' | 'ask'; target?: string; media?: string[] }>>([])
   useEffect(() => {
     const offs: Array<() => void> = []
-    const push = (text: string, source: 'qq' | 'group' | 'ask' | undefined, target: string | undefined) => {
+    const push = (
+      text: string,
+      source: 'qq' | 'group' | 'ask' | undefined,
+      target: string | undefined,
+      media?: string[],
+    ) => {
       if (!text.trim()) return
       if (statusRef.current === 'thinking' || statusRef.current === 'running') {
-        napcatQueueRef.current.push({ text, source, target })
+        napcatQueueRef.current.push({ text, source, target, media })
         return
       }
-      send(text, source && target ? { source, target } : undefined)
+      send(text, source && target ? { source, target, media } : { media })
     }
     const off1 = window.desktop?.onNapcatMessage?.((msg) => {
       if (!msg || typeof msg.text !== 'string') return
@@ -814,11 +826,12 @@ export function useAgent(opts?: { allowProactive?: boolean }): AgentController {
       // false = 陌生人(带 source='ask'——2026-08-12 询问同步:该轮回复
       // 是"询问主人怎么回复",main.cjs 把它发到主人 QQ,同时对话窗口
       // 显示;主人指示后(QQ 或对话窗口)回复发回陌生人)
-      push(msg.text, msg.trusted === false ? 'ask' : 'qq', msg.qq)
+      // media(2026-08-12 收图):消息图片本地路径 → 对话展示
+      push(msg.text, msg.trusted === false ? 'ask' : 'qq', msg.qq, msg.media)
     })
     if (typeof off1 === 'function') offs.push(off1)
     const off2 = window.desktop?.onNapcatGroupMessage?.((msg) => {
-      if (msg && typeof msg.text === 'string') push(msg.text, 'group', msg.groupId)
+      if (msg && typeof msg.text === 'string') push(msg.text, 'group', msg.groupId, msg.media)
     })
     if (typeof off2 === 'function') offs.push(off2)
     return () => {
@@ -830,7 +843,7 @@ export function useAgent(opts?: { allowProactive?: boolean }): AgentController {
     if (status !== 'idle') return
     if (napcatQueueRef.current.length === 0) return
     const next = napcatQueueRef.current.shift()!
-    send(next.text, next.source && next.target ? { source: next.source, target: next.target } : undefined)
+    send(next.text, next.source && next.target ? { source: next.source, target: next.target, media: next.media } : { media: next.media })
   }, [status, send])
 
   const confirmTool = useCallback((approved: boolean) => {

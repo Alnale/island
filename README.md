@@ -181,11 +181,11 @@
 | --- | --- |
 | exec_command | 运行本机命令(可开启确认门,见设置) |
 | read_file / write_file / list_dir | 文件读写与目录 |
-| open_url / open_file | 打开链接 / 文件(媒体文件**在窗口内直接播放**,不弹外部播放器;HEVC(H.265)等特殊编码窗口内无法解码时会提示"用系统播放器打开或让助手转码",不再静默黑屏) |
+| open_url / open_file | 打开链接 / 文件(媒体文件**在窗口内直接播放**,不弹外部播放器;HEVC(H.265)/AV1 已原生软解支持,补丁未应用时提示"用系统播放器打开或让助手转码",不再静默黑屏) |
 | web_search | 联网搜索 |
 | get_time / system_info / notify | 时间 / 系统信息 / 系统通知 |
 | switch_to_music | 切回音乐模式;说"听歌"会自动开始播放当前播放列表(play) |
-| bili | B站搜索/热榜/视频信息/下载(扫码登录后可下高清;**HEVC/AV1 视频自动转码 H.264**,窗口内直接可播;已有 HEVC 文件可让助手用 convert 转码;可查下载实时进度,对话里改默认清晰度/转码设置) |
+| bili | B站搜索/热榜/视频信息/下载(扫码登录后可下高清;HEVC/AV1 **默认自动转码 H.264**(性能/通用性兜底,窗口已原生软解 HEVC 可 `codec=copy` 保原编码);已有 HEVC 文件可让助手用 convert 转码;可查下载实时进度,对话里改默认清晰度/转码设置) |
 | doc_convert | 文档转 Markdown(Word/PDF 等) |
 | xxt | 超星学习通自动答题 |
 | get_feature_guide | 读取内置技术文档,向用户介绍灵动岛功能 |
@@ -385,9 +385,10 @@ A: 已用虚拟滚动解决(2026-08-12):消息列表只挂载可视区附近的�
 A: 重跑 build:electron(dev:widget 已前置)。
 
 **Q: 视频"无法播放"?**
-A: 格式限制:窗口内只支持 H.264 mp4 / webm(vp8-vp9)/ ogg;HEVC(H.265)
-需系统安装「HEVC 视频扩展」;其它格式可点错误提示的按钮用系统播放器
-打开降级。
+A: 窗口内支持 H.264/HEVC(H.265)/AV1 的 mp4 与 webm/ogg。HEVC/AV1 靠
+自编译 ffmpeg 软解(dev.bat 自动应用 `scripts/apply-hevc-electron.mjs`,
+官方版备份可回退);其余格式(mkv/avi/flv 等)点错误提示按钮用系统
+播放器打开降级。
 
 ---
 

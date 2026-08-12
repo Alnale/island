@@ -770,7 +770,7 @@ function runScreenshotTests({ win, app, fs, path, settingsPath, runIslandSetting
                 // 真实查询等待(网络往返 + 引擎 fetch)
                 await sleep(3000)
                 const rows = [...accountCard.querySelectorAll('.island-agent-account-row')].map((r) =>
-                  r.textContent.replace(/\s+/g, ' ').trim(),
+                  r.textContent.replace(/[ \t\r\n]+/g, ' ').trim(),
                 )
                 const errEl = accountCard.querySelector('.island-agent-account-error')
                 out.accountRows = rows
@@ -3010,10 +3010,14 @@ function runScreenshotTests({ win, app, fs, path, settingsPath, runIslandSetting
             console.log('[chat-media] done')
           }
           if (process.env.WIDGET_SCREENSHOT_MODE === 'hevc-frame') {
-            // HEVC 黑屏诊断巡检(2026-08-11):真实应用内注入本地视频文件 →
-            // 轮询 rVFC 帧计数(帧是否真正呈现;readyState/decodeError 检查
-            // 不出帧问题——HEVC 在软件合成下"播放中但零帧呈现"= 全黑)。
-            // WIDGET_HEVC_VIDEO = 待测视频路径(缺省 bili 20260514 HEVC)
+            // HEVC/AV1 播放验证巡检(2026-08-11 建,黑屏诊断;2026-08-12 改断言):
+            // 真实应用内注入本地视频文件 → 轮询 rVFC 帧计数(帧是否真正呈现;
+            // readyState/decodeError 检查不出"播放中但零帧呈现"= 全黑)。
+            // 2026-08-12 起 HEVC 走自编译 ffmpeg 软解(apply-hevc-electron.mjs
+            // 换装 electron.exe+ffmpeg.dll,media 层门控补丁 enable-hevc-ffmpeg-
+            // decoding.patch)——断言改为:HEVC/AV1/H.264 全部帧数持续增长。
+            // 未应用补丁时(官方 Electron)HEVC 显示 code 9 文案,黑屏检测仍在。
+            // WIDGET_HEVC_VIDEO = 待测视频路径(缺省 bili Hi-res 20230404 HEVC)
             const sleep = (ms) => new Promise((res) => setTimeout(res, ms))
             const js = (code) => win.webContents.executeJavaScript(code)
             const videoPath = process.env.WIDGET_HEVC_VIDEO
@@ -3047,6 +3051,7 @@ function runScreenshotTests({ win, app, fs, path, settingsPath, runIslandSetting
               },
               usage: { input: 1, output: 1 },
             })
+            const frHistory = []
             for (let i = 0; i < 8; i++) {
               await sleep(1500)
               const s = await js(`(async () => {
@@ -3071,8 +3076,17 @@ function runScreenshotTests({ win, app, fs, path, settingsPath, runIslandSetting
                   visible: video.offsetWidth > 0 && video.offsetHeight > 0,
                 })
               })()`)
+              frHistory.push(JSON.parse(s))
               console.log('[hevc-frame]', s)
             }
+            // 2026-08-12 断言:视频已解码并持续出帧(HEVC 走 ffmpeg 软解后与
+            // H.264/AV1 同判据;code 9 文案出现 = 未应用 HEVC 补丁,诊断用)
+            // 注意:找到 video 时返回的 JSON 无 msg/video 键(有 fr 即视频存在),
+            // 仅 errText 分支带 {msg:true, video:false}
+            const grown = frHistory.filter((p) => typeof p.fr === 'number' && p.fr >= 0)
+            const framesGrow = grown.length >= 2 && grown[grown.length - 1].fr > grown[0].fr && grown[grown.length - 1].fr >= 10
+            const errSeen = frHistory.some((p) => p.msg && !p.video && p.errText)
+            console.log(`[hevc-frame] 断言:${framesGrow ? 'PASS' : 'FAIL'}(${grown.length ? `fr ${grown[0].fr} → ${grown[grown.length - 1].fr}` : '无视频元素'})${errSeen ? ' | 出现错误文案(未应用 HEVC 补丁?)' : ''}`)
             await js(`(async () => {
               if (${JSON.stringify(msgBackup)} === null) localStorage.removeItem('widget-agent-messages')
               else localStorage.setItem('widget-agent-messages', ${JSON.stringify(msgBackup)})
@@ -3406,7 +3420,8 @@ function runScreenshotTests({ win, app, fs, path, settingsPath, runIslandSetting
             console.log('[clear-data] panel button hover (expanded):', btnHover)
             // 真实鼠标点击面板按钮(播放键等):事件计数证明点击到达页面
             // (穿透死锁时点击事件被 OS 拦截,计数不增)
-            const clickDiag = await js(`(() => {
+            // 返回值 'armed' 不用,仅副作用(挂监听器)必要
+            await js(`(() => {
               window.__panelClickDiag = { down: 0, up: 0 }
               document.addEventListener('pointerdown', () => window.__panelClickDiag.down++)
               document.addEventListener('pointerup', () => window.__panelClickDiag.up++)

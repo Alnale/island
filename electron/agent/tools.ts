@@ -93,6 +93,38 @@ export function toolOutputDir(tool: string): string | null {
   return sid ? path.join(base, sid) : base
 }
 
+/**
+ * 本机工具存放路径与用法清单(2026-08-12,用户要求"LLM 不知道各个工具
+ * 的存放路径和使用说明"):静态系统提示块——列出内置工具的**绝对路径**
+ * + 一句话用法,注入主引擎系统提示(engine.ts),LLM 每轮都知道工具在哪、
+ * 怎么用 exec_command 直接操作(查日志/改配置/独立调用),不需要靠猜或
+ * 问用户。文案必须**稳定**(系统提示前缀缓存:任何变化都会断缓存前缀)。
+ * 路径运行时求值(dev = 项目根,打包 = resourcesPath,与 toolsRoot 同源)。
+ */
+export function buildToolsGuideBlock(): string {
+  const root = toolsRoot()
+  const bili = path.join(root, 'bili', 'bili-tool.exe')
+  const docflowExe = path.join(root, 'docflow', 'dist', 'docflow', 'docflow.exe')
+  const docflowPy = path.join(root, 'docflow', 'server.py')
+  const xxtExe = path.join(root, 'xxt', 'dist', 'xxt', 'xxt.exe')
+  const xxtPy = path.join(root, 'xxt', 'auto_answer.py')
+  const biliCwd = BILI_CWD
+  const lines = [
+    '【本机工具存放路径与用法】(用 exec_command 可直接操作;引擎内置工具调用不到的需求可在此找到):',
+    `- bili 工具(引擎 bili 工具的后端二进制):${bili}。用法:bili-tool <action> [参数] --json,`,
+    `  动作 up_info/up_videos/search/open/trending/comments/danmaku/subtitle/download/download_up/saved/progress/login/whoami/config/convert;`,
+    `  工作目录 ${biliCwd}(登录态 cookies.json、下载都在这里,下载落 ${path.join(biliCwd, 'downloads')})`,
+    `- DocFlow 文档转换服务(引擎 doc_convert 工具的后端):${existsSync(docflowExe) ? docflowExe : docflowPy}(不存在 exe 时用系统 python 跑 server.py)。`,
+    `  服务地址 http://127.0.0.1:5000,引擎会自动拉起,一般无需手动`,
+    `- xxt 超星学习通工具(引擎 xxt 工具的后端):${existsSync(xxtExe) ? xxtExe : xxtPy}(exe 不存在时用系统 python 跑 auto_answer.py)。`,
+    `  子命令 login/crawl/fill/check/submit/screenshot,浏览器走系统 Edge`,
+    `- 系统音量脚本:${path.resolve(process.cwd(), 'electron', 'system-volume.ps1')}(引擎 set_system_volume 工具的后端)`,
+    `- 长期记忆文件:${path.join(userDataDir(), 'memory.json')}(引擎 remember/list_memory 工具操作它)`,
+    `- 功能引导文档:${path.resolve(process.cwd(), 'docs', 'TECH.md')}(第 11 章 = 功能清单,get_feature_guide 工具读取)`,
+  ]
+  return lines.join('\n')
+}
+
 // bili-tool 工作目录必须存在:spawn 的 cwd 不存在会 ENOENT(且被误报为
 // "二进制缺失")——download/saved/trending 等分支都直接 spawn,从不创建
 // 目录,首次使用必然失败(2026-08-08 工具逐一验证实测);login 分支虽有

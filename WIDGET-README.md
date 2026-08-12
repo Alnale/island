@@ -117,7 +117,7 @@ WIDGET_SCREENSHOT 六种巡检模式 ~1160 行已从 main.cjs 抽离)。
 | WIDGET_SCREENSHOT_MODE | 巡检模式(见下表);**probe-clear** = 新对话后窗口扁平回归探针, **probe-evolve** = 记忆进化垂直细分整合实测探针(真实 LLM,4 轮) |
 | WIDGET_SCREENSHOT_QUIT | **必须带 1**:巡检完成后优雅退出(app.quit)——应用托盘常驻不自退,用 timeout/taskkill 强杀进程树会让子进程(bridge/GPU/renderer)打出 "renderer gone: crashed" 假象(实测误导) |
 | WIDGET_MOCK_SERVER | mock MCP 服务器路径(agent 巡检段 3 真实连接) |
-| WIDGET_HEVC_VIDEO | hevc-frame 巡检的待测视频路径(缺省 bili 20260514 HEVC 文件) |
+| WIDGET_HEVC_VIDEO | hevc-frame 巡检的待测视频路径(缺省 bili Hi-res 20230404 HEVC 文件) |
 
 ### 巡检模式
 
@@ -130,7 +130,7 @@ WIDGET_SCREENSHOT 六种巡检模式 ~1160 行已从 main.cjs 抽离)。
 | agent | Agent 全链路:设置表单/四区断言/MCP mock 连接/记忆增删/记忆类型滚轮/进化/设置工具端到端(段 4.7)/快捷切换按钮(sendInputEvent 注入真实鼠标,段 4.5)/主动陪伴消息(段 4.8)/10 秒真实调度链路(段 4.9) |
 | chat-media | 对话媒体:MediaRecorder 录真实 webm 注入 → 断言消息气泡/video/可见高度;优先扫描 `C:\Program Files\JiJiDown\Download` 真实 mp4/mp3(不可读回退 webm) |
 | media-lib | 多媒体库:面板/试听自动播放/编辑动画/宽度对齐/右键菜单应用背景/视频 autoPlay(79 用例) |
-| hevc-frame | HEVC 黑屏诊断:注入本地视频 → 轮询帧呈现(rVFC/总帧数/错误文案)——HEVC+禁用硬件加速时 readyState/decodeError 全过但零帧呈现(全黑);断言 HEVC → code 9 错误文案, H.264/转码产物 → 帧数持续增长 |
+| hevc-frame | HEVC/AV1 播放验证(2026-08-11 建为黑屏诊断,08-12 改断言):注入本地视频 → 轮询帧呈现(rVFC/总帧数/错误文案)——断言**帧数持续增长** = PASS(HEVC 走自编译 ffmpeg 软解,与 H.264/AV1 同判据);出现 code 9 错误文案 = 未应用 HEVC 补丁(apply-hevc-electron.mjs) |
 | skill-delete-check | 技能彻底删除:预置测试技能 → agentSkillDelete → 断言目录已删/其它技能不受影响/非法 slug 被拒 |
 
 ### 运行示例
@@ -170,7 +170,7 @@ WIDGET_SCREENSHOT=D:/tmp/agent WIDGET_SCREENSHOT_MODE=agent \
 | 窗口越拖越大 | 全屏期间 setWinSize 出口(fsLockedSize + resize 校正,见 TECH.md 6.11) |
 | 透明窗口布局漂移 | 垂直居中用 transform: translateY(-50%),不用 translate 属性 |
 | 点击穿透点不到 | 鼠标悬停岛体(岛体 mouseenter 切换接收鼠标) |
-| 视频"无法播放" | 格式限制(H.264 mp4/webm/ogg)或 HEVC 扩展缺失;island-media 协议 Range 正常与否看主进程日志 |
+| 视频"无法播放" | HEVC 报错 = 未应用 HEVC 补丁(dev.bat 自动应用;手动 `node scripts/apply-hevc-electron.mjs`,回退 `--restore`);mkv/avi/flv 等容器/编码不支持;island-media 协议 Range 正常与否看主进程日志 |
 | LLM 设置工具报「未知的操作」 | main.cjs ISLAND_SETTINGS_OPS 白名单漏加(新增操作三处同步:工具 op + 桥方法 + 白名单) |
 | 歌词 API 切换不生效 | 检查 widget-lyric-auto 开关与 provider 选择(切换即刷新,key 含 provider) |
 | 主动陪伴不触发 | 检查开关/间隔/模式/历史;judge 失败按 should:false(安全侧) |

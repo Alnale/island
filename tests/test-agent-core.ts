@@ -41,8 +41,9 @@ import {
   cutMindSentence,
   fallbackTitle,
 } from '../electron/agent/engine'
-import { createTools, toolOutputDir } from '../electron/agent/tools'
-import { createNapcatTools, napcatMessageText } from '../electron/agent/napcat'
+import { buildToolsGuideBlock, createTools, toolOutputDir } from '../electron/agent/tools'
+import { createNapcatTools, gtkFromCookie, napcatMessageImages, napcatMessageText } from '../electron/agent/napcat'
+import { MASTER_QQ } from '../electron/agent/constants'
 import { streamResponse } from '../electron/agent/deepseek'
 import { sanitizeUnpairedSurrogates } from '../electron/agent/sse'
 import {
@@ -3067,6 +3068,21 @@ await test('接收端:SSE delta 含孤立代理(截断回复)→ 事件文本已
 //     ID 分类;未配置保持默认位置)
 // ---------------------------------------------------------------------------
 
+console.log('\n=== 工具路径清单(buildToolsGuideBlock) ===')
+
+await test('buildToolsGuideBlock:包含各工具绝对路径与用法', () => {
+  const block = buildToolsGuideBlock()
+  assert(block.includes('bili-tool.exe'), '应包含 bili-tool 二进制路径')
+  assert(block.includes('DocFlow') && block.includes('server.py'), '应包含 DocFlow 服务')
+  assert(block.includes('auto_answer.py') && block.includes('xxt'), '应包含 xxt 脚本路径')
+  assert(block.includes('system-volume.ps1'), '应包含系统音量脚本')
+  assert(block.includes('memory.json'), '应包含长期记忆文件')
+  assert(block.includes('TECH.md'), '应包含功能引导文档')
+  assert(block.includes('downloads'), '应包含 bili 下载目录')
+  // 文案稳定(缓存前缀):两次调用结果一致
+  assert(buildToolsGuideBlock() === block, '工具清单文案应稳定(不断缓存前缀)')
+})
+
 console.log('\n=== 工具输出目录(toolOutputDir / set_output_dir) ===')
 
 await test('toolOutputDir:未注入输出目录环境 = null(保持默认位置)', async () => {
@@ -3219,8 +3235,167 @@ await test('napcat 工具:status/recent 格式化,send/send_group 校验与透�
   await assertRejects(() => tool.execute({ action: 'send', message: '缺 QQ 号' }), 'send 需要 user_id')
   await assertRejects(() => tool.execute({ action: 'send', user_id: '1' }), 'send 需要 message')
   await assertRejects(() => tool.execute({ action: 'send_group', message: '缺群号' }), 'send_group 需要 group_id')
-  await assertRejects(() => tool.execute({ action: 'send_group', group_id: '1' }), 'send_group 需要 message 或 file')
+  await assertRejects(() => tool.execute({ action: 'send_group', group_id: '1' }), 'send_group 需要 message、file 或 image')
   await assertRejects(() => tool.execute({ action: 'nope' }), 'action 仅支持')
+})
+
+await test('napcat 工具:send/send_group 带图片与私聊文件透传', async () => {
+  // 工具层会校验本地路径存在——用临时目录里真实创建的文件测透传
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'napcat-img-'))
+  const imgPath = path.join(tmpDir, 'x.png')
+  const imgPath2 = path.join(tmpDir, 'y.png')
+  const filePath = path.join(tmpDir, 'x.mp3')
+  await fs.writeFile(imgPath, 'i')
+  await fs.writeFile(imgPath2, 'i')
+  await fs.writeFile(filePath, 'm')
+  const qqCalls: Array<{ qq: string; text: string; image?: string; file?: string }> = []
+  const groupCalls: Array<{ groupId: string; text: string; file?: string; image?: string }> = []
+  const tools = createNapcatTools({
+    status: () => ({ connected: true, url: 'ws://127.0.0.1:3001', lastError: '', receivedCount: 0, repliedCount: 0 }),
+    sendToQQ: async (qq, text, opts) => {
+      qqCalls.push({ qq, text, image: opts?.image, file: opts?.file })
+      return 'qq-img'
+    },
+    sendToGroup: async (groupId, text, filePath2, image) => {
+      groupCalls.push({ groupId, text, file: filePath2, image })
+      return 'group-img'
+    },
+    getRecentMessages: () => [],
+    getContacts: async () => ({}),
+    updateContact: async (p) => ({ qq: p.qq, source: p.source, updatedAt: 0 }),
+  })
+  const tool = tools.find((t) => t.name === 'napcat')!
+  // send 带本地图片:透传 image(工具层校验路径存在通过)
+  const r1 = String(await tool.execute({ action: 'send', user_id: '10001', message: '看图', image: imgPath }))
+  const n1: number = qqCalls.length
+  assert(n1 === 1 && qqCalls[0].image === imgPath, 'send 应透传 image')
+  assert(r1.includes('含图片'), `send 带图应回显,实际:${r1}`)
+  // send 带 URL 图片(http(s) 不校验存在直接放行)
+  const r2 = String(await tool.execute({ action: 'send', user_id: '10001', message: '链接图', image: 'https://example.com/a.png' }))
+  const n2: number = qqCalls.length
+  assert(n2 === 2 && qqCalls[1].image === 'https://example.com/a.png', 'send 应透传 http(s) 图片链接')
+  void r2
+  // send 带文件(私聊发文件,2026-08-12)
+  const r3 = String(await tool.execute({ action: 'send', user_id: '10001', message: '文件', file: filePath }))
+  const n3: number = qqCalls.length
+  assert(n3 === 3 && qqCalls[2].file === filePath, 'send 应透传 file')
+  assert(r3.includes('含文件'), `send 带文件应回显,实际:${r3}`)
+  // send_group 带图片
+  const r4 = String(await tool.execute({ action: 'send_group', group_id: '1045765371', message: '群图', image: imgPath2 }))
+  const n4: number = groupCalls.length
+  assert(n4 === 1 && groupCalls[0].image === imgPath2, 'send_group 应透传 image')
+  assert(r4.includes('含图片'), `send_group 带图应回显,实际:${r4}`)
+  // 本地路径图片不存在 → 报错(LLM 可自纠)
+  await assertRejects(() => tool.execute({ action: 'send', user_id: '10001', image: path.join(tmpDir, 'missing.png') }), '图片不存在')
+  // send_group 本地路径图片不存在 → 同样报错
+  await assertRejects(() => tool.execute({ action: 'send_group', group_id: '1', image: path.join(tmpDir, 'missing.png') }), '图片不存在')
+  // 什么都不给 → 报错
+  await assertRejects(() => tool.execute({ action: 'send', user_id: '10001' }), 'send 需要 message')
+  await fs.rm(tmpDir, { recursive: true, force: true })
+})
+
+await test('napcat 工具:recall / members(自动补档案) / friends / profile / group_info / group_manage', async () => {
+  const recalled: string[] = []
+  const banned: Array<{ groupId: string; qq: string; duration: number }> = []
+  const kicked: Array<{ groupId: string; qq: string }> = []
+  const wholeBans: Array<{ groupId: string; enable: boolean }> = []
+  const nameMerges: Array<{ qq: string; name?: string }> = []
+  const tools = createNapcatTools({
+    status: () => ({ connected: true, url: 'ws://127.0.0.1:3001', lastError: '', receivedCount: 0, repliedCount: 0 }),
+    sendToQQ: async () => '',
+    sendToGroup: async () => '',
+    getRecentMessages: () => [],
+    getContacts: async () => ({}),
+    updateContact: async (p) => ({ qq: p.qq, source: p.source, updatedAt: 0 }),
+    recallMessage: async (messageId) => {
+      recalled.push(messageId)
+    },
+    mergeContactNames: async (entries) => {
+      for (const e of entries) nameMerges.push({ qq: e.qq, name: e.name })
+    },
+    getGroupMembers: async () => [
+      { user_id: '20001', nickname: '群友A', card: '阿A' },
+      { user_id: '20002', nickname: '群友B' },
+      { user_id: '20003' },
+    ],
+    getFriendList: async () => [
+      { user_id: '30001', nickname: '好友X', remark: '老X' },
+      { user_id: '30002', nickname: '好友Y' },
+    ],
+    getStrangerInfo: async () => ({ nickname: '神秘人', age: 25, sex: 'male' }),
+    getGroupInfo: async () => ({ groupName: '测试群', memberCount: 42 }),
+    setGroupBan: async (groupId, qq, duration) => {
+      banned.push({ groupId, qq, duration })
+    },
+    setGroupKick: async (groupId, qq) => {
+      kicked.push({ groupId, qq })
+    },
+    setGroupWholeBan: async (groupId, enable) => {
+      wholeBans.push({ groupId, enable })
+    },
+  })
+  const tool = tools.find((t) => t.name === 'napcat')!
+  // 撤回
+  const rRecall = String(await tool.execute({ action: 'recall', message_id: 'm-42' }))
+  assert(recalled.length === 1 && recalled[0] === 'm-42', 'recall 应透传 message_id')
+  assert(rRecall.includes('已撤回'), `recall 应回显,实际:${rRecall}`)
+  await assertRejects(() => tool.execute({ action: 'recall' }), 'recall 需要 message_id')
+  // 群成员 + 自动补档案(群名片优先)
+  const rMembers = String(await tool.execute({ action: 'members', group_id: '1045765371' }))
+  assert(
+    rMembers.includes('20001') && rMembers.includes('阿A') && rMembers.includes('20002') && rMembers.includes('20003'),
+    `members 应列成员与昵称,实际:${rMembers}`,
+  )
+  assert(nameMerges.length === 3 && nameMerges[0].name === '阿A' && nameMerges[1].name === '群友B', 'members 应自动补档案(群名片优先)')
+  await assertRejects(() => tool.execute({ action: 'members' }), 'members 需要 group_id')
+  // 好友列表
+  const rFriends = String(await tool.execute({ action: 'friends' }))
+  assert(rFriends.includes('30001') && rFriends.includes('老X') && rFriends.includes('30002'), `friends 应列好友,实际:${rFriends}`)
+  // 资料查询
+  const rProfile = String(await tool.execute({ action: 'profile', user_id: '40001' }))
+  assert(rProfile.includes('40001') && rProfile.includes('神秘人') && rProfile.includes('25'), `profile 应含资料,实际:${rProfile}`)
+  await assertRejects(() => tool.execute({ action: 'profile' }), 'profile 需要 user_id')
+  // 群信息
+  const rInfo = String(await tool.execute({ action: 'group_info', group_id: '1045765371' }))
+  assert(rInfo.includes('测试群') && rInfo.includes('42'), `group_info 应含群信息,实际:${rInfo}`)
+  await assertRejects(() => tool.execute({ action: 'group_info' }), 'group_info 需要 group_id')
+  // 群管理:禁言 / 解除(duration 0)/ 踢人 / 全员禁言
+  const rBan = String(await tool.execute({ action: 'group_manage', group_id: '1045765371', op: 'ban', user_id: '20001', duration: 600 }))
+  const banN: number = banned.length
+  assert(banN === 1 && banned[0].duration === 600 && rBan.includes('600 秒'), `ban 应透传时长,实际:${rBan}`)
+  const rUnban = String(await tool.execute({ action: 'group_manage', group_id: '1045765371', op: 'ban', user_id: '20001', duration: 0 }))
+  const unbanN: number = banned.length
+  assert(unbanN === 2 && banned[1].duration === 0 && rUnban.includes('解除'), `unban(duration 0)应透传,实际:${rUnban}`)
+  const rKick = String(await tool.execute({ action: 'group_manage', group_id: '1045765371', op: 'kick', user_id: '20002' }))
+  const kickN: number = kicked.length
+  assert(kickN === 1 && kicked[0].qq === '20002' && rKick.includes('移出'), `kick 应透传,实际:${rKick}`)
+  const rWhole = String(await tool.execute({ action: 'group_manage', group_id: '1045765371', op: 'whole_ban', enable: true }))
+  const wholeN: number = wholeBans.length
+  assert(wholeN === 1 && wholeBans[0].enable === true && rWhole.includes('全员禁言'), `whole_ban 应透传,实际:${rWhole}`)
+  const rWholeOff = String(await tool.execute({ action: 'group_manage', group_id: '1045765371', op: 'whole_ban', enable: false }))
+  const wholeOffN: number = wholeBans.length
+  assert(wholeOffN === 2 && wholeBans[1].enable === false && rWholeOff.includes('解除'), `whole_ban 关闭应透传,实际:${rWholeOff}`)
+  // 参数校验
+  await assertRejects(() => tool.execute({ action: 'group_manage', group_id: '1', op: 'ban' }), 'ban 需要 user_id')
+  await assertRejects(() => tool.execute({ action: 'group_manage', group_id: '1', op: 'ban', user_id: '2' }), 'ban 需要 duration')
+  await assertRejects(() => tool.execute({ action: 'group_manage', group_id: '1', op: 'nope' }), 'op 仅支持')
+  await assertRejects(() => tool.execute({ action: 'group_manage', group_id: '1' }), 'group_manage 需要 op')
+  await assertRejects(() => tool.execute({ action: 'group_manage', group_id: '1', op: 'whole_ban' }), 'whole_ban 需要 enable')
+})
+
+await test('napcatMessageImages:图片段提取(收图链路)', () => {
+  assert(napcatMessageImages(null).length === 0, 'null 无图片')
+  assert(napcatMessageImages('文本').length === 0, 'string 无图片')
+  const imgs = napcatMessageImages([
+    { type: 'text', data: { text: '看这个' } },
+    { type: 'image', data: { file: 'abc.image', url: 'https://gimg2.baidu.com/x.png' } },
+    { type: 'image', data: { file: 'def.image' } },
+    { type: 'face', data: { id: '1' } },
+  ])
+  assert(imgs.length === 2, `应提取 2 张图片,实际 ${imgs.length}`)
+  assert(imgs[0].file === 'abc.image' && imgs[0].url === 'https://gimg2.baidu.com/x.png', '第一张应带 file 与 url')
+  assert(imgs[1].file === 'def.image' && imgs[1].url === undefined, '第二张应只带 file')
+  assert(napcatMessageImages([{ type: 'text', data: { text: 'x' } }]).length === 0, '纯文本段无图片')
 })
 
 await test('napcat 工具:contacts 档案查询与 contact_update 记录', async () => {
@@ -3354,6 +3529,66 @@ await test('set_napcat_config:enabled/wsUrl/allowed/allowedGroups 校验与写�
   await assertRejects(() => tool.execute({ allowedGroups: 'not-array' }), 'allowedGroups 需要是群号字符串数组')
   const out2 = String(await tool.execute({ enabled: false }))
   assert(out2.includes('已关闭'), `关闭应回显,实际:${out2}`)
+})
+
+await test('napcat 工具:sent(机器人发出的消息带 ID 可撤回)与 zone(查看 QQ 空间动态)', async () => {
+  const sentList = [
+    { messageId: 'm-sent-1', type: 'private' as const, target: '10001', text: '下载好了', time: 1700000000 },
+    { messageId: 'm-sent-2', type: 'group' as const, target: '1045765371', text: '大家好', time: 1700000100 },
+  ]
+  const zoneCalls: Array<{ qq: string; num: number }> = []
+  const tools = createNapcatTools({
+    status: () => ({ connected: false, url: '', lastError: '', receivedCount: 0, repliedCount: 0 }),
+    sendToQQ: async () => '',
+    sendToGroup: async () => '',
+    getRecentMessages: () => [],
+    getContacts: async () => ({}),
+    updateContact: async (p) => ({ qq: p.qq, source: p.source, updatedAt: 0 }),
+    getSentMessages: () => sentList,
+    getQzoneFeeds: async (qq, num) => {
+      zoneCalls.push({ qq, num })
+      return [
+        { tid: 'tid-1', content: '今天天气不错', createTime: 1700000000, picnum: 2, commentnum: 3, likenum: 5 },
+        { tid: 'tid-2', content: '晒个猫', createTime: 1700000100, picnum: 0, commentnum: 0, likenum: 0 },
+      ]
+    },
+  })
+  const tool = tools.find((t) => t.name === 'napcat')!
+  // sent:列出机器人发出的消息(2026-08-12 撤回修复),带 message_id 与撤回提示
+  const sent = String(await tool.execute({ action: 'sent' }))
+  assert(sent.includes('m-sent-1') && sent.includes('QQ10001') && sent.includes('recall 这个 ID'), `sent 应列消息与撤回提示,实际:${sent}`)
+  assert(sent.includes('m-sent-2') && sent.includes('群1045765371'), `sent 应含群消息,实际:${sent}`)
+  // sent 空列表兜底
+  const emptyTools = createNapcatTools({
+    status: () => ({ connected: false, url: '', lastError: '', receivedCount: 0, repliedCount: 0 }),
+    sendToQQ: async () => '',
+    sendToGroup: async () => '',
+    getRecentMessages: () => [],
+    getContacts: async () => ({}),
+    updateContact: async (p) => ({ qq: p.qq, source: p.source, updatedAt: 0 }),
+    getSentMessages: () => [],
+  })
+  const sentEmpty = String(await emptyTools.find((t) => t.name === 'napcat')!.execute({ action: 'sent' }))
+  assert(sentEmpty.includes('还没有发出过'), `sent 空应兜底,实际:${sentEmpty}`)
+  // zone:缺省 qq = 主人(MASTER_QQ,即用户自己的空间),num 缺省 10
+  const zone = String(await tool.execute({ action: 'zone' }))
+  assert(zoneCalls.length === 1 && zoneCalls[0].qq === MASTER_QQ && zoneCalls[0].num === 10, `zone 缺省应查主人空间,实际:${JSON.stringify(zoneCalls)}`)
+  assert(zone.includes('今天天气不错') && zone.includes('[图片×2]') && zone.includes('👍5') && zone.includes('💬3'), `zone 应格式化动态,实际:${zone}`)
+  // 显式 qq/num 透传
+  await tool.execute({ action: 'zone', qq: '10001', num: 5 })
+  // 注:assert 是 asserts 类型守卫,前面 length===1 断言后 TS 把 length 收窄为
+  // 字面量 1,再用 ===2 报 2367 无重叠——用 >= 表达"经过一次调用后至少 2"
+  assert(zoneCalls.length >= 2 && zoneCalls[1].qq === '10001' && zoneCalls[1].num === 5, 'zone 应透传 qq 与 num')
+  // num 越界校验
+  await assertRejects(() => tool.execute({ action: 'zone', num: 0 }), 'num 需要在 1-20')
+  await assertRejects(() => tool.execute({ action: 'zone', num: 21 }), 'num 需要在 1-20')
+})
+
+await test('gtkFromCookie:QQ Cookie 计算 g_tk(QQ 空间接口认证)', () => {
+  assert(gtkFromCookie('uin=o123456789; p_skey=abc123; ') !== '', 'p_skey 应能计算 g_tk')
+  assert(gtkFromCookie('uin=o123; skey=xyz;') !== '', 'skey 兜底应能计算 g_tk')
+  assert(gtkFromCookie('uin=o123; p_skey=abc;') === gtkFromCookie('p_skey=abc'), '只取 p_skey 值,与其它 cookie 无关')
+  assert(gtkFromCookie('no keys here') === '', '无 p_skey/skey 返回空串')
 })
 
 // ---------------------------------------------------------------------------

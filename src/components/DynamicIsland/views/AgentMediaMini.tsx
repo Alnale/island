@@ -58,6 +58,7 @@ export function AgentMediaMini({
     v.muted = p.volume === 0
     v.playbackRate = p.speed
     v.loop = p.loop
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅挂载时应用一次偏好
   }, [])
   // 原面板播放中 → 小窗挂载自动续播(仅挂载时一次)。
   // **先 seek 到面板内的最近进度再 play(2026-08-09 修复"收起变多媒体

@@ -332,22 +332,31 @@ export default function WidgetApp() {
   // 注册设置桥(LLM 设置工具入口;Web 演示版无主进程工具调用,不注册;
   // 设置变更事件的即时重读已收进 useIslandCustomizations 各 hook;
   // 外部模式同步/循环/seek 已收进 useIslandMedia 共享 hook)
+  // 音乐控制桥 getter 经 ref 镜像读实时状态(2026-08-12 修复:原空依赖
+  // 闭包捕获**首次渲染**的 externalActive/system/player——QQ 远程控制
+  // 读到过期状态;每次渲染刷新镜像,getter 惰性读当前值,与 useIslandMedia
+  // 的 cycleMode ref 同款模式)
+  const musicControlStateRef = useRef({ externalActive, system, player })
+  musicControlStateRef.current = { externalActive, system, player }
   useEffect(() => {
     registerIslandSettingsBridge()
     // 音乐控制桥(2026-08-12,QQ 远程控制/后台对话):主进程经
     // executeJavaScript 调 window.__islandMusicControl 控制播放——
     // 外部平台(SMTC)优先,本地播放器兜底;状态供 LLM 查询
     registerMusicControlBridge({
-      getExternalActive: () => externalActive,
-      systemControl: (action) => system.control(action),
-      getPlayer: () => player,
+      getExternalActive: () => musicControlStateRef.current.externalActive,
+      systemControl: (action) => musicControlStateRef.current.system.control(action),
+      getPlayer: () => musicControlStateRef.current.player,
       // system 的公开播放状态字段是 isPlaying(意图驱动),映射到桥的 playing
-      getSystem: () => ({
-        track: system.track,
-        playing: system.isPlaying,
-        position: system.position,
-        duration: system.duration,
-      }),
+      getSystem: () => {
+        const s = musicControlStateRef.current.system
+        return {
+          track: s.track,
+          playing: s.isPlaying,
+          position: s.position,
+          duration: s.duration,
+        }
+      },
     })
   }, [])
 

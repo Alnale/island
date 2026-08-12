@@ -1,3 +1,7 @@
+/* eslint-disable react-refresh/only-export-components -- 本文件同时导出组件与
+   跨文件共享的媒体辅助函数(MediaFrame/VideoPlayer/VoiceBubble 等组件 +
+   resolveMediaSrc/AgentMediaReport/dispatchAgentMedia/readAgentMediaPosition
+   等,被 AgentMessages/DynamicIsland/桥多处 import),拆分文件收益低于风险 */
 /**
  * 消息气泡 Markdown 渲染组件(配合 markdownParser.ts 使用)
  *
@@ -177,6 +181,11 @@ function openMediaExternally(url: string) {
  * code 4(SRC_NOT_SUPPORTED)= 格式不支持——Chromium 窗口内只支持
  * H.264 的 mp4 / webm(vp8/vp9)/ ogg,HEVC/H.265、mkv、avi、flv 等
  * 无法解码(硬限制),明确告知 + 系统播放器一键降级。
+ * 2026-08-12 HEVC 已可窗口内播放:自编译 ffmpeg(scripts/apply-hevc-
+ * electron.mjs 应用,C:\electron-hevc-dist)带 HEVC 软解 + media 层
+ * 门控补丁(enable-hevc-ffmpeg-decoding.patch)——code 9 仅剩"补丁
+ * 未应用"时的兜底提示(官方 Electron 无 HEVC 解码器)。
+ * AV1 自始支持(libgav1 软解内置,官方版即可)。
  * 2026-08-09 修复"格式正确却报无法播放(实测)":Chromium 对**加载
  * 失败**(404 文件不存在 / 413 过大 / 500 读取失败)也报 code 4——
  * 同一错误码无法区分"资源没拿到"与"资源格式不支持"。code 4 且
@@ -216,9 +225,9 @@ function MediaError({ src, kind, code }: { src: string; kind: 'img' | 'video' | 
           ? '视频文件过大,超过窗口内播放上限(10GB)'
           : probe === 'readfail'
             ? '视频文件读取失败(可能被占用、已损坏或不可访问)'
-            : '该视频格式无法在窗口内播放(窗口内支持 mp4(H.264)/webm/ogg)'
+            : '该视频格式无法在窗口内播放(窗口内支持 mp4(H.264/HEVC/AV1)/webm/ogg)'
       : kind === 'video' && code === 9
-        ? '该视频为 HEVC(H.265)等特殊编码,窗口内无法解码(挂件禁用硬件加速)——可用系统播放器打开,或让助手用 bili 工具转码(convert)为 H.264 后窗口内直接播放'
+        ? '该视频为 HEVC(H.265)等特殊编码,当前 Electron 未带 HEVC 解码器——可让助手用 bili 转码(convert)为 H.264 后窗口内播放,或用系统播放器打开(应用 HEVC 补丁 scripts/apply-hevc-electron.mjs 后可窗口内直接播放)'
         : '无法播放该文件(可能已移动、过大或格式不支持)'
   return (
     <div className="island-agent-media-err">
@@ -726,6 +735,8 @@ function VideoPlayer({
   const [poster, setPoster] = useState<string | null>(null)
   const posterTriedRef = useRef(false)
   const everPlayedRef = useRef(false)
+  // 仅挂载时抓一次封面(2026-08-10 设计:未播放过才显示;续播位置
+  // cacheKey 在 effect 内读取,不随其变化重跑)
   useEffect(() => {
     const v = videoRef.current
     if (!v) return
@@ -779,6 +790,7 @@ function VideoPlayer({
       v.removeEventListener('loadeddata', tryCapture)
       v.removeEventListener('loadedmetadata', tryCapture)
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅挂载时抓一次封面
   }, [])
   // 挂载续播(2026-08-09 双向同步):小窗播放/seek 的进度经
   // readAgentMediaPosition 读回,面板重新挂载(收起后再展开)时从该
@@ -842,7 +854,8 @@ function VideoPlayer({
   }, [])
   // 应用播放偏好(2026-08-10 双向同步:音量/倍速/循环与视频岛/多媒体
   // 库共享;2026-08-10 二轮:videoKey 指定时读**该视频个性化**,缺省
-  // 回退共享——挂载时读当前值应用到 video)
+  // 回退共享——挂载时读当前值应用到 video,不随 videoKey 变化重跑)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
     const v = videoRef.current
     if (!v) return
@@ -851,6 +864,7 @@ function VideoPlayer({
     v.muted = p.volume === 0
     v.playbackRate = p.speed
     v.loop = p.loop
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅挂载时应用一次偏好
   }, [])
   // 自动播放(2026-08-10 用户要求"LLM 播放视频,加载出媒体元素后自动
   // 播放";三轮修复):**挂载时一次性捕获 autoPlay(useRef,声明已提前到
