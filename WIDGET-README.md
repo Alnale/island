@@ -70,6 +70,12 @@ pnpm dev:widget      # 构建挂件页面 + 启动 Electron(日常调试主入�
 pnpm watch:electron  # 热重建 Agent 引擎/桥(监听 electron/agent/*.ts,
                      # 自动 esbuild 重建 + 重启 electron)
 pnpm bridge          # 独立运行系统媒体桥接脚本(单独调试 SMTC)
+node scripts/apply-hevc-electron.mjs  # HEVC 解码补丁(2026-08-12):dev.bat
+                     # [1.5/3] 自动检测应用——把自编译产物(C:\electron-hevc-dist,
+                     # 与官方 43.2.0 同 tag 构建,ffmpeg 软解 + media 门控补丁)
+                     # 的 7 个构建文件换进 node_modules/electron/dist;
+                     # --restore 恢复官方版, --check 只查状态;重装
+                     # node_modules 后 dev.bat 会自动重新应用
 ```
 
 ### 验证约定(用户要求)

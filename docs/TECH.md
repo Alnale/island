@@ -3111,7 +3111,7 @@ remember / forget / list_memory / update_memory / evolve_memory
 | 2026-08-08 | 工具参数校验(LLM 自纠)、输出预算动态调整、多媒体库(图片/音频/视频)、island-media 流式协议、对话媒体窗口、Markdown 渲染器、媒体拦截(open_file/exec_command start)、消息气泡 mermaid/表格、播放列表 ↔ 音频库同步、HEVC 硬解、智能截图修复 |
 | 2026-08-09 | 媒体小窗(视频岛/图片岛)、全屏(工作区扩展/退出缩回)、进度双向同步、封面抓帧、chat-media 巡检 |
 | 2026-08-10 | 定制视频控件(VideoExtras 音量/更多,三处同步)、帮助手册移除、收起语义拆分(灵动岛/多媒体岛)、**主动陪伴工具积极性(拟人)**、**设置工具白名单修复 + play_library_video 跳转播放**、**本文档(技术文档 3000 行)+ get_feature_guide 引导工具 + README 重写** |
-| 2026-08-12 | **HEVC 原生软解**(自编译 Electron:ffmpeg HEVC 解码器 + media 层门控补丁,apply-hevc-electron.mjs 换装/回退,dev.bat 自动应用;AV1 验证本就支持)、hevc-frame 巡检改断言、NapCat 主人硬编码、群消息直进对话与记忆强化、分会话人格、工具输出目录、set_audio_config/set_output_budget 等工具、消息列表虚拟滚动 |
+| 2026-08-12 | **HEVC 原生软解**(自编译 Electron:ffmpeg HEVC 解码器 + media 层门控补丁,apply-hevc-electron.mjs 换装/回退,dev.bat 自动应用;AV1 验证本就支持)、hevc-frame 巡检改断言、**lint 警告清零(12 处)+ TS2367 修复 + 音乐控制桥实时状态修复(ref 镜像,原空依赖闭包读到首次渲染值)**、NapCat 主人硬编码、群消息直进对话与记忆强化、分会话人格、工具输出目录、set_audio_config/set_output_budget 等工具、消息列表虚拟滚动 |
 
 ---
 

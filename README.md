@@ -63,6 +63,19 @@
   网易云、酷狗、酷我、浏览器(Chrome/Edge 标签页)等均支持;
 - Agent 模式需要可用的 LLM API(默认 DeepSeek,也可用 Anthropic 兼容端点)。
 
+### 视频播放(HEVC/AV1,2026-08-12)
+
+- 对话窗口内可直接播放 **H.264 / HEVC(H.265) / AV1** 的 mp4 与 webm/ogg;
+- **HEVC/AV1 靠自编译 ffmpeg 软解**:`dev.bat` 启动时自动检测并应用
+  (`scripts/apply-hevc-electron.mjs`——把自编译产物(C:\electron-hevc-dist,
+  源码树 C:\electron-gn)的 electron.exe/ffmpeg.dll 等换进官方 dist,官方版
+  全量备份可回退)。AV1 官方版即可软解,无需补丁;
+- 手动应用:`node scripts/apply-hevc-electron.mjs`;恢复官方版:
+  `node scripts/apply-hevc-electron.mjs --restore`;查状态:`--check`;
+- mkv/avi/flv 等容器/编码不支持,点错误提示按钮可用系统播放器打开;
+- bili 下载默认把 HEVC/AV1 自动转码为 H.264(性能/通用性兜底),想保留
+  原编码可在对话里让助手执行 `bili config --set codec copy`。
+
 ---
 
 ## 界面与基础操作
