@@ -28,6 +28,7 @@ import { existsSync, promises as fs } from 'node:fs'
 import path from 'node:path'
 import { app } from 'electron'
 import type { AgentConfig, AgentTool, ToolParams } from './types'
+import { MASTER_QQ } from './constants'
 
 /** OneBot 消息 → 文本(兼容 string 与段数组;测试用导出):text 段拼接,
  * face/emoji 标注,@ 段标注(机器人自身 = @鲸鱼娘),其它段(图片等)标注类型 */
@@ -678,8 +679,13 @@ export function createNapcatTools(client: {
             `\n收到消息 ${s.receivedCount} 条,已回复 ${s.repliedCount} 条` +
             // 白名单诊断(2026-08-12:换群监听后新群收不到 = 群白名单
             // 没变,status 直接可见)
-            `\n私聊白名单:${s.allowed && s.allowed.length > 0 ? s.allowed.join('、') : '(全部)'}` +
-            `\n监听群:${s.allowedGroups && s.allowedGroups.length > 0 ? s.allowedGroups.join('、') : '(全部)'}` +
+            // **主人恒为 MASTER_QQ 硬编码(2026-08-12 用户要求"主人永远
+            // 只有 1178821869"):列表 = 扩展信任(额外可自主回复的 QQ),
+            // 空列表 = 只回复主人,不再是"全部信任"——"(全部)"文案误导,
+            // LLM 看到后可能把任意 QQ 当信任对象**
+            `\n主人:${MASTER_QQ}(硬编码,唯一主人)` +
+            `\n私聊扩展信任:${s.allowed && s.allowed.length > 0 ? s.allowed.join('、') : '(仅主人)'}` +
+            `\n监听群:${s.allowedGroups && s.allowedGroups.length > 0 ? s.allowedGroups.join('、') : '(无)'}` +
             `\n(换群监听用 set_napcat_config 的 allowedGroups 参数)`
           )
         }

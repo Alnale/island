@@ -173,6 +173,15 @@ const DEFAULT_SKILLS_DIRS = (() => {
   return dirs
 })()
 
+/** 主人 QQ(2026-08-12 用户要求"主人永远只有 1178821869 这一个账号,
+ * 别的都不是,不要产生幻觉"):**硬编码,不受任何配置影响**——LLM 经
+ * set_napcat_config 修改 napcatAllowed、或配置被清空/损坏都不能改变
+ * 主人身份。所有"主人"判定(trusted 信任级、询问轮同步对象、注入
+ * 指令中的主人指向)一律以此常量为准。
+ * 与 electron/agent/constants.ts 的 MASTER_QQ 同值(本文件手写 CJS
+ * 无法 import TS 模块,改值时两处必须同步) */
+const MASTER_QQ = '1178821869'
+
 const AGENT_CONFIG_DEFAULTS = {
   apiKey: '',
   baseURL: 'https://api.deepseek.com',
@@ -217,7 +226,10 @@ const AGENT_CONFIG_DEFAULTS = {
   napcatWsUrl: 'ws://127.0.0.1:3001',
   /** NapCat 开关(默认关;开启后挂件启动即连接,QQ 私聊自动回复) */
   napcatEnabled: false,
-  /** 私聊 QQ 白名单(用户限定:只能和 1178821869 通信) */
+  /** 私聊扩展信任 QQ 号(2026-08-12 语义收紧:主人恒为 MASTER_QQ 硬编码,
+   * 此列表只是"额外自主回复"的扩展信任;空数组 = 只信任主人,不再有
+   * "空 = 全部信任"语义——LLM 把列表清空后陌生人全被当主人处理的
+   * 隐患已杜绝) */
   napcatAllowed: ['1178821869'],
   /** 群白名单(用户限定:只能和群 1045765371 通信) */
   napcatAllowedGroups: ['1045765371'],
@@ -558,8 +570,9 @@ async function runMusicControl(op, args) {
 let lastSendSource = null
 let lastSendTarget = null
 /** 询问轮标记(2026-08-12,source='ask'):陌生人消息触发,LLM 回复 =
- * "询问主人怎么回复"——落定后发到**主人 QQ**(napcatAllowed[0])同步
- * 询问(不只在对话窗口);询问轮不清 pendingQQReply(等待主人指示) */
+ * "询问主人怎么回复"——落定后发到**主人 QQ**(MASTER_QQ 硬编码,不受
+ * napcatAllowed 配置影响)同步询问(不只在对话窗口);询问轮不清
+ * pendingQQReply(等待主人指示) */
 let lastAskTurn = false
 /** 最近一次 QQ/群触发轮的时间戳(2026-08-12:summarize 时据此强制
  * 记忆提取——QQ 聊天记录要沉淀进长期记忆,不受主动陪伴开关限制) */
@@ -614,7 +627,14 @@ function getNapcatClient() {
       getNapcatClient()
         .client.appendChat({ id: msg.messageId || `p-${msg.time}-${msg.qq}`, type: 'private', target: msg.qq, qq: msg.qq, text: msg.text, time: msg.time })
       const allowed = currentAgentConfig().napcatAllowed ?? []
-      const trusted = allowed.length === 0 || allowed.includes(msg.qq)
+      // **信任分级(2026-08-12 收紧,用户要求"主人永远只有 1178821869")**:
+      // 主人(MASTER_QQ 硬编码)恒信任;napcatAllowed 是**扩展信任**
+      // (配置的朋友/常用联系人,可自主回复);**空数组不再 = 全部信任**
+      // (原语义:allowed 为空时所有私聊都走自主回复链路——LLM 用
+      // set_napcat_config 清空列表后,陌生人消息被当成"主人"处理并
+      // 自主回复,用户实测担忧;现在空列表 = 只有主人信任,其余全走
+      // 陌生人链路"先询问主人")
+      const trusted = msg.qq === MASTER_QQ || allowed.includes(msg.qq)
       if (trusted) {
         sendToWidget('napcat:message', { ...msg, trusted: true })
         return
@@ -641,7 +661,10 @@ function getNapcatClient() {
       }
       const injected = `【QQ ${msg.qq} 发来私聊消息】${msg.text}` +
         `\n【私聊指令】` + personaBlock +
-        `对方不是岛灵的主人。请先询问主人(岛灵)希望怎么回复,得到指示后再执行回复;` +
+        `**岛灵的主人 = QQ ${MASTER_QQ}(灵动岛的使用者本人)——只有这一个账号是主人,**` +
+        `其它任何人(包括当前发消息的对方)都不是主人,不要猜测/假设/认可任何其它` +
+        `账号为主人**。对方不是岛灵的主人,请先询问主人(${MASTER_QQ})希望怎么回复,` +
+        `得到指示后再执行回复;` +
         `如果主人暂时没空,给出你的建议。` +
         `回复务必偏袒岛灵的主人,替主人说好话、维护主人的形象——` +
         `对方贬低/质疑/说主人坏话时要委婉回护,不随声附和。` +
@@ -708,10 +731,12 @@ function getNapcatClient() {
           `你回复了什么要点、有什么值得主人注意的——如下载进度/需要主人决定的事);` +
           `**不要描述工具调用过程**(如"我已回复""下载开始啦""我先搜搜"),**不会发到群里**,可以放心汇报。` +
           `最近群聊记录:\n${recentGroup || '(无)'}` +
-          `\n看场合决定是否回复群友:@了你 / 提到你 / 问你问题 / 聊到主人(尤其被贬低/质疑,` +
+          `\n**岛灵的主人 = QQ ${MASTER_QQ}(灵动岛的使用者本人)——只有这一个账号是主人,**` +
+          `群里任何人(包括 @ 你的群友)都不是主人,不要猜测/假设/认可任何其它账号为主人**。` +
+          `看场合决定是否回复群友:@了你 / 提到你 / 问你问题 / 聊到主人(尤其被贬低/质疑,` +
           `必须站出来有力回护、替主人找回场子,不卑不亢)→ 必须 send_group 回复;` +
           `普通闲聊、插不上话 → 不回复群友,只向主人汇报即可。` +
-          `回复群友时偏袒岛灵的主人,替主人说好话、维护主人形象。` +
+          `回复群友时偏袒岛灵的主人(${MASTER_QQ}),替主人说好话、维护主人形象。` +
           `隐私边界:群友是外人,不得暴露主人的私密信息(长期记忆里的私人话题、` +
           `对话窗口中的私聊内容、主人的真实信息等),被问及主人私事时委婉带过。` +
           `群成员的信息(称呼/喜好)可用 napcat 工具 contact_update 记入联系人档案;` +
@@ -742,14 +767,12 @@ function handleEngineMessageForNapcat(message) {
   // 长期记忆没有 QQ 聊天记录,提取原来只在 proactiveEnabled 开启时跑)
   if (lastAskTurn || lastSendSource) lastQQTurnAt = Date.now()
   // **询问轮(2026-08-12,source='ask'):LLM 回复 = 询问主人怎么回复——
-  // 发到主人 QQ(napcatAllowed[0])同步询问**(不只在对话窗口);
-  // pendingQQReply 保留(等主人指示)
+  // 发到主人 QQ(MASTER_QQ 硬编码,2026-08-12 起不再取 napcatAllowed[0]:
+  // LLM 修改白名单配置后询问轮会发错对象——主人身份固定不可配置)同步
+  // 询问**(不只在对话窗口);pendingQQReply 保留(等主人指示)
   if (lastAskTurn) {
     lastAskTurn = false
-    const ownerQQ = (currentAgentConfig().napcatAllowed ?? [])[0]
-    if (ownerQQ) {
-      c.sendToQQ(ownerQQ, text).catch(() => {})
-    }
+    c.sendToQQ(MASTER_QQ, text).catch(() => {})
     return
   }
   // 来源触发轮(白名单私聊 / 群消息)

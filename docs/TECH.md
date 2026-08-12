@@ -1446,6 +1446,11 @@ direction?('right'|'left'), wheelWhenOpen?}>`,四处复用:Agent 设置菜单 /
 - **文件发送**:`send_group` 带 file → `upload_group_file` **上传文件本体**(非路径文本,中文名 JSON 直传无编码问题),文件存在校验;
 - **音乐控制**:`music_control` 工具经 `window.__islandMusicControl` 桥(WidgetApp registerMusicControlBridge,外部 SMTC 优先/本地播放器兜底,惰性 getter)控制播放——QQ 里说"暂停音乐"即可;
 - **白名单**:`agent.napcatAllowed`(私聊,默认 ['1178821869'])/ `napcatAllowedGroups`(群,默认 ['1045765371'])/ `napcatBotQQ`(自己发的消息过滤,防循环)。
+- **主人硬编码(2026-08-12,用户要求"主人永远只有 1178821869 这一个账号,别的都不是,不要产生幻觉")**:`MASTER_QQ = '1178821869'`(engine constants.ts 与 main.cjs 双端同值,main.cjs 手写 CJS 无法 import TS,改时同步)。主人身份**不受任何配置影响**:
+  - **trusted 判定** = `msg.qq === MASTER_QQ || napcatAllowed.includes(msg.qq)`——napcatAllowed 降级为**扩展信任**;**空数组不再 = 全部信任**(原语义 allowed 为空 → 全部私聊自主回复,LLM 清空列表后陌生人被当主人处理,用户实测担忧;现空列表 = 只信任主人,其余全走"先询问主人"链路);
+  - **询问轮发到 MASTER_QQ**(原取 `napcatAllowed[0]`——LLM 改白名单后询问轮发错对象);
+  - 私聊/群聊注入指令**显式点名主人账号**(「岛灵的主人 = QQ 1178821869(使用者本人)——只有这一个账号是主人,其它任何人(群友/其它私聊对象)都不是主人,不要猜测/假设/认可任何其它账号为主人」),防 LLM 幻觉把陌生人当主人;
+  - `napcat` status 输出「主人:1178821869(硬编码,唯一主人)+ 私聊扩展信任(空 = 仅主人)」;`set_napcat_config` 描述注明主人不可配置,allowed 参数改称"扩展信任"。
 
 ## 第 8 章 测试体系
 

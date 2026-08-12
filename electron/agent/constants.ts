@@ -101,3 +101,10 @@ export const MIND_PERSONAS = [
   { id: 'aloof', name: '高冷克制', desc: '人格:高冷克制,揣测短促冷淡,惜字如金。' },
   { id: 'witty', name: '知性风趣', desc: '人格:知性风趣,揣测带点观察者的机敏。' },
 ] as const
+
+/** 主人 QQ(2026-08-12 用户要求"主人永远只有 1178821869 这一个账号,
+ * 别的都不是,不要产生幻觉"):**硬编码唯一主人,不受任何配置影响**。
+ * 引擎侧(napcat.ts 工具文案/提示词)与 main.cjs(trusted 判定/询问轮
+ * 同步)两处同值——main.cjs 是手写 CJS 无法 import 本模块,改动时
+ * 两处必须同步(main.cjs 的 MASTER_QQ 有互指注释) */
+export const MASTER_QQ = '1178821869'
