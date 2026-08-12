@@ -480,6 +480,254 @@
   border: 1px solid rgba(255, 255, 255, 0.25);
 }
 
+/** 会话隔离折叠坞(2026-08-13 五轮,用户要求"按钮和面板一体式"):
+    **同一个圆角矩形**——左侧窄条 = 会话按钮区(同背景/描边/阴影,
+    无接缝,仅一条细分隔线),右侧 = 面板主体;收起时整个矩形缩成
+    小条(24×52),展开时矩形变大(宽度 320 + 高度 280,左缘随之一并
+    向左位移 = 胶水观感);右缘贴窗口边 = 截断圆角矩形 */
+.island-session-dock {
+  position: absolute;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 30;
+  display: flex;
+  align-items: stretch;
+  width: 24px;
+  height: 52px;
+  background: rgba(13, 16, 24, 0.96);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-right: none;
+  border-radius: 14px 0 0 14px;
+  box-shadow: -3px 3px 18px rgba(0, 0, 0, 0.38);
+  overflow: hidden;
+  transition:
+    width 0.22s cubic-bezier(0.4, 0, 0.2, 1),
+    height 0.22s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.island-session-dock.open {
+  width: 344px;
+  height: 280px;
+  transition:
+    width 0.34s cubic-bezier(0.34, 1.56, 0.64, 1),
+    height 0.34s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+/* 按钮区:同一矩形的左窄条(无独立背景/描边,一体式;细分隔线区分) */
+.island-session-fold {
+  position: relative;
+  flex: none;
+  width: 24px;
+  height: 100%;
+  padding: 0;
+  border: none;
+  border-right: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-dim, rgba(255, 255, 255, 0.72));
+  font-family: inherit;
+  font-size: 0.56rem;
+  cursor: pointer;
+  transition:
+    background 0.15s ease,
+    color 0.15s ease;
+}
+
+.island-session-fold:hover {
+  background: rgba(255, 255, 255, 0.09);
+  color: var(--text-color, #fff);
+}
+
+.island-session-fold-label {
+  writing-mode: vertical-rl;
+  letter-spacing: 3px;
+}
+
+.island-session-fold-dot {
+  position: absolute;
+  top: 5px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #e5484d;
+}
+
+/* 面板主体:同一矩形右段(无独立背景/描边,宽度过渡展开) */
+.island-session-panel {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: row;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.16s ease;
+}
+
+.island-session-dock.open .island-session-panel {
+  opacity: 1;
+  pointer-events: auto;
+  transition: opacity 0.2s ease 0.08s;
+}
+
+/* 左列:会话名称列表(可滚动) */
+.island-session-left {
+  flex: none;
+  width: 116px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 6px;
+  border-right: 1px solid rgba(255, 255, 255, 0.1);
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.island-session-title {
+  flex: none;
+  font-size: 0.56rem;
+  font-weight: 600;
+  color: var(--text-dim, rgba(255, 255, 255, 0.5));
+  padding: 1px 6px 3px;
+  letter-spacing: 1px;
+}
+
+.island-session-item {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 6px 8px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-dim, rgba(255, 255, 255, 0.72));
+  font-family: inherit;
+  font-size: 0.6rem;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background 0.15s ease,
+    border-color 0.15s ease,
+    color 0.15s ease;
+}
+
+.island-session-item:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-color, #fff);
+}
+
+.island-session-item.on {
+  border-color: var(--state-color, #4d6bfe);
+  background: color-mix(in srgb, var(--state-color, #4d6bfe) 16%, transparent);
+  color: var(--text-color, #fff);
+}
+
+.island-session-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.island-session-unread {
+  flex: none;
+  min-width: 15px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: #e5484d;
+  color: #fff;
+  font-size: 0.52rem;
+  line-height: 1.5;
+  text-align: center;
+}
+
+/* 右列:对话框 */
+.island-session-right {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 6px;
+}
+
+.island-session-chat-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  padding: 0 2px 5px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.island-session-chat-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.62rem;
+  font-weight: 600;
+  color: var(--text-color, #fff);
+}
+
+.island-session-chat-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px 2px;
+}
+
+.island-session-chat-empty {
+  margin: auto;
+  font-size: 0.56rem;
+  color: var(--text-dim, rgba(255, 255, 255, 0.45));
+  text-align: center;
+  padding: 8px;
+}
+
+/* 气泡:对方(user)右侧强调色、LLM(assistant)左侧浅底——QQ 视角 */
+.island-session-chat-msg {
+  align-self: flex-start;
+  max-width: 92%;
+  padding: 4px 7px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.08);
+  font-size: 0.56rem;
+  line-height: 1.5;
+  color: var(--text-color, #fff);
+  word-break: break-word;
+}
+
+.island-session-chat-msg.user {
+  align-self: flex-end;
+  background: color-mix(in srgb, var(--state-color, #4d6bfe) 38%, transparent);
+  border: 1px solid color-mix(in srgb, var(--state-color, #4d6bfe) 60%, transparent);
+}
+
+.island-session-chat-input {
+  flex: none;
+  padding-top: 5px;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.island-session-chat-input input {
+  width: 100%;
+  padding: 4px 7px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-color, #fff);
+  font-family: inherit;
+  font-size: 0.56rem;
+  outline: none;
+}
+
+.island-session-chat-input input::placeholder {
+  color: var(--text-dim, rgba(255, 255, 255, 0.4));
+}
+
 /* QQ 消息来源头(2026-08-13 布局细分:QQ → 私聊/群聊 → QQ 号 → 档案卡) */
 .island-agent-msg-qq-head {
   display: flex;

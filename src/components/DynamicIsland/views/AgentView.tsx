@@ -28,6 +28,7 @@ import {
 import type { AgentPanelProps, AgentToolInfo } from '../../../agent/types'
 import { stripMcpServiceLabel } from '../../../../electron/agent/constants'
 import { mediaKindOf } from './markdownParser'
+import { stripNapcatInstructions, textFromMessage } from '../../../agent/text'
 import { useLeavingList } from '../../../hooks/useLeavingList'
 import { QuickMenu } from './QuickMenu'
 import { Markdown, type AgentMediaReport } from './Markdown'
@@ -391,6 +392,10 @@ export function AgentView({
   streaming,
   lastError,
   sessions,
+  sessionList,
+  panelSession,
+  unreadCounts,
+  onSelectPanelSession,
   tools,
   onLoadSession,
   onDeleteSession,
@@ -414,6 +419,18 @@ export function AgentView({
   // 消息复用同一引用——内联箭头会让 AssistantBlock 的 memo 全部失效,
   // 任何一次本组件重渲染都重建全部已落定消息(视频播放 1Hz 上报/流式
   // 期间尤其放大,见 Fix B)
+  // 会话面板开合(2026-08-13 会话隔离)
+  const [sessionOpen, setSessionOpen] = useState(false)
+  const sessionOpenRef = useRef(sessionOpen)
+  sessionOpenRef.current = sessionOpen
+  const dockRef = useRef<HTMLDivElement>(null)
+  const panelChatBodyRef = useRef<HTMLDivElement>(null)
+  // 会话小窗消息自动滚底(新消息/切换会话时)
+  useEffect(() => {
+    const el = panelChatBodyRef.current
+    if (el) el.scrollTop = el.scrollHeight
+  }, [panelSession?.messages.length, panelSession?.key, sessionOpen])
+
   const onMediaAutoPlayedStable = useCallback(
     (id: string) => onMediaAutoPlayed?.(id),
     [onMediaAutoPlayed],
@@ -610,9 +627,16 @@ export function AgentView({
         const gap = parseFloat(getComputedStyle(el).rowGap)
         if (Number.isFinite(gap) && gap > 0) contentH += (children.length - 1) * gap
       }
+      // **会话面板高度需求(2026-08-13 三轮,用户要求"窗口大小足够展示
+      // 相关信息,支持高度响应式伸缩")**:面板展开时,窗口需容纳面板
+      // (面板垂直居中于岛体,超出部分 = 需要的额外窗口高度)
+      let dockH = 0
+      if (sessionOpenRef.current && dockRef.current) {
+        dockH = Math.max(0, Math.min(dockRef.current.offsetHeight, 360) - contentH)
+      }
       const next = Math.min(
         AGENT_PANEL_MAX_H,
-        Math.max(AGENT_PANEL_MIN_H, AGENT_PANEL_FIXED_H + contentH),
+        Math.max(AGENT_PANEL_MIN_H, AGENT_PANEL_FIXED_H + contentH + dockH),
       )
       onHeightChange?.(next)
     }
@@ -637,6 +661,11 @@ export function AgentView({
     doMeasure(el)
   }, [onHeightChange, phase])
 
+  // 会话面板开合 → 重测高度(2026-08-13 三轮:窗口随面板伸缩)
+  useEffect(() => {
+    const t = window.setTimeout(() => measureHeight(), 380)
+    return () => window.clearTimeout(t)
+  }, [sessionOpen, panelSession, measureHeight])
   // 视图切换(chat ↔ 对话历史/工具列表):立即换主实例(新视图进场
   // 动画),旧视图副本盖在上层播放离场动画,结束后卸载并重测高度
   // (窗口跟随新视图内容)。过渡中不响应再次切换(0.17s 极短)
@@ -1182,6 +1211,103 @@ export function AgentView({
     /* 聊天视图:头部(状态 + 下拉菜单)+ 消息列表(骨架两阶段)+ 输入区 */
     return (
       <>
+        {/* 会话隔离折叠面板(2026-08-13 二轮,用户澄清):按钮与面板
+            **一体式胶囊**(同一容器同一描边,展开时面板从按钮向左
+            联通伸出,非独立浮层);面板叠在主对话窗口上——**不替换
+            主对话**,选中某会话后面板内小窗展示该会话 */}
+        {(
+          <div ref={dockRef} className={`island-session-dock${sessionOpen ? ' open' : ''}`}>
+            {/* 会话按钮:粘在面板左缘外侧的小突起——面板向左展开时
+                按钮随之一起位移(胶水粘在左缘) */}
+            <button
+              type="button"
+              className="island-session-fold"
+              title="外部会话"
+              aria-expanded={sessionOpen}
+              onClick={() => setSessionOpen((o) => !o)}
+            >
+              <span className="island-session-fold-label">会话</span>
+              {(sessionList ?? []).some((it) => (unreadCounts?.[it.key] ?? 0) > 0) && (
+                <span className="island-session-fold-dot" aria-hidden="true" />
+              )}
+            </button>
+            {/* 面板:截断圆角矩形(右缘贴窗口边,被"截断"观感),固定形状 */}
+            <div className="island-session-panel">
+              {/* 左列:会话名称列表(可滚动,容纳更多会话) */}
+              <div className="island-session-left">
+                <div className="island-session-title">会话</div>
+                {(sessionList ?? []).length === 0 && (
+                  <div className="island-session-chat-empty">暂无外部会话(收到 QQ 私聊/群消息后自动创建)</div>
+                )}
+                {(sessionList ?? []).map((it) => (
+                  <button
+                    key={it.key}
+                    type="button"
+                    className={`island-session-item${panelSession?.key === it.key ? ' on' : ''}`}
+                    onClick={() => onSelectPanelSession?.(it.key)}
+                  >
+                    <span className="island-session-name">
+                      {it.kind === 'group' ? '群聊 · ' : '私聊 · '}
+                      {it.title}
+                    </span>
+                    {(unreadCounts?.[it.key] ?? 0) > 0 && (
+                      <span className="island-session-unread">{unreadCounts![it.key]}</span>
+                    )}
+                  </button>
+                ))}
+              </div>
+              {/* 右列:对话框(对方消息右、LLM 消息左,QQ 视角) */}
+              <div className="island-session-right">
+                {!panelSession ? (
+                  <div className="island-session-chat-empty">选择左侧会话查看对话</div>
+                ) : (
+                  <>
+                    <div className="island-session-chat-head">
+                      <span className="island-session-chat-title">
+                        {panelSession.kind === 'group' ? '群聊 · ' : '私聊 · '}
+                        {panelSession.title}
+                      </span>
+                    </div>
+                    <div ref={panelChatBodyRef} className="island-session-chat-body">
+                      {panelSession.messages.length === 0 && (
+                        <div className="island-session-chat-empty">暂无消息</div>
+                      )}
+                      {panelSession.messages.map((m) => (
+                        <div
+                          key={m.id}
+                          className={`island-session-chat-msg${m.role === 'user' ? ' user' : ''}`}
+                        >
+                          <Markdown text={m.role === 'user' ? stripNapcatInstructions(textFromMessage(m)) : textFromMessage(m)} plainMermaid={m.role === 'user'} />
+                        </div>
+                      ))}
+                      {panelSession.streaming && panelSession.streaming.text && (
+                        <div className="island-session-chat-msg">
+                          <Markdown text={panelSession.streaming.text} />
+                        </div>
+                      )}
+                    </div>
+                    <div className="island-session-chat-input">
+                      <input
+                        type="text"
+                        placeholder="以主人身份回复(自动发给对方)"
+                        spellCheck={false}
+                        onKeyDown={(event) => {
+                          if (event.key === 'Enter' && !event.nativeEvent.isComposing) {
+                            const v = (event.target as HTMLInputElement).value.trim()
+                            if (v) {
+                              panelSession.send(v)
+                              ;(event.target as HTMLInputElement).value = ''
+                            }
+                          }
+                        }}
+                      />
+                    </div>
+                  </>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
         <div
           className="island-agent-head"
           onPointerDown={(event) => {

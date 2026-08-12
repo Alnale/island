@@ -16,7 +16,7 @@
 import { randomUUID } from 'node:crypto'
 import { parseToolArgs } from './deepseek'
 import { streamByConfig } from './provider'
-import { detectProvider, apiErrorMessage, MASTER_IDENTITY_LINE } from './constants'
+import { detectProvider, apiErrorMessage, MASTER_IDENTITY_LINE, REPLY_RESTRAINT_LINE } from './constants'
 import { buildToolsGuideBlock, createTools, disposeTools } from './tools'
 import { getTasksStatusBlock } from './tasks'
 import { createMusicControlTools, createSettingsTools } from './settingsTools'
@@ -324,7 +324,7 @@ export interface AgentEngine {
    * sessionId = 渲染端会话 ID(2026-08-12,工具输出按对话分类存放:
    * 引擎记录为"当前会话",工具执行时读取拼输出目录;缺省 = 无会话层)
    */
-  send(text: string, history: AgentMessage[], sessionId?: string): void
+  send(text: string, history: AgentMessage[], sessionId?: string, sessionKey?: string): void
   /**
    * 主动陪伴回合(2026-08-07):无用户消息的**完整回合**——思考/流式/
    * 工具/子代理全保留,消息以正常助手气泡落定(message 事件带
@@ -449,6 +449,9 @@ export function createAgentEngine(deps: EngineDeps): AgentEngine {
    * 输出回退到 <根>/<工具>
    */
   let currentSessionId: string | null = null
+  /** 当前会话键(2026-08-13 会话隔离并发):'main' / 'private:<QQ>' /
+   * 'group:<群号>';事件经 emit 附带,渲染端按会话路由状态机 */
+  let currentSessionKey = 'main'
   /**
    * 主对话/子代理输出预算(2026-08-08 动态化):初始 = 持久化配置
    * (settings.json agent.maxOutputTokens,用户设置/LLM persist 写入)
@@ -466,7 +469,7 @@ export function createAgentEngine(deps: EngineDeps): AgentEngine {
       ? configuredBudget
       : MAIN_MAX_OUTPUT_TOKENS
 
-  const emit = (event: AgentEvent) => deps.onEvent(event)
+  const emit = (event: AgentEvent) => deps.onEvent({ ...event, sessionKey: currentSessionKey })
 
   /**
    * 外部工具源(MCP 服务工具 + 技能目录):每轮循环开始时拉取一次。
@@ -479,6 +482,16 @@ export function createAgentEngine(deps: EngineDeps): AgentEngine {
   const mcpManager: MCPManager = createMCPManager()
   const skillLoader = createSkillLoader()
   async function getExternalTools(): Promise<AgentTool[]> {
+    // 共享外部工具源(2026-08-13 会话隔离并发):主进程注入共享 MCP/
+    // 技能单例(多会话引擎共用连接);未注入才用引擎自建实例
+    if (deps.externalTools) {
+      try {
+        return await deps.externalTools()
+      } catch (err) {
+        console.error('[agent] 共享外部工具加载失败:', (err as Error).message)
+        return []
+      }
+    }
     const cfg = deps.getConfig()
     const [mcpTools, skillTools] = await Promise.all([
       mcpManager.listTools(cfg.mcpServers ?? []).catch((err: Error) => {
@@ -1077,6 +1090,9 @@ export function createAgentEngine(deps: EngineDeps): AgentEngine {
         // 静态常量拼进每轮系统提示——窗口消息 = 主人本人最高权限,
         // QQ 消息按来源标注区分;文案稳定不断缓存前缀
         MASTER_IDENTITY_LINE,
+        // 回复克制(2026-08-13 用户实测"回复重复三段"):多轮循环里
+        // 模型每轮追加确认段——约束一次简洁确认,说完就停
+        REPLY_RESTRAINT_LINE,
         memoryBlock,
         evolutionStatus,
         bgStatus,
@@ -1219,7 +1235,7 @@ export function createAgentEngine(deps: EngineDeps): AgentEngine {
     get outputBudget() {
       return outputBudget
     },
-    send(text: string, history: AgentMessage[], sessionId?: string) {
+    send(text: string, history: AgentMessage[], sessionId?: string, sessionKey?: string) {
       if (running) {
         emit({ type: 'error', message: 'Agent 正在运行中,请先等待或中止' })
         return
@@ -1231,6 +1247,9 @@ export function createAgentEngine(deps: EngineDeps): AgentEngine {
       }
       // 记录当前会话 ID(工具输出按对话分类;空串视为未指定)
       currentSessionId = typeof sessionId === 'string' && sessionId ? sessionId : null
+      // 会话键(2026-08-13 会话隔离并发):本回合事件全部携带,渲染端
+      // 按会话路由;缺省 'main'(主人主对话)
+      currentSessionKey = typeof sessionKey === 'string' && sessionKey ? sessionKey : 'main'
       running = true
       const turnCtl = new AbortController()
       ctl = turnCtl
@@ -1325,3 +1344,7 @@ export { createEvolution } from './evolution'
 export { setNotificationShower, showNotify } from './notify'
 export { buildProfileCard } from './napcat'
 export { createMemoryStore } from './memory'
+// 会话隔离并发(2026-08-13):主进程为每个外部会话创建独立引擎实例,
+// MCP 连接/技能扫描经共享单例注入(避免每会话重复拉起进程)
+export { createMCPManager } from './mcp'
+export { createSkillLoader } from './skills'

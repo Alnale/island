@@ -92,14 +92,26 @@ contextBridge.exposeInMainWorld('desktop', {
     ipcRenderer.on('napcat:group-message', listener)
     return () => ipcRenderer.removeListener('napcat:group-message', listener)
   },
+  /** 会话绑定(2026-08-13 会话隔离):主进程通知渲染端切换当前显示会话 */
+  onSessionBind(callback) {
+    const listener = (_event, payload) => callback(payload)
+    ipcRenderer.on('island:session-bind', listener)
+    return () => ipcRenderer.removeListener('island:session-bind', listener)
+  },
+  /** 监听群种子(2026-08-13):配置的监听群下发,渲染端注册群会话条目 */
+  onSessionsSeed(callback) {
+    const listener = (_event, payload) => callback(payload)
+    ipcRenderer.on('island:sessions-seed', listener)
+    return () => ipcRenderer.removeListener('island:sessions-seed', listener)
+  },
   /** Agent:中止当前轮 */
   agentAbort() {
     ipcRenderer.send('agent:abort')
   },
   /** Agent:exec_command 确认门回执(确认请求经 onAgentEvent 的
    * tool-confirm-request 事件到达,用户点允许/拒绝后回传) */
-  agentConfirmTool(approved) {
-    ipcRenderer.send('agent:tool-confirm', Boolean(approved))
+  agentConfirmTool(approved, sessionKey) {
+    ipcRenderer.send('agent:tool-confirm', Boolean(approved), sessionKey)
   },
   /** Agent:订阅引擎事件流(状态/文本增量/工具调用/工具结果/消息落定)。
    * 返回取消订阅函数(useAgent 与设置视图的 effect cleanup 调用,

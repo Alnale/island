@@ -151,6 +151,15 @@ export interface NapcatDeps {
   onGroupMessage(msg: NapcatGroupMessage): void
   /** Windows 系统通知(消息到达提示) */
   notify?(title: string, body: string): void
+  /** 会话列表(2026-08-13 会话隔离:key/标题/类型/屏蔽态,manage_sessions
+   * 工具 list 用;main.cjs 按已知会话登记表实时返回) */
+  listSessions?(): Array<{ key: string; title: string; kind: 'private' | 'group'; muted: boolean }>
+  /** 屏蔽/解除屏蔽会话(写配置 agent.mutedSessions;屏蔽后该会话消息
+   * 只显示不回复) */
+  muteSession?(key: string, muted: boolean): void
+  /** 绑定窗口到指定会话(通知渲染端切换当前显示会话;key='main' 回
+   * 主对话) */
+  bindSession?(key: string): void
 }
 
 const DEFAULT_WS_URL = 'ws://127.0.0.1:3001'
@@ -1269,6 +1278,9 @@ export function createNapcatTools(client: {
   updateContact(patch: { qq: string; name?: string; info?: string; source?: 'private' | 'group' }): Promise<NapcatContact>
   getChats?(): Promise<NapcatChatRecord[]>
   getPersonas?(): Promise<Record<string, NapcatPersona>>
+  listSessions?(): Array<{ key: string; title: string; kind: 'private' | 'group'; muted: boolean }>
+  muteSession?(key: string, muted: boolean): void
+  bindSession?(key: string): void
   setPersona?(scope: string, persona: string): Promise<NapcatPersona | null>
   recallMessage?(messageId: string): Promise<void>
   mergeContactNames?(entries: Array<{ qq: string; name?: string; source?: 'private' | 'group' }>): Promise<void>
@@ -1420,6 +1432,39 @@ export function createNapcatTools(client: {
               )
               .join('\n')
           )
+        }
+        if (action === 'sessions') {
+          // 会话列表(2026-08-13 会话隔离):key/标题/类型/屏蔽态——LLM
+          // 可据此了解外部会话,并可经 session_bind 切换窗口绑定
+          const list = client.listSessions?.() ?? []
+          if (list.length === 0) return '(暂无外部会话——收到 QQ 私聊/群消息后自动创建)'
+          return (
+            '外部会话列表:\n' +
+            list
+              .map((it) => `- ${it.key}(${it.kind === 'group' ? '群聊' : '私聊'}·${it.title})${it.muted ? ' [已屏蔽]' : ''}`)
+              .join('\n') +
+            '\n主对话(key=main)为主人专属,不在外部会话列表。'
+          )
+        }
+        if (action === 'session_mute') {
+          // 屏蔽/解除屏蔽会话(2026-08-13 用户要求"支持屏蔽"):屏蔽后该
+          // 会话消息只显示不回复(主人仍可在对话窗口看到与手动处理)
+          const key = String(params.key ?? '').trim()
+          if (!key) throw new Error('session_mute 需要 key(会话键,如 private:1536057397;可用 sessions 查询)')
+          if (key === 'main') throw new Error('主对话(key=main)是主人会话,不可屏蔽')
+          const muted = params.muted !== false
+          if (!client.muteSession) throw new Error('会话屏蔽不可用')
+          client.muteSession(key, muted)
+          return `已${muted ? '屏蔽' : '解除屏蔽'}会话 ${key}${muted ? '(消息只显示不回复)' : '(恢复自主回复)'}`
+        }
+        if (action === 'session_bind') {
+          // 绑定窗口到指定会话(2026-08-13 用户要求"LLM 可通过设置工具
+          // 进行窗口与会话的绑定"):渲染端切换当前显示的会话
+          const key = String(params.key ?? '').trim()
+          if (!key) throw new Error('session_bind 需要 key(会话键;main = 主人主对话)')
+          if (!client.bindSession) throw new Error('会话绑定不可用')
+          client.bindSession(key)
+          return `已把对话窗口切换到会话 ${key}`
         }
         if (action === 'contacts') {
           const contacts = await client.getContacts()
@@ -1588,7 +1633,7 @@ export function createNapcatTools(client: {
           }
           throw new Error('group_manage 的 op 仅支持 ban / kick / whole_ban')
         }
-        throw new Error('action 仅支持 status/recent/sent/contacts/contact_update/chats/persona/persona_set/send/send_group/recall/zone/members/friends/profile/group_info/group_manage')
+        throw new Error('action 仅支持 status/recent/sent/contacts/contact_update/chats/persona/persona_set/send/send_group/recall/zone/sessions/session_mute/session_bind/members/friends/profile/group_info/group_manage')
       },
     },
   ]

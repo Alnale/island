@@ -23,7 +23,7 @@ import {
   resolveMediaSrc,
 } from '../src/components/DynamicIsland/views/Markdown'
 import type { AgentPanelProps } from '../src/agent/types'
-import { useAgent } from '../src/hooks/useAgent'
+import { useAgent, type AgentController } from '../src/hooks/useAgent'
 import {
   MEDIA_WINDOW_STORAGE_KEY,
   onMediaLibraryPlay,
@@ -116,6 +116,139 @@ export default function WidgetApp() {
   // 主动陪伴(2026-08-07):仅在 Agent 模式允许调度器触发(音乐模式
   // 下主动对话没有语义;主进程 currentMode 再兜底)
   const agent = useAgent({ allowProactive: mode === 'agent' })
+  // 会话隔离与并发(2026-08-13):外部会话注册表 + 多实例控制器。每个
+  // 外部会话一个 SessionHost(独立 useAgent 状态机 + 主进程独立引擎
+  // 实例)= 并行处理;记忆/档案卡经主进程共享单例共用;主人会话
+  // (main)不计入外部列表。窗口绑定 = currentKey,QQ 风格一键切换
+  const [extSessions, setExtSessions] = useState<Array<{ key: string; title: string; kind: 'private' | 'group' }>>([])
+  // 面板选中会话(2026-08-13 二轮:主对话窗口不被替换,面板叠在主对话
+  // 上;panelKey = null 时面板显示会话列表)
+  const [panelKey, setPanelKey] = useState<string | null>(null)
+  const panelKeyRef = useRef(panelKey)
+  panelKeyRef.current = panelKey
+  const [unread, setUnread] = useState<Record<string, number>>({})
+  const [sessionTick, setSessionTick] = useState(0)
+  const extControllersRef = useRef<Map<string, AgentController>>(new Map())
+  // 实例挂载前的暂存消息(2026-08-13 三轮:首条消息不丢,挂载后补投)
+  const pendingSessionMsgsRef = useRef<Map<string, unknown[]>>(new Map())
+  const [, bumpExt] = useState(0)
+  const extRegister = useCallback((key: string, ctl: AgentController | null) => {
+    if (ctl) {
+      extControllersRef.current.set(key, ctl)
+      bumpExt((x) => x + 1)
+      // 补投挂载前的暂存消息(首条不丢)
+      const pending = pendingSessionMsgsRef.current.get(key)
+      if (pending && pending.length > 0) {
+        pendingSessionMsgsRef.current.delete(key)
+        for (const m of pending) {
+          const msg = m as { text?: string; groupId?: string; qq?: string }
+          if (msg && typeof msg.groupId === 'string') ctl.ingestNapcatGroupMessage(m)
+          else ctl.ingestNapcatMessage(m)
+        }
+      }
+    } else {
+      extControllersRef.current.delete(key)
+    }
+  }, [])
+  // 外部会话登记 + 未读计数(消息到达即创建会话条目;不自动切换,
+  // 用户经折叠面板点击绑定,QQ 风格)
+  useEffect(() => {
+    const offs: Array<() => void> = []
+    const reg = (key: string, title: string, kind: 'private' | 'group') => {
+      setExtSessions((prev) => (prev.some((it) => it.key === key) ? prev : [...prev, { key, title, kind }]))
+      if (panelKeyRef.current !== key) {
+        setUnread((prev) => ({ ...prev, [key]: (prev[key] ?? 0) + 1 }))
+      }
+      setSessionTick((t) => t + 1)
+    }
+    const off1 = window.desktop?.onNapcatMessage?.((msg) => {
+      // 只登记外部会话(2026-08-13 三轮:陌生人消息 sessionKey='main'
+      // 走主对话,不建外部会话)
+      if (!msg || typeof msg.qq !== 'string') return
+      const key = (msg as { sessionKey?: string }).sessionKey ?? `private:${msg.qq}`
+      if (key === 'main') return
+      reg(key, `QQ ${msg.qq}`, 'private')
+      // 首条消息不丢(2026-08-13 三轮):实例未挂载时暂存,挂载后补投
+      const ctl = extControllersRef.current.get(key)
+      if (ctl) ctl.ingestNapcatMessage(msg)
+      else {
+        pendingSessionMsgsRef.current.set(key, [...(pendingSessionMsgsRef.current.get(key) ?? []), msg])
+      }
+    })
+    if (typeof off1 === 'function') offs.push(off1)
+    const off2 = window.desktop?.onNapcatGroupMessage?.((msg) => {
+      if (!msg || typeof msg.groupId !== 'string') return
+      const key = (msg as { sessionKey?: string }).sessionKey ?? `group:${msg.groupId}`
+      if (key === 'main') return
+      reg(key, `群 ${msg.groupId}`, 'group')
+      const ctl = extControllersRef.current.get(key)
+      if (ctl) ctl.ingestNapcatGroupMessage(msg)
+      else {
+        pendingSessionMsgsRef.current.set(key, [...(pendingSessionMsgsRef.current.get(key) ?? []), msg])
+      }
+    })
+    if (typeof off2 === 'function') offs.push(off2)
+    // LLM 会话绑定工具(2026-08-13):主进程 island:session-bind 事件
+    const off3 = window.desktop?.onSessionBind?.((payload) => {
+      // LLM 会话绑定(2026-08-13):面板中打开该会话(key=main 时收起面板)
+      if (payload && typeof payload.key === 'string') {
+        setPanelKey(payload.key === 'main' ? null : payload.key)
+        setUnread((prev) => (payload.key in prev ? { ...prev, [payload.key]: 0 } : prev))
+      }
+    })
+    if (typeof off3 === 'function') offs.push(off3)
+    // 监听群种子(2026-08-13 用户实测"LLM 说接入了但会话面板没有"):
+    // 配置的监听群下发 → 立即注册群会话条目(不等群里来消息)
+    const off5 = window.desktop?.onSessionsSeed?.((payload) => {
+      if (payload && Array.isArray(payload.groups)) {
+        for (const g of payload.groups) {
+          if (typeof g === 'string' && g) reg(`group:${g}`, `群 ${g}`, 'group')
+        }
+      }
+    })
+    if (typeof off5 === 'function') offs.push(off5)
+    // 启动时拉一次配置(已有的监听群立即入面板;LLM 此前已配置过)
+    void window.desktop?.agentGetConfig?.().then((cfg) => {
+      for (const g of cfg?.napcatAllowedGroups ?? []) {
+        if (typeof g === 'string' && g) reg(`group:${g}`, `群 ${g}`, 'group')
+      }
+    })
+    // 引擎事件 bump(外部会话回复落定 → 面板小窗实时刷新)
+    const off4 = window.desktop?.onAgentEvent?.((raw) => {
+      const ev = raw as { sessionKey?: string } | null
+      if (ev && ev.sessionKey && ev.sessionKey !== 'main') setSessionTick((t) => t + 1)
+    })
+    if (typeof off4 === 'function') offs.push(off4)
+    if (typeof off3 === 'function') offs.push(off3)
+    return () => {
+      for (const off of offs) off()
+    }
+  }, [])
+  // 面板选中会话的数据(2026-08-13 二轮:主对话窗口不被替换,面板
+  // 小窗展示选中会话;数据经 Proxy 控制器实时读取,sessionTick 触发
+  // 刷新)。useMemo 保持引用稳定(panelSession 只在选中项/活动时变)
+  const panelSession = useMemo(() => {
+    void sessionTick // 依赖声明:外部会话活动时触发重算(数据经 Proxy 实时读)
+    if (!panelKey) return null
+    const ctl = extControllersRef.current.get(panelKey)
+    if (!ctl) return null
+    const meta = extSessions.find((it) => it.key === panelKey)
+    return {
+      key: panelKey,
+      title: meta?.title ?? panelKey,
+      kind: meta?.kind ?? 'private',
+      messages: ctl.messages,
+      streaming: ctl.streaming,
+      status: ctl.status,
+      send: ctl.send,
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 引用稳定优先:
+    // sessionTick 仅为触发重算(消息更新),不参与身份比较
+  }, [panelKey, sessionTick, extSessions])
+  const selectPanelSession = useCallback((key: string) => {
+    setPanelKey(key)
+    setUnread((prev) => (key in prev ? { ...prev, [key]: 0 } : prev))
+  }, [])
   // 定制状态(主题色/提示/背景图+图片库/字体库)与媒体数据源派生统一走
   // 双宿主共享 hook(与 Web 演示版同一实现;原 ~400 行逐字重复已收敛,
   // 2026-08-06 架构优化;LLM 设置工具的即时重读也收进各 hook)
@@ -589,6 +722,12 @@ export default function WidgetApp() {
             // 2026-08-10 自动播放只限"当次对话"(LLM 播放的那一轮才自动播,
             // 历史/重挂载不播):Set 引用稳定 + 消费函数
             mediaAutoPlayIds: agentMediaAutoPlayIds,
+            // 会话隔离(2026-08-13 二轮):外部会话列表 + 面板选中会话小窗
+            // (主对话窗口不被替换,面板叠在其上)+ 选中回调/未读
+            sessionList: extSessions,
+            panelSession: panelSession,
+            unreadCounts: unread,
+            onSelectPanelSession: selectPanelSession,
             onMediaAutoPlayed: agentConsumeMediaAutoPlay,
           }
         : undefined,
@@ -613,6 +752,10 @@ export default function WidgetApp() {
       agentPendingConfirm,
       agentMediaAutoPlayIds,
       agentConsumeMediaAutoPlay,
+      extSessions,
+      panelSession,
+      unread,
+      selectPanelSession,
     ],
   )
 
@@ -936,7 +1079,43 @@ export default function WidgetApp() {
           imageLibrary={imageLibrary}
           onImageLibraryChange={handleImageLibraryChange}
         />
+        {/* 外部会话多实例(2026-08-13 会话隔离并发):每个外部会话一个
+            SessionHost = 独立 useAgent 状态机 + 主进程独立引擎实例;
+            隐藏挂载保持状态与订阅存活,当前绑定会话的控制器经
+            extControllersRef 取出传给 DynamicIsland */}
+        {extSessions.map((it) => (
+          <SessionHost key={it.key} sessionKey={it.key} onRegister={extRegister} />
+        ))}
       </div>
     </div>
   )
+}
+
+/**
+ * 外部会话宿主(2026-08-13 会话隔离并发):每个外部会话一个实例——
+ * useAgent 独立状态机/独立历史/独立 busy(并行处理),控制器经 Proxy
+ * 稳定引用注册到父级注册表(控制器对象每渲染重建,Proxy 转发最新值,
+ * 防注册 effect 因引用变化反复触发)
+ */
+function SessionHost({
+  sessionKey,
+  onRegister,
+}: {
+  sessionKey: string
+  onRegister: (key: string, ctl: AgentController | null) => void
+}) {
+  const ctl = useAgent({ sessionKey })
+  const ctlRef = useRef(ctl)
+  ctlRef.current = ctl
+  useEffect(() => {
+    const proxy = new Proxy(
+      {},
+      {
+        get: (_t, k) => ctlRef.current[k as keyof AgentController],
+      },
+    ) as AgentController
+    onRegister(sessionKey, proxy)
+    return () => onRegister(sessionKey, null)
+  }, [sessionKey, onRegister])
+  return null
 }

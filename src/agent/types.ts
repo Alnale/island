@@ -112,6 +112,24 @@ export interface AgentPanelProps {
   mediaAutoPlayIds?: ReadonlySet<string>
   /** 消费自动播放标记(消息首条媒体已自动播放过) */
   onMediaAutoPlayed?(id: string): void
+  /** 外部会话列表(2026-08-13 会话隔离:私聊/群聊,自动创建;主对话
+   * 'main' 不计入) */
+  sessionList?: Array<{ key: string; title: string; kind: 'private' | 'group' }>
+  /** 面板选中的会话小窗数据(2026-08-13 二轮:主对话窗口不被替换,
+   * 会话面板叠在主对话上;null = 面板显示会话列表) */
+  panelSession?: {
+    key: string
+    title: string
+    kind: 'private' | 'group'
+    messages: AgentMessage[]
+    streaming: { text: string; reasoning: string; tools: AgentToolCallState[] } | null
+    status: AgentStatus
+    send(text: string): void
+  } | null
+  /** 各会话未读计数(当前未在面板中打开的会话新消息 +1) */
+  unreadCounts?: Record<string, number>
+  /** 面板中打开某会话(2026-08-13 二轮:不切换主对话,小窗展示) */
+  onSelectPanelSession?(key: string): void
 }
 
 /** MCP 服务端配置(与引擎同构,re-export) */

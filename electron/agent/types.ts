@@ -73,7 +73,10 @@ export interface AgentMessage {
 }
 
 /** 引擎 → 渲染端的事件流(经主进程转发) */
-export type AgentEvent =
+/** 会话隔离并发(2026-08-13):事件统一携带 sessionKey('main' = 主人
+ * 主对话;'private:<QQ>' / 'group:<群号>' = 外部会话),渲染端按会话路由
+ * 到对应状态机。交叉类型对联合分布,所有成员都带可选会话键 */
+export type AgentEvent = { sessionKey?: string } & (
   | { type: 'status'; status: 'thinking' | 'running' | 'idle' }
   | { type: 'text-delta'; text: string }
   | { type: 'reasoning-delta'; text: string }
@@ -101,6 +104,7 @@ export type AgentEvent =
    * 同一条 guess)——渲染端更新紧凑态文字区 mindGuess,与通知一致
    */
   | { type: 'mind-proactive'; messageId: string; guess: string }
+)
 
 /**
  * MCP 服务端配置(settings.json 的 agent.mcpServers 段)。
@@ -222,6 +226,12 @@ export interface AgentConfig {
   napcatAllowedGroups?: string[]
   /** 机器人自身 QQ(群消息 @ 检测;默认 108724305) */
   napcatBotQQ?: string
+  /**
+   * 屏蔽的外部会话键列表(2026-08-13 会话隔离:private:<QQ> / group:<群号>):
+   * 屏蔽会话的消息只显示进对话窗口、不触发 LLM 回复;LLM 可经
+   * napcat 工具 session_mute 管理,设置界面不暴露(会话管理走对话)
+   */
+  mutedSessions?: string[]
 }
 
 /** 工具执行上下文(可选第二参):主回合中止信号——delegate 子代理
@@ -297,6 +307,10 @@ export interface EngineDeps {
   getConfig(): AgentConfig
   /** 事件转发(→ 渲染端) */
   onEvent(event: AgentEvent): void
+  /** 共享外部工具源(2026-08-13 会话隔离并发):主进程为多个会话引擎
+   * 提供同一 MCP 管理器/技能扫描器——避免每会话独立拉起 MCP 进程;
+   * 未注入时引擎内部自建(测试/单引擎向后兼容) */
+  externalTools?(): Promise<AgentTool[]>
   /** switch_to_music 工具:切换回音乐模式;play=true = 切换后立即开始
    * 播放当前播放列表(2026-08-11 用户"让 LLM 切音乐模式听歌没有自动播放") */
   onSwitchToMusic(play?: boolean): void
