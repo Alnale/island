@@ -694,6 +694,29 @@ export function cutMindSentence(raw: string): string | null {
 }
 
 /**
+ * 超长且无句末标点的 raw 二级兜底截取(2026-08-14 实机修复,测试用导出):
+ * 人格风格(粤语/猫娘等)持续输出逗号串长句、全程无句末标点(实机样本
+ * "收到,以后我答嘢快狠准,唔会再长篇大论")——cutMindSentence 无从截取,
+ * 盲重试 5 次同风格同病,耗尽返回空。取 **≤16 码元范围内、以逗号/顿号
+ * 收尾的最长前缀小句**(实机样本 → "收到,以后我答嘢快狠准"),首段小句
+ * 语义完整、无截断观感;4-16 码元且非残句才采用,否则返回 null 判废重试
+ */
+export function salvageMindClause(raw: string): string | null {
+  const chars = Array.from(raw)
+  let best: string | null = null
+  // 逐码元扫描前 16 码元内的逗号/顿号,保留最后一个(= 最长)合规前缀小句
+  for (let i = 0; i < Math.min(chars.length, MIND_MAX_LEN); i++) {
+    if (/[,，、]/.test(chars[i])) {
+      const head = chars.slice(0, i).join('').trim()
+      if (Array.from(head).length >= 4) best = head
+    }
+  }
+  if (!best) return null
+  if (looksLikeIncompleteMind(best)) return null
+  return best
+}
+
+/**
  * 心理揣测残句判定(2026-08-12,测试用导出):以逗号/顿号/冒号等未完成
  * 标点结尾、或收在连词上(你那/就是/因为/但是/然后/所以/还有…) =
  * 句子没说完——模型把 16 字配额用满但话只说一半(实测"收到,以后给你
@@ -708,18 +731,20 @@ export function looksLikeIncompleteMind(guess: string): boolean {
 }
 
 /**
- * 心理揣测清洗(测试用导出):去引号/「心理揣测:」前缀/尾随标点、
+ * 心理揣测清洗(测试用导出):去引号/首尾括号/「心理揣测:」前缀/尾随标点、
  * **剥离任意位置的 [揣测：xxx] / 【揣测：xxx】 括号标注**(2026-08-07
  * 实测:模型输出"喵～我已经瞄到主人了哦[揣测：表情…]"——标注在中段,
  * 原只剥开头前缀,截 16 码元后残留"[揣测：表",用户要求去掉"["与
  * "揣测："残片;闭合缺失也剥(截断输入安全侧)),
  * 按码元截 16(2026-08-07 放宽:用户要求"15 字左右,最多 16 字"——
- * 紧凑态文字区随字数扩展岛宽,不再像素截断;渲染端兜底同值)
+ * 紧凑态文字区随字数扩展岛宽,不再像素截断;渲染端兜底同值)。
+ * 首尾括号含 2026-08-14 实机样本"（这下总该明白了吧"——开头全角左括号
+ * 无闭合,原字符类不含括号直接透传显示
  */
 export function sanitizeMind(raw: string): string {
   const text = raw
     .trim()
-    .replace(/^[「『"'《<]+|[」』"'》>]+$/g, '')
+    .replace(/^[「『"'《<（(【[]+|[」』"'》>）)】\]]+$/g, '')
     .replace(/^(?:心理揣测|揣测|心态)\s*[:：]?\s*/, '')
     .replace(/[[【]\s*(?:心理揣测|揣测|心态)\s*[:：]?[^\]】]*[\]】]?/g, '')
     .replace(/[。！？!?…]+$/, '')
@@ -828,6 +853,13 @@ export function createMindAgent(deps: {
         // 输出原文**给模型,让它精确删减(比"写短点"有效,模型看到自己的
         // 句子会删到 16 字内保留核心意思)
         let lastRaw = ''
+        // **次优揣测兜底(2026-08-14)**:语义有效但细节判废(残句收尾/照抄
+        // 示例)的结果留档,重试耗尽后优先回退它——空串让文字区退回标题,
+        // 观感比略带瑕疵的内心独白更差
+        let bestGuess = ''
+        // **精确判废原因(2026-08-14)**:注入重试反馈——笼统措辞"超过 16 字
+        // 或句子没说完"实测无效(模型持续重复同一错误模式,5 次全废)
+        let lastReason = ''
         for (let retry = 0; retry < MIND_MAX_RETRIES; retry++) {
           try {
             // 重试 3 次仍失败 → 去掉人格块(风格与长度约束持续冲突,
@@ -839,8 +871,8 @@ export function createMindAgent(deps: {
                 retry === 0
                   ? currentSystem
                   : currentSystem +
-                    `\n(你上次的输出「${lastRaw.slice(0, 60)}」不合格——超过 16 字或句子没说完。` +
-                    '请**删减它**到 16 字以内,保留核心意思并完整收尾,不要逗号结尾、不要留半句)',
+                    `\n(你上次的输出「${lastRaw.slice(0, 60)}」不合格——${lastReason || '超过 16 字或句子没说完'}。` +
+                    '请重新写一句:**严格 ≤16 汉字、说完的完整一句**,不要逗号/连词收尾、不要照抄示例)',
               history: recent,
               tools: [],
               signal: AbortSignal.timeout(60000),
@@ -851,23 +883,34 @@ export function createMindAgent(deps: {
             lastRaw = raw
             // 超长时先语义截取(取第一个句末标点前的完整小句,实机
             // 2026-08-12:模型超长输出 = 完整小句+续写,第一小句直接可用,
-            // 省掉重试);截取失败(无标点/结果不合格)判废进重试
+            // 省掉重试);无句末标点(逗号串长句)再走逗号小句兜底截取
+            // (2026-08-14);都截取失败判废进重试
             const tooLong = Array.from(raw).length > MIND_MAX_LEN
-            const guess = tooLong ? (cutMindSentence(raw) ?? '') : sanitizeMind(raw)
+            const guess = tooLong
+              ? sanitizeMind(cutMindSentence(raw) ?? salvageMindClause(raw) ?? '')
+              : sanitizeMind(raw)
             // 工具调用幻觉(2026-08-12 实测诊断):失败重试时模型可能输出
             // "<tool_calls>/<invoke>" 工具调用语法,清洗后是乱码残片——
             // 直接判废,不进入判效链
             const toolCallHalluc = /<[\s\S]{0,200}(?:tool_calls|invoke|command)[\s\S]{0,60}>/i.test(raw)
             // 判效:空/垃圾/照抄示例/残句都重试(重新组织);tooLong 时
-            // guess 已是语义截取结果(≤16 或空),不再单列超长条件
-            if (
-              guess &&
-              !toolCallHalluc &&
-              !looksLikeCodeLiteral(guess) &&
-              !MIND_LITERAL_EXAMPLES.has(guess) &&
-              !looksLikeIncompleteMind(guess)
-            ) {
-              return guess
+            // guess 已是语义截取结果(≤16 或空),不再单列超长条件。
+            // 判废同时记录精确原因供下轮反馈注入;语义有效但细节不合格的
+            // 留档次优兜底(首个,重试耗尽后优先回退)
+            if (guess && !toolCallHalluc && !looksLikeCodeLiteral(guess)) {
+              if (MIND_LITERAL_EXAMPLES.has(guess)) {
+                lastReason = '照抄了示例原句,要写全新的'
+                bestGuess = bestGuess || guess
+              } else if (looksLikeIncompleteMind(guess)) {
+                lastReason = '句子没说完(以逗号/连词收尾)'
+                bestGuess = bestGuess || guess
+              } else {
+                return guess
+              }
+            } else if (!guess) {
+              lastReason = tooLong ? '超过 16 字且截取不出完整小句' : '输出为空'
+            } else {
+              lastReason = '输出是工具调用语法或代码字面量,不是内心独白'
             }
             // 超长/空/垃圾/残句/工具调用幻觉:重试(重新组织)。**不在
             // 循环内打日志**(2026-08-12 用户实测反馈:每次重试都打
@@ -878,8 +921,14 @@ export function createMindAgent(deps: {
             break
           }
         }
+        if (bestGuess) {
+          console.warn(
+            `[mind-guess] 重试 ${MIND_MAX_RETRIES} 次均不合格(${lastReason}),回退次优揣测:${JSON.stringify(bestGuess)}`,
+          )
+          return bestGuess
+        }
         console.warn(
-          `[mind-guess] 重试 ${MIND_MAX_RETRIES} 次均不合格,返回空(文字区回退标题;lastRaw=${JSON.stringify(
+          `[mind-guess] 重试 ${MIND_MAX_RETRIES} 次均不合格,返回空(文字区回退标题;原因=${lastReason};lastRaw=${JSON.stringify(
             lastRaw.slice(0, 60),
           )})`,
         )

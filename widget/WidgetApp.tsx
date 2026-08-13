@@ -50,6 +50,8 @@ const AGENT_THEME = '#4d6bfe'
 const MODE_SWITCH_ANIMATE_MS = 420
 /** 模式 localStorage 镜像键(启动瞬间避免闪错模式,权威值在主进程 settings.json) */
 const MODE_STORAGE_KEY = 'widget-mode'
+/** 外部会话登记表持久化键(2026-08-14:重启后群名/备注/会话不丢) */
+const EXT_SESSIONS_STORAGE_KEY = 'widget-agent-ext-sessions'
 
 // THEME_STORAGE_KEY 从 src/settingsBridge 导入(设置桥与 UI 共用同一键)
 /** 挂件窗口常规宽度(与 electron/main.cjs 的 WINDOW_W 一致) */
@@ -115,15 +117,45 @@ export default function WidgetApp() {
   // Agent 模式(托盘右键切换):状态/消息/流式累积/发送/中止/配置
   // 主动陪伴(2026-08-07):仅在 Agent 模式允许调度器触发(音乐模式
   // 下主动对话没有语义;主进程 currentMode 再兜底)
-  const agent = useAgent({ allowProactive: mode === 'agent' })
+  // 当前查看键(2026-08-13 八轮:提前声明——主实例的 active 由它决定)
+  const [panelKey, setPanelKey] = useState<string | null>(null)
+  const agent = useAgent({ allowProactive: mode === 'agent', active: panelKey === null || panelKey === 'main' })
   // 会话隔离与并发(2026-08-13):外部会话注册表 + 多实例控制器。每个
   // 外部会话一个 SessionHost(独立 useAgent 状态机 + 主进程独立引擎
   // 实例)= 并行处理;记忆/档案卡经主进程共享单例共用;主人会话
   // (main)不计入外部列表。窗口绑定 = currentKey,QQ 风格一键切换
-  const [extSessions, setExtSessions] = useState<Array<{ key: string; title: string; kind: 'private' | 'group' }>>([])
-  // 面板选中会话(2026-08-13 二轮:主对话窗口不被替换,面板叠在主对话
-  // 上;panelKey = null 时面板显示会话列表)
-  const [panelKey, setPanelKey] = useState<string | null>(null)
+  const [extSessions, setExtSessions] = useState<Array<{ key: string; title: string; caption: string; kind: 'private' | 'group' }>>(() => {
+    // 实时持久化(2026-08-14 用户实测"重启后群名/备注/会话丢失"):
+    // 启动时从 localStorage 恢复会话列表;标题随后被种子/消息的真实
+    // 称呼精化覆盖;数据损坏回退空列表
+    try {
+      const raw = localStorage.getItem(EXT_SESSIONS_STORAGE_KEY)
+      if (raw) {
+        const arr = JSON.parse(raw)
+        if (Array.isArray(arr)) {
+          return arr
+            .filter((it) => it && typeof it.key === 'string' && (it.kind === 'private' || it.kind === 'group'))
+            .map((it) => ({
+              key: String(it.key),
+              title: String(it.title ?? it.key),
+              caption: String(it.caption ?? ''),
+              kind: it.kind as 'private' | 'group',
+            }))
+        }
+      }
+    } catch {
+      // 忽略损坏数据
+    }
+    return []
+  })
+  // 会话列表变化 → 立即写入 localStorage(实时保存,非退出时一次性)
+  useEffect(() => {
+    try {
+      localStorage.setItem(EXT_SESSIONS_STORAGE_KEY, JSON.stringify(extSessions))
+    } catch {
+      // 忽略存储失败
+    }
+  }, [extSessions])
   const panelKeyRef = useRef(panelKey)
   panelKeyRef.current = panelKey
   const [unread, setUnread] = useState<Record<string, number>>({})
@@ -132,17 +164,24 @@ export default function WidgetApp() {
   // 实例挂载前的暂存消息(2026-08-13 三轮:首条消息不丢,挂载后补投)
   const pendingSessionMsgsRef = useRef<Map<string, unknown[]>>(new Map())
   const [, bumpExt] = useState(0)
+  // 会话消息变化 → 面板刷新(2026-08-13):**必须稳定引用**(内联箭头
+  // 每渲染新闭包 → SessionHost 的 onTick effect 每渲染触发 → bump →
+  // 无限重渲染循环,实测渲染进程卡死全断言失败)
+  const handleSessionTick = useCallback(() => setSessionTick((t) => t + 1), [])
   const extRegister = useCallback((key: string, ctl: AgentController | null) => {
     if (ctl) {
       extControllersRef.current.set(key, ctl)
       bumpExt((x) => x + 1)
-      // 补投挂载前的暂存消息(首条不丢)
+      // 补投挂载前的暂存消息(首条不丢;kind='sent' = 已发消息回显,
+      // 与收消息/群消息分流)
       const pending = pendingSessionMsgsRef.current.get(key)
       if (pending && pending.length > 0) {
         pendingSessionMsgsRef.current.delete(key)
         for (const m of pending) {
-          const msg = m as { text?: string; groupId?: string; qq?: string }
-          if (msg && typeof msg.groupId === 'string') ctl.ingestNapcatGroupMessage(m)
+          const msg = m as { text?: string; groupId?: string; qq?: string; kind?: string }
+          if (msg && msg.kind === 'sent') ctl.ingestSentMessage(msg as { text?: string; images?: string[] })
+          else if (msg && msg.kind === 'display-user') ctl.ingestDisplayUserMessage(msg as { text?: string; profileCard?: string })
+          else if (msg && typeof msg.groupId === 'string') ctl.ingestNapcatGroupMessage(m)
           else ctl.ingestNapcatMessage(m)
         }
       }
@@ -154,9 +193,24 @@ export default function WidgetApp() {
   // 用户经折叠面板点击绑定,QQ 风格)
   useEffect(() => {
     const offs: Array<() => void> = []
-    const reg = (key: string, title: string, kind: 'private' | 'group') => {
-      setExtSessions((prev) => (prev.some((it) => it.key === key) ? prev : [...prev, { key, title, kind }]))
-      if (panelKeyRef.current !== key) {
+    const reg = (key: string, title: string, kind: 'private' | 'group', caption?: string, noUnread = false) => {
+      // **标题精化(2026-08-13 二轮)**:种子注册用占位标题(QQ 号/群号),
+      // 消息到达/种子带真实称呼时更新覆盖(占位 → 主人/魔精/真实群名)
+      setExtSessions((prev) =>
+        prev.some((it) => it.key === key)
+          ? prev.map((it) =>
+              it.key === key
+                ? {
+                    ...it,
+                    title: title && title !== key ? title : it.title,
+                    caption: caption || it.caption,
+                  }
+                : it,
+            )
+          : [...prev, { key, title, kind, caption: caption ?? '' }],
+      )
+      // 种子注册(配置预建,无消息到达)不记未读——红点语义 = 有未读消息
+      if (!noUnread && panelKeyRef.current !== key) {
         setUnread((prev) => ({ ...prev, [key]: (prev[key] ?? 0) + 1 }))
       }
       setSessionTick((t) => t + 1)
@@ -167,7 +221,28 @@ export default function WidgetApp() {
       if (!msg || typeof msg.qq !== 'string') return
       const key = (msg as { sessionKey?: string }).sessionKey ?? `private:${msg.qq}`
       if (key === 'main') return
-      reg(key, `QQ ${msg.qq}`, 'private')
+      // 标题 = 档案卡称呼(如「魔精」),说明 = QQ 号——两行分层
+      const card = (msg as { profileCard?: string }).profileCard ?? ''
+      const nameM = /^称呼:(.+)$/m.exec(card)
+      if (key === 'ask') {
+        // **陌生人自动建会话(2026-08-14 修复"对方给 LLM 的 QQ 发消息
+        // 没有自动创建会话")**:ask 流仍由当前活跃实例处理,但面板为
+        // private:QQ 建会话条目;对方原消息仅显示注入(不能用
+        // ingestNapcatMessage——会触发引擎二次发送)。用户正查看该
+        // 会话时其实例已收 ask 消息,跳过防重复
+        const pKey = `private:${msg.qq}`
+        reg(pKey, nameM ? nameM[1].trim() : `QQ ${msg.qq}`, 'private', `QQ ${msg.qq}`)
+        if (panelKeyRef.current !== pKey) {
+          const display = { kind: 'display-user', text: (msg as { text?: string }).text, profileCard: card }
+          const ctl = extControllersRef.current.get(pKey)
+          if (ctl) ctl.ingestDisplayUserMessage(display)
+          else {
+            pendingSessionMsgsRef.current.set(pKey, [...(pendingSessionMsgsRef.current.get(pKey) ?? []), display])
+          }
+        }
+        return
+      }
+      reg(key, nameM ? nameM[1].trim() : `QQ ${msg.qq}`, 'private', `QQ ${msg.qq}`)
       // 首条消息不丢(2026-08-13 三轮):实例未挂载时暂存,挂载后补投
       const ctl = extControllersRef.current.get(key)
       if (ctl) ctl.ingestNapcatMessage(msg)
@@ -180,7 +255,7 @@ export default function WidgetApp() {
       if (!msg || typeof msg.groupId !== 'string') return
       const key = (msg as { sessionKey?: string }).sessionKey ?? `group:${msg.groupId}`
       if (key === 'main') return
-      reg(key, `群 ${msg.groupId}`, 'group')
+      reg(key, `群 ${msg.groupId}`, 'group', `群号 ${msg.groupId}`)
       const ctl = extControllersRef.current.get(key)
       if (ctl) ctl.ingestNapcatGroupMessage(msg)
       else {
@@ -190,28 +265,77 @@ export default function WidgetApp() {
     if (typeof off2 === 'function') offs.push(off2)
     // LLM 会话绑定工具(2026-08-13):主进程 island:session-bind 事件
     const off3 = window.desktop?.onSessionBind?.((payload) => {
-      // LLM 会话绑定(2026-08-13):面板中打开该会话(key=main 时收起面板)
+      // LLM 会话绑定(2026-08-13):面板中打开该会话(key=main 时收起面板);
+      // 同样是一次会话切换——清除视频续播标记(与 selectPanelSession 同款
+      // 语义:切换会话不自动播放视频,仅保留多媒体岛 ↔ 对话窗口同步)
       if (payload && typeof payload.key === 'string') {
-        setPanelKey(payload.key === 'main' ? null : payload.key)
+        const target = payload.key === 'main' ? null : payload.key
+        if ((panelKeyRef.current ?? 'main') !== payload.key) {
+          clearAgentVideoResume()
+        }
+        setPanelKey(target)
         setUnread((prev) => (payload.key in prev ? { ...prev, [payload.key]: 0 } : prev))
       }
     })
     if (typeof off3 === 'function') offs.push(off3)
-    // 监听群种子(2026-08-13 用户实测"LLM 说接入了但会话面板没有"):
-    // 配置的监听群下发 → 立即注册群会话条目(不等群里来消息)
+    // 监听会话种子(2026-08-13 用户实测"LLM 说接入了但会话面板没有":
+    // 配置的监听会话下发 → 立即注册会话条目(不等消息来);2026-08-13
+    // 二轮扩展私聊——只要是监听的(napcatAllowed 扩展信任+主人 +
+    // napcatAllowedGroups 群),自动加入面板)
     const off5 = window.desktop?.onSessionsSeed?.((payload) => {
       if (payload && Array.isArray(payload.groups)) {
         for (const g of payload.groups) {
-          if (typeof g === 'string' && g) reg(`group:${g}`, `群 ${g}`, 'group')
+          const id = typeof g === 'string' ? g : (g as { id?: string }).id
+          if (id) {
+            const name = typeof g === 'string' ? undefined : (g as { name?: string }).name
+            reg(`group:${id}`, name || `群 ${id}`, 'group', `群号 ${id}`, true)
+          }
+        }
+      }
+      if (payload && Array.isArray(payload.privates)) {
+        for (const p of payload.privates) {
+          const id = typeof p === 'string' ? p : (p as { id?: string }).id
+          if (id) {
+            const name = typeof p === 'string' ? undefined : (p as { name?: string }).name
+            reg(`private:${id}`, name || `QQ ${id}`, 'private', `QQ ${id}`, true)
+          }
         }
       }
     })
     if (typeof off5 === 'function') offs.push(off5)
-    // 启动时拉一次配置(已有的监听群立即入面板;LLM 此前已配置过)
+    // 主动发送成功 → 建会话条目(2026-08-13 用户实测"让 LLM 给别人
+    // 发消息没有自动创建会话":发消息即会话存在)+ **已发消息回显**
+    // (用户要求"主对话让 LLM 发的消息,切到对应会话要有相关消息(实际
+    // QQ 已发送)":发送成功的正文/图片注入该会话窗口作助手消息)
+    const off6 = window.desktop?.onSessionActivity?.((payload) => {
+      if (payload && typeof payload.key === 'string' && payload.key !== 'main') {
+        reg(payload.key, payload.title || payload.key, payload.kind === 'group' ? 'group' : 'private', payload.caption || '')
+        const ctl = extControllersRef.current.get(payload.key)
+        if (ctl) {
+          ctl.ingestSentMessage({ text: payload.text, images: payload.images })
+        } else {
+          // 实例未挂载:暂存,挂载后补投(与收消息首条不丢同款)
+          pendingSessionMsgsRef.current.set(payload.key, [
+            ...(pendingSessionMsgsRef.current.get(payload.key) ?? []),
+            { kind: 'sent', text: payload.text, images: payload.images },
+          ])
+        }
+      }
+    })
+    if (typeof off6 === 'function') offs.push(off6)
+    // 启动时拉一次配置(监听会话立即入面板;LLM 此前已配置过)——群聊 +
+    // 私聊(2026-08-13 二轮:用户要求"只要是监听的,自动加入",原只预注册
+    // 群,私聊要等消息到达才建会话;标题随后被主进程种子/消息的档案称呼
+    // 精化覆盖)
     void window.desktop?.agentGetConfig?.().then((cfg) => {
       for (const g of cfg?.napcatAllowedGroups ?? []) {
-        if (typeof g === 'string' && g) reg(`group:${g}`, `群 ${g}`, 'group')
+        if (typeof g === 'string' && g) reg(`group:${g}`, `群 ${g}`, 'group', `群号 ${g}`, true)
       }
+      for (const q of cfg?.napcatAllowed ?? []) {
+        if (typeof q === 'string' && q) reg(`private:${q}`, `QQ ${q}`, 'private', `QQ ${q}`, true)
+      }
+      // 群名异步补正(八轮):main.cjs 的 session-activity 事件会带来真实群名
+
     })
     // 引擎事件 bump(外部会话回复落定 → 面板小窗实时刷新)
     const off4 = window.desktop?.onAgentEvent?.((raw) => {
@@ -224,28 +348,26 @@ export default function WidgetApp() {
       for (const off of offs) off()
     }
   }, [])
-  // 面板选中会话的数据(2026-08-13 二轮:主对话窗口不被替换,面板
-  // 小窗展示选中会话;数据经 Proxy 控制器实时读取,sessionTick 触发
-  // 刷新)。useMemo 保持引用稳定(panelSession 只在选中项/活动时变)
-  const panelSession = useMemo(() => {
-    void sessionTick // 依赖声明:外部会话活动时触发重算(数据经 Proxy 实时读)
-    if (!panelKey) return null
-    const ctl = extControllersRef.current.get(panelKey)
-    if (!ctl) return null
-    const meta = extSessions.find((it) => it.key === panelKey)
-    return {
-      key: panelKey,
-      title: meta?.title ?? panelKey,
-      kind: meta?.kind ?? 'private',
-      messages: ctl.messages,
-      streaming: ctl.streaming,
-      status: ctl.status,
-      send: ctl.send,
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- 引用稳定优先:
-    // sessionTick 仅为触发重算(消息更新),不参与身份比较
-  }, [panelKey, sessionTick, extSessions])
+  // 当前查看会话的控制器(2026-08-13 七轮:面板纯化为切换器——
+  // 主对话窗口显示 panelKey 对应上下文;外部实例未就绪回退主对话;
+  // 切回 main 即恢复主对话快照——主控制器从未销毁)
+  void sessionTick
+  const currentAgent =
+    panelKey && panelKey !== 'main'
+      ? extControllersRef.current.get(panelKey) ?? agent
+      : agent
   const selectPanelSession = useCallback((key: string) => {
+    // 会话切换 ≠ 多媒体岛切换(2026-08-13 用户要求"禁止切换会话时自动
+    // 播放视频,仅保留多媒体岛和对话窗口的同步"):切换会话让主对话窗口
+    // 的消息列表整体替换,残留的 lastPlayingVideoSrc 续播标记会让新会话
+    // 里的视频"诈尸续播"——切换前清除。位置缓存(agentMediaPositions)
+    // 仍保留:重挂载回到暂停位置(与"收起为灵动岛再展开"同款语义);
+    // 多媒体岛 ↔ 对话窗口的播放状态同步不受影响(由视频岛在播时的
+    // play 事件实时驱动,非静态标记)。null 与 'main' 同为当前主对话,
+    // 点主对话入口不算切换、不误清面板里正在播的视频
+    if ((panelKeyRef.current ?? 'main') !== key) {
+      clearAgentVideoResume()
+    }
     setPanelKey(key)
     setUnread((prev) => (key in prev ? { ...prev, [key]: 0 } : prev))
   }, [])
@@ -474,8 +596,9 @@ export default function WidgetApp() {
   useEffect(() => {
     registerIslandSettingsBridge()
     // 音乐控制桥(2026-08-12,QQ 远程控制/后台对话):主进程经
-    // executeJavaScript 调 window.__islandMusicControl 控制播放——
+    // IPC 请求/响应 调 window.__islandMusicControl 控制播放——
     // 外部平台(SMTC)优先,本地播放器兜底;状态供 LLM 查询
+    // (审计 SEC-1,2026-08-14:原 executeJavaScript 动态拼接 → IPC)
     registerMusicControlBridge({
       getExternalActive: () => musicControlStateRef.current.externalActive,
       systemControl: (action) => musicControlStateRef.current.system.control(action),
@@ -491,6 +614,17 @@ export default function WidgetApp() {
         }
       },
     })
+    // 音乐控制 IPC 监听(SEC-1):主进程下发请求,调用已注册的桥方法回传
+    if (window.desktop?.onMusicControlRequest) {
+      const offMusic = window.desktop.onMusicControlRequest((op, args) => {
+        const bridge = window.__islandMusicControl
+        if (!bridge) throw new Error('音乐控制桥不可用')
+        if (op === 'control') return bridge.control(args as 'play' | 'pause' | 'next' | 'previous')
+        if (op === 'status') return bridge.status()
+        throw new Error(`未知操作: ${op}`)
+      })
+      return offMusic
+    }
   }, [])
 
   // Agent 模式文字区左滑/右滑:退出 Agent 切回音乐模式
@@ -557,23 +691,24 @@ export default function WidgetApp() {
     mindGuess,
     send: agentSend,
     abort: agentAbort,
+    undo: agentUndo,
     clear: agentClear,
     saveConfig: agentSaveConfig,
     config: agentConfig,
     mediaAutoPlayIds: agentMediaAutoPlayIds,
     consumeMediaAutoPlay: agentConsumeMediaAutoPlay,
-  } = agent
+  } = currentAgent
   // agentConfig 引用必须稳定:内联对象字面量每次渲染都是新引用,会击穿
   // DynamicIsland 的 memo(1827 行巨型组件在流式期间被整树重渲染)。
   // tools 不再走此通道(审计 P1 #4:双通道冗余,统一由 AgentPanelProps.tools
   // 进入——设置视图从 agent prop 取,同一 useAgent.tools 单一来源)
   const agentConfigProp = useMemo(
     () => ({
-      config: agent.config,
-      onSave: agent.saveConfig,
-      onRefresh: agent.refreshConfig,
+      config: currentAgent.config,
+      onSave: currentAgent.saveConfig,
+      onRefresh: currentAgent.refreshConfig,
     }),
-    [agent.config, agent.saveConfig, agent.refreshConfig],
+    [currentAgent.config, currentAgent.saveConfig, currentAgent.refreshConfig],
   )
   // 媒体窗口默认宽(2026-08-08):对话图片/视频窗口初始宽;localStorage
   // 即时生效(设置界面 QuickMenu / LLM set_media_window_size 工具写入,
@@ -712,6 +847,9 @@ export default function WidgetApp() {
             mindGuess,
             onSend: agentSend,
             onAbort: agentAbort,
+            // 撤销(2026-08-14 停止与撤销分离):用户气泡左侧按钮 →
+            // 回滚该消息之前的上下文与文件(git 快照)
+            onUndo: agentUndo,
             onClear: agentClear,
             // 工具列表视图禁用/恢复(持久化 settings.json agent 段;
             // 引擎每轮实时读配置,下一轮生效)
@@ -722,12 +860,12 @@ export default function WidgetApp() {
             // 2026-08-10 自动播放只限"当次对话"(LLM 播放的那一轮才自动播,
             // 历史/重挂载不播):Set 引用稳定 + 消费函数
             mediaAutoPlayIds: agentMediaAutoPlayIds,
-            // 会话隔离(2026-08-13 二轮):外部会话列表 + 面板选中会话小窗
-            // (主对话窗口不被替换,面板叠在其上)+ 选中回调/未读
+            // 会话隔离(2026-08-13 七轮):面板纯化为切换器——主对话窗口
+            // 显示当前键的上下文;悬停即切换;主对话入口一键切回(快照保留)
             sessionList: extSessions,
-            panelSession: panelSession,
+            currentSessionKey: panelKey ?? 'main',
             unreadCounts: unread,
-            onSelectPanelSession: selectPanelSession,
+            onSwitchSession: selectPanelSession,
             onMediaAutoPlayed: agentConsumeMediaAutoPlay,
           }
         : undefined,
@@ -745,6 +883,7 @@ export default function WidgetApp() {
       mindGuess,
       agentSend,
       agentAbort,
+      agentUndo,
       agentClear,
       agentConfig?.excludedTools,
       agentSaveConfig,
@@ -753,7 +892,7 @@ export default function WidgetApp() {
       agentMediaAutoPlayIds,
       agentConsumeMediaAutoPlay,
       extSessions,
-      panelSession,
+      panelKey,
       unread,
       selectPanelSession,
     ],
@@ -1084,7 +1223,7 @@ export default function WidgetApp() {
             隐藏挂载保持状态与订阅存活,当前绑定会话的控制器经
             extControllersRef 取出传给 DynamicIsland */}
         {extSessions.map((it) => (
-          <SessionHost key={it.key} sessionKey={it.key} onRegister={extRegister} />
+          <SessionHost key={it.key} sessionKey={it.key} active={panelKey === it.key} onRegister={extRegister} onTick={handleSessionTick} />
         ))}
       </div>
     </div>
@@ -1099,12 +1238,21 @@ export default function WidgetApp() {
  */
 function SessionHost({
   sessionKey,
+  active,
   onRegister,
+  onTick,
 }: {
   sessionKey: string
+  active: boolean
   onRegister: (key: string, ctl: AgentController | null) => void
+  /** 会话消息变化通知(2026-08-13 用户实测"清空后窗口内对话记录没有
+   * 清空"):父级渲染时代理解构读 ctlRef——仅当父级重渲染才重读控制器;
+   * 引擎事件流能触发父级重渲染,但 clear()(清空上下文/新对话)在引擎
+   * 空闲时不产生事件。本 effect 在**本组件渲染后**触发(ctlRef 已是最
+   * 新),父级据此 bump 重渲染——与事件 bump 同一通道 */
+  onTick?: () => void
 }) {
-  const ctl = useAgent({ sessionKey })
+  const ctl = useAgent({ sessionKey, active })
   const ctlRef = useRef(ctl)
   ctlRef.current = ctl
   useEffect(() => {
@@ -1117,5 +1265,15 @@ function SessionHost({
     onRegister(sessionKey, proxy)
     return () => onRegister(sessionKey, null)
   }, [sessionKey, onRegister])
+  // 控制器状态变化(消息/状态)→ 通知父级重渲染(渲染后触发,ctlRef 最新)。
+  // **状态也必须通知(2026-08-13 用户实测"会话里发消息,偶现 LLM 回复完
+  // 发送按钮仍是停止态、左上角执行工具中")**:面板 props 由父级渲染时
+  // 代理解构,事件批处理里父级先渲染、读到的控制器**滞后一拍**——最终
+  // idle 事件之后没有后续事件,父级永远停在上一个状态(running = 停止
+  // 按钮 + 执行工具中;偶现 = 直到下一次无关事件(新消息等)才纠正)。
+  // 渲染后通知让父级重读最新状态(messages 变化/clear 清空同款机制)
+  useEffect(() => {
+    onTick?.()
+  }, [ctl.messages, ctl.status, onTick])
   return null
 }

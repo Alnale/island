@@ -124,6 +124,12 @@ export function clamp01(v: number): number {
 export const AGENT_PANEL_FIXED_H = 116
 export const AGENT_PANEL_MIN_H = 176
 export const AGENT_PANEL_MAX_H = 700
+/** 高度预算余量(2026-08-13 用户实测"切会话收起面板后单条消息底部被
+ * 截断"):FIXED_H + contentH + bannerH 是零余量预算——offsetHeight 取整
+ * 与行高小数叠加,消息区实际可用高比内容矮 1-2px,最后一条消息底缘
+ * 被裁、与输入框之间没有留空(会话横幅占一行时最明显)。预算加 6px
+ * 余量,消息区永远比内容多出呼吸空间,视觉不可感知 */
+export const AGENT_PANEL_HEIGHT_SLACK = 6
 /** 展开首帧骨架屏时长(ms):形变动画期间先渲染轻量占位,之后挂载真实内容。
  *  120ms:形变(0.3s)进行到约 1/3 时挂载内容并测量——高度从该点以 CSS
  *  过渡并入宽度动画(并行动画;若等形变结束才测,就变成"先宽后高"顺序) */

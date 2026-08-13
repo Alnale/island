@@ -38,6 +38,10 @@ downloads
 help-anim.png
 mini-test.png
 test-check.png
+probe-tools.png
+
+# TypeScript 增量构建信息(tsc -b 产物,不入库)
+tsconfig/tsconfig.tsbuildinfo
 
 # 双岛巡检截图输出(WIDGET_SCREENSHOT 目录)
 .dual-shots/

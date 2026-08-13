@@ -293,22 +293,25 @@ export function useSystemMedia(): SystemMediaState {
             // 插值从暂停时刻继续,不把暂停时长计入
             lyricAnchorAtRef.current = now
           }
-          prevReportedRef.current = reported
           // 挂起的 seek 验证:系统位置跟随目标(或单次大幅移动——覆盖
           // 浏览器等阶梯式更新平台,位置块状前进可能永远不落在目标
           // ±3s 内,但跳变本身证明 seek 已生效)即视为成功;
           // 超时未跟随的收尾见 control() 里的定时器
+          // **审计修复(2026-08-14 BUG-1)**:prevReportedRef 必须在 seek
+          // 验证之后更新,否则 reported - prevReportedRef 恒为 0,跳变
+          // 检测路径永远不触发
           const pendingSeek = pendingSeekRef.current
           if (
             pendingSeek &&
             (Math.abs(reported - pendingSeek.target) <= SEEK_VERIFY_TOLERANCE_SEC ||
-              Math.abs(reported - prevReportedRef.current) > SEEK_VERIFY_JUMP_SEC)
+              (prevReportedRef.current !== null && Math.abs(reported - prevReportedRef.current) > SEEK_VERIFY_JUMP_SEC))
           ) {
             pendingSeekRef.current = null
             window.clearTimeout(seekVerifyTimerRef.current)
             rememberSeekSupport(pendingSeek.sourceId, true)
             pendingSeek.resolve(true)
           }
+          prevReportedRef.current = reported
           // PlaybackStatus 双向校准:暂停态切歌后外部自动播放时,
           // 播放键/时间插值能跟随真实状态(不再卡在"暂停"显示)
           if (typeof data.isPlaying === 'boolean') setUserPlaying(data.isPlaying)

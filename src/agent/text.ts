@@ -45,3 +45,27 @@ export function stripNapcatHistoryInstructions(text: string): string {
     .replace(/【(?:群聊指令|私聊指令|主人消息|回复规则|群聊上下文)】[\s\S]*$/, '')
     .trim()
 }
+
+/**
+ * 剥离执行回复的轮次标记(2026-08-13 指纹协议):【回复对方】(旧静态
+ * 标记,兼容)与【指纹:xxxxxx】(每轮随机指纹)——这两个前缀是给路由层
+ * 验证用的(指纹对不上就不发送),**进历史/显示前必须剥掉**:残留的旧
+ * 指纹会出现在 LLM 上下文里,下一轮可能被"抄"到过期指纹,指纹验证
+ * 对不上 = 回复发不出去(实测);显示层一并使用,气泡不露标记
+ */
+export function stripTurnMarks(text: string): string {
+  return String(text ?? '')
+    .replace(/^\s*/, '')
+    .replace(/^【回复对方】\s*/, '')
+    .replace(/^【指纹:[2-9A-HJ-NP-Z]{6}】\s*/, '')
+}
+
+/**
+ * 文本开头是否命中轮次标记(2026-08-14 指纹 UI):必须在**剥离前**检测——
+ * 命中【指纹:xxxx】/【回复对方】= 该回复会被路由层发给 QQ 对方,
+ * 显示层据此给消息打 sentToPeer 标记,气泡用"发给对方"风格与普通
+ * 回复区分(见 AgentMessages 的 PeerTurnTag)
+ */
+export function hasTurnMark(text: string): boolean {
+  return /^\s*(?:【回复对方】|【指纹:[2-9A-HJ-NP-Z]{6}】)/.test(String(text ?? ''))
+}

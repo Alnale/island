@@ -66,15 +66,26 @@ contextBridge.exposeInMainWorld('desktop', {
   /** Agent:发送一轮对话(引擎无状态,history 为完整历史;sessionId =
    * 会话 ID——工具输出按对话分类存放,2026-08-12;source='qq'(私聊,
    * target = QQ 号)/'group'(群聊,target = 群号)/'ask'(询问轮,target =
-   * 陌生人 QQ——回复发到主人 QQ 同步询问,2026-08-12)= NapCat 触发轮 */
-  agentSend(text, history, sessionId, source, target) {
+   * 陌生人 QQ——回复发到主人 QQ 同步询问,2026-08-12)/'window'(主人
+   * 窗口直发)= 触发轮标记;sessionKey = 会话隔离键(2026-08-13 外部
+   * 会话各自引擎实例)——**两参曾漏传(实测:外部会话面板输入的消息
+   * LLM 完全不知道**——丢 sessionKey 让请求落到主引擎、回复落主对话;
+   * 丢 window 让窗口轮不能消费待回复陌生人) */
+  agentSend(text, history, sessionId, source, target, sessionKey, noteText) {
     ipcRenderer.send(
       'agent:send',
       String(text),
       history,
       typeof sessionId === 'string' ? sessionId : undefined,
-      source === 'qq' || source === 'group' || source === 'ask' ? source : undefined,
-      (source === 'qq' || source === 'group' || source === 'ask') && typeof target === 'string' ? target : undefined,
+      source === 'qq' || source === 'group' || source === 'ask' || source === 'window'
+        ? source
+        : undefined,
+      (source === 'qq' || source === 'group' || source === 'ask') && typeof target === 'string'
+        ? target
+        : undefined,
+      typeof sessionKey === 'string' && sessionKey ? sessionKey : undefined,
+      // 会话情况记录(2026-08-13):渲染端随发送回传,主进程注入引擎输入
+      typeof noteText === 'string' && noteText.trim() ? noteText.trim() : undefined,
     )
   },
   /** NapCat 私聊消息订阅(2026-08-12):payload = {qq, text, messageId,
@@ -104,9 +115,27 @@ contextBridge.exposeInMainWorld('desktop', {
     ipcRenderer.on('island:sessions-seed', listener)
     return () => ipcRenderer.removeListener('island:sessions-seed', listener)
   },
-  /** Agent:中止当前轮 */
-  agentAbort() {
-    ipcRenderer.send('agent:abort')
+  /** 会话活动(2026-08-13):主动发送成功/其它会话事件,渲染端建会话条目 */
+  onSessionActivity(callback) {
+    const listener = (_event, payload) => callback(payload)
+    ipcRenderer.on('napcat:session-activity', listener)
+    return () => ipcRenderer.removeListener('napcat:session-activity', listener)
+  },
+  /** Agent:中止当前轮(sessionKey = 会话隔离键,缺省主对话——外部会话
+   * 面板的停止按钮必须中止对应会话引擎,2026-08-13 与 agentSend 同款
+   * 漏传修复) */
+  agentAbort(sessionKey) {
+    ipcRenderer.send('agent:abort', typeof sessionKey === 'string' && sessionKey ? sessionKey : undefined)
+  },
+  /** Agent:撤销拍快照(2026-08-14 停止与撤销分离):主人输入轮 send 前
+   * 调,对 undoWatchDirs 逐目录拍隐藏 git 快照;返回 {id, dirs}。
+   * 监控目录未配置 → 空 id(撤销时只回滚上下文) */
+  agentUndoSnapshot(sessionKey) {
+    return ipcRenderer.invoke('agent:undo-snapshot', typeof sessionKey === 'string' && sessionKey ? sessionKey : 'main')
+  },
+  /** Agent:撤销回滚快照(git 工作区精确还原;返回各目录结果) */
+  agentUndoRestore(snapshotId) {
+    return ipcRenderer.invoke('agent:undo-restore', snapshotId)
   },
   /** Agent:exec_command 确认门回执(确认请求经 onAgentEvent 的
    * tool-confirm-request 事件到达,用户点允许/拒绝后回传) */
@@ -242,4 +271,42 @@ contextBridge.exposeInMainWorld('desktop', {
     ipcRenderer.on('widget:open-media-library', listener)
     return () => ipcRenderer.removeListener('widget:open-media-library', listener)
   },
+  /** 音乐控制 IPC 注册(审计 SEC-1,2026-08-14):主进程下发请求,
+   * 渲染端回调处理(调用 window.__islandMusicControl)。返回取消函数 */
+  onMusicControlRequest(callback) {
+    const listener = (_event, { reqId, op, args }) => {
+      Promise.resolve(callback(op, args))
+        .then((result) => ipcRenderer.send('island:music-control-response', { reqId, result }))
+        .catch((e) => ipcRenderer.send('island:music-control-response', { reqId, error: String(e?.message || e) }))
+    }
+    ipcRenderer.on('island:music-control', listener)
+    return () => ipcRenderer.removeListener('island:music-control', listener)
+  },
+})
+
+// ---------------------------------------------------------------------------
+// 会话操作 IPC 监听(审计 SEC-1,2026-08-14):主进程经 webContents.send
+// 下发会话操作请求(get/set/clear),preload 直接操作 localStorage 后回传
+// 结果。替代原 executeJavaScript 动态拼接(彻底消除代码注入攻击面)
+// ---------------------------------------------------------------------------
+ipcRenderer.on('island:session-op', (_event, { reqId, op, key, note }) => {
+  try {
+    let result
+    if (op === 'get-session-note') {
+      result = localStorage.getItem('widget-agent-session-note:' + key) ?? ''
+    } else if (op === 'set-session-note') {
+      if (note) localStorage.setItem('widget-agent-session-note:' + key, note)
+      else localStorage.removeItem('widget-agent-session-note:' + key)
+      result = true
+    } else if (op === 'clear-session-context') {
+      localStorage.removeItem('widget-agent-session:' + key)
+      result = true
+    } else {
+      ipcRenderer.send('island:session-op-response', { reqId, error: `未知操作: ${op}` })
+      return
+    }
+    ipcRenderer.send('island:session-op-response', { reqId, result })
+  } catch (e) {
+    ipcRenderer.send('island:session-op-response', { reqId, error: String(e?.message || e) })
+  }
 })

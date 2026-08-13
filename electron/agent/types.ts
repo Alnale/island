@@ -104,6 +104,12 @@ export type AgentEvent = { sessionKey?: string } & (
    * 同一条 guess)——渲染端更新紧凑态文字区 mindGuess,与通知一致
    */
   | { type: 'mind-proactive'; messageId: string; guess: string }
+  /**
+   * 会话上下文已清空(2026-08-13,LLM clear_session_context 工具):主进程
+   * 已擦除该会话持久化历史,渲染端据此清消息状态(**不中止当前回合**——
+   * 工具在本回合执行,回复照常落定到全新上下文)
+   */
+  | { type: 'session-context-cleared' }
 )
 
 /**
@@ -147,13 +153,35 @@ export interface MemoryEntry {
   updatedAt: number
 }
 
+/** 单个 LLM 供应商的连接凭据(API Key / Base URL / 模型) */
+export interface ProviderCredentials {
+  /** API Key(留空则拒绝发送) */
+  apiKey: string
+  /** API 地址 */
+  baseURL: string
+  /** 模型 ID */
+  model: string
+}
+
+/** 支持的 LLM 供应商标识 */
+export type ProviderId = 'deepseek' | 'mimo'
+
 /** Agent 配置(settings.json 的 agent 段,主进程持有) */
 export interface AgentConfig {
-  /** DeepSeek API Key(留空则拒绝发送) */
+  /**
+   * 当前激活的供应商(2026-08-14 多供应商独立存储:切换供应商时
+   * apiKey/baseURL/model 从 providers[activeProvider] 读出;
+   * 顶层 apiKey/baseURL/model 仍保留以兼容旧代码路径,但始终
+   * 与 providers[activeProvider] 保持同步)
+   */
+  activeProvider: ProviderId
+  /** 各供应商独立的连接凭据(每个 Key/地址/模型互不覆盖) */
+  providers: Record<ProviderId, ProviderCredentials>
+  /** 当前激活供应商的 API Key(与 providers[activeProvider].apiKey 同步) */
   apiKey: string
-  /** 默认 https://api.deepseek.com */
+  /** 当前激活供应商的 Base URL */
   baseURL: string
-  /** 默认 deepseek-v4-flash(当前唯一支持 Responses API 的模型) */
+  /** 当前激活供应商的模型 */
   model: string
   /** 系统提示词(默认值在 main.cjs 兜底) */
   systemPrompt: string
@@ -232,6 +260,13 @@ export interface AgentConfig {
    * napcat 工具 session_mute 管理,设置界面不暴露(会话管理走对话)
    */
   mutedSessions?: string[]
+  /**
+   * 撤销监控目录(2026-08-14 停止与撤销分离):须为 git 仓库。主人输入
+   * 轮发送前逐目录拍隐藏快照(临时索引提交 + refs/island-undo 引用),
+   * 撤销时精确还原工作区到该轮之前(reset 回快照前 HEAD + 覆盖脏改动
+   * + 差集删除该轮新建文件)。空数组 = 撤销只回滚上下文不动文件
+   */
+  undoWatchDirs?: string[]
 }
 
 /** 工具执行上下文(可选第二参):主回合中止信号——delegate 子代理
@@ -349,6 +384,16 @@ export interface EngineDeps {
    * 未注入则不注册 music_control 工具
    */
   runMusicControl?(op: string, args: unknown[]): Promise<unknown>
+  /**
+   * 会话管理工具(2026-08-13,用户要求"LLM 自己生成记录,自己清空当前
+   * 会话上下文"):set_session_note / clear_session_context 的桥——主进程
+   * 经 executeJavaScript 读写渲染端 localStorage + 派发
+   * session-context-cleared 事件。key = 会话键('main' / private:<QQ> /
+   * group:<群号>)。未注入则不注册会话工具
+   */
+  getSessionNote?(key: string): Promise<string>
+  setSessionNote?(key: string, note: string): Promise<unknown>
+  clearSessionContext?(key: string): Promise<unknown>
   /**
    * NapCat QQ 机器人客户端(2026-08-12,main.cjs 创建注入):
    * 未注入则不注册 napcat 工具。收到的 QQ 消息经 main.cjs 转发渲染端

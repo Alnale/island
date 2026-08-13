@@ -28,15 +28,17 @@ import {
 import type { AgentPanelProps, AgentToolInfo } from '../../../agent/types'
 import { stripMcpServiceLabel } from '../../../../electron/agent/constants'
 import { mediaKindOf } from './markdownParser'
-import { stripNapcatInstructions, textFromMessage } from '../../../agent/text'
 import { useLeavingList } from '../../../hooks/useLeavingList'
+import { getSessionNote, setSessionNote } from '../../../hooks/useAgent'
 import { QuickMenu } from './QuickMenu'
 import { Markdown, type AgentMediaReport } from './Markdown'
-import { AssistantBlock, ToolSummary, UserBubble } from './AgentMessages'
+import { AssistantBlock, PeerTurnTag, ToolSummary, UserBubble } from './AgentMessages'
 import { MessageWindow } from './MessageWindow'
 import type { AgentMessage } from '../../../agent/types'
+import { hasTurnMark, stripTurnMarks, textFromParts } from '../../../agent/text'
 import {
   AGENT_PANEL_FIXED_H,
+  AGENT_PANEL_HEIGHT_SLACK,
   AGENT_PANEL_MAX_H,
   AGENT_PANEL_MIN_H,
   AGENT_PHASE_IN_MS,
@@ -393,14 +395,15 @@ export function AgentView({
   lastError,
   sessions,
   sessionList,
-  panelSession,
+  currentSessionKey,
   unreadCounts,
-  onSelectPanelSession,
+  onSwitchSession,
   tools,
   onLoadSession,
   onDeleteSession,
   onSend,
   onAbort,
+  onUndo,
   onClear,
   onOpenSettings,
   onOpenMediaLibrary,
@@ -424,16 +427,70 @@ export function AgentView({
   const sessionOpenRef = useRef(sessionOpen)
   sessionOpenRef.current = sessionOpen
   const dockRef = useRef<HTMLDivElement>(null)
-  const panelChatBodyRef = useRef<HTMLDivElement>(null)
-  // 会话小窗消息自动滚底(新消息/切换会话时)
+  // 会话上下文横幅(2026-08-13 修复"收起会话面板后单条消息底部被截断"):
+  // 查看外部会话时横幅占一行,高度测量须计入(见 measureHeight bannerH)
+  const bannerRef = useRef<HTMLDivElement>(null)
+  // 会话情况记录 + 快捷清空(2026-08-13 用户要求"给单个会话加上情况
+  // 记录,可以快捷清空上下文"):横幅右侧两个操作——「记录」= 该会话
+  // 上下文备忘(localStorage,注入 LLM 每轮参考,清空上下文不清除);
+  // 「清空」= 两段式确认后清空该会话消息历史(abort + 擦除)
+  const [sessionNoteEdit, setSessionNoteEdit] = useState(false)
+  const [sessionNoteDraft, setSessionNoteDraft] = useState('')
+  const [sessionNoteText, setSessionNoteText] = useState('')
+  const [clearArmed, setClearArmed] = useState(false)
+  const clearArmTimerRef = useRef<number | null>(null)
+  // 切会话:重读该会话的记录、复位编辑与确认态
   useEffect(() => {
-    const el = panelChatBodyRef.current
-    if (el) el.scrollTop = el.scrollHeight
-  }, [panelSession?.messages.length, panelSession?.key, sessionOpen])
+    setSessionNoteText(currentSessionKey ? getSessionNote(currentSessionKey) : '')
+    setSessionNoteEdit(false)
+    setClearArmed(false)
+  }, [currentSessionKey])
+  // 卸载清理确认复位定时器
+  useEffect(
+    () => () => {
+      if (clearArmTimerRef.current !== null) clearTimeout(clearArmTimerRef.current)
+    },
+    [],
+  )
+  const startEditNote = useCallback(() => {
+    setSessionNoteDraft(sessionNoteText)
+    setSessionNoteEdit(true)
+  }, [sessionNoteText])
+  const saveSessionNote = useCallback(() => {
+    if (currentSessionKey) {
+      setSessionNote(currentSessionKey, sessionNoteDraft)
+      setSessionNoteText(getSessionNote(currentSessionKey))
+    }
+    setSessionNoteEdit(false)
+  }, [currentSessionKey, sessionNoteDraft])
+  const cancelSessionNote = useCallback(() => setSessionNoteEdit(false), [])
+  // 快捷清空该会话上下文:两段式确认(与清除数据同款:首次点击进入
+  // 确认态 3.5s 自动复位,再次点击执行)——清空 = onClear(当前会话
+  // 控制器,中止运行中的回合 + 擦除消息历史 + 新会话 ID;外部会话
+  // 不归档共享对话历史,见 useAgent clear)
+  const handleClearSession = useCallback(() => {
+    if (clearArmed) {
+      setClearArmed(false)
+      if (clearArmTimerRef.current !== null) {
+        clearTimeout(clearArmTimerRef.current)
+        clearArmTimerRef.current = null
+      }
+      onClear?.()
+    } else {
+      setClearArmed(true)
+      clearArmTimerRef.current = window.setTimeout(() => setClearArmed(false), 3500)
+    }
+  }, [clearArmed, onClear])
 
   const onMediaAutoPlayedStable = useCallback(
     (id: string) => onMediaAutoPlayed?.(id),
     [onMediaAutoPlayed],
+  )
+  // 撤销回调稳定引用(2026-08-14 停止与撤销分离):同 onMediaAutoPlayed,
+  // 内联箭头会打穿 UserBubble 的 memo
+  const onUndoStable = useCallback(
+    (id: string) => onUndo?.(id),
+    [onUndo],
   )
   // 单条消息渲染(2026-08-12,MessageWindow 窗口化渲染用):useCallback
   // 稳定引用——滚动中 MessageWindow 重渲染(范围变化)时消息组件靠
@@ -442,18 +499,25 @@ export function AgentView({
   const renderMessage = useCallback(
     (m: AgentMessage) =>
       m.role === 'user' ? (
-        <UserBubble key={m.id} m={m} />
+        <UserBubble key={m.id} m={m} onUndo={onUndoStable} />
+      ) : m.role === 'system' ? (
+        // 系统消息(2026-08-14 软停止):停止说明等,居中一行小字弱化
+        <div key={m.id} className="island-agent-msg-system">
+          {textFromParts(m.parts)}
+        </div>
       ) : (
         <AssistantBlock
           key={m.id}
           id={m.id}
           parts={m.parts}
           usage={m.usage}
+          sentToPeer={m.sentToPeer}
+          interrupted={m.interrupted}
           mediaAutoPlay={mediaAutoPlayIds?.has(m.id) ?? false}
           onMediaAutoPlayed={onMediaAutoPlayedStable}
         />
       ),
-    [mediaAutoPlayIds, onMediaAutoPlayedStable],
+    [mediaAutoPlayIds, onMediaAutoPlayedStable, onUndoStable],
   )
   // 对话最后媒体快照(2026-08-09):从消息**数据**取最后一条含媒体的
   // 消息的最后一个媒体——数据顺序 = 消息顺序,不受消息列表分批挂载
@@ -573,6 +637,11 @@ export function AgentView({
   // 输入框引用:LLM 回复完成后自动聚焦,直接可输入
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
+  // 会话切换/新消息时滚底(2026-08-13 七轮:主窗口显示当前会话上下文)
+  useEffect(() => {
+    const el = scrollRef.current
+    if (el) el.scrollTop = el.scrollHeight
+  }, [messages.length, currentSessionKey, sessionOpen, scrollRef])
   const atBottomRef = useRef(true)
   const busy = status === 'thinking' || status === 'running'
   // 快捷菜单项(2026-08-07 重构:通用 QuickMenu 取代 ⋯ 弹出菜单):
@@ -632,21 +701,31 @@ export function AgentView({
       // (面板垂直居中于岛体,超出部分 = 需要的额外窗口高度)
       let dockH = 0
       if (sessionOpenRef.current && dockRef.current) {
-        dockH = Math.max(0, Math.min(dockRef.current.offsetHeight, 360) - contentH)
+        dockH = Math.max(0, Math.min(dockRef.current.offsetHeight, 480) - contentH)
       }
+      // **会话上下文横幅高度(2026-08-13 用户实测"收起会话面板后单条
+      // 消息底部被截断、响应式布局失效")**:查看外部会话时横幅在消息
+      // 列表上方占一行(含 10px 视图 gap),AGENT_PANEL_FIXED_H(116)只
+      // 标定 头+消息区+输入 无横幅的布局——预算不足把消息区挤矮,底部
+      // 被裁、消息与输入框之间没有留空;会话面板展开时 dockH 余量恰好
+      // 兜住,收起后暴露。横幅高度计入预算,消息区恢复完整高度
+      let bannerH = 0
+      if (bannerRef.current) bannerH = bannerRef.current.offsetHeight + 10
       const next = Math.min(
         AGENT_PANEL_MAX_H,
-        Math.max(AGENT_PANEL_MIN_H, AGENT_PANEL_FIXED_H + contentH + dockH),
+        // + AGENT_PANEL_HEIGHT_SLACK(2026-08-13 修复"切会话收起面板后
+        // 单条消息底部被截断"):零余量预算在 offsetHeight 取整/行高小数
+        // 下消息区比内容矮 1-2px,底缘被裁;加余量后消息区留出呼吸空间
+        Math.max(AGENT_PANEL_MIN_H, AGENT_PANEL_FIXED_H + contentH + dockH + bannerH + AGENT_PANEL_HEIGHT_SLACK),
       )
       onHeightChange?.(next)
     }
     // 骨架期不测量(消息区未挂载,保持岛体下限;内容期才测量长高)
     if (phase !== 'content') return
-    // 工具列表/对话历史视图:高度由聊天视图决定(岛体保持进入前的聊天
-    // 高度),内容在岛体剩余空间内滚动——不能按子视图内容测量,否则
-    // 工具多/会话多会把岛体撑到上限(用户要求:与工具列表相同设计,
-    // 实时响应布局,岛体小则列表小可滚动,岛体扩展列表随之扩展)
-    if (viewRef.current === 'tools' || viewRef.current === 'history') return
+    // 工具列表/对话历史视图同样参与测高(2026-08-14 用户实测"工具列表都
+    // 打开半天它才伸长/收起后半天才缩短"):岛体随列表内容伸缩,超高封顶
+    // AGENT_PANEL_MAX_H 后列表内部滚动。原设计保持进入前的聊天高度、窗口
+    // 对工具列表零响应,观感即"不响应"
     const el = scrollRef.current
     if (!el) return
     if (streamingRef.current) {
@@ -661,11 +740,26 @@ export function AgentView({
     doMeasure(el)
   }, [onHeightChange, phase])
 
+  // 工具列表/对话历史视图的子行高度变化 → 重测(2026-08-14):列表容器
+  // 自身高度被 flex 固定,容器级 ResizeObserver 不随内容增高触发,需观察
+  // **每个子元素**——覆盖工具清单异步加载、搜索过滤、禁用/恢复移行、
+  // ToolsItem 参数卡展开/折叠(内部 state 不在 deps,行尺寸变化是唯一信号);
+  // deps 里的数据源变化会重建观察(子元素增删),尺寸变化即时触发
+  useLayoutEffect(() => {
+    if (phase !== 'content') return
+    if (view !== 'tools' && view !== 'history') return
+    const el = scrollRef.current
+    if (!el) return
+    const ro = new ResizeObserver(() => measureHeight())
+    for (let i = 0; i < el.children.length; i++) ro.observe(el.children[i])
+    return () => ro.disconnect()
+  }, [view, phase, measureHeight, tools, toolQuery, excludedTools, sessions])
+
   // 会话面板开合 → 重测高度(2026-08-13 三轮:窗口随面板伸缩)
   useEffect(() => {
     const t = window.setTimeout(() => measureHeight(), 380)
     return () => window.clearTimeout(t)
-  }, [sessionOpen, panelSession, measureHeight])
+  }, [sessionOpen, currentSessionKey, measureHeight])
   // 视图切换(chat ↔ 对话历史/工具列表):立即换主实例(新视图进场
   // 动画),旧视图副本盖在上层播放离场动画,结束后卸载并重测高度
   // (窗口跟随新视图内容)。过渡中不响应再次切换(0.17s 极短)
@@ -813,11 +907,12 @@ export function AgentView({
   // 展开动画布局,测量结果下一帧生效,展开更顺)。消息内部高度变化
   // (工具卡片展开/媒体 aspect)由 MessageWindow 的 ResizeObserver 驱动
   // onLayoutChange → 本函数重测(2026-08-12 起,原 MutationObserver/
-  // 容器 ResizeObserver 兜底已并入虚拟滚动)
+  // 容器 ResizeObserver 兜底已并入虚拟滚动)。**view 入 deps**(2026-08-14):
+  // 视图切换当帧即重测(~16ms),不等旧视图离场 200ms 后的定时器
   useLayoutEffect(() => {
     const raf = requestAnimationFrame(measureHeight)
     return () => cancelAnimationFrame(raf)
-  }, [measureHeight, messages, streaming, status, lastError, phase])
+  }, [measureHeight, view, messages, streaming, status, lastError, phase])
 
   // 卸载时清理测量节流计时器
   useEffect(() => () => window.clearTimeout(measureTimerRef.current), [])
@@ -1217,12 +1312,11 @@ export function AgentView({
             主对话**,选中某会话后面板内小窗展示该会话 */}
         {(
           <div ref={dockRef} className={`island-session-dock${sessionOpen ? ' open' : ''}`}>
-            {/* 会话按钮:粘在面板左缘外侧的小突起——面板向左展开时
-                按钮随之一起位移(胶水粘在左缘) */}
+            {/* 会话按钮:矩形左缘突起(一体式) */}
             <button
               type="button"
               className="island-session-fold"
-              title="外部会话"
+              title="会话切换"
               aria-expanded={sessionOpen}
               onClick={() => setSessionOpen((o) => !o)}
             >
@@ -1231,24 +1325,34 @@ export function AgentView({
                 <span className="island-session-fold-dot" aria-hidden="true" />
               )}
             </button>
-            {/* 面板:截断圆角矩形(右缘贴窗口边,被"截断"观感),固定形状 */}
+            {/* 面板:纯会话切换器(2026-08-13 七轮)——悬停即把主对话
+                窗口切到对应上下文;主对话入口一键切回(快照保留) */}
             <div className="island-session-panel">
-              {/* 左列:会话名称列表(可滚动,容纳更多会话) */}
               <div className="island-session-left">
-                <div className="island-session-title">会话</div>
+                <div className="island-session-title">会话切换</div>
+                <button
+                  type="button"
+                  className={`island-session-item${currentSessionKey !== 'main' ? '' : ' on'}`}
+                  onClick={() => onSwitchSession?.('main')}
+                >
+                  <span className="island-session-name">
+                    <span className="island-session-name-title">主对话(主人)</span>
+                    <span className="island-session-name-caption">切换回主人对话(快照恢复)</span>
+                  </span>
+                </button>
                 {(sessionList ?? []).length === 0 && (
-                  <div className="island-session-chat-empty">暂无外部会话(收到 QQ 私聊/群消息后自动创建)</div>
+                  <div className="island-session-chat-empty">暂无外部会话(收到/发出 QQ 消息后自动创建)</div>
                 )}
                 {(sessionList ?? []).map((it) => (
                   <button
                     key={it.key}
                     type="button"
-                    className={`island-session-item${panelSession?.key === it.key ? ' on' : ''}`}
-                    onClick={() => onSelectPanelSession?.(it.key)}
+                    className={`island-session-item${currentSessionKey === it.key ? ' on' : ''}`}
+                    onClick={() => onSwitchSession?.(it.key)}
                   >
                     <span className="island-session-name">
-                      {it.kind === 'group' ? '群聊 · ' : '私聊 · '}
-                      {it.title}
+                      <span className="island-session-name-title">{it.title}</span>
+                      <span className="island-session-name-caption">{it.caption || (it.kind === 'group' ? '群聊' : '私聊')}</span>
                     </span>
                     {(unreadCounts?.[it.key] ?? 0) > 0 && (
                       <span className="island-session-unread">{unreadCounts![it.key]}</span>
@@ -1256,56 +1360,60 @@ export function AgentView({
                   </button>
                 ))}
               </div>
-              {/* 右列:对话框(对方消息右、LLM 消息左,QQ 视角) */}
-              <div className="island-session-right">
-                {!panelSession ? (
-                  <div className="island-session-chat-empty">选择左侧会话查看对话</div>
-                ) : (
-                  <>
-                    <div className="island-session-chat-head">
-                      <span className="island-session-chat-title">
-                        {panelSession.kind === 'group' ? '群聊 · ' : '私聊 · '}
-                        {panelSession.title}
-                      </span>
-                    </div>
-                    <div ref={panelChatBodyRef} className="island-session-chat-body">
-                      {panelSession.messages.length === 0 && (
-                        <div className="island-session-chat-empty">暂无消息</div>
-                      )}
-                      {panelSession.messages.map((m) => (
-                        <div
-                          key={m.id}
-                          className={`island-session-chat-msg${m.role === 'user' ? ' user' : ''}`}
-                        >
-                          <Markdown text={m.role === 'user' ? stripNapcatInstructions(textFromMessage(m)) : textFromMessage(m)} plainMermaid={m.role === 'user'} />
-                        </div>
-                      ))}
-                      {panelSession.streaming && panelSession.streaming.text && (
-                        <div className="island-session-chat-msg">
-                          <Markdown text={panelSession.streaming.text} />
-                        </div>
-                      )}
-                    </div>
-                    <div className="island-session-chat-input">
-                      <input
-                        type="text"
-                        placeholder="以主人身份回复(自动发给对方)"
-                        spellCheck={false}
-                        onKeyDown={(event) => {
-                          if (event.key === 'Enter' && !event.nativeEvent.isComposing) {
-                            const v = (event.target as HTMLInputElement).value.trim()
-                            if (v) {
-                              panelSession.send(v)
-                              ;(event.target as HTMLInputElement).value = ''
-                            }
-                          }
-                        }}
-                      />
-                    </div>
-                  </>
-                )}
-              </div>
             </div>
+          </div>
+        )}
+        {/* 会话上下文横幅(2026-08-13 八轮):查看外部会话历史时,
+            对话窗口上方显示会话名 + 会话操作(情况记录/快捷清空);
+            高度计入岛体测量(见 measureHeight bannerH) */}
+        {currentSessionKey && currentSessionKey !== 'main' && (
+          <div ref={bannerRef} className="island-session-current">
+            {sessionNoteEdit ? (
+              <div className="island-session-note-editor">
+                <textarea
+                  className="island-session-note-input"
+                  value={sessionNoteDraft}
+                  placeholder="记录本会话情况(如:对方身份/最近聊什么/回复风格)——每轮回复都会参考;清空上下文不会清除记录"
+                  onChange={(e) => setSessionNoteDraft(e.target.value)}
+                  rows={2}
+                />
+                <div className="island-session-note-actions">
+                  <button type="button" className="island-session-ctl" onClick={saveSessionNote}>
+                    保存
+                  </button>
+                  <button type="button" className="island-session-ctl" onClick={cancelSessionNote}>
+                    取消
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <>
+                <span className="island-session-current-title">
+                  {(() => {
+                    const it = (sessionList ?? []).find((x) => x.key === currentSessionKey)
+                    return it ? it.title : currentSessionKey
+                  })()}
+                </span>
+                <span className="island-session-current-actions">
+                  <button
+                    type="button"
+                    className={`island-session-ctl${sessionNoteText ? ' has-note' : ''}`}
+                    title={sessionNoteText ? `情况记录:${sessionNoteText.slice(0, 30)}${sessionNoteText.length > 30 ? '…' : ''}` : '写情况记录(该会话上下文备忘,每轮回复参考)'}
+                    onClick={startEditNote}
+                  >
+                    {sessionNoteText ? '记录' : '记录'}
+                  </button>
+                  <button
+                    type="button"
+                    className={`island-session-ctl danger${clearArmed ? ' armed' : ''}`}
+                    title="清空该会话上下文(消息历史,记录保留)"
+                    onClick={handleClearSession}
+                  >
+                    {clearArmed ? '确认清空' : '清空'}
+                  </button>
+                </span>
+              </>
+            )}
           </div>
         )}
         <div
@@ -1384,10 +1492,13 @@ export function AgentView({
                     只有一行,执行中脉冲/成功失败计数实时更新;展开可
                     看各卡状态,卡片 key 稳定 → open 状态跨事件保留) */}
                 {streaming && (streaming.text || streaming.tools.length > 0) && (
-                  <div className="island-agent-msg-assistant">
+                  <div className={`island-agent-msg-assistant${hasTurnMark(streaming.text) ? ' qq-peer' : ''}`}>
+                    {hasTurnMark(streaming.text) && <PeerTurnTag />}
                     {streaming.text && (
                       <div className="island-agent-text">
-                        <Markdown text={streaming.text} caret />
+                        {/* 流式前缀可能先到指纹标记(未凑齐时 strip 不命中,
+                            凑齐即剥)——与落定消息同款剥离,气泡不露标记 */}
+                        <Markdown text={stripTurnMarks(streaming.text)} caret />
                       </div>
                     )}
                     {streaming.tools.length > 0 && (

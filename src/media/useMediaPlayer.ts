@@ -134,7 +134,12 @@ export function useMediaPlayer(): MediaPlayer {
           // seek 失败忽略(照常播放)
         }
       }
-      audio.play().catch(() => setPhase('idle'))
+      audio.play().catch(() => {
+        // 审计修复(2026-08-14 DEF-1):自动播放被浏览器策略拒绝时回退
+        // 暂停态并提示用户(原 .catch(() => {}) 静默吞错,用户不知为何无声)
+        setPhase('idle')
+        console.warn('[useMediaPlayer] 自动播放被拒绝:浏览器可能要求用户先交互')
+      })
     }
     audio.addEventListener('canplay', onReady)
     if (timerRef.current !== null) window.clearTimeout(timerRef.current)
@@ -151,7 +156,11 @@ export function useMediaPlayer(): MediaPlayer {
       playTrack(0)
       return
     }
-    audio.play().catch(() => {})
+    audio.play().catch(() => {
+      // 审计修复(2026-08-14 DEF-1):原静默吞错 → 回退暂停态 + 警告
+      setPhase('idle')
+      console.warn('[useMediaPlayer] play() 失败:可能未满足自动播放策略')
+    })
   }, [playTrack])
 
   const pause = useCallback(() => {
@@ -169,7 +178,11 @@ export function useMediaPlayer(): MediaPlayer {
     const audio = audioRef.current
     if (!audio) return
     audio.currentTime = 0
-    audio.play().catch(() => {})
+    audio.play().catch(() => {
+      // 审计修复(2026-08-14 DEF-1):重播失败时回退暂停态
+      setPhase('idle')
+      console.warn('[useMediaPlayer] 重播失败:可能未满足自动播放策略')
+    })
   }, [])
 
   /** 手动下一首:总是切歌——顺序 → 列表顺延;随机 → 随机曲目(单曲时退回顺序);

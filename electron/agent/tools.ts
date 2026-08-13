@@ -44,6 +44,24 @@ function userDataDir(): string {
   }
 }
 
+/**
+ * 审计修复(2026-08-14 SEC-2):文件路径安全校验——拦截写入/读取系统
+ * 关键目录,防止 LLM 被 prompt injection 诱导操作敏感路径。
+ * 仅作为最后防线,桌面助手语义下用户文件操作不受限。
+ */
+const SENSITIVE_PATH_PATTERNS = [
+  /\\Windows\\/i, /\/etc\//, /\/proc\//, /\/sys\//,
+  /\\System32\\/i, /\\WinSxS\\/i,
+]
+function assertPathSafe(filePath: string): void {
+  const normalized = path.resolve(filePath)
+  for (const pat of SENSITIVE_PATH_PATTERNS) {
+    if (pat.test(normalized)) {
+      throw new Error(`路径安全校验失败:不允许操作系统关键目录 ${normalized}`)
+    }
+  }
+}
+
 /** xxt 可执行产物(本地构建的 pyinstaller onedir 在 dist/xxt/ 下;
  * 不存在时回退系统 python + 源码脚本) */
 const XXT_EXE = path.join(toolsRoot(), 'xxt', 'dist', 'xxt', 'xxt.exe')
@@ -793,6 +811,12 @@ const LIST_LIMIT = 200
 
 /** 执行 shell 命令(Windows 走 cmd.exe,shell: true) */
 function runCommand(command: string, cwd: string, timeoutMs: number): Promise<string> {
+  // 测试 stub(2026-08-14):AGENT_TEST_STUB_SHELL=1 时不起真实进程——
+  // 此前测试里 `start "some title"` 等命令真被 cmd 执行,每次跑测试
+  // 都弹一个标题为 some title 的终端窗口;生产不设此变量,零影响
+  if (process.env.AGENT_TEST_STUB_SHELL === '1') {
+    return Promise.resolve(`(测试 stub,命令未真实执行:${command})`)
+  }
   return new Promise((resolve, _reject) => {
     exec(
       command,
@@ -1127,6 +1151,7 @@ export function createTools(deps: {
       async execute(params: ToolParams) {
         const filePath = String(params.path ?? '')
         if (!filePath) throw new Error('path 不能为空')
+        assertPathSafe(filePath) // 审计 SEC-2:拦截系统关键目录
         const text = await fs.readFile(filePath, 'utf8')
         const max = Math.min(Math.max(Number(params.maxChars) || RESULT_MAX, 200), 100000)
         return text.length > max ? text.slice(0, max) + `\n…(内容过长,已截断到 ${max} 字符)` : text
@@ -1147,6 +1172,7 @@ export function createTools(deps: {
         const filePath = String(params.path ?? '')
         const content = String(params.content ?? '')
         if (!filePath) throw new Error('path 不能为空')
+        assertPathSafe(filePath) // 审计 SEC-2:拦截系统关键目录
         await fs.mkdir(path.dirname(filePath), { recursive: true })
         await fs.writeFile(filePath, content, 'utf8')
         return `已写入 ${filePath}(${Buffer.byteLength(content, 'utf8')} 字节)`

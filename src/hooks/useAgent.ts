@@ -8,11 +8,15 @@
  *
  * 流式管线:文本/推理增量、工具参数增量实时更新"未落定助手消息",
  * 引擎在每轮结束时发送权威 message 事件,以它替换流式累积(单一事实来源)。
- * 中止:丢弃未落定的流式消息(引擎不会再发 message 事件)。
+ * 软停止(2026-08-14 停止与撤销分离):中止时先把已累积的部分工作落定
+ * (进行中的工具标记为"已被用户停止")+ 追加 system 停止说明,下一轮
+ * LLM 看得到"已完成部分 + 停止要求",不重复已完成的工作。
+ * 撤销(同日):原停止的回滚语义——用户气泡左侧撤销键,上下文与文件
+ * (git 快照)回滚到该轮之前的状态快照。
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { stripNapcatHistoryInstructions } from '../agent/text'
+import { hasTurnMark, stripNapcatHistoryInstructions, stripTurnMarks } from '../agent/text'
 import type {
   AgentConfig,
   AgentEvent,
@@ -116,6 +120,32 @@ function loadExternalHistory(key: string): AgentMessage[] {
   return loadHistoryFromKey(`widget-agent-session:${key}`)
 }
 
+/** 会话情况记录键(2026-08-13,用户要求"给单个会话加上情况记录"):
+ * localStorage `widget-agent-session-note:<key>`——主人为单个会话写的
+ * 上下文备忘(注入该会话 LLM 每轮参考;清空上下文**不清除**记录——
+ * 情况记录独立于消息历史) */
+export function sessionNoteKey(key: string): string {
+  return `widget-agent-session-note:${key}`
+}
+/** 读取会话情况记录(截 500 字——每轮注入上下文,超长白烧 token) */
+export function getSessionNote(key: string): string {
+  try {
+    return (localStorage.getItem(sessionNoteKey(key)) ?? '').trim().slice(0, 500)
+  } catch {
+    return ''
+  }
+}
+/** 写入会话情况记录(空串 = 删除) */
+export function setSessionNote(key: string, text: string): void {
+  try {
+    const v = (text ?? '').trim().slice(0, 500)
+    if (v) localStorage.setItem(sessionNoteKey(key), v)
+    else localStorage.removeItem(sessionNoteKey(key))
+  } catch {
+    // 存储失败(隐私模式等)静默,本次修改不生效
+  }
+}
+
 /** 按指定键加载历史(2026-08-13 会话隔离:主对话/外部会话共用) */
 function loadHistoryFromKey(key: string): AgentMessage[] {
   try {
@@ -124,11 +154,13 @@ function loadHistoryFromKey(key: string): AgentMessage[] {
     const parsed = JSON.parse(raw) as AgentMessage[]
     if (!Array.isArray(parsed)) return []
     // 轻量校验:只保留合法消息,防御旧版本脏数据
+    // system 角色(2026-08-14 软停止):停止说明消息随历史持久化,
+    // 重启后仍进引擎上下文(引擎 historyToItems 支持 system 序列化)
     return parsed.filter(
       (m) =>
         m &&
         typeof m === 'object' &&
-        (m.role === 'user' || m.role === 'assistant') &&
+        (m.role === 'user' || m.role === 'assistant' || m.role === 'system') &&
         Array.isArray(m.parts),
     )
   } catch {
@@ -185,7 +217,12 @@ export interface AgentController {
   /** 发送一轮对话。opts.silent = 系统提示静默模式(不进渲染端历史,
    * 仅作引擎本轮输入——background-done 等系统通知用) */
   send(text: string, opts?: { silent?: boolean }): void
+  /** 软停止(2026-08-14 停止与撤销分离):中止引擎并把已完成的
+   * 部分工作保留为上下文(落定 + system 停止说明),不回退 */
   abort(): void
+  /** 撤销(2026-08-14):回滚指定用户消息之前的上下文与文件(git
+   * 快照);原停止的回滚语义。busy 时先软停止再回滚 */
+  undo(messageId: string): void
   /** exec_command 确认门:回传用户选择(引擎在等待 tool-confirm-request) */
   confirmTool(approved: boolean): void
   /** 待确认的请求(引擎等待用户允许/拒绝;exec_command 带 command,
@@ -206,9 +243,17 @@ export interface AgentController {
    * 暂存,挂载后经此方法补投,首条消息不丢) */
   ingestNapcatMessage(msg: unknown): void
   ingestNapcatGroupMessage(msg: unknown): void
+  /** 已发消息回显(2026-08-13,用户要求"主对话让 LLM 发的消息切到
+   * 对应会话要有相关消息"):发送成功的正文/图片注入本会话窗口作
+   * 助手消息(与引擎 message 事件同文本去重,防同一回复显示两次;
+   * 回显带 sentToPeer 指纹风格) */
+  ingestSentMessage(msg: { text?: string; images?: string[] }): void
+  /** 仅显示注入(2026-08-14 ask 自动建会话):陌生人消息只作 user 消息
+   * 显示在本会话窗口,不触发引擎(ask 流由当前活跃实例处理) */
+  ingestDisplayUserMessage(msg: { text?: string; profileCard?: string }): void
 }
 
-export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string; muted?: boolean }): AgentController {
+export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string; muted?: boolean; active?: boolean }): AgentController {
   // 会话隔离(2026-08-13):myKey = 'main'(主人主对话)或 'private:<QQ>' /
   // 'group:<群号>'(外部会话)。每会话一个 useAgent 实例(独立状态机/
   // 独立历史/独立 busy)= 并发;记忆与档案卡经主进程共享单例共用
@@ -387,7 +432,49 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
           // 2026-08-10 自动播放:落定的消息 id 入"可自动播放"集合——
           // 本轮渲染时首条媒体附件自动播放;消费后移除(见 consumeMediaAutoPlay)
           mediaAutoPlayRef.current.add(event.message.id)
-          setMessages((prev) => [...prev, { ...event.message, usage: event.usage }])
+          // **轮次标记剥离(2026-08-13 指纹协议)**:【回复对方】/【指纹:xx】
+          // 前缀是给主进程路由层验证用的——进历史/显示前剥掉,残留旧指纹
+          // 会被下一轮 LLM 从上下文"抄"到,指纹验证对不上 = 回复发不出去
+          // **剥离前检测(2026-08-14 指纹 UI)**:首段命中指纹 = 路由发给
+          // 对方的话 → sentToPeer,气泡用"发给对方"风格与给主人的普通
+          // 回复区分(指纹剥掉后信息就丢了,必须先检测)
+          const firstTextPart = event.message.parts.find(
+            (p): p is Extract<AgentPart, { type: 'text' }> => p.type === 'text',
+          )
+          const sentToPeer = firstTextPart ? hasTurnMark(firstTextPart.text) : false
+          const landed: AgentMessage = {
+            ...event.message,
+            parts: event.message.parts.map((p) =>
+              p.type === 'text' ? { ...p, text: stripTurnMarks(p.text) } : p,
+            ),
+            usage: event.usage,
+            sentToPeer: sentToPeer || undefined,
+          }
+          setMessages((prev) => {
+            // **回显对称去重(2026-08-14)**:session-activity 回显可能先于
+            // message 事件到达,先落了同文本回显消息——近 2 条内有回显
+            // (a-sent-*)同文本则**升级替换**为本权威落定(带指纹风格/
+            // parts/usage),防同一回复显示两条且回显版丢指纹 UI
+            const firstText = landed.parts.find((p): p is Extract<AgentPart, { type: 'text' }> => p.type === 'text')
+            if (firstText) {
+              const norm = (s: string) => String(s).replace(/\s+/g, ' ').trim()
+              const want = norm(firstText.text)
+              for (let i = prev.length - 1; i >= Math.max(0, prev.length - 2); i--) {
+                const m = prev[i]
+                if (
+                  m.role === 'assistant' &&
+                  typeof m.id === 'string' &&
+                  m.id.startsWith('a-sent-') &&
+                  m.parts.some((p) => p.type === 'text' && norm(p.text) === want)
+                ) {
+                  const next = [...prev]
+                  next[i] = landed
+                  return next
+                }
+              }
+            }
+            return [...prev, landed]
+          })
           setLastError(null)
           // 主动陪伴:主动回复落定 = 一次"有操作"(重置 idle 时钟——
           // 否则每分钟重发 tick、judge 连续 yes → 每 N 分钟一条主动
@@ -399,6 +486,16 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
           resetStreaming()
           setLastError(event.message)
           setStatus('idle')
+          break
+        case 'session-context-cleared':
+          // 2026-08-13 LLM clear_session_context 工具:主进程已擦除本会话
+          // 持久化历史,这里清消息状态——**不中止当前回合**(工具在本回合
+          // 执行,回复照常落定到全新上下文;新会话 ID 使工具输出归入新
+          // 对话文件夹)
+          setMessages([])
+          resetStreaming()
+          sessionIdRef.current = newSessionId()
+          setLastError(null)
           break
         case 'tool-confirm-request':
           setPendingConfirm({ command: event.command, title: event.title, detail: event.detail })
@@ -416,7 +513,10 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
           // 与 NapCat 消息同款排队:status idle 后逐条补发
           const text = `【系统通知】${event.title}:${event.message}。请根据当前任务状态,用一两句话主动告知用户结果。`
           if (statusRef.current === 'thinking' || statusRef.current === 'running') {
-            silentQueueRef.current.push(text)
+            const queue = silentQueueRef.current
+            queue.push(text)
+            // 队列溢出保护:超过最大长度时丢弃最旧的消息
+            if (queue.length > MAX_SILENT_QUEUE) queue.shift()
             break
           }
           send(text, { silent: true })
@@ -759,13 +859,33 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
   }, [config?.proactiveEnabled, config?.proactiveInterval, config?.proactiveIntervalUnit, opts?.allowProactive, myKey])
 
   const send = useCallback(
-    (text: string, opts?: { silent?: boolean; source?: 'qq' | 'group' | 'ask'; target?: string; media?: string[]; profileCard?: string }) => {
+    async (text: string, opts?: { silent?: boolean; source?: 'qq' | 'group' | 'ask'; target?: string; media?: string[]; profileCard?: string }) => {
     const trimmed = text.trim()
     if (!trimmed) return
     if (statusRef.current === 'thinking' || statusRef.current === 'running') return
     // 主动陪伴:任何一轮对话 = 有操作(重置 idle 时钟,含 background-done
     // 的系统通知自动轮——有对话在发生就不该主动打扰)
     lastUserSendRef.current = Date.now()
+    // **撤销拍快照(2026-08-14 停止与撤销分离)**:仅主人输入轮(非静默且非
+    // QQ/群/询问触发)在 send 前拍快照——撤销要把文件回滚到"本轮指示执行
+    // 前";QQ/系统轮不拍(非主人发起,无撤销语义)。快照失败不阻断发送
+    // (撤销降级为只回滚上下文);await 后再验一次 busy(等待期间可能已
+    // 有排队消息抢先开轮)
+    const isMasterTurn =
+      !opts?.silent && opts?.source !== 'qq' && opts?.source !== 'group' && opts?.source !== 'ask'
+    let snapshotId: string | undefined
+    if (isMasterTurn) {
+      try {
+        const snap = await window.desktop?.agentUndoSnapshot?.(myKey)
+        if (snap && typeof snap.id === 'string' && snap.id) snapshotId = snap.id
+      } catch {
+        // 快照失败(无 git/主进程异常):照常发送,撤销只回滚上下文
+      }
+      // 显式取回完整状态类型:函数入口的 busy 守卫会把 statusRef.current
+      // 的控制流窄化到 'idle' | 'error',直接比较会被 TS 判无重叠
+      const stAfterSnap = statusRef.current as AgentStatus
+      if (stAfterSnap === 'thinking' || stAfterSnap === 'running') return
+    }
     const prev = messagesRef.current
     const last = prev[prev.length - 1]
     // 上一轮被中止/失败(未落定助手消息,历史以 user 消息结尾):该轮
@@ -815,6 +935,8 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
         opts?.source === 'qq' || opts?.source === 'group' || opts?.source === 'ask' ? opts.source : undefined,
       qq: opts?.target,
       profileCard: opts?.profileCard,
+      // 撤销快照 id(2026-08-14):撤销时经 agentUndoRestore 回滚 git 工作区
+      snapshotId,
     }
     const next = [...history, userMessage]
     if (opts?.silent) {
@@ -827,7 +949,7 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
       // 引擎无状态:回传完整历史(末尾 = 系统通知,引擎不再追加);
       // 带会话 ID;**source='system'(2026-08-13 泄露修复)**:系统轮回复
       // 永不路由到 QQ(此前被 pendingQQReply 当主人指示发给了陌生人)
-      window.desktop?.agentSend?.(trimmed, next, sessionIdRef.current, 'system', undefined, myKey)
+      window.desktop?.agentSend?.(trimmed, next, sessionIdRef.current, 'system', undefined, myKey, getSessionNote(myKey) || undefined)
       return
     }
     // 同步更新引用:连续 send 之间(React 尚未渲染)也能拿到最新历史,
@@ -842,6 +964,8 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
     //   的窗口轮);
     // - 'system' = 系统通知轮(background-done 等,永不路由 QQ)
     const routed = opts?.source === 'qq' || opts?.source === 'group' || opts?.source === 'ask' ? opts.source : undefined
+    // 会话情况记录(2026-08-13):随发送回传主进程 → 注入引擎输入
+    // (主进程拼系统项;空 = 不注入)——每轮参考,清空上下文不清除
     window.desktop?.agentSend?.(
       trimmed,
       next,
@@ -849,6 +973,7 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
       routed ?? 'window',
       routed ? opts?.target : undefined,
       myKey,
+      getSessionNote(myKey) || undefined,
     )
   },
     [myKey],
@@ -865,17 +990,67 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
   //   指示后的回复由主进程 pendingQQReply 链路发回;
   // - 群接话 = 带 source='group'(回复发回群)
   const napcatQueueRef = useRef<Array<{ text: string; source?: 'qq' | 'group' | 'ask'; target?: string; media?: string[]; profileCard?: string }>>([])
+  const MAX_NAPCAT_QUEUE = 50 // 队列最大长度(防LLM长时间busy时消息无限堆积)
   // 系统通知队列(2026-08-13:background-done busy 时入队,idle 后逐条
   // 补发——防"下载太快通知被吞")
   const silentQueueRef = useRef<string[]>([])
+  const MAX_SILENT_QUEUE = 20 // 通知队列最大长度
+  // **消息去重(2026-08-13 指纹协议配套,用户实测级 bug)**:外部会话消息
+  // 经双通道送达——本实例的 onNapcatMessage 订阅 + 父级(WidgetApp)
+  // 控制器 ingest(挂载后的实例两个都走)→ 同一消息触发两次 send
+  // (第二次被引擎 busy 拒绝;指纹协议下第二次 send 会重写轮次指纹,
+  // 回复回显第一轮指纹 = 验证对不上 = 被扣留)。按 messageId 去重,
+  // 有 id 才记(旧消息无 id 的仍全量处理);上限防无限膨胀。
+  // **键带通道前缀(2026-08-13 修复"群聊会话里的人消息没有正确传递
+  // 给 LLM")**:私聊与群聊的 message_id 可能同值(不同会话各自编号),
+  // 共用集合会把先到的那种消息的 id 记下、后到的同 id 消息误判重复
+  // 丢弃——私聊/群聊各自独立去重
+  const seenNapcatMsgRef = useRef(new Set<string>())
+  // 无messageId时的兜底去重(2026-08-14):基于"来源+QQ+文本前50字+时间窗口(5秒内)"
+  const fallbackDedupRef = useRef<Array<{ key: string; ts: number }>>([])
+  const dedupNapcatMsg = useCallback((id?: unknown, kind?: 'private' | 'group', extra?: { qq?: string; groupId?: string; text?: string }) => {
+    // 1. 优先使用messageId去重(带通道前缀)
+    const key = typeof id === 'string' && id ? `${kind === 'group' ? 'g' : 'p'}:${id}` : ''
+    const seen = seenNapcatMsgRef.current
+    if (key) {
+      if (seen.has(key)) return true
+      seen.add(key)
+      if (seen.size > 100) {
+        const first = seen.values().next().value
+        if (first !== undefined) seen.delete(first)
+      }
+      return false
+    }
+    // 2. 无messageId时的兜底去重(5秒内相同来源+QQ+文本视为重复)
+    if (!extra || !extra.text) return false
+    const now = Date.now()
+    const fbKey = `${kind}:${extra.qq ?? ''}:${extra.groupId ?? ''}:${extra.text.slice(0, 50)}`
+    const fbList = fallbackDedupRef.current
+    // 清理5秒前的记录
+    while (fbList.length > 0 && now - fbList[0].ts > 5000) fbList.shift()
+    // 检查是否在5秒内有相同的key
+    if (fbList.some(item => item.key === fbKey)) return true
+    fbList.push({ key: fbKey, ts: now })
+    if (fbList.length > 50) fbList.shift()
+    return false
+  }, [])
   // 私聊消息处理(订阅与父级补投共用,2026-08-13 三轮:首条消息到达时
   // 外部会话实例可能尚未挂载,父级暂存后经 ingestNapcatMessage 补投)
   const processNapcatMessage = useCallback(
-    (msg: { text?: string; qq?: string; trusted?: boolean; media?: string[]; profileCard?: string; muted?: boolean; sessionKey?: string }) => {
+    (msg: { text?: string; qq?: string; trusted?: boolean; media?: string[]; profileCard?: string; muted?: boolean; sessionKey?: string; messageId?: string }) => {
       if (!msg || typeof msg.text !== 'string') return
-      // 会话过滤(2026-08-13):只处理属于本实例的消息
+      // 双通道去重(2026-08-13):实例订阅 + 父级 ingest 会各送一次;
+      // 键带私聊前缀(2026-08-13:与群聊 message_id 可能同值,分开去重)
+      if (dedupNapcatMsg(msg.messageId, 'private', { qq: msg.qq, text: msg.text })) return
+      // 会话过滤(2026-08-13):只处理属于本实例的消息;
+      // 'ask' 哨兵(2026-08-13 八轮,用户要求"询问直接发送在已打开的
+      // 会话窗口"):只有**当前查看中**的实例接收询问消息
       const msgKey = msg.sessionKey || `private:${String(msg.qq ?? '')}`
-      if (msgKey !== myKey) return
+      if (msgKey === 'ask') {
+        if (!opts?.active) return
+      } else if (msgKey !== myKey) {
+        return
+      }
       // trusted: true = 白名单(自主回复,带 source='qq');false = 陌生人
       // (source='ask'——询问同步:回复发到主人 QQ;2026-08-13 三轮起
       // 陌生人消息 sessionKey='main',询问留在主对话)
@@ -887,16 +1062,23 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
         return
       }
       if (statusRef.current === 'thinking' || statusRef.current === 'running') {
-        napcatQueueRef.current.push({ text: msg.text, source: msg.trusted === false ? 'ask' : 'qq', target: msg.qq, media: msg.media, profileCard: msg.profileCard })
+        const queue = napcatQueueRef.current
+        queue.push({ text: msg.text, source: msg.trusted === false ? 'ask' : 'qq', target: msg.qq, media: msg.media, profileCard: msg.profileCard })
+        // 队列溢出保护:超过最大长度时丢弃最旧的消息
+        if (queue.length > MAX_NAPCAT_QUEUE) queue.shift()
         return
       }
       send(msg.text, { source: msg.trusted === false ? 'ask' : 'qq', target: msg.qq, media: msg.media, profileCard: msg.profileCard })
     },
-    [send, myKey],
+    [send, myKey, opts?.active, dedupNapcatMsg],
   )
   const processNapcatGroupMessage = useCallback(
-    (msg: { text?: string; groupId?: string; media?: string[]; profileCard?: string; muted?: boolean; sessionKey?: string }) => {
+    (msg: { text?: string; qq?: string; groupId?: string; media?: string[]; profileCard?: string; muted?: boolean; sessionKey?: string; messageId?: string }) => {
       if (!msg || typeof msg.text !== 'string') return
+      // 双通道去重(2026-08-13):实例订阅 + 父级 ingest 会各送一次;
+      // 键带群聊前缀(2026-08-13:与私聊 message_id 可能同值,分开去重
+      // ——修复"群聊会话里的人消息没有正确传递给 LLM")
+      if (dedupNapcatMsg(msg.messageId, 'group', { qq: msg.qq, groupId: msg.groupId, text: msg.text })) return
       const gKey = msg.sessionKey || `group:${String(msg.groupId ?? '')}`
       if (gKey !== myKey) return
       if (msg.muted) {
@@ -907,13 +1089,74 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
         return
       }
       if (statusRef.current === 'thinking' || statusRef.current === 'running') {
-        napcatQueueRef.current.push({ text: msg.text, source: 'group', target: msg.groupId, media: msg.media, profileCard: msg.profileCard })
+        const queue = napcatQueueRef.current
+        queue.push({ text: msg.text, source: 'group', target: msg.groupId, media: msg.media, profileCard: msg.profileCard })
+        // 队列溢出保护:超过最大长度时丢弃最旧的消息
+        if (queue.length > MAX_NAPCAT_QUEUE) queue.shift()
         return
       }
       send(msg.text, { source: 'group', target: msg.groupId, media: msg.media, profileCard: msg.profileCard })
     },
-    [send, myKey],
+    [send, myKey, dedupNapcatMsg],
   )
+  // 已发消息回显(2026-08-13,用户要求"主对话让 LLM 发的消息,切到
+  // 对应会话要有相关消息(实际 QQ 已发送)"):发送成功广播(napcat:
+  // session-activity 的 text/images)注入本会话窗口作助手消息。
+  // 去重:外部会话面板输入 → 引擎回复 → sendToQQ 路由与引擎 message
+  // 事件是同一条回复——末尾已有同文本助手消息则跳过(两者经不同 IPC
+  // 竞态到达,消息事件通常先到;向后看 2 条防竞态)
+  const ingestSentMessage = useCallback((msg: { text?: string; images?: string[] }) => {
+    const text = (msg?.text ?? '').trim()
+    const images = Array.isArray(msg?.images)
+      ? msg.images.filter((p): p is string => typeof p === 'string' && p.trim().length > 0)
+      : []
+    if (!text && images.length === 0) return
+    const parts: AgentPart[] = []
+    if (text) parts.push({ type: 'text', text })
+    for (const url of images) parts.push({ type: 'media', kind: 'img', url, name: '发送的图片' })
+    setMessages((prev) => {
+      if (text) {
+        const tail = prev.slice(-2)
+        // 去重比较做**空白归一**(2026-08-13 实测:引擎 message 事件的
+        // 原文 vs 发回 QQ 的最终文本经 stripToolNarration 等按句切分
+        // 重组,换行可能被压平——精确比较永不命中,同一回复显示两条
+        // 助手消息;归一化后「已收到在吗」与「已收到 在吗」同判
+        const norm = (s: string) => String(s).replace(/\s+/g, ' ').trim()
+        const dup = tail.some(
+          (m) => m.role === 'assistant' && m.parts.some((p) => p.type === 'text' && norm(p.text) === norm(text)),
+        )
+        if (dup) return prev
+      }
+      return [
+        ...prev,
+        {
+          id: `a-sent-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+          role: 'assistant' as const,
+          parts,
+          // 回显 = 实际经 QQ 发给该会话对方的消息 → 指纹风格 UI
+          // (2026-08-14 修复"切会话/群自动回复后指纹风格丢失")
+          sentToPeer: true,
+        },
+      ]
+    })
+  }, [])
+  // 仅显示注入(2026-08-14 ask 自动建会话):陌生人私聊消息 sessionKey='ask'
+  // 投给当前活跃实例走 ask 流,但会话面板仍要为其建会话条目——对方原
+  // 消息经此方法只作 user 消息显示在对应会话窗口,**不能**走
+  // ingestNapcatMessage(会触发引擎二次发送)
+  const ingestDisplayUserMessage = useCallback((msg: { text?: string; profileCard?: string }) => {
+    const text = (msg?.text ?? '').trim()
+    if (!text) return
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: `u-disp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        role: 'user' as const,
+        parts: [{ type: 'text', text }],
+        profileCard: msg?.profileCard,
+      },
+    ])
+  }, [])
   useEffect(() => {
     const offs: Array<() => void> = []
     const off1 = window.desktop?.onNapcatMessage?.((msg) => processNapcatMessage(msg))
@@ -951,11 +1194,82 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
   }, [status])
 
   const abort = useCallback(() => {
-    window.desktop?.agentAbort?.()
-    // 丢弃未落定的流式消息(引擎中止后不会再发 message 事件;
-    // 镜像同步清空 + 取消未提交的合批帧)
+    // **软停止(2026-08-14 停止与撤销分离)**:中止前先把本轮已累积部分
+    // 落定为 assistant 消息——文本/推理段 + 工具调用/结果按现有镜像组装,
+    // 进行中的工具(无 ok)标记为失败、结果"已被用户停止";打 interrupted
+    // 标记(气泡挂"已停止"标签)。紧随一条 system 停止说明:下一轮 LLM
+    // 看得到"已完成部分 + 停止要求",不重复已完成的工作(原实现丢弃全部
+    // = LLM 把同一批活重干一遍)
+    const s = streamingRef.current
+    const hasContent = Boolean(s.text.trim() || s.reasoning.trim()) || s.tools.length > 0
+    if (hasContent) {
+      const parts: AgentPart[] = []
+      if (s.reasoning) parts.push({ type: 'reasoning', text: s.reasoning })
+      if (s.text) parts.push({ type: 'text', text: s.text })
+      for (const t of s.tools) {
+        parts.push({ type: 'tool-call', id: t.id, name: t.name, args: t.args ?? {} })
+        parts.push({
+          type: 'tool-result',
+          id: t.id,
+          name: t.name,
+          ok: t.ok ?? false,
+          result: t.ok === undefined ? '已被用户停止' : (t.result ?? ''),
+          durationMs: t.durationMs ?? 0,
+        })
+      }
+      const rand = () => Math.random().toString(36).slice(2, 8)
+      setMessages((prev) => [
+        ...prev,
+        { id: `a-int-${Date.now()}-${rand()}`, role: 'assistant', parts, interrupted: true },
+        {
+          id: `s-int-${Date.now()}-${rand()}`,
+          role: 'system',
+          parts: [
+            {
+              type: 'text',
+              text: '【系统】用户手动停止了上一轮,以上是该轮已完成的部分。不要重复已完成的工作,等待用户新指示。',
+            },
+          ],
+        },
+      ])
+    }
+    // sessionKey 传本会话(2026-08-13 修复"外部会话停止按钮无效"):
+    // 主进程按会话键中止对应引擎,外部会话不再误打主引擎
+    window.desktop?.agentAbort?.(myKey)
+    // 清空镜像 + 取消未提交的合批帧;立即置 idle——迟到的流式事件被
+    // statusRef 守卫丢弃(防幽灵残留,与 clear 同款语义)
     resetStreaming()
-  }, [resetStreaming])
+    setStatus('idle')
+  }, [resetStreaming, myKey])
+
+  const undo = useCallback(
+    async (messageId: string) => {
+      const list = messagesRef.current
+      const idx = list.findIndex((m) => m.id === messageId && m.role === 'user')
+      if (idx === -1) return
+      const target = list[idx]
+      // busy 时先软停止(保留已完成部分再回滚——停止落定的消息属于本轮,
+      // 下方截断连同本轮全部内容一起消失,无残留)
+      if (statusRef.current === 'thinking' || statusRef.current === 'running') abort()
+      // 文件回滚(git 快照):无快照 id(监控目录未配置/旧消息)→ 跳过,
+      // 上下文照常回滚;失败不阻断(主进程已弹通知说明)
+      if (target.snapshotId) {
+        try {
+          await window.desktop?.agentUndoRestore?.(target.snapshotId)
+        } catch {
+          // git 回滚失败:上下文仍回滚(撤销的核心语义)
+        }
+      }
+      // 截断上下文到该用户消息之前(localStorage 持久化 effect 自动跟随)
+      setMessages(list.slice(0, idx))
+      resetStreaming()
+      setStatus('idle')
+      setLastError(null)
+      // 主动陪伴:撤销 = 一次"有操作"(重置 idle 时钟)
+      lastUserSendRef.current = Date.now()
+    },
+    [abort, resetStreaming],
+  )
 
   const clear = useCallback(() => {
     // **中止正在运行的回合(2026-08-11 修复"新对话后对话窗口仍 16:9")**:
@@ -975,7 +1289,11 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
     // 自动播放标记随会话清空(历史/新会话不自动播)
     mediaAutoPlayRef.current.clear()
     const current = messagesRef.current
-    if (current.length > 0) {
+    // **仅主对话存档对话历史(2026-08-13 会话隔离配套)**:SESSIONS_KEY
+    // 是共享归档(主对话"对话历史"视图读取)——外部会话清空上下文若
+    // 也归档,会把该会话的消息塞进主对话的对话历史(污染);外部会话
+    // 的历史就是它自己(widget-agent-session:<key>),清空 = 直接擦除
+    if (myKey === 'main' && current.length > 0) {
       const title = currentTitleRef.current?.trim() || '对话'
       const session: AgentSession = {
         id: `s-${Date.now()}`,
@@ -992,7 +1310,7 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
     setMindGuess(null)
     // 主动陪伴:切换会话 = 有操作(新会话从零计时)
     lastUserSendRef.current = Date.now()
-  }, [abort, resetStreaming])
+  }, [abort, resetStreaming, myKey])
 
   const loadSession = useCallback((id: string) => {
     const target = sessionsRef.current.find((s) => s.id === id)
@@ -1053,8 +1371,13 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
     // 暂存,挂载后经此方法补投,首条消息不丢)
     ingestNapcatMessage: processNapcatMessage,
     ingestNapcatGroupMessage: processNapcatGroupMessage,
+    // 已发消息回显(2026-08-13:主对话让 LLM 发的消息注入对应会话窗口)
+    ingestSentMessage,
+    // 仅显示注入(2026-08-14:ask 自动建会话的陌生人原消息)
+    ingestDisplayUserMessage,
     send,
     abort,
+    undo,
     clear,
     loadSession,
     deleteSession,

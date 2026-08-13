@@ -40,6 +40,8 @@ import {
   looksLikeSentenceTitle,
   looksLikeIncompleteMind,
   cutMindSentence,
+  salvageMindClause,
+  sanitizeMind,
   fallbackTitle,
 } from '../electron/agent/engine'
 import { buildToolsGuideBlock, createTools, toolOutputDir } from '../electron/agent/tools'
@@ -47,18 +49,36 @@ import {
   buildProfileCard,
   createNapcatTools,
   extractImageRefs,
+  extractReplyToStranger,
+  extractTurnFingerprint,
   gtkFromCookie,
+  isAskTurnToMaster,
+  isValidSessionKey,
   napcatMessageImages,
   napcatMessageText,
+  newTurnFingerprint,
+  REPLY_TO_STRANGER_MARK,
+  sessionKeyFor,
   stripMasterNarration,
   stripThinkingPreamble,
   stripToolNarration,
+  turnAlreadySentToPending,
+  turnAlreadySentToTarget,
+  type NapcatToolDeps,
 } from '../electron/agent/napcat'
 import { MASTER_IDENTITY_LINE, MASTER_QQ } from '../electron/agent/constants'
 import { streamResponse } from '../electron/agent/deepseek'
 import { sanitizeUnpairedSurrogates } from '../electron/agent/sse'
+
+// createNapcatTools 现签名收 { client, getSessionKey?, confirmDangerous? } 单参
+// (engine.ts 以 deps.napcat 包成 client 注入);测试直接平铺 mock client 方法,
+// 这里统一包一层,第二参并入 deps(旧两参调用兼容)
+function napcatTools(mockClient: object, opts?: Omit<NapcatToolDeps, 'client'>) {
+  return createNapcatTools({ ...(opts ?? {}), client: mockClient as NapcatToolDeps['client'] })
+}
 import { createWsSocket, encodeWsFrame, parseWsUrl, WsFrameParser } from '../electron/agent/wsclient'
-import { stripNapcatHistoryInstructions, stripNapcatInstructions } from '../src/agent/text'
+import { snapshotWatchDirs, restoreUndoSnapshot, releaseUndoRef, type GitExec } from '../electron/agent/undo'
+import { stripNapcatHistoryInstructions, stripNapcatInstructions, stripTurnMarks } from '../src/agent/text'
 import {
   getTasksStatusBlock,
   listTasks,
@@ -70,8 +90,14 @@ import {
   type AgentTask,
 } from '../electron/agent/tasks'
 import { createMusicControlTools, createSettingsTools } from '../electron/agent/settingsTools'
+import { createSessionTools } from '../electron/agent/sessionTools'
 import { applyChanges, createEvolution, isCleanupChange, mapSeqToEntry } from '../electron/agent/evolution'
 import type { AgentMessage, AgentTool, McpServerConfig, MemoryEntry } from '../electron/agent/types'
+
+// exec_command 的 shell stub(2026-08-14):测试里 `start "some title"`/`dir`
+// 等命令不再真起 cmd 进程——此前每次跑测试都弹一个标题为 some title
+// 的终端窗口(runCommand 运行时读此变量,生产不设)
+process.env.AGENT_TEST_STUB_SHELL = '1'
 
 // 打包产物运行时路径会变(import.meta.url 指向 node_modules/.cache),
 // mock 服务器目录由 esbuild define 注入(__ROOT__ = 项目根)
@@ -1462,6 +1488,27 @@ await test('cutMindSentence:超长 raw 取第一个句末标点前的完整小�
   assert(cutMindSentence('嘴上说够,心里嘀咕:问倒我算了') === null, '正常长度(≤16)不触发截取')
   assert(cutMindSentence('哈哈!') === null, '截取结果过短(<4)判废')
   assert(cutMindSentence('') === null, '空串返回 null')
+})
+
+await test('salvageMindClause:无句末标点的逗号串长句取 ≤16 码元最长前缀小句', () => {
+  // 实机样本(2026-08-14):粤语人格持续输出逗号串,cutMindSentence 无从截取
+  assert(
+    salvageMindClause('收到,以后我答嘢快狠准,唔会再长篇大论') === '收到,以后我答嘢快狠准',
+    '取 16 码元内最后一个逗号前的完整前缀小句',
+  )
+  assert(salvageMindClause('哈哈,') === null, '前缀小句过短(<4)返回 null')
+  assert(salvageMindClause('心里在偷乐呢') === null, '无逗号返回 null')
+  assert(salvageMindClause('就是,后面还有好多话要说') === null, '前缀收在连词上判废')
+  assert(salvageMindClause('') === null, '空串返回 null')
+})
+
+await test('sanitizeMind:引号/首尾括号/前缀/尾随标点清洗', () => {
+  // 实机样本(2026-08-14):开头全角左括号无闭合,原字符类不含括号透传显示
+  assert(sanitizeMind('（这下总该明白了吧') === '这下总该明白了吧', '无闭合的开头全角左括号应剥除')
+  assert(sanitizeMind('（心里在偷乐）') === '心里在偷乐', '成对全角括号首尾剥除')
+  assert(sanitizeMind('「嘴上淡定」') === '嘴上淡定', '引号剥除不回归')
+  assert(sanitizeMind('心理揣测:在慌') === '在慌', '前缀剥除')
+  assert(sanitizeMind('这下明白了吧。') === '这下明白了吧', '尾随句末标点剥除')
 })
 
 // ---------------------------------------------------------------------------
@@ -3365,7 +3412,7 @@ await test('napcat 工具:status/recent 格式化,send/send_group 校验与透�
   const calls: Array<{ kind: 'qq' | 'group'; target: string; text: string }> = []
   const contactWrites: Array<{ qq: string; name?: string; info?: string }> = []
   let contacts: Record<string, { qq: string; name?: string; info?: string; source?: 'private' | 'group'; updatedAt: number }> = {}
-  const tools = createNapcatTools({
+  const tools = napcatTools({
     status: () => ({ connected: true, url: 'ws://127.0.0.1:3001', lastError: '', receivedCount: 3, repliedCount: 2 }),
     sendToQQ: async (qq, text) => {
       calls.push({ kind: 'qq', target: qq, text })
@@ -3395,6 +3442,9 @@ await test('napcat 工具:status/recent 格式化,send/send_group 校验与透�
   })
   const tool = tools.find((t) => t.name === 'napcat')!
   assert(tool !== undefined, 'napcat 工具应注册')
+  // 2026-08-14:file 发视频上传可达 180s,必须声明工具级 timeoutMs 覆盖
+  // 引擎 60s 兜底超时——否则 QQ 实际收到了但工具报超时,LLM 误报没发成功
+  assert((tool.timeoutMs ?? 0) >= 200_000, `napcat 工具应声明 >=200s 的 timeoutMs(覆盖上传),实际:${tool.timeoutMs}`)
   const status = String(await tool.execute({ action: 'status' }))
   assert(status.includes('已连接') && status.includes('3 条') && status.includes('2 条'), `status 应含连接与统计,实际:${status}`)
   const recent = String(await tool.execute({ action: 'recent' }))
@@ -3416,8 +3466,58 @@ await test('napcat 工具:status/recent 格式化,send/send_group 校验与透�
   await assertRejects(() => tool.execute({ action: 'send', message: '缺 QQ 号' }), 'send 需要 user_id')
   await assertRejects(() => tool.execute({ action: 'send', user_id: '1' }), 'send 需要 message')
   await assertRejects(() => tool.execute({ action: 'send_group', message: '缺群号' }), 'send_group 需要 group_id')
-  await assertRejects(() => tool.execute({ action: 'send_group', group_id: '1' }), 'send_group 需要 message、file 或 image')
-  await assertRejects(() => tool.execute({ action: 'nope' }), 'action 仅支持')
+})
+
+await test('napcat 工具:send/send_group 缺省目标 = 当前会话对象(2026-08-13 指向性)', async () => {
+  const calls: Array<{ kind: 'qq' | 'group'; target: string; text: string }> = []
+  let sessionKey: string | null = 'private:222'
+  const tools = napcatTools(
+    {
+      status: () => ({ connected: true, url: '', lastError: '', receivedCount: 0, repliedCount: 0 }),
+      sendToQQ: async (qq, text) => {
+        calls.push({ kind: 'qq', target: qq, text })
+        return 'm1'
+      },
+      sendToGroup: async (groupId, text) => {
+        calls.push({ kind: 'group', target: groupId, text })
+        return 'm2'
+      },
+      getRecentMessages: () => [],
+      getContacts: async () => ({}),
+      updateContact: async (p) => ({ qq: p.qq, updatedAt: 0 }),
+    },
+    { getSessionKey: () => sessionKey },
+  )
+  const tool = tools.find((t) => t.name === 'napcat')!
+  // 私聊会话:send 不传 user_id → 默认发给当前会话对象("发消息给他"直落到位)
+  const r1 = String(await tool.execute({ action: 'send', message: '发消息给他' }))
+  const n1: number = calls.length
+  assert(
+    n1 === 1 && calls[0].kind === 'qq' && calls[0].target === '222' && calls[0].text === '发消息给他',
+    `私聊会话缺省应发当前会话对象,实际:${JSON.stringify(calls)}`,
+  )
+  assert(r1.includes('222'), `应回显目标 QQ,实际:${r1}`)
+  // 群会话:send_group 不传 group_id → 默认发当前会话群
+  sessionKey = 'group:999'
+  const r2 = String(await tool.execute({ action: 'send_group', message: '发到群里' }))
+  const n2: number = calls.length
+  assert(n2 === 2 && calls[1].kind === 'group' && calls[1].target === '999', `群会话缺省应发当前会话群,实际:${JSON.stringify(calls)}`)
+  assert(r2.includes('999'), `应回显目标群,实际:${r2}`)
+  // 群会话里 send(私聊)无对应缺省 → 报错提示(LLM 可自纠)
+  await assertRejects(() => tool.execute({ action: 'send', message: 'x' }), 'send 需要 user_id')
+  // 主对话 / 无会话:无缺省 → 报错
+  sessionKey = 'main'
+  await assertRejects(() => tool.execute({ action: 'send', message: 'x' }), 'send 需要 user_id')
+  await assertRejects(() => tool.execute({ action: 'send_group', message: 'x' }), 'send_group 需要 group_id')
+  sessionKey = null
+  await assertRejects(() => tool.execute({ action: 'send', message: 'x' }), 'send 需要 user_id')
+  // 显式 user_id 仍优先于缺省
+  sessionKey = 'private:222'
+  await tool.execute({ action: 'send', user_id: '333', message: '显式目标' })
+  const n3: number = calls.length
+  assert(n3 === 3 && calls[2].target === '333', '显式 user_id 应优先于会话缺省')
+  await assertRejects(() => tool.execute({ action: 'send_group', group_id: '1' }), 'send_group 需要 message/file/image 至少一个')
+  await assertRejects(() => tool.execute({ action: 'nope' }), '未知action')
 })
 
 await test('napcat 工具:send/send_group 带图片与私聊文件透传', async () => {
@@ -3431,7 +3531,7 @@ await test('napcat 工具:send/send_group 带图片与私聊文件透传', async
   await fs.writeFile(filePath, 'm')
   const qqCalls: Array<{ qq: string; text: string; image?: string; file?: string }> = []
   const groupCalls: Array<{ groupId: string; text: string; file?: string; image?: string }> = []
-  const tools = createNapcatTools({
+  const tools = napcatTools({
     status: () => ({ connected: true, url: 'ws://127.0.0.1:3001', lastError: '', receivedCount: 0, repliedCount: 0 }),
     sendToQQ: async (qq, text, opts) => {
       qqCalls.push({ qq, text, image: opts?.image, file: opts?.file })
@@ -3481,7 +3581,7 @@ await test('napcat 工具:recall / members(自动补档案) / friends / profile 
   const kicked: Array<{ groupId: string; qq: string }> = []
   const wholeBans: Array<{ groupId: string; enable: boolean }> = []
   const nameMerges: Array<{ qq: string; name?: string }> = []
-  const tools = createNapcatTools({
+  const tools = napcatTools({
     status: () => ({ connected: true, url: 'ws://127.0.0.1:3001', lastError: '', receivedCount: 0, repliedCount: 0 }),
     sendToQQ: async () => '',
     sendToGroup: async () => '',
@@ -3543,7 +3643,7 @@ await test('napcat 工具:recall / members(自动补档案) / friends / profile 
   // 群管理:禁言 / 解除(duration 0)/ 踢人 / 全员禁言
   const rBan = String(await tool.execute({ action: 'group_manage', group_id: '1045765371', op: 'ban', user_id: '20001', duration: 600 }))
   const banN: number = banned.length
-  assert(banN === 1 && banned[0].duration === 600 && rBan.includes('600 秒'), `ban 应透传时长,实际:${rBan}`)
+  assert(banN === 1 && banned[0].duration === 600 && rBan.includes('600秒'), `ban 应透传时长,实际:${rBan}`)
   const rUnban = String(await tool.execute({ action: 'group_manage', group_id: '1045765371', op: 'ban', user_id: '20001', duration: 0 }))
   const unbanN: number = banned.length
   assert(unbanN === 2 && banned[1].duration === 0 && rUnban.includes('解除'), `unban(duration 0)应透传,实际:${rUnban}`)
@@ -3607,6 +3707,111 @@ await test('stripNapcat 双通道:显示剥离档案卡/历史保留档案卡(�
   assert(stripNapcatHistoryInstructions(group).includes('称呼:群友') && !stripNapcatHistoryInstructions(group).includes('最近群聊记录'), '群聊历史保留档案卡剥规则与群上下文')
   // 空输入
   assert(stripNapcatInstructions('') === '' && stripNapcatHistoryInstructions('  ') === '', '空输入返回空')
+})
+
+await test('extractReplyToStranger:执行回复标记判定(串台根治,2026-08-13 回归)', () => {
+  // 用户实测"串台后陌生人收不到消息":只有带标记的回复才路由给
+  // 待回复陌生人并消费 pending;无标记回复留在主人侧且 pending 保留
+  const marked = extractReplyToStranger('【回复对方】哼,刚认识就要赶人家走')
+  assert(marked === '哼,刚认识就要赶人家走', `标记应剥离且保留正文,实际:${marked}`)
+  assert(extractReplyToStranger('【回复对方】') === '', '仅标记无正文应返回空串')
+  assert(extractReplyToStranger('好的主人,我知道了') === null, '无标记回复应返回 null(留在主人侧)')
+  assert(extractReplyToStranger('嗯,让我想想') === null, '主人应答不应触发路由')
+  assert(extractReplyToStranger('回复对方:你好') === null, '不含标记格式(缺【】)不触发')
+  assert(REPLY_TO_STRANGER_MARK === '【回复对方】', '标记常量一致')
+})
+
+await test('sessionKeyFor / isValidSessionKey:会话键(会话隔离,2026-08-13)', () => {
+  assert(sessionKeyFor('1178821869') === 'private:1178821869', '私聊键')
+  assert(sessionKeyFor('20001', '1045765371') === 'group:1045765371', '群聊键')
+  assert(isValidSessionKey('private:1536057397'), '合法私聊键')
+  assert(isValidSessionKey('group:1045765371'), '合法群聊键')
+  assert(!isValidSessionKey('main'), 'main 不是外部会话键(mutedSessions 校验拒收)')
+  assert(!isValidSessionKey('private:abc'), '非法 QQ 号拒收')
+  assert(!isValidSessionKey('../etc/passwd'), '路径穿越拒收')
+  assert(!isValidSessionKey('group:1045765371;rm -rf'), '注入拒收')
+})
+
+await test('turnAlreadySentToPending:防重发判定(对方收到 2-3 条,2026-08-13 回归)', () => {
+  // 本轮开始前快照 before = 0;本轮中 LLM 已用 send 工具发过 1 条 → 跳过路由
+  const sent = [
+    { type: 'private', target: '1536057397' },
+    { type: 'group', target: '1045765371' },
+  ]
+  assert(turnAlreadySentToPending(sent, 0, '1536057397') === true, '本轮已发过 → 跳过 pending 路由')
+  assert(turnAlreadySentToPending(sent, 0, '20002') === false, '未发给该陌生人 → 照常路由')
+  assert(turnAlreadySentToPending(sent, 1, '1536057397') === false, '快照已含该条(本轮未新发)→ 照常路由')
+  assert(turnAlreadySentToPending(sent, 1, '1045765371') === false, '群消息不计入私聊防重发')
+})
+
+await test('napcat 工具 sessions/session_mute/session_bind:sessions 直查列表,mute/bind 引导 manage_sessions(2026-08-14)', async () => {
+  // 2026-08-13 旧版在 napcat 工具内直接实现会话管理;2026-08-14 起增删
+  // 监听/屏蔽/绑定迁到 manage_sessions 工具(main.cjs 注入实现);
+  // sessions action 改为直查列表(未注入 listSessions 时回空列表引导)
+  const tools = napcatTools({
+    status: () => ({ connected: false, url: '', lastError: '', receivedCount: 0, repliedCount: 0 }),
+    sendToQQ: async () => '',
+    sendToGroup: async () => '',
+    getRecentMessages: () => [],
+    getContacts: async () => ({}),
+    updateContact: async (p) => ({ qq: p.qq, source: p.source, updatedAt: 0 }),
+  })
+  const napcatTool = tools.find((t) => t.name === 'napcat')!
+  const sessionsOut = String(await napcatTool.execute({ action: 'sessions' }))
+  assert(sessionsOut.includes('manage_sessions'), `sessions 空列表应引导到 manage_sessions,实际:${sessionsOut}`)
+  const muteOut = String(await napcatTool.execute({ action: 'session_mute', key: 'private:1' }))
+  assert(muteOut.includes('manage_sessions'), `session_mute 应引导到 manage_sessions,实际:${muteOut}`)
+  const bindOut = String(await napcatTool.execute({ action: 'session_bind', key: 'group:1' }))
+  assert(bindOut.includes('manage_sessions'), `session_bind 应引导到 manage_sessions,实际:${bindOut}`)
+})
+
+await test('manage_sessions 工具:list/watch/unwatch/mute/bind 直接新建监听会话(2026-08-14)', async () => {
+  // 用户要求"灵动岛设置工具支持接入会话面板,LLM 直接将监听会话在
+  // 会话面板中新建":watch 写监听名单(主进程广播种子 → 面板立即建
+  // 条目);list/mute/unmute/bind 透传 client 会话管理回调
+  const calls: Array<unknown[]> = []
+  const tools = napcatTools({
+    status: () => ({ connected: false, url: '', lastError: '', receivedCount: 0, repliedCount: 0 }),
+    listSessions: () => [
+      { key: 'private:1536057397', title: '魔精', kind: 'private' as const, muted: false },
+      { key: 'group:1045765371', title: '群 1045765371', kind: 'group' as const, muted: true },
+    ],
+    muteSession: (key: string, muted: boolean) => calls.push(['mute', key, muted]),
+    bindSession: (key: string) => calls.push(['bind', key]),
+    watchSession: (kind: string, id: string) => calls.push(['watch', kind, id]),
+    unwatchSession: (kind: string, id: string) => calls.push(['unwatch', kind, id]),
+  })
+  const tool = tools.find((t) => t.name === 'manage_sessions')
+  assert(!!tool, 'manage_sessions 工具应注册')
+  // list:列表 + 屏蔽标记
+  const list = String(await tool!.execute({ action: 'list' }))
+  assert(list.includes('private:1536057397') && list.includes('魔精'), `list 应含会话条目,实际:${list}`)
+  assert(list.includes('[已屏蔽]'), `屏蔽会话应带标记,实际:${list}`)
+  // watch 私聊/群:回调透传 + 成功文案
+  const watchPrivate = String(await tool!.execute({ action: 'watch', kind: 'private', id: '123456' }))
+  assert(watchPrivate.includes('监听名单'), `watch 应回报成功,实际:${watchPrivate}`)
+  assert(calls.some((c) => c[0] === 'watch' && c[1] === 'private' && c[2] === '123456'), 'watch 私聊应透传 watchSession')
+  const watchGroup = String(await tool!.execute({ action: 'watch', kind: 'group', id: '987654' }))
+  assert(watchGroup.includes('群 987654'), `watch 群应带群号,实际:${watchGroup}`)
+  assert(calls.some((c) => c[0] === 'watch' && c[1] === 'group' && c[2] === '987654'), 'watch 群应透传 watchSession')
+  // 参数校验:非数字 id / 缺 kind / 非法 key
+  await assertRejects(() => tool!.execute({ action: 'watch', kind: 'private', id: 'abc' }), 'id', '非数字 id 应拒绝')
+  await assertRejects(() => tool!.execute({ action: 'watch', id: '123' }), 'kind', '缺 kind 应拒绝')
+  await assertRejects(() => tool!.execute({ action: 'mute', key: 'bad' }), 'key', '非法会话键应拒绝')
+  // mute/unmute/bind 透传
+  const muteOut = String(await tool!.execute({ action: 'mute', key: 'private:123456' }))
+  assert(muteOut.includes('屏蔽'), `mute 应回报成功,实际:${muteOut}`)
+  assert(calls.some((c) => c[0] === 'mute' && c[1] === 'private:123456' && c[2] === true), 'mute 应透传 muteSession(true)')
+  const unmuteOut = String(await tool!.execute({ action: 'unmute', key: 'private:123456' }))
+  assert(unmuteOut.includes('解除'), `unmute 应回报成功,实际:${unmuteOut}`)
+  const unwatchOut = String(await tool!.execute({ action: 'unwatch', kind: 'group', id: '987654' }))
+  assert(unwatchOut.includes('移出'), `unwatch 应回报成功,实际:${unwatchOut}`)
+  assert(calls.some((c) => c[0] === 'unwatch' && c[1] === 'group' && c[2] === '987654'), 'unwatch 应透传 unwatchSession')
+  const bindOut = String(await tool!.execute({ action: 'bind', key: 'main' }))
+  assert(bindOut.includes('打开'), `bind 应回报成功,实际:${bindOut}`)
+  assert(calls.some((c) => c[0] === 'bind' && c[1] === 'main'), 'bind 应透传 bindSession')
+  // 未知 action 拒绝
+  await assertRejects(() => tool!.execute({ action: 'nope' }), '仅支持', '未知 action 应拒绝')
 })
 
 await test('buildProfileCard:档案卡聚合(联系人/人格/记忆相关/空档案)', () => {
@@ -3674,7 +3879,7 @@ await test('napcat 工具:contacts 档案查询与 contact_update 记录', async
   let contacts: Record<string, { qq: string; name?: string; info?: string; source?: 'private' | 'group'; updatedAt: number }> = {
     '10001': { qq: '10001', name: '阿白', info: '群友,喜欢猫', source: 'group', updatedAt: 1700000000 },
   }
-  const tools = createNapcatTools({
+  const tools = napcatTools({
     status: () => ({ connected: false, url: 'ws://127.0.0.1:3001', lastError: '', receivedCount: 0, repliedCount: 0 }),
     sendToQQ: async () => '',
     sendToGroup: async () => '',
@@ -3704,7 +3909,7 @@ await test('napcat 工具:chats 聊天记录备份查询与过滤', async () => 
     { id: 'g1', type: 'group' as const, target: '1045765371', qq: '20001', text: '今天天气不错', atMe: true, time: 1700000100 },
     { id: 'g2', type: 'group' as const, target: '1045765371', qq: '20002', text: '哈哈', time: 1700000200 },
   ]
-  const tools = createNapcatTools({
+  const tools = napcatTools({
     status: () => ({ connected: false, url: '', lastError: '', receivedCount: 0, repliedCount: 0 }),
     sendToQQ: async () => '',
     sendToGroup: async () => '',
@@ -3729,7 +3934,7 @@ await test('napcat 工具:persona 会话人格查询与 persona_set 设置/删�
     'group:1045765371': { persona: '群聊高冷版,话少但偶尔毒舌', updatedAt: 1700000000 },
   }
   const writes: string[] = []
-  const tools = createNapcatTools({
+  const tools = napcatTools({
     status: () => ({ connected: false, url: '', lastError: '', receivedCount: 0, repliedCount: 0 }),
     sendToQQ: async () => '',
     sendToGroup: async () => '',
@@ -3755,7 +3960,7 @@ await test('napcat 工具:persona 会话人格查询与 persona_set 设置/删�
   assert(writes.includes('private:1178821869:私聊亲近版,黏人撒娇'), 'persona_set 应写入')
   assert(set.includes('private:1178821869') && set.includes('黏人撒娇'), `应回显设置,实际:${set}`)
   // scope 校验
-  await assertRejects(() => tool.execute({ action: 'persona_set', scope: 'bad', persona: 'x' }), 'scope 需要是 private:<QQ号> 或 group:<群号>')
+  await assertRejects(() => tool.execute({ action: 'persona_set', scope: 'bad', persona: 'x' }), 'scope 需要是 private:<QQ> 或 group:<群号>')
   // 空 persona = 删除
   const del = String(await tool.execute({ action: 'persona_set', scope: 'group:1045765371', persona: '' }))
   assert(writes.includes('group:1045765371:'), '空 persona 应删除')
@@ -3808,7 +4013,7 @@ await test('napcat 工具:sent(机器人发出的消息带 ID 可撤回)与 zone
     { messageId: 'm-sent-2', type: 'group' as const, target: '1045765371', text: '大家好', time: 1700000100 },
   ]
   const zoneCalls: Array<{ qq: string; num: number }> = []
-  const tools = createNapcatTools({
+  const tools = napcatTools({
     status: () => ({ connected: false, url: '', lastError: '', receivedCount: 0, repliedCount: 0 }),
     sendToQQ: async () => '',
     sendToGroup: async () => '',
@@ -3825,12 +4030,12 @@ await test('napcat 工具:sent(机器人发出的消息带 ID 可撤回)与 zone
     },
   })
   const tool = tools.find((t) => t.name === 'napcat')!
-  // sent:列出机器人发出的消息(2026-08-12 撤回修复),带 message_id 与撤回提示
+  // sent:列出机器人发出的消息(2026-08-12 撤回修复),带 message_id(撤回用 action=recall + message_id)
   const sent = String(await tool.execute({ action: 'sent' }))
-  assert(sent.includes('m-sent-1') && sent.includes('QQ10001') && sent.includes('recall 这个 ID'), `sent 应列消息与撤回提示,实际:${sent}`)
+  assert(sent.includes('m-sent-1') && sent.includes('QQ10001') && sent.includes('message_id m-sent-1'), `sent 应列消息与 ID,实际:${sent}`)
   assert(sent.includes('m-sent-2') && sent.includes('群1045765371'), `sent 应含群消息,实际:${sent}`)
   // sent 空列表兜底
-  const emptyTools = createNapcatTools({
+  const emptyTools = napcatTools({
     status: () => ({ connected: false, url: '', lastError: '', receivedCount: 0, repliedCount: 0 }),
     sendToQQ: async () => '',
     sendToGroup: async () => '',
@@ -3908,6 +4113,12 @@ await test('stripToolNarration:剥离工具调用过程叙述(和外人聊天不
   assert(stripToolNarration('我刚帮你查了下比分,现在 KSG 领先。') === '我刚帮你查了下比分,现在 KSG 领先。', '单句叙述不应误删')
   // 正常回复不删
   assert(stripToolNarration('比分 2:1,KSG 暂时领先。第二局还在打。') === '比分 2:1,KSG 暂时领先。第二局还在打。', '正常回复不应误删')
+  // 多行回复换行保留(2026-08-13 修复:原 .trim() 把段尾 \n 剥掉,
+  // join('') 后行与行粘连——QQ 收到的多行回复换行全部丢失)
+  assert(
+    stripToolNarration('已收到\n\n称呼:魔精\n(尚无已知信息)') === '已收到\n\n称呼:魔精\n(尚无已知信息)',
+    '多行回复换行应保留',
+  )
   // 空输入
   assert(stripToolNarration('') === '' && stripToolNarration('   ') === '', '空输入返回空')
 })
@@ -4064,8 +4275,154 @@ await test('stripMasterNarration:主人视角汇报剥离(私聊窗口泄露,202
   // 全叙述且无引号 → 保留原文兜底
   const noQuote = '魔精发来一张图,我先展示给你看。图片已经展示在窗口里了。'
   assert(stripMasterNarration(noQuote) === noQuote, '无引号兜底应保留原文')
+  // 多行回复换行保留(与 stripToolNarration 同款 2026-08-13 修复)
+  assert(
+    stripMasterNarration('已收到\n\n称呼:魔精\n(尚无已知信息)') === '已收到\n\n称呼:魔精\n(尚无已知信息)',
+    '多行回复换行应保留',
+  )
   // 空输入
   assert(stripMasterNarration('') === '' && stripMasterNarration('   ') === '', '空输入返回空')
+})
+
+await test('isAskTurnToMaster:询问轮判定(2026-08-13 泄露根治——LLM 征求主人意见的回复绝不能发回对方)', () => {
+  // 用户实测泄露原文:询问主人怎么回复(扩展信任联系人,应当拦截)
+  const ask = '魔精又补了一句:「要被零封了」——原来是在说 AG 这场比赛要被打零封了(所以你说"AG少人了"他回的是这茬)。 要不要我回他一句调侃?比如:「哈哈你们AG今天这阵容确实拉胯,少人+零封预定,心疼你一秒」之类的。你说回啥,我马上发~'
+  assert(isAskTurnToMaster(ask), '用户实测询问原文应判询问轮(拦截)')
+  // 用户实测第二条:执行后的汇报(不应判询问,靠 pending+标记 拦截)
+  assert(
+    isAskTurnToMaster('好嘞,那我自由发挥啦~(っ˘з(˘⌣˘ ) ♡) 发出去了~调侃他一句,等他回话我再转告你(｡♡‿♡｡)') === false,
+    '执行后的汇报不应判询问轮',
+  )
+  // 常见询问措辞
+  assert(isAskTurnToMaster('要不要我回他一句?'), '要不要我回他一句应判询问')
+  assert(isAskTurnToMaster('你说回啥,我马上发~'), '你说回啥应判询问')
+  assert(isAskTurnToMaster('你想怎么回他?'), '你想怎么回应判询问')
+  assert(isAskTurnToMaster('等你指示,主人'), '等你指示应判询问')
+  assert(isAskTurnToMaster('我先问问主人的意见。'), '问主人应判询问')
+  assert(isAskTurnToMaster('我建议回他一句调侃,你觉得呢?'), '我建议回他+你觉得呢应判询问')
+  assert(isAskTurnToMaster('回他什么好呢'), '回他什么好呢应判询问')
+  // 直接回复(应放行,绝不能误判扣留)
+  assert(isAskTurnToMaster('哈哈确实拉胯,少人+零封预定,心疼你一秒') === false, '直接回复不应判询问')
+  assert(isAskTurnToMaster('哈哈你们AG今天这阵容确实拉胯,心疼你一秒') === false, '直接回复(含调侃原文)不应判询问')
+  assert(isAskTurnToMaster('嗯,知道了') === false, '简短应答不应判询问')
+  assert(isAskTurnToMaster('好的,我这就告诉他怎么回。') === false, '陈述句「怎么回」不应判询问(非疑问收尾)')
+  assert(isAskTurnToMaster('好的,等你消息~') === false, '「等你消息」是对对方说的话,不应判询问')
+  assert(isAskTurnToMaster('我问你一下,今晚打王者还是看KPL呀?') === false, '「我问你」是对对方说话,不应判询问')
+  assert(isAskTurnToMaster('哈哈你觉得呢?') === false, '「你觉得呢」可能问对方,弱模式不拦(宁漏勿误伤)')
+  // 空输入
+  assert(isAskTurnToMaster('') === false && isAskTurnToMaster('   ') === false, '空输入返回 false')
+})
+
+await test('turnAlreadySentToTarget:防重发通用判定(私聊/群聊共用,2026-08-13)', () => {
+  const sent = [
+    { type: 'private', target: '222', messageId: '1' },
+    { type: 'private', target: '333', messageId: '2' },
+    { type: 'group', target: '999', messageId: '3' },
+  ]
+  // before = 本轮开始前已发给目标的数量
+  assert(turnAlreadySentToTarget(sent, 0, 'private', '222') === true, '本轮已发过私聊 → 应判已发(跳过路由)')
+  assert(turnAlreadySentToTarget(sent, 1, 'private', '222') === false, '快照数量相等 → 本轮没发过')
+  assert(turnAlreadySentToTarget(sent, 0, 'private', '333') === true, '发给其它目标也计数')
+  assert(turnAlreadySentToTarget(sent, 0, 'group', '999') === true, '群聊 send_group 同款判定')
+  assert(turnAlreadySentToTarget(sent, 0, 'private', '404') === false, '未发过目标 → false')
+  // 旧签名兼容(私聊专用)
+  assert(turnAlreadySentToPending(sent, 0, '222') === true, '旧签名仍按私聊判定')
+})
+
+await test('newTurnFingerprint:轮次指纹生成(2026-08-13,每个轮唯一)', () => {
+  const f1 = newTurnFingerprint()
+  const f2 = newTurnFingerprint()
+  assert(/^[2-9A-HJ-NP-Z]{6}$/.test(f1), `指纹应为 6 位安全字母表(无 0O1Il),实际:${f1}`)
+  assert(f1 !== f2, '两次生成应不同')
+  // 30 次无重复(概率断言,防实现退化)
+  const seen = new Set(Array.from({ length: 30 }, () => newTurnFingerprint()))
+  assert(seen.size === 30, '30 次生成应全唯一')
+})
+
+await test('extractTurnFingerprint:指纹提取与匹配(2026-08-13 指纹协议,对不上就不发送)', () => {
+  const fp = 'A1B2C3'
+  const ok = extractTurnFingerprint(`【指纹:${fp}】哈哈确实拉胯,心疼你一秒`, fp)
+  assert(ok !== null && ok.content === '哈哈确实拉胯,心疼你一秒', '指纹开头应提取并剥离')
+  assert(extractTurnFingerprint('哈哈确实拉胯,心疼你一秒', fp) === null, '无指纹 = 给主人的话,不发送')
+  assert(extractTurnFingerprint(`【指纹:XXXXXX】哈哈确实拉胯`, fp) === null, '指纹对不上 = 不发送')
+  assert(extractTurnFingerprint(`  【指纹:${fp}】哈哈`, fp) !== null, '容忍先导空白')
+  assert(extractTurnFingerprint(`【回复对方】【指纹:${fp}】哈哈`, fp) !== null, '容忍先导旧【回复对方】标记')
+  assert(extractTurnFingerprint(`【指纹:${fp}】`, fp)?.content === '', '仅指纹返回空正文')
+  assert(extractTurnFingerprint('', fp) === null && extractTurnFingerprint('  ', fp) === null, '空输入')
+  // ---- 严格性对抗用例(2026-08-13 二轮)----
+  // 指纹必须在开头:语气词/问候前置 = 不发送(规则明确"指纹前面不要加任何话")
+  assert(extractTurnFingerprint(`好的~【指纹:${fp}】哈哈`, fp) === null, '语气词前置(非开头)不应匹配')
+  assert(extractTurnFingerprint(`哈哈【指纹:${fp}】哈哈`, fp) === null, '指纹在中间不应匹配')
+  // 旧轮次指纹对不上本轮(历史里抄来的 = 不发送)
+  assert(extractTurnFingerprint('【指纹:OLDOLD】哈哈', fp) === null, '旧轮次指纹对不上本轮')
+  // 指纹行后换行:正文保留(多行回复)
+  const multi = extractTurnFingerprint(`【指纹:${fp}】\n哈哈确实拉胯`, fp)
+  assert(multi !== null && multi.content === '哈哈确实拉胯', '指纹后换行正文应保留')
+  // 指纹重复出现:取第一个指纹后的内容(第二个属正文)
+  const twice = extractTurnFingerprint(`【指纹:${fp}】哈哈【指纹:${fp}】x`, fp)
+  assert(twice !== null && twice.content === `哈哈【指纹:${fp}】x`, '第二个指纹应留在正文')
+})
+
+await test('stripTurnMarks:轮次标记剥离(2026-08-13,指纹不进历史/显示)', () => {
+  // 指纹前缀剥离(旧指纹残留进上下文会被 LLM 抄到 → 验证对不上 → 发不出去)
+  assert(stripTurnMarks('【指纹:A2B3C4】哈哈确实拉胯') === '哈哈确实拉胯', '指纹前缀应剥离')
+  assert(stripTurnMarks('【指纹:A2B3C4】\n哈哈') === '哈哈', '指纹后换行应剥离')
+  assert(stripTurnMarks('【回复对方】哈哈') === '哈哈', '旧【回复对方】标记应剥离')
+  assert(stripTurnMarks('  【指纹:A2B3C4】哈哈') === '哈哈', '先导空白应剥离')
+  // 无标记 / 标记不在开头 / 非安全字母表 → 原样(防误伤正文)
+  assert(stripTurnMarks('哈哈【指纹:A2B3C4】') === '哈哈【指纹:A2B3C4】', '正文中间的指纹不应剥离')
+  assert(stripTurnMarks('【指纹:0O1IlA】哈哈') === '【指纹:0O1IlA】哈哈', '非安全字母表的指纹不应剥离(不是指纹协议格式)')
+  assert(stripTurnMarks('哈哈确实拉胯') === '哈哈确实拉胯', '无标记原样')
+  assert(stripTurnMarks('') === '' && stripTurnMarks('  ') === '', '空输入')
+})
+
+await test('会话管理工具:get/set_session_note + clear_session_context(2026-08-13 LLM 自己管理会话)', async () => {
+  const notes = new Map<string, string>()
+  const calls: string[] = []
+  const tools = createSessionTools({
+    getSessionKey: () => 'private:222',
+    getNote: async (k) => notes.get(k) ?? '',
+    setNote: async (k, n) => {
+      notes.set(k, n)
+      calls.push(`set:${k}:${n}`)
+    },
+    clearContext: async (k) => {
+      calls.push(`clear:${k}`)
+    },
+  })
+  const names = tools.map((t) => t.name)
+  assert(
+    names.includes('get_session_note') && names.includes('set_session_note') && names.includes('clear_session_context'),
+    `三个工具应注册,实际:${names.join(',')}`,
+  )
+  const getTool = tools.find((t) => t.name === 'get_session_note')!
+  const setTool = tools.find((t) => t.name === 'set_session_note')!
+  const clearTool = tools.find((t) => t.name === 'clear_session_context')!
+  // 设置 → 透传会话键 + 截 500
+  const r1 = String(await setTool.execute({ note: '魔精是好友,喜欢电竞' }))
+  assert(r1.includes('private:222') && notes.get('private:222') === '魔精是好友,喜欢电竞', `应写入,实际:${r1}`)
+  await setTool.execute({ note: 'x'.repeat(600) })
+  assert(notes.get('private:222')!.length === 500, '超长应截 500')
+  // 空串 = 清除
+  await setTool.execute({ note: '  ' })
+  assert(!notes.get('private:222'), '空串应清除记录')
+  // 读取
+  await setTool.execute({ note: '电竞' })
+  const r2 = String(await getTool.execute({}))
+  assert(r2.includes('电竞'), `读取应返回记录,实际:${r2}`)
+  // 清空上下文 → 透传会话键
+  const r3 = String(await clearTool.execute({}))
+  assert(r3.includes('private:222') && calls.includes('clear:private:222'), `清空应透传,实际:${r3}`)
+  // 无会话键 → 拒绝(工具返回提示,不抛错)
+  const tools2 = createSessionTools({
+    getSessionKey: () => null,
+    getNote: async () => '',
+    setNote: async () => {},
+    clearContext: async () => {},
+  })
+  assert(String(await tools2.find((t) => t.name === 'set_session_note')!.execute({ note: 'x' })).includes('没有可操作'), '无会话键设置应拒绝')
+  assert(String(await tools2.find((t) => t.name === 'clear_session_context')!.execute({})).includes('没有可操作'), '无会话键清空应拒绝')
+  assert(String(await tools2.find((t) => t.name === 'get_session_note')!.execute({})).includes('没有可操作'), '无会话键读取应拒绝')
 })
 
 await test('extractImageRefs:文本夹带的图片路径自动提取转 image 段(发真图不是路径)', async () => {
@@ -4089,6 +4446,127 @@ await test('extractImageRefs:文本夹带的图片路径自动提取转 image �
   assert(r5.images.length === 0, '非图片扩展名不应提取')
   // 空输入
   assert(extractImageRefs('').images.length === 0 && extractImageRefs('  ').text === '', '空输入')
+})
+
+// ---------------------------------------------------------------------------
+// 撤销 git 快照(2026-08-14 停止与撤销分离):注入式 git 执行器直测
+// ---------------------------------------------------------------------------
+
+/** 脚本化 git 执行器:按 args[0](+次参)匹配 handler,记录全部调用 */
+function scriptedExec(
+  handlers: Array<{ match: (args: string[]) => boolean; reply: (args: string[], cwd: string, env?: Record<string, string>) => string }>,
+) {
+  const calls: Array<{ args: string[]; cwd: string; env?: Record<string, string> }> = []
+  const exec: GitExec = async (args, cwd, env) => {
+    calls.push({ args, cwd, env })
+    const h = handlers.find((x) => x.match(args))
+    if (!h) throw new Error(`意外 git 命令:${args.join(' ')}`)
+    return h.reply(args, cwd, env)
+  }
+  return { exec, calls }
+}
+
+await test('undo 快照:临时索引隐藏快照提交的命令序列与记录', async () => {
+  const { exec, calls } = scriptedExec([
+    { match: (a) => a[0] === 'rev-parse', reply: () => 'HEADSHA\n' },
+    { match: (a) => a[0] === 'ls-files', reply: () => 'keep.txt\nsub/old.txt\n' },
+    { match: (a) => a[0] === 'read-tree', reply: () => '' },
+    { match: (a) => a[0] === 'add', reply: () => '' },
+    { match: (a) => a[0] === 'write-tree', reply: () => 'TREESHA\n' },
+    { match: (a) => a.includes('commit-tree'), reply: () => 'SNAPSHA\n' },
+    { match: (a) => a[0] === 'update-ref', reply: () => '' },
+  ])
+  const recs = await snapshotWatchDirs(['/repo/a'], 'u-test-1', exec)
+  assert(recs.length === 1 && recs[0].ok, `快照应成功,实际:${JSON.stringify(recs)}`)
+  assert(recs[0].headSha === 'HEADSHA' && recs[0].snapSha === 'SNAPSHA', '应记录 headSha/snapSha')
+  assert(JSON.stringify(recs[0].untracked) === JSON.stringify(['keep.txt', 'sub/old.txt']), '应记录未跟踪清单')
+  // 命令顺序:基准 → 临时索引重建 → 快照提交 → 私有引用钉住
+  // (commit-tree 带 -c 身份前缀,按 args 包含判定)
+  const order = calls.map((c) => (c.args.includes('commit-tree') ? 'commit-tree' : c.args[0])).join(',')
+  assert(
+    order === 'rev-parse,ls-files,read-tree,add,write-tree,commit-tree,update-ref',
+    `命令序列不符,实际:${order}`,
+  )
+  // 临时索引:read-tree/add/write-tree/commit-tree 都带 GIT_INDEX_FILE
+  for (const c of calls.slice(2, 6)) {
+    assert(!!c.env?.GIT_INDEX_FILE, `${c.args[0]} 应携带 GIT_INDEX_FILE(不碰用户真实索引)`)
+  }
+  // commit-tree 自带身份 + 挂 HEAD 为父;update-ref 钉到私有命名空间
+  const ct = calls.find((c) => c.args.includes('commit-tree'))!.args
+  assert(ct.includes('-p') && ct[ct.indexOf('-p') + 1] === 'HEADSHA', 'commit-tree 应挂 HEAD 为父')
+  assert(ct.includes('user.name=island-undo') || ct.some((x) => x.startsWith('user.name=')), 'commit-tree 应自带身份')
+  const ur = calls.find((c) => c.args[0] === 'update-ref')!.args
+  assert(ur[1] === 'refs/island-undo/u-test-1' && ur[2] === 'SNAPSHA', `私有引用钉住快照,实际:${ur.join(' ')}`)
+})
+
+await test('undo 快照:非 git 目录/命令失败记 ok:false 不阻断其余目录', async () => {
+  const { exec } = scriptedExec([
+    { match: (a) => a[0] === 'rev-parse', reply: () => { throw new Error('fatal: not a git repository') } },
+  ])
+  const recs = await snapshotWatchDirs(['/not/repo'], 'u-test-2', exec)
+  assert(recs.length === 1 && !recs[0].ok, '非 git 目录应 ok:false')
+  assert(!!recs[0].reason && recs[0].reason.includes('not a git repository'), `应带原因,实际:${recs[0].reason}`)
+  // 空目录列表直接返回空
+  const empty = await snapshotWatchDirs([], 'u-test-2b', exec)
+  assert(empty.length === 0, '空列表应返回空数组')
+})
+
+await test('undo 回滚:三步序列 + 未跟踪差集删除(只删该轮新建)', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'island-undo-test-'))
+  // 快照时的未跟踪文件 keep.txt 仍在;该轮新建 new-turn.txt 应被删
+  await fs.writeFile(path.join(dir, 'keep.txt'), '快照前已有')
+  await fs.writeFile(path.join(dir, 'new-turn.txt'), '该轮新建')
+  const { exec, calls } = scriptedExec([
+    { match: (a) => a[0] === 'reset' && a[1] === '--hard', reply: () => '' },
+    { match: (a) => a[0] === 'restore', reply: () => '' },
+    { match: (a) => a[0] === 'ls-files', reply: () => 'keep.txt\nnew-turn.txt\n' },
+    { match: (a) => a[0] === 'update-ref', reply: () => '' },
+  ])
+  const rec = { dir, ok: true, headSha: 'HEADSHA', snapSha: 'SNAPSHA', untracked: ['keep.txt'] }
+  const out = await restoreUndoSnapshot({ id: 'u-test-3', dirs: [rec] }, exec)
+  assert(out.length === 1 && out[0].ok, `回滚应成功,实际:${JSON.stringify(out)}`)
+  const order = calls.map((c) => c.args[0]).join(',')
+  assert(order === 'reset,restore,ls-files,update-ref', `回滚序列不符,实际:${order}`)
+  assert(JSON.stringify(calls[0].args) === JSON.stringify(['reset', '--hard', 'HEADSHA']), '第一步 reset 回快照前 HEAD')
+  assert(calls[1].args.includes('--source=SNAPSHA') && calls[1].args.includes('--worktree'), '第二步 restore 还原脏改动')
+  // 差集删除:new-turn.txt 被删,keep.txt 保留(不用 git clean)
+  assert(!(await fs.access(path.join(dir, 'new-turn.txt')).then(() => true).catch(() => false)), '该轮新建文件应被删除')
+  assert(await fs.access(path.join(dir, 'keep.txt')).then(() => true).catch(() => false), '快照时已有的未跟踪文件应保留')
+  // 第四步释放私有引用
+  assert(JSON.stringify(calls[3].args) === JSON.stringify(['update-ref', '-d', 'refs/island-undo/u-test-3']), '回滚后应释放私有引用')
+  await fs.rm(dir, { recursive: true, force: true })
+})
+
+await test('undo 回滚:旧版 git 无 restore 回退 checkout + reset 复位索引', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'island-undo-test-'))
+  const { exec, calls } = scriptedExec([
+    { match: (a) => a[0] === 'reset' && a[1] === '--hard', reply: () => '' },
+    { match: (a) => a[0] === 'restore', reply: () => { throw new Error('git: restore is not a git command') } },
+    { match: (a) => a[0] === 'checkout', reply: () => '' },
+    { match: (a) => a[0] === 'reset', reply: () => '' },
+    { match: (a) => a[0] === 'ls-files', reply: () => '' },
+    { match: (a) => a[0] === 'update-ref', reply: () => '' },
+  ])
+  const rec = { dir, ok: true, headSha: 'H', snapSha: 'S', untracked: [] }
+  const out = await restoreUndoSnapshot({ id: 'u-test-4', dirs: [rec] }, exec)
+  assert(out.length === 1 && out[0].ok, `兜底回滚应成功,实际:${JSON.stringify(out)}`)
+  const order = calls.map((c) => c.args[0]).join(',')
+  assert(order === 'reset,restore,checkout,reset,ls-files,update-ref', `兜底序列不符,实际:${order}`)
+  const co = calls.find((c) => c.args[0] === 'checkout')!.args
+  assert(co[1] === 'S' && co.includes('.'), `checkout 应还原快照提交,实际:${co.join(' ')}`)
+  await fs.rm(dir, { recursive: true, force: true })
+})
+
+await test('undo 回滚:快照不完整(无 headSha/snapSha)拒绝执行不动仓库', async () => {
+  const { exec, calls } = scriptedExec([])
+  const out = await restoreUndoSnapshot(
+    { id: 'u-test-5', dirs: [{ dir: '/repo/x', ok: false, reason: 'not a git repository' }] },
+    exec,
+  )
+  assert(out.length === 1 && !out[0].ok && !!out[0].reason, '不完整记录应拒绝回滚')
+  assert(calls.length === 0, '拒绝回滚不应发起任何 git 命令')
+  // releaseUndoRef 尽力而为:失败不抛错
+  await releaseUndoRef('/repo/x', 'u-gone', async () => { throw new Error('ref not found') })
 })
 
 // ---------------------------------------------------------------------------

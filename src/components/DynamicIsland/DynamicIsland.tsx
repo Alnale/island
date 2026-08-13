@@ -637,6 +637,22 @@ export const DynamicIsland = memo(function DynamicIsland({
   // 展开面板视图:媒体控制 / 播放列表 / 主题色 / 自定义背景 / 帮助手册 / 字体 / 设置
   // (各视图为独立组件,见 ./views)
   const [panelView, setPanelView] = useState<PanelView>('control')
+  // **离开 Agent 对话视图(去 Agent 设置/多媒体库等)清除视频续播标记
+  // (2026-08-13 用户实测"从 Agent 设置回到对话窗口时自动播放视频,
+  // 不需要")**:panelView 切走 = AgentView 卸载 = 播放停止,但
+  // lastPlayingVideoSrc 残留,返回重挂载时 MediaFrame 判 resume 自动
+  // play(诈尸续播)。去 'control' 例外 = 收起路径(doCollapse 按
+  // mediaMini 区分:收起为多媒体岛由小窗接管播放**不清**、收起为灵动岛
+  // 已清);视频岛在播 → 展开面板的接管续播路径(control → agent)不受
+  // 影响(只在离开 agent 时清)
+  const prevPanelViewRef = useRef<PanelView>('control')
+  useEffect(() => {
+    const prev = prevPanelViewRef.current
+    prevPanelViewRef.current = panelView
+    if (prev === 'agent' && panelView !== 'agent' && panelView !== 'control') {
+      clearAgentVideoResume()
+    }
+  }, [panelView])
   // 主题色切换的"跑马灯流体"动画:记录颜色与触发位置,动画结束自动清除
   const [ripple, setRipple] = useState<{ id: number; color: string; x: number; y: number } | null>(null)
   const rippleIdRef = useRef(0)

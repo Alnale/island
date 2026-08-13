@@ -42,7 +42,7 @@
  */
 
 import { parseSse, sanitizeJsonStrings, truncateResult } from './sse'
-import { apiErrorMessage } from './constants'
+import { deepseekErrorMessage } from './deepseek-constants'
 import type { AgentConfig, AgentEvent, AgentMessage, AgentPart, AgentTool, ProviderOutcome } from './types'
 
 /** 工具 → Chat Completions tools(官方格式:function 嵌套) */
@@ -202,7 +202,7 @@ export async function streamChatCompletion(params: {
       // 忽略读失败
     }
     // 错误码映射(2026-08-10,与 Responses 同款可读中文错误)
-    throw new Error(apiErrorMessage(res.status, detail))
+    throw new Error(deepseekErrorMessage(res.status, detail))
   }
 
   // 流式工具调用按 index 累积(OpenAI 格式:首个 delta 带 id/name,

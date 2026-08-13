@@ -20,10 +20,14 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 // PowerShell 过滤条件:只匹配本项目 node_modules 下的 electron.exe。
 // 注意:不能只用 '*dynamic-island*'(会误杀 C:\Users\asus\Desktop\
 // dynamic-island-official 副本的实例——同一 userData/单实例锁,2026-08-12
-// 实测用户日常跑该副本);必须带 '\node_modules\' 限定本项目精确路径。
+// 实测用户日常跑该副本);必须带项目路径限定。
+// **路径用通配 \node_modules\*electron**(2026-08-14):pnpm 下 electron.exe
+// 真实路径是 node_modules\.pnpm\electron@43.2.0\node_modules\electron\dist\
+// ——原条件 \node_modules\electron* 匹配不到,残留实例杀不掉还被误判成
+// "official 副本占锁"导致新实例静默退出(实测)。
 // 注意必须用 $_.Id——实测本机 PowerShell 5.1 上 $_.ProcessId 为空值,
 // Stop-Process -Id 传 null 会抛"参数不能为空"。
-const PS_FILTER = `$_.Path -like '*dynamic-island\\node_modules\\electron*'`
+const PS_FILTER = `$_.Path -like '*dynamic-island\\node_modules\\*electron*'`
 
 /** 结束本项目残留的 electron 实例(单实例锁:不结束则新启动只会唤起旧窗口,加载旧代码) */
 function killOldInstances() {
@@ -97,7 +101,7 @@ const alienAlive = await new Promise((resolve) => {
   const ps = spawn('powershell', [
     '-NoProfile',
     '-Command',
-    `(Get-Process electron -ErrorAction SilentlyContinue | Where-Object { $_.Path -like '*dynamic-island*' -and $_.Path -notlike '*dynamic-island\\node_modules\\electron*' }).Count`,
+    `(Get-Process electron -ErrorAction SilentlyContinue | Where-Object { $_.Path -like '*dynamic-island*' -and $_.Path -notlike '*dynamic-island\\node_modules\\*electron*' }).Count`,
   ], { windowsHide: true })
   let out = ''
   ps.stdout.on('data', (d) => { out += String(d) })

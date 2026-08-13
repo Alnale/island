@@ -1,0 +1,14 @@
+{
+  // IDE 入口(2026-08-14 修复 IDE 报 window.desktop 不存在):
+  // 实际配置都在 tsconfig/ 子目录,但 IDE 语言服务从源文件向上只找
+  // 根目录的 tsconfig.json——此前根目录没有该文件,src/ 下文件落入
+  // "推断项目"(读不到 include 里的 widget/desktop.d.ts 全局声明)。
+  // 本文件仅作入口,references 指向真实配置(与 tsconfig/tsconfig.json
+  // 同款;构建走 `tsc -b tsconfig/tsconfig.json` 不受影响)
+  "files": [],
+  "references": [
+    { "path": "./tsconfig/tsconfig.app.json" },
+    { "path": "./tsconfig/tsconfig.node.json" },
+    { "path": "./tsconfig/tsconfig.electron.json" }
+  ]
+}

@@ -16,6 +16,8 @@ import type {
   AgentTool as EngineAgentTool,
   McpServerConfig,
   MemoryEntry,
+  ProviderId,
+  ProviderCredentials,
 } from '../../electron/agent/types'
 
 /** 引擎状态 → 渲染端状态机 */
@@ -38,6 +40,19 @@ export interface AgentMessage extends EngineAgentMessage {
    * main.cjs 聚合联系人档案 + 会话人格 + 长期记忆相关条目下发,
    * 气泡头部分层展示(QQ → 私聊/群聊 → QQ号 → 档案卡) */
   profileCard?: string
+  /** 轮次指纹命中(2026-08-14 指纹 UI):回复开头带本轮【指纹:xx】/
+   * 【回复对方】标记 = 会被路由层发给 QQ 对方(useAgent 剥离标记前
+   * 检测);气泡用"发给对方"风格(虚线边框 + 指纹标签),无标记 =
+   * 给主人的普通回复 */
+  sentToPeer?: boolean
+  /** 软停止落定标记(2026-08-14 停止与撤销分离):用户手动停止时把
+   * 已累积的部分工作落定为 assistant 消息,打此标记——气泡挂"已停止"
+   * 标签;后续跟一条 system 停止说明(下一轮 LLM 不重复已完成工作) */
+  interrupted?: boolean
+  /** 撤销快照 id(2026-08-14 停止与撤销分离):仅主人输入轮的用户消息
+   * 携带(send 前对 undoWatchDirs 拍快照);撤销时经 agentUndoRestore
+   * 回滚 git 工作区 + 截断上下文。无 id = 撤销只回滚上下文 */
+  snapshotId?: string
 }
 
 /** 引擎事件流(含确认门/进化/后台完成事件) */
@@ -90,6 +105,9 @@ export interface AgentPanelProps {
   mindGuess: string | null
   onSend(text: string): void
   onAbort(): void
+  /** 撤销(2026-08-14 停止与撤销分离):回滚指定用户消息之前的上下文
+   * 与文件(git 快照);原"停止"的回滚语义归入此功能。busy 时先软停止 */
+  onUndo?(messageId: string): void
   /** 新对话:当前对话存档到历史后清空 */
   onClear(): void
   /** 打开 Agent 设置视图(⋯ 菜单"设置"入口) */
@@ -114,22 +132,14 @@ export interface AgentPanelProps {
   onMediaAutoPlayed?(id: string): void
   /** 外部会话列表(2026-08-13 会话隔离:私聊/群聊,自动创建;主对话
    * 'main' 不计入) */
-  sessionList?: Array<{ key: string; title: string; kind: 'private' | 'group' }>
-  /** 面板选中的会话小窗数据(2026-08-13 二轮:主对话窗口不被替换,
-   * 会话面板叠在主对话上;null = 面板显示会话列表) */
-  panelSession?: {
-    key: string
-    title: string
-    kind: 'private' | 'group'
-    messages: AgentMessage[]
-    streaming: { text: string; reasoning: string; tools: AgentToolCallState[] } | null
-    status: AgentStatus
-    send(text: string): void
-  } | null
-  /** 各会话未读计数(当前未在面板中打开的会话新消息 +1) */
+  sessionList?: Array<{ key: string; title: string; caption: string; kind: 'private' | 'group' }>
+  /** 各会话未读计数(当前未查看的会话新消息 +1) */
   unreadCounts?: Record<string, number>
-  /** 面板中打开某会话(2026-08-13 二轮:不切换主对话,小窗展示) */
-  onSelectPanelSession?(key: string): void
+  /** 当前查看的会话键(2026-08-13 七轮:面板纯化为切换器——主对话
+   * 窗口显示当前键的上下文;'main' = 主人主对话,切回即恢复快照) */
+  currentSessionKey?: string
+  /** 切换查看的会话(悬停左侧会话即切换主窗口上下文) */
+  onSwitchSession?(key: string): void
 }
 
 /** MCP 服务端配置(与引擎同构,re-export) */
@@ -137,6 +147,9 @@ export type { McpServerConfig }
 
 /** 记忆条目(记忆系统;类型 = 偏好/事实/工作流/教训) */
 export type { MemoryEntry }
+
+/** LLM 供应商独立凭据(API Key/Base URL/模型,2026-08-14 多供应商独立存储) */
+export type { ProviderId, ProviderCredentials }
 
 /** Agent 配置:渲染端要求 excludedTools/excludedSkills 与主动陪伴两
  * 字段必填(引擎侧可选——主进程 AGENT_CONFIG_DEFAULTS 总是补齐,

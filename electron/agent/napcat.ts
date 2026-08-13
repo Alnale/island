@@ -1,19 +1,16 @@
 /**
- * NapCat QQ 机器人桥(2026-08-12)
+ * NapCat QQ 机器人桥(2026-08-14 全面优化版)
  *
  * OneBot 11 协议 WebSocket 客户端,零第三方依赖(全局 WebSocket,Node 22+):
- * - 正向 WS 连接 NapCat(默认 ws://127.0.0.1:3001),断线指数退避重连;
+ * - 正向 WS 连接 NapCat(默认 ws://127.0.0.1:3001),断线指数退避重连+熔断;
  * - 收到**私聊消息**事件 → 回调 onMessage(QQ 号 + 文本)——main.cjs 转发
  *   渲染端作为用户消息进入对话(同步上下文),LLM 回复后经 sendToQQ 发回
  *    QQ(用户要求"对话窗口和 QQ 自己回复我");
  * - 收到**群消息**事件 → 回调 onGroupMessage(群号 + QQ + 文本)——main.cjs
  *   自主判断是否接话(防刷屏),接话进对话,回复发回群;
  * - 长期记忆自动生效(QQ 对话走主引擎,系统提示含记忆块);
- * - 消息缓存(最近 50 条)供 napcat 工具查询;
- * - 配置 agent.napcatWsUrl / agent.napcatEnabled / agent.napcatAllowed
- *   (私聊 QQ 白名单,用户限定 1178821869)/ agent.napcatAllowedGroups
- *   (群白名单,用户限定 1045765371)。在已有 Python 桥 qq_bridge.py 的
- *   基础上整合(其连接/私聊回复/群聊自主接话能力全部并入本模块,桥退役)。
+ * - 消息缓存(可配置,默认50条)供 napcat 工具查询;
+ * - 去重持久化(重启不丢),文件写队列防并发,危险操作确认门。
  *
  * 协议要点(OneBot 11):
  * - 事件:{"post_type":"message","message_type":"private|group","user_id":...,
@@ -25,16 +22,48 @@
  */
 
 import { existsSync, promises as fs } from 'node:fs'
+import { randomInt } from 'node:crypto'
 import path from 'node:path'
 import { app } from 'electron'
 import type { AgentConfig, AgentTool, ToolParams } from './types'
 import { MASTER_QQ } from './constants'
 import { createWsSocket, type WsConn } from './wsclient'
 
+// ---- 默认配置常量(可被 agent 配置覆盖) ----
+const DEFAULT_WS_URL = 'ws://127.0.0.1:3001'
+const DEFAULT_CACHE_SIZE = 50
+const DEFAULT_SENT_SIZE = 50
+const DEFAULT_CHATS_SIZE = 200 // 减少聊天记录条数(原500过大)
+const MAX_CHAT_TEXT_LEN = 2000 // 单条聊天记录文本截断
+const ACTION_TIMEOUT_MS = 15000
+// 文件/视频上传超时(2026-08-14 修复):upload_private_file/upload_group_file
+// 大视频上传到 QQ 动辄几十秒,原统一 15s 会先触发超时——QQ 实际收到了
+// 视频但工具报"超时失败",LLM 误报没发成功;延长到 180s
+const FILE_UPLOAD_TIMEOUT_MS = 180_000
+const MAX_IMAGE_SIZE = 20 * 1024 * 1024 // 20MB(原50MB过大)
+const MAX_RECONNECT_FAILS = 10 // 连续失败N次后熔断
+const IMAGE_DOWNLOAD_TIMEOUT_MS = 10000 // 图片下载超时
+const RECONNECT_CAP_MS = 30000
+const SEEN_TTL_MS = 60 * 60 * 1000 // 去重ID 1小时过期
+const SEEN_CLEANUP_INTERVAL_MS = 10 * 60 * 1000 // 10分钟清理一次过期ID
+const QZONE_RATE_LIMIT_MS = 1000 // QQ空间接口最小间隔
+
+// ---- 消息段文本化 ----
 /** OneBot 消息 → 文本(兼容 string 与段数组;测试用导出):text 段拼接,
- * face/emoji 标注,@ 段标注(机器人自身 = @鲸鱼娘),其它段(图片等)标注类型 */
+ * face/emoji 标注,@ 段标注(机器人自身 = @鲸鱼娘),其它段(图片/语音/视频等)标注类型 */
 export function napcatMessageText(msg: unknown, botQQ?: string): string {
-  if (typeof msg === 'string') return msg
+  if (typeof msg === 'string') {
+    // CQ码字符串消息:处理CQ:at
+    return msg.replace(/\[CQ:at,qq=(\d+)(?:,name=([^\]]*))?\]/g, (_m, qq: string, name?: string) => {
+      return String(qq) === String(botQQ ?? '') ? '@鲸鱼娘' : `@${name || qq}`
+    }).replace(/\[CQ:image[^\]]*\]/g, '[图片]')
+      .replace(/\[CQ:record[^\]]*\]/g, '[语音]')
+      .replace(/\[CQ:video[^\]]*\]/g, '[视频]')
+      .replace(/\[CQ:forward[^\]]*\]/g, '[转发消息]')
+      .replace(/\[CQ:reply[^\]]*\]/g, '[回复]')
+      .replace(/\[CQ:face[^\]]*\]/g, '[表情]')
+      .replace(/\[CQ:[a-z]+[^\]]*\]/g, (m) => `[${m.slice(4, -1).split(',')[0]}]`)
+  }
   if (Array.isArray(msg)) {
     return msg
       .map((seg) => {
@@ -46,6 +75,9 @@ export function napcatMessageText(msg: unknown, botQQ?: string): string {
           return qq === String(botQQ ?? '') ? '@鲸鱼娘' : `@${qq}`
         }
         if (s?.type === 'image') return '[图片]'
+        if (s?.type === 'record') return '[语音]'
+        if (s?.type === 'video') return '[视频]'
+        if (s?.type === 'forward') return '[转发消息]'
         if (s?.type === 'reply') return '[回复]'
         return `[${s.type ?? 'segment'}]`
       })
@@ -54,62 +86,44 @@ export function napcatMessageText(msg: unknown, botQQ?: string): string {
   return String(msg ?? '')
 }
 
+// ---- 类型定义 ----
 /** 收到的 QQ 消息(私聊) */
 export interface NapcatMessage {
-  /** 发送者 QQ 号 */
   qq: string
-  /** 文本内容(段数组已拼接;纯图片等无文本时为空串) */
   text: string
-  /** 消息 ID(去重用) */
   messageId: string
-  /** 收到时间戳(秒) */
   time: number
-  /** 是否已自动回复 */
   replied?: boolean
-  /** 图片段(2026-08-12:收图链路,main.cjs 下载后注入对话) */
   images?: NapcatImage[]
 }
 
 /** 收到的群消息 */
 export interface NapcatGroupMessage {
-  /** 群号 */
   groupId: string
-  /** 发送者 QQ 号 */
   qq: string
-  /** 文本内容 */
   text: string
-  /** 是否 @ 了机器人(必须接话) */
   atMe: boolean
   messageId: string
   time: number
-  /** 图片段(2026-08-12:收图链路,main.cjs 下载后注入对话) */
   images?: NapcatImage[]
 }
 
-/** 消息中的图片段(image 段):file = NapCat 缓存文件名(如 xxx.image)或
- * 本地路径,url = 图床直链(可能为空——旧缓存消息仅 file) */
+/** 消息中的图片段 */
 export interface NapcatImage {
   file?: string
   url?: string
 }
 
-/** 机器人发出的消息(2026-08-12 修复"私聊无法撤回"):发送成功
- * (sendToQQ/sendToGroup 返回 message_id)后自动记录——此前只记录
- * **收到**的消息,机器人自己发的消息 ID 无处可查,recall 拿不到
- * ID 撤不了;sent 记录带 message_id,LLM 经 napcat 工具 sent action
- * 查到后可直接 recall 撤回 */
+/** 机器人发出的消息 */
 export interface NapcatSentMessage {
   messageId: string
-  /** private = 私聊 / group = 群聊 */
   type: 'private' | 'group'
-  /** 私聊 = 对方 QQ 号 / 群聊 = 群号 */
   target: string
   text: string
   time: number
 }
 
-/** 提取消息中的图片段(2026-08-12 收图):段数组里的 image 段 → 图片
- * 列表(保留 file/url 原字段,供下载);string 消息无图片 */
+/** 提取消息中的图片段 */
 export function napcatMessageImages(msg: unknown): NapcatImage[] {
   if (!Array.isArray(msg)) return []
   const out: NapcatImage[] = []
@@ -125,92 +139,79 @@ export function napcatMessageImages(msg: unknown): NapcatImage[] {
   return out
 }
 
+/** 检测CQ码字符串消息中的atMe(段数组已在napcatMessageText处理,这里单独检测) */
+function cqAtMe(raw: unknown, botQQ: string): boolean {
+  if (typeof raw === 'string') {
+    return new RegExp(`\\[CQ:at,qq=${botQQ}(?:,|\\])`).test(raw)
+  }
+  return false
+}
+
 /** 连接状态 */
 export interface NapcatStatus {
   connected: boolean
   url: string
   lastError: string
-  /** 收到消息总数 */
   receivedCount: number
-  /** 已回复数 */
   repliedCount: number
-  /** 私聊白名单(2026-08-12 诊断:空 = 回复所有私聊) */
   allowed?: string[]
-  /** 监听群白名单(2026-08-12 诊断:空 = 监听所有群;不在列表的群
-   * 消息被过滤,LLM 查"为什么新群收不到"可见) */
   allowedGroups?: string[]
+  circuitBroken?: boolean
+}
+
+/** 通知事件(撤回/好友请求/群邀请) */
+export interface NapcatNotice {
+  type: 'group_recall' | 'friend_recall' | 'friend_request' | 'group_request' | 'group_increase' | 'group_decrease'
+  /** 相关QQ号(操作者/申请人) */
+  userId?: string
+  /** 群号 */
+  groupId?: string
+  /** 被操作者(被踢/加入) */
+  targetId?: string
+  /** 请求flag(需通过操作接受/拒绝) */
+  flag?: string
+  /** 附加信息(验证消息/理由) */
+  comment?: string
 }
 
 /** 主进程注入的依赖 */
 export interface NapcatDeps {
-  /** 引擎配置(读 agent.napcat* 字段) */
   getConfig(): AgentConfig
-  /** 收到私聊消息(经 main.cjs 转发渲染端触发对话) */
   onMessage(msg: NapcatMessage): void
-  /** 收到群消息(经 main.cjs 自主判断是否接话) */
   onGroupMessage(msg: NapcatGroupMessage): void
-  /** Windows 系统通知(消息到达提示) */
   notify?(title: string, body: string): void
-  /** 会话列表(2026-08-13 会话隔离:key/标题/类型/屏蔽态,manage_sessions
-   * 工具 list 用;main.cjs 按已知会话登记表实时返回) */
   listSessions?(): Array<{ key: string; title: string; kind: 'private' | 'group'; muted: boolean }>
-  /** 屏蔽/解除屏蔽会话(写配置 agent.mutedSessions;屏蔽后该会话消息
-   * 只显示不回复) */
   muteSession?(key: string, muted: boolean): void
-  /** 绑定窗口到指定会话(通知渲染端切换当前显示会话;key='main' 回
-   * 主对话) */
   bindSession?(key: string): void
+  /** 监听增删(2026-08-14 manage_sessions 工具):写 napcatAllowed /
+   * napcatAllowedGroups 配置 → applyAgentConfigPatch 自动广播会话种子,
+   * 渲染端会话面板立即建条目 */
+  watchSession?(kind: 'private' | 'group', id: string): void
+  unwatchSession?(kind: 'private' | 'group', id: string): void
+  onSent?(msg: { type: 'private' | 'group'; target: string; text: string; images?: string[] }): void
+  /** 错误上报(不再静默catch——发送失败/API错误经此回调通知主进程) */
+  onError?(message: string): void
+  /** 通知事件(撤回/好友请求等) */
+  onNotice?(notice: NapcatNotice): void
 }
 
-const DEFAULT_WS_URL = 'ws://127.0.0.1:3001'
-/** 消息缓存上限(工具 recent 查询用) */
-const MAX_CACHE = 50
-/** 机器人发出消息记录上限(工具 sent 查询用) */
-const MAX_SENT = 50
-/** 动作调用超时(ms) */
-const ACTION_TIMEOUT_MS = 15000
-/** 机器人自身 QQ(群 @ 检测;与 Python 桥 BOT_QQ 一致) */
-const BOT_QQ = '108724305'
-/** 群消息去重(最近 200 条 message_id) */
-const groupSeen = new Set<string>()
-
-// ---- 联系人档案(2026-08-12,用户要求"读取并记忆群聊和私聊内群成员
-// 的相关信息,计入工具的记忆目录") ----
-// userData/napcat-contacts.json:QQ 号 → 档案{备注/信息/来源/更新时间}。
-// LLM 经 napcat 工具 contacts action 读写(交流中认识新联系人时记录),
-// 回复时可用档案里的称呼与信息(配合隐私边界,私密信息不对外说)
+// ---- 联系人档案 ----
 export interface NapcatContact {
-  /** 联系人/成员 QQ 号 */
   qq: string
-  /** 备注名(群里的昵称/称呼) */
   name?: string
-  /** 已知信息(身份/喜好/关系等,一句话) */
   info?: string
-  /** 认识来源:private = 私聊 / group = 群聊 */
   source?: 'private' | 'group'
-  /** 更新时间戳(秒) */
   updatedAt: number
 }
 
-/**
- * 档案卡聚合(2026-08-13,用户要求"将不同的 QQ 号的所有涉及发言汇总成
- * 一个档案卡,包含性格/兴趣爱好/不良嗜好等基本信息 + 该人所有已知信息
- * 的简单总结"):联系人档案(name/info)+ 会话人格(persona)+ 长期记忆
- * 相关条目(内容含该 QQ 号或称呼)——单函数纯聚合,main.cjs 消息到达时
- * 组装,随消息注入 LLM(每条消息带档案卡,LLM 正确区分人)并下发渲染端
- * 展示。所有已知信息汇总 = 档案 info + 相关记忆条目正文,格式稳定
- * (缓存前缀友好)
- */
+/** 档案卡聚合(联系人+人格+记忆+最近发言) */
 export function buildProfileCard(
   qq: string,
   data: {
     contact?: NapcatContact | null
     persona?: string
     memories?: Array<{ content: string }>
-    /** 该人的聊天记录备份(napcat-chats,私聊/群聊都记;按 QQ 过滤后取
-     * 最近几条 = "所有涉及发言汇总"的原始层) */
     chats?: Array<{ id?: string; text: string; type?: string }>
-    /** 排除的聊天记录 id(当前正在处理的消息,避免卡内重复) */
     excludeId?: string
   },
 ): string {
@@ -218,15 +219,10 @@ export function buildProfileCard(
   const name = data.contact?.name?.trim()
   const info = data.contact?.info?.trim()
   const persona = data.persona?.trim()
-  // **主人称呼兜底(2026-08-13 用户实测"我是主人但称呼未知")**:自动
-  // 建档只记 QQ 号与来源,没有名字字段——主人缺名字时称呼恒为「主人」
-  // (档案里记录过名字则优先用名字);其它 QQ 缺名字仍显示(未知)
   const displayName = name || (qq === MASTER_QQ ? '主人' : '(未知)')
   lines.push(`称呼:${displayName}`)
   if (info) lines.push(`已知:${info.slice(0, 300)}`)
-  // 会话人格(私聊/群聊分会话,该 QQ 会话设置过人格时展示)
   if (persona) lines.push(`会话人格:${persona.slice(0, 200)}`)
-  // 长期记忆相关条目(内容含 QQ 号或称呼 = 该人已知信息;截 4 条防过长)
   const mems = (data.memories ?? [])
     .map((m) => m.content.trim())
     .filter((c) => c && (c.includes(qq) || (name ? c.includes(name) : false)))
@@ -235,9 +231,6 @@ export function buildProfileCard(
     lines.push('记忆相关:')
     for (const c of mems) lines.push(`- ${c.slice(0, 120)}`)
   }
-  // **最近发言(2026-08-13 用户要求"群聊里的各个消息也能正确计入个人
-  // 的档案卡")**:聊天记录备份按 QQ 号过滤取最近 3 条(私聊/群聊标记
-  // 渠道),该人的实际发言进档案卡——群聊里每个人说的话都归到各自的卡
   const chats = (data.chats ?? [])
     .filter((c) => c && typeof c.text === 'string' && c.text.trim() && c.id !== data.excludeId)
     .slice(-3)
@@ -248,12 +241,91 @@ export function buildProfileCard(
       lines.push(`- [${channel}] ${c.text.replace(/\s+/g, ' ').trim().slice(0, 50)}`)
     }
   }
-  // 无任何已知信息时给空卡提示(LLM 可经 contact_update 补充)
   if (lines.length === 1) lines.push('(尚无已知信息,交流中可用 contact_update 记录)')
   return lines.join('\n')
 }
 
-/** 用户数据目录(测试回退临时路径) */
+// ---- 会话键 ----
+export function sessionKeyFor(qq: string, groupId?: string): string {
+  return groupId ? `group:${groupId}` : `private:${qq}`
+}
+export function isValidSessionKey(key: string): boolean {
+  return /^(private:\d+|group:\d+)$/.test(key)
+}
+
+// ---- 回复标记 ----
+export const REPLY_TO_STRANGER_MARK = '【回复对方】'
+export function extractReplyToStranger(text: string): string | null {
+  if (!String(text).startsWith(REPLY_TO_STRANGER_MARK)) return null
+  return String(text).slice(REPLY_TO_STRANGER_MARK.length).trim()
+}
+
+// ---- 防重发判定 ----
+export function turnAlreadySentToTarget(
+  now: Array<{ type: string; target: string }>,
+  before: number,
+  type: string,
+  target: string,
+): boolean {
+  return now.filter((s) => s.type === type && s.target === target).length > before
+}
+export function turnAlreadySentToPending(
+  now: Array<{ type: string; target: string }>,
+  before: number,
+  qq: string,
+): boolean {
+  return turnAlreadySentToTarget(now, before, 'private', qq)
+}
+
+// ---- 询问轮判定(给主人的话不外发) ----
+const ASK_TURN_STRONG = [
+  /你说回/,
+  /你(想|要|说)怎么回/,
+  /等你(的)?(指示|发话)/,
+  /问(问|一下)?主人/,
+  /要不要我(回|发|说)/,
+  /我建议[^。！？]{0,12}(回|发|说)/,
+  /要(不)要我[^。！？]{0,10}(回|发|说)他/,
+]
+const ASK_TURN_WEAK = [
+  /怎么回/,
+  /(回|发|说)(他|她|他们|对方)[^。！？]{0,8}(什么|啥|点啥|吗|吧|如何|怎样|怎么样)/,
+]
+const ASK_TURN_QUESTION_END = /[?？~～…]$|[吗吧呢呀好]$/
+export function isAskTurnToMaster(text: string): boolean {
+  const t = String(text ?? '')
+  if (!t.trim()) return false
+  if (ASK_TURN_STRONG.some((re) => re.test(t))) return true
+  return ASK_TURN_QUESTION_END.test(t.trim()) && ASK_TURN_WEAK.some((re) => re.test(t))
+}
+
+// ---- 轮次指纹 ----
+const FINGERPRINT_ALPHABET = '23456789ABCDEFGHJKMNPQRSTUVWXYZ'
+const FINGERPRINT_LEN = 6
+export function newTurnFingerprint(): string {
+  let out = ''
+  for (let i = 0; i < FINGERPRINT_LEN; i++) {
+    out += FINGERPRINT_ALPHABET[randomInt(FINGERPRINT_ALPHABET.length)]
+  }
+  return out
+}
+export function fingerprintMark(fp: string): string {
+  return `【指纹:${fp}】`
+}
+export function stripFingerprintMarks(text: string): string {
+  return String(text ?? '').replace(/【指纹:[2-9A-HJ-NP-Z]{6}】/g, '')
+}
+export function extractTurnFingerprint(text: string, fp: string): { content: string } | null {
+  const t = String(text ?? '')
+    .replace(/^\s*/, '')
+    .replace(/^【回复对方】\s*/, '')
+    .trimStart()
+  const mark = fingerprintMark(fp)
+  if (!t.startsWith(mark)) return null
+  return { content: t.slice(mark.length).trim() }
+}
+
+// ---- 用户数据目录 ----
 function userDataDir(): string {
   try {
     return app.getPath('userData')
@@ -262,144 +334,109 @@ function userDataDir(): string {
   }
 }
 
-/** 联系人档案文件路径 */
+// ---- 文件路径 ----
 export function napcatContactsPath(): string {
   return path.join(userDataDir(), 'napcat-contacts.json')
 }
-
-// ---- 聊天记录备份(2026-08-12,用户要求"不只是长期记忆,也要单独
-// 存放一个备份在工具记忆中") ----
-// userData/napcat-chats.json:私聊/群聊的**原始消息**备份(时间/来源/
-// 文本)——与提炼后的长期记忆(memory.json)分开,是"工具记忆"的原始
-// 层;LLM 经 napcat 工具 chats action 查询,防丢失(长期记忆提炼会遗漏
-// 细节,原始记录兜底)
-export interface NapcatChatRecord {
-  /** 消息 ID(去重) */
-  id: string
-  /** private = 私聊 / group = 群聊 */
-  type: 'private' | 'group'
-  /** 私聊 = 对方 QQ 号 / 群聊 = 群号 */
-  target: string
-  /** 发送者 QQ 号 */
-  qq: string
-  text: string
-  /** 是否 @ 了机器人(群聊) */
-  atMe?: boolean
-  time: number
-}
-
-/** 聊天记录备份文件路径 */
 export function napcatChatsPath(): string {
   return path.join(userDataDir(), 'napcat-chats.json')
 }
+export function napcatPersonasPath(): string {
+  return path.join(userDataDir(), 'napcat-personas.json')
+}
+function napcatSeenPath(): string {
+  return path.join(userDataDir(), 'napcat-seen.json')
+}
 
-// ---- 会话人格(2026-08-12,用户要求"在不同会话(群聊/私聊)中扮演
-// 不同人格,写入长期记忆和工具记忆,作为会话人格记忆——整合各个
-// 会话中不同联系人的喜好和风格") ----
-// userData/napcat-personas.json:{ [scope]: {persona, updatedAt} }
-// scope = 'private:<QQ号>' | 'group:<群号>'——每个会话独立人格
-// (群聊一个"群友版人设",私聊一个"亲近版人设"),注入时按会话带入;
-// 联系人喜好/风格由 LLM 在会话中沉淀(contact_update/remember)或
-// 直接 persona_set 设置
+// ---- 聊天记录 ----
+export interface NapcatChatRecord {
+  id: string
+  type: 'private' | 'group'
+  target: string
+  qq: string
+  text: string
+  atMe?: boolean
+  time: number
+}
+export function personaScope(type: 'private' | 'group', target: string): string {
+  return `${type}:${target}`
+}
 export interface NapcatPersona {
-  /** 人格描述(回复风格/人设/该会话联系人的喜好与风格整合) */
   persona: string
   updatedAt: number
 }
 
-/** 会话人格文件路径 */
-export function napcatPersonasPath(): string {
-  return path.join(userDataDir(), 'napcat-personas.json')
+// ---- 去重持久化 ----
+interface SeenData {
+  /** messageId -> timestamp(ms) */
+  ids: Record<string, number>
 }
-
-/** 会话 scope:'private:<QQ号>' / 'group:<群号>' */
-export function personaScope(type: 'private' | 'group', target: string): string {
-  return `${type}:${target}`
-}
-
-/** 读取全部会话人格 */
-export async function loadNapcatPersonas(): Promise<Record<string, NapcatPersona>> {
+let seenData: SeenData = { ids: {} }
+let seenLoaded = false
+async function loadSeen(): Promise<void> {
+  if (seenLoaded) return
   try {
-    const raw = await fs.readFile(napcatPersonasPath(), 'utf8')
-    const obj = JSON.parse(raw) as Record<string, Partial<NapcatPersona>>
-    const out: Record<string, NapcatPersona> = {}
-    for (const [scope, p] of Object.entries(obj)) {
-      if (p && typeof p === 'object' && typeof p.persona === 'string' && p.persona.trim()) {
-        out[scope] = { persona: p.persona.trim().slice(0, 500), updatedAt: typeof p.updatedAt === 'number' ? p.updatedAt : 0 }
-      }
+    const raw = await fs.readFile(napcatSeenPath(), 'utf8')
+    const obj = JSON.parse(raw) as Partial<SeenData>
+    if (obj && typeof obj === 'object' && obj.ids && typeof obj.ids === 'object') {
+      seenData = { ids: obj.ids }
     }
-    return out
   } catch {
-    return {}
+    seenData = { ids: {} }
   }
+  seenLoaded = true
+  // 清理过期ID
+  pruneSeen()
 }
-
-/** 写入会话人格(原子写;persona 为空 = 删除该会话人格) */
-export async function saveNapcatPersona(scope: string, persona: string): Promise<NapcatPersona | null> {
-  const personas = await loadNapcatPersonas()
-  const p = napcatPersonasPath()
-  await fs.mkdir(path.dirname(p), { recursive: true })
-  if (!persona.trim()) {
-    delete personas[scope]
-    const tmp = p + '.tmp'
-    await fs.writeFile(tmp, JSON.stringify(personas, null, 2), 'utf8')
-    await fs.rename(tmp, p)
-    return null
-  }
-  const next: NapcatPersona = { persona: persona.trim().slice(0, 500), updatedAt: Math.floor(Date.now() / 1000) }
-  personas[scope] = next
-  const tmp = p + '.tmp'
-  await fs.writeFile(tmp, JSON.stringify(personas, null, 2), 'utf8')
-  await fs.rename(tmp, p)
-  return next
-}
-
-/** 聊天记录上限(超限淘汰最旧) */
-const MAX_CHATS = 500
-
-/** 读取聊天记录备份(文件缺失/损坏返回空数组) */
-export async function loadNapcatChats(): Promise<NapcatChatRecord[]> {
-  try {
-    const raw = await fs.readFile(napcatChatsPath(), 'utf8')
-    const arr = JSON.parse(raw) as unknown
-    if (!Array.isArray(arr)) return []
-    return arr.filter(
-      (c): c is NapcatChatRecord =>
-        !!c &&
-        typeof c === 'object' &&
-        typeof (c as NapcatChatRecord).id === 'string' &&
-        typeof (c as NapcatChatRecord).text === 'string' &&
-        ((c as NapcatChatRecord).type === 'private' || (c as NapcatChatRecord).type === 'group'),
-    )
-  } catch {
-    return []
-  }
-}
-
-/** 追加一条聊天记录(串行写队列防并发竞争;失败静默——备份是兜底,
- * 不阻断通信) */
-let chatWriteChain: Promise<unknown> = Promise.resolve()
-export function appendNapcatChat(record: NapcatChatRecord): void {
-  chatWriteChain = chatWriteChain
-    .then(async () => {
-      const chats = await loadNapcatChats()
-      // 同 id 去重(重连重复推送)
-      if (chats.some((c) => c.id === record.id)) return
-      chats.push(record)
-      const trimmed = chats.slice(-MAX_CHATS)
-      const p = napcatChatsPath()
+let seenWriteChain: Promise<unknown> = Promise.resolve()
+function saveSeen(): void {
+  seenWriteChain = seenWriteChain.then(async () => {
+    try {
+      const p = napcatSeenPath()
       await fs.mkdir(path.dirname(p), { recursive: true })
       const tmp = p + '.tmp'
-      await fs.writeFile(tmp, JSON.stringify(trimmed, null, 1), 'utf8')
+      await fs.writeFile(tmp, JSON.stringify(seenData), 'utf8')
       await fs.rename(tmp, p)
-    })
-    .catch(() => {
-      // 备份写入失败静默
-    })
+    } catch {
+      // 写入失败静默(去重是增强功能)
+    }
+  }).catch(() => {})
+}
+function pruneSeen(): void {
+  const now = Date.now()
+  let changed = false
+  for (const [id, ts] of Object.entries(seenData.ids)) {
+    if (now - ts > SEEN_TTL_MS) {
+      delete seenData.ids[id]
+      changed = true
+    }
+  }
+  if (changed) saveSeen()
+}
+function seenHas(id: string): boolean {
+  if (!id) return false
+  return Object.prototype.hasOwnProperty.call(seenData.ids, id)
+}
+function seenAdd(id: string): void {
+  if (!id) return
+  seenData.ids[id] = Date.now()
+  // 限制总量不超过5000条(防止无限增长)
+  const keys = Object.keys(seenData.ids)
+  if (keys.length > 5000) {
+    // 删除最旧的一半
+    const sorted = keys.sort((a, b) => seenData.ids[a] - seenData.ids[b])
+    for (let i = 0; i < sorted.length / 2; i++) delete seenData.ids[sorted[i]]
+  }
+  saveSeen()
 }
 
-/** 读取联系人档案(文件缺失/损坏返回空表) */
+// ---- 联系人持久化(带内存缓存+写队列) ----
+let contactWriteChain: Promise<unknown> = Promise.resolve()
+let contactsCache: Record<string, NapcatContact> | null = null
+let contactsCacheLoaded = false
+
 export async function loadNapcatContacts(): Promise<Record<string, NapcatContact>> {
+  if (contactsCacheLoaded && contactsCache) return { ...contactsCache }
   try {
     const raw = await fs.readFile(napcatContactsPath(), 'utf8')
     const obj = JSON.parse(raw) as Record<string, Partial<NapcatContact>>
@@ -415,14 +452,142 @@ export async function loadNapcatContacts(): Promise<Record<string, NapcatContact
         }
       }
     }
+    contactsCache = { ...out }
+    contactsCacheLoaded = true
+    return out
+  } catch {
+    contactsCache = {}
+    contactsCacheLoaded = true
+    return {}
+  }
+}
+export async function saveNapcatContacts(contacts: Record<string, NapcatContact>): Promise<void> {
+  contactsCache = { ...contacts }
+  contactsCacheLoaded = true
+  contactWriteChain = contactWriteChain.then(async () => {
+    try {
+      const p = napcatContactsPath()
+      await fs.mkdir(path.dirname(p), { recursive: true })
+      const tmp = p + '.tmp'
+      await fs.writeFile(tmp, JSON.stringify(contacts, null, 2), 'utf8')
+      await fs.rename(tmp, p)
+    } catch (e) {
+      console.warn('[napcat] save contacts failed:', (e as Error)?.message)
+    }
+  }).catch(() => {})
+  await contactWriteChain
+}
+
+// ---- 聊天记录持久化(带内存缓存+写队列,性能优化) ----
+let chatWriteChain: Promise<unknown> = Promise.resolve()
+let chatsCache: NapcatChatRecord[] | null = null
+let chatsCacheLoaded = false
+
+export async function loadNapcatChats(maxChats?: number): Promise<NapcatChatRecord[]> {
+  if (chatsCacheLoaded && chatsCache) {
+    const limit = maxChats ?? DEFAULT_CHATS_SIZE
+    return chatsCache.slice(-limit)
+  }
+  try {
+    const raw = await fs.readFile(napcatChatsPath(), 'utf8')
+    const arr = JSON.parse(raw) as unknown
+    if (!Array.isArray(arr)) {
+      chatsCache = []
+      chatsCacheLoaded = true
+      return []
+    }
+    chatsCache = arr.filter(
+      (c): c is NapcatChatRecord =>
+        !!c &&
+        typeof c === 'object' &&
+        typeof (c as NapcatChatRecord).id === 'string' &&
+        typeof (c as NapcatChatRecord).text === 'string' &&
+        ((c as NapcatChatRecord).type === 'private' || (c as NapcatChatRecord).type === 'group'),
+    ).map(c => ({
+      ...c,
+      text: c.text.length > MAX_CHAT_TEXT_LEN ? c.text.slice(0, MAX_CHAT_TEXT_LEN) + '…(截断)' : c.text,
+    }))
+    chatsCacheLoaded = true
+    const limit = maxChats ?? DEFAULT_CHATS_SIZE
+    return chatsCache.slice(-limit)
+  } catch {
+    chatsCache = []
+    chatsCacheLoaded = true
+    return []
+  }
+}
+export function appendNapcatChat(record: NapcatChatRecord, maxChats?: number): void {
+  // 消息文本截断(防止超大消息占用内存和磁盘)
+  const safeRecord: NapcatChatRecord = {
+    ...record,
+    text: record.text.length > MAX_CHAT_TEXT_LEN 
+      ? record.text.slice(0, MAX_CHAT_TEXT_LEN) + '…(截断)' 
+      : record.text,
+  }
+  chatWriteChain = chatWriteChain
+    .then(async () => {
+      if (!chatsCacheLoaded) await loadNapcatChats(maxChats)
+      const chats = chatsCache ?? []
+      if (chats.some((c) => c.id === safeRecord.id)) return
+      chats.push(safeRecord)
+      const limit = maxChats ?? DEFAULT_CHATS_SIZE
+      const trimmed = chats.length > limit ? chats.slice(-limit) : chats
+      chatsCache = trimmed
+      const p = napcatChatsPath()
+      await fs.mkdir(path.dirname(p), { recursive: true })
+      const tmp = p + '.tmp'
+      await fs.writeFile(tmp, JSON.stringify(trimmed, null, 1), 'utf8')
+      await fs.rename(tmp, p)
+    })
+    .catch((err) => console.warn('[napcat] append chat failed:', err?.message))
+}
+
+// ---- 人格持久化(带写队列) ----
+let personaWriteChain: Promise<unknown> = Promise.resolve()
+export async function loadNapcatPersonas(): Promise<Record<string, NapcatPersona>> {
+  try {
+    const raw = await fs.readFile(napcatPersonasPath(), 'utf8')
+    const obj = JSON.parse(raw) as Record<string, Partial<NapcatPersona>>
+    const out: Record<string, NapcatPersona> = {}
+    for (const [scope, p] of Object.entries(obj)) {
+      if (p && typeof p === 'object' && typeof p.persona === 'string' && p.persona.trim()) {
+        out[scope] = { persona: p.persona.trim().slice(0, 500), updatedAt: typeof p.updatedAt === 'number' ? p.updatedAt : 0 }
+      }
+    }
     return out
   } catch {
     return {}
   }
 }
+export async function saveNapcatPersona(scope: string, persona: string): Promise<NapcatPersona | null> {
+  return new Promise((resolve) => {
+    personaWriteChain = personaWriteChain.then(async () => {
+      try {
+        const personas = await loadNapcatPersonas()
+        const p = napcatPersonasPath()
+        await fs.mkdir(path.dirname(p), { recursive: true })
+        if (!persona.trim()) {
+          delete personas[scope]
+          const tmp = p + '.tmp'
+          await fs.writeFile(tmp, JSON.stringify(personas, null, 2), 'utf8')
+          await fs.rename(tmp, p)
+          resolve(null)
+          return
+        }
+        const next: NapcatPersona = { persona: persona.trim().slice(0, 500), updatedAt: Math.floor(Date.now() / 1000) }
+        personas[scope] = next
+        const tmp = p + '.tmp'
+        await fs.writeFile(tmp, JSON.stringify(personas, null, 2), 'utf8')
+        await fs.rename(tmp, p)
+        resolve(next)
+      } catch {
+        resolve(null)
+      }
+    }).catch(() => resolve(null))
+  })
+}
 
-/** 从 QQ Cookie 计算 g_tk(CSRF token,2026-08-12 QQ 空间动态接口用):
- * 标准 hash33 算法,p_skey 优先、skey 兜底;找不到返回空串 */
+// ---- QQ空间 g_tk 计算 ----
 export function gtkFromCookie(cookie: string): string {
   const m = /p_skey=([^;]+)/.exec(cookie) ?? /skey=([^;]+)/.exec(cookie)
   if (!m) return ''
@@ -431,33 +596,16 @@ export function gtkFromCookie(cookie: string): string {
   return String(hash & 0x7fffffff)
 }
 
-/** 工具调用叙述句判定(2026-08-12,用户实测"和主人外的人聊天会暴露
- * 工具调用"——LLM 把内部工作流写进对外回复:「我来找实时数据源,先
- * 探测 KPL 数据中心的接口。找到了 API 路径…」):第一人称行动词 +
- * 技术/过程词**同时命中**才判叙述(行动词收窄防误伤正常口吻) */
+// ---- 文本清洗函数 ----
+/** 工具调用叙述句剥离(对外人不暴露内部工作流) */
 const TOOL_NARRATION_ACTION =
   /(我去|我来|我直接|我先|我再|我换|我细看|我用|我基于|我拿到|拿到|我找到|找到|拿到了|发现|定位|我挖|我探|我绘|我调用|我搜|我开|我拼|我测|我下载|我解析|我查|探测|拼接|绘制|下载|解析|抓取|爬取|请求|接口是|接口走)/
 const TOOL_NARRATION_WORD =
   /(接口|API|api|数据源|数据端点|端点|路径|域名|JS|脚本|命令|直播间|URL|网址|matplotlib|环境|胜率曲线|曲线|cookies|二维码|数据库|服务器|fetch|请求|响应|解析|网页|抓|爬|绘图|拼接|打开网页|打开浏览器|数据)/
-
-/** 剥离回复文本里的**工具调用过程叙述段**(2026-08-12,用户实测"和
- * 主人外的人聊天会暴露工具调用"——LLM 思考模式把内部工作流写进对
- * 外回复:「我来找实时数据源,先探测 KPL 数据中心的接口。找到了 API
- * 路径…」,外人看到探测接口/绘图/搜索等内部动作)。规则(保守):
- * - 按句末标点(。！？!?/换行)切句,标记「行动词+技术词」双命中的
- *   叙述句;
- * - **连续 ≥2 句**的叙述段整体删除(单句如「我刚帮你查了下比分」
- *   是正常口吻,不删——误伤风险大于收益);
- * - 删除后为空则保留原文(不把回复删没);
- * - 约束侧配套:main.cjs 注入指令要求对外人只给结论不叙述工具调用。
- */
 export function stripToolNarration(text: string): string {
   const t = String(text ?? '').trim()
   if (!t) return t
-  const sentences = t
-    .split(/(?<=[。！？!?\n])/)
-    .map((s) => s.trim())
-    .filter(Boolean)
+  const sentences = t.split(/(?<=[。！？!?\n])/).map((s) => s.replace(/^[^\S\n]*/, ''))
   if (sentences.length < 2) return t
   const isNarration = (s: string) => TOOL_NARRATION_ACTION.test(s) && TOOL_NARRATION_WORD.test(s)
   const flags = sentences.map(isNarration)
@@ -468,7 +616,7 @@ export function stripToolNarration(text: string): string {
       let j = i
       while (j < sentences.length && flags[j]) j++
       if (j - i >= 2) {
-        i = j // 连续叙述段整段删除
+        i = j
         continue
       }
     }
@@ -479,40 +627,13 @@ export function stripToolNarration(text: string): string {
   return out || t
 }
 
-/** 主人视角叙述句判定(2026-08-13,用户实测"私聊窗口泄露"——给扩展
- * 信任联系人的回复整体是向主人汇报的口吻:「魔精发来一张图片,我先
- * 展示给你看,同时识别一下图里的内容。…魔精回你了——他发了张…,
- * 图片已经展示在窗口里了,你可以看看。」,主人视角的叙述被当回复发给
- * 了对方)。三类模式任一命中即判叙述句(比 stripToolNarration 的行动词
- * +技术词双命中更宽:主人视角叙述不需要技术词):
- * ① 第三人称转述对方(他/她发来·回你·发了…)/ ② 向主人汇报(给你看/
- * 展示给/窗口里/你可以看看)/ ③ 内部工作流(识别一下/临时文件/清理) */
+/** 主人视角叙述句剥离(「展示给你看」「他回你了」不外发) */
 const MASTER_NARRATION_RE =
   /(他|她)(回你|回我|发来|发的是|发了|在回|回应)|(回你|回你了|发来)|(给你看|展示给|展示在|先展示)|(窗口里|你可以看看)|(识别一下|识别出来|临时文件|清理掉|清理了|顺便把)/
-
-/** 剥离回复里「向主人汇报/第三人称转述对方」的叙述句(2026-08-13,
- * 用户实测"私聊窗口泄露":给扩展信任联系人的回复整体是向主人汇报的
- * 口吻——「魔精发来…展示给你看…魔精回你了…你可以看看」,对方看到的
- * 是主人视角的转述)。规则(保守,与 stripToolNarration 同款):
- * - 按句末标点(。！？!?/换行)切句,叙述句(任一模式命中)标记;
- * - **连续 ≥2 句**的叙述段整体删除(单句「我刚帮你查了下比分」是
- *   正常口吻,不删——误伤风险大于收益);
- * - 删除后为空:**优先提取「回他/回复他「…」」引号里的回复原文**
- *   (叙述「我认出来后就回他「晚上好呀~图收到啦…」」——引号部分就是
- *   真正要发给对方的话);无引号才保留原文(宁可不删也不把正常回复
- *   删没);
- * - 约束侧配套:main.cjs 注入指令要求回复就是以第二人称对对方说的话
- *   (onMessage trusted 分支【私聊指令】)。仅对非主人目标应用
- *   (sendToQQ 非 MASTER / sendToGroup;主人保留过程,对话窗口本就是
- *   过程展示)
- */
 export function stripMasterNarration(text: string): string {
   const t = String(text ?? '').trim()
   if (!t) return t
-  const sentences = t
-    .split(/(?<=[。！？!?\n])/)
-    .map((s) => s.trim())
-    .filter(Boolean)
+  const sentences = t.split(/(?<=[。！？!?\n])/).map((s) => s.replace(/^[^\S\n]*/, ''))
   if (sentences.length < 2) return t
   const flags = sentences.map((s) => MASTER_NARRATION_RE.test(s))
   const keep: string[] = []
@@ -522,7 +643,7 @@ export function stripMasterNarration(text: string): string {
       let j = i
       while (j < sentences.length && flags[j]) j++
       if (j - i >= 2) {
-        i = j // 连续叙述段整段删除
+        i = j
         continue
       }
     }
@@ -531,50 +652,30 @@ export function stripMasterNarration(text: string): string {
   }
   const out = keep.join('').trim()
   if (out) return out
-  // 全部是叙述:提取「回他「…」」的引用回复(叙述里夹带的真正回复)
   const quoted = /回(他|她|对方)[^。！？!?\n]{0,20}[「"“]([\s\S]{2,120}?)[」"”]/.exec(t)
   if (quoted && quoted[2].trim()) return quoted[2].trim()
-  return t // 无引号兜底:保留原文(宁可不删也不把正常回复删没)
+  return t
 }
 
-/** 从消息文本中提取夹带的图片路径/URL(2026-08-12,用户质疑"发送图片
- * 应该不是只发个路径吧"——LLM 可能把图片路径写进 message 文本而非
- * image 参数,那样对方只会收到一串路径文字):提取本地绝对路径
- * (D:/x.png)或 http(s) 链接 + 图片扩展名(png/jpg/jpeg/gif/webp/bmp,
- * 括号包裹的也提取),从文本移除返回。**发送时转 image 段真发图**;
- * 本地路径的存在性由调用方校验(不存在的回填文本,不发假图) */
+/** 从文本中提取夹带的图片路径/URL(用于发图兜底)
+ * 加强边界条件:必须在行首/空白/引号/括号之后,避免"C盘的那个.png我看过了"误提取 */
 export function extractImageRefs(text: string): { text: string; images: string[] } {
   const images: string[] = []
-  // 结构:前缀(盘符/协议)→ 共用字符集(排除 ? 防贪婪吞查询串)→ 显式
-  // 图片扩展名 → 可选查询串([?#&] 开头,防回溯截断 URL 的 ?x=1&y=2)
+  // 路径前必须是空白、引号、括号、中文标点或行首,避免在句子中间误匹配
   const cleaned = String(text ?? '').replace(
-    /(?:[（(]\s*)?((?:[A-Za-z]:[\\/]|https?:\/\/)[^\s，,。;；!！?？"'“”‘’【】()（）]+\.(?:png|jpe?g|gif|webp|bmp)(?:[?#&][^\s，,。;；!！"'“”‘’【】()（）？]*)?)(?:\s*[）)])?/gi,
-    (_m, p: string) => {
+    /(^|[\s，,。;；!！?？"'“”‘’【】(（)）>》])((?:[A-Za-z]:[\\/]|https?:\/\/)[^\s，,。;；!！?？"'“”‘’【】()（）<>《》]+\.(?:png|jpe?g|gif|webp|bmp)(?:[?#&][^\s，,。;；!！"'“”‘’【】()（）<>《》？]*)?)/gi,
+    (_m, prefix: string, p: string) => {
       images.push(p)
-      return ''
+      return prefix
     },
   )
-  return { text: cleaned.replace(/\s+/g, ' ').trim(), images }
+  return { text: cleaned.replace(/\(\)|（）|\[]|【】/g, '').replace(/\s+/g, ' ').trim(), images }
 }
 
-/** 思考腔开头(语气词 + 思考动词,如「好的,我先梳理一下…」;
- * 「先」可插在动词前——"让我先分析"是常见形式) */
+/** 思考腔开头剥离 */
 const THINK_LEAD =
   /^(好的|好|嗯|嗯嗯|OK|ok|okay|可以的|可以|没问题|收到|明白了|行|行吧)[,，、\s]*(让我|我先|我|让我来|我来)先?(分析|梳理|思考|想想|整理|回顾|总结|看一下|看看|确认|理一下|查一下|研究)/
-/** 直接以思考动词开头(如「让我先分析一下…」) */
 const THINK_START = /^(让我|我先|我(来)?|容我)先?(分析|梳理|思考|想想|整理|回顾|总结|看一下|看看|理一下)/
-
-/** 剥离回复文本开头的「思考腔」段落(2026-08-12,用户实测 QQ 机器人
- * 私聊收到的回复带思考过程——LLM 思考模式输出常以「好的,我先梳理
- * 一下你的需求…」这类思考腔开头再给结论,QQ 客户端看到的就是思考
- * 过程)。规则(保守,防误伤正常回复):
- * - 只剥离**第一段**(非贪婪到首个句末标点 。！？!? 换行或冒号),
- *   段尾无句末符(如整句以逗号结尾)不剥;
- * - 第一段必须是明显思考腔(语气词+思考动词,或以思考动词直接开头)
- *   才剥;剥后文本为空则保留原文(不把结论误删光);
- * - 第一段超 40 字不剥(长句多为正式开场,不是思考腔)。
- * 约束侧配套:main.cjs 注入指令要求 LLM 直接给结论不写思考过程。
- */
 export function stripThinkingPreamble(text: string): string {
   const t = String(text ?? '').trim()
   if (!t) return t
@@ -590,191 +691,336 @@ export function stripThinkingPreamble(text: string): string {
   return rest || t
 }
 
-/** 写入联系人档案(原子写) */
-export async function saveNapcatContacts(contacts: Record<string, NapcatContact>): Promise<void> {
-  try {
-    const p = napcatContactsPath()
-    await fs.mkdir(path.dirname(p), { recursive: true })
-    const tmp = p + '.tmp'
-    await fs.writeFile(tmp, JSON.stringify(contacts, null, 2), 'utf8')
-    await fs.rename(tmp, p)
-  } catch {
-    // 写入失败忽略(档案是增强功能,不阻断通信)
-  }
+// ---- NapCat 客户端 ----
+export interface NapcatClient {
+  start(): void
+  stop(): void
+  status(): NapcatStatus
+  downloadImages(images?: NapcatImage[]): Promise<string[]>
+  appendChat(record: Omit<NapcatChatRecord, 'time'> & { time?: number }): void
+  sendToQQ(qq: string, text: string, opts?: { image?: string; file?: string }): Promise<string>
+  sendToGroup(groupId: string, text: string, filePath?: string, image?: string): Promise<string>
+  recallMessage(messageId: string): Promise<void>
+  getRecentMessages(): NapcatMessage[]
+  getSentMessages(): NapcatSentMessage[]
+  getContacts(): Promise<Record<string, NapcatContact>>
+  updateContact(patch: { qq: string; name?: string; info?: string; source?: 'private' | 'group' }): Promise<NapcatContact>
+  getChats(): Promise<NapcatChatRecord[]>
+  getPersonas(): Promise<Record<string, NapcatPersona>>
+  setPersona(scope: string, persona: string): Promise<NapcatPersona | null>
+  mergeContactNames(entries: Array<{ qq: string; name?: string; source?: 'private' | 'group' }>): Promise<void>
+  getGroupMembers(groupId: string): Promise<Array<{ user_id: string; nickname?: string; card?: string }>>
+  getFriendList(): Promise<Array<{ user_id: string; nickname?: string; remark?: string }>>
+  getStrangerInfo(qq: string): Promise<{ nickname?: string; age?: number; sex?: string }>
+  getGroupInfo(groupId: string): Promise<{ groupName?: string; memberCount?: number }>
+  setGroupBan(groupId: string, qq: string, durationSec: number): Promise<void>
+  setGroupKick(groupId: string, qq: string): Promise<void>
+  setGroupWholeBan(groupId: string, enable: boolean): Promise<void>
+  getQzoneFeeds(qq: string, num: number): Promise<Array<{ tid: string; content: string; createTime: number; picnum: number; commentnum: number; likenum: number }>>
+  markReplied(messageId: string): void
+  getBotQQ(): string
+  /** 会话面板管理(2026-08-14 manage_sessions 工具):主进程经 NapcatDeps
+   * 注入后透传,未注入时工具侧拿到的都是空实现/空列表 */
+  listSessions?(): Array<{ key: string; title: string; kind: 'private' | 'group'; muted: boolean }>
+  muteSession?(key: string, muted: boolean): void
+  bindSession?(key: string): void
+  watchSession?(kind: 'private' | 'group', id: string): void
+  unwatchSession?(kind: 'private' | 'group', id: string): void
 }
 
-export function createNapcatClient(deps: NapcatDeps) {
+export function createNapcatClient(deps: NapcatDeps): NapcatClient {
   let ws: WsConn | null = null
   let stopped = false
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+  let seenCleanupTimer: ReturnType<typeof setInterval> | null = null
   let reconnectDelay = 1000
+  let reconnectFails = 0
+  let circuitBroken = false
   let lastError = ''
   let receivedCount = 0
   let repliedCount = 0
+  let lastQzoneCall = 0
   const messages: NapcatMessage[] = []
-  /** 机器人发出的消息记录(2026-08-12:send 成功后记录,recall 可查 ID) */
   const sentMessages: NapcatSentMessage[] = []
-  /** 动作调用:echo → resolve(等待响应;泛型经闭包转换) */
-  const pending = new Map<string, { resolve: (v: unknown) => void; timer: ReturnType<typeof setTimeout> }>()
+  const pending = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> }>()
   let echoSeq = 0
 
-  /** 记录一条发出的消息(有 message_id 才记——没有 ID 撤不了,记了也没用) */
+  // ---- 发送频率限制(2026-08-14 防刷屏/QQ客户端卡死) ----
+  const MIN_SEND_INTERVAL_MS = 800 // 同一目标最小发送间隔
+  const MAX_SENDS_PER_MINUTE = 25 // 全局每分钟最大发送数
+  const sendTimestamps: number[] = [] // 滑动窗口记录发送时间
+  const lastSentAt = new Map<string, number>() // target -> 上次发送时间戳
+  function checkRateLimit(target: string): { ok: boolean; reason?: string } {
+    const now = Date.now()
+    // 清理1分钟前的记录
+    while (sendTimestamps.length > 0 && now - sendTimestamps[0] > 60000) sendTimestamps.shift()
+    if (sendTimestamps.length >= MAX_SENDS_PER_MINUTE) {
+      return { ok: false, reason: `发送过于频繁(${MAX_SENDS_PER_MINUTE}条/分钟),请稍后再试` }
+    }
+    const last = lastSentAt.get(target)
+    if (last && now - last < MIN_SEND_INTERVAL_MS) {
+      return { ok: false, reason: '发送间隔太短,请稍候' }
+    }
+    return { ok: true }
+  }
+  function recordSend(target: string): void {
+    const now = Date.now()
+    sendTimestamps.push(now)
+    lastSentAt.set(target, now)
+  }
+
+  // 加载去重数据
+  void loadSeen()
+
+  const cfg = () => deps.getConfig()
+  const botQQ = () => String(cfg().napcatBotQQ ?? '108724305')
+  const cacheSize = () => DEFAULT_CACHE_SIZE
+  const sentSize = () => DEFAULT_SENT_SIZE
+  const chatsSize = () => DEFAULT_CHATS_SIZE
+
   function recordSent(msg: Omit<NapcatSentMessage, 'time'> & { time?: number }): void {
     if (!msg.messageId) return
     sentMessages.push({ ...msg, time: msg.time ?? Math.floor(Date.now() / 1000) })
-    if (sentMessages.length > MAX_SENT) sentMessages.shift()
+    const limit = sentSize()
+    while (sentMessages.length > limit) sentMessages.shift()
   }
 
-  const cfg = () => deps.getConfig()
+  function reportError(message: string): void {
+    lastError = message
+    deps.onError?.(message)
+    console.error('[napcat]', message)
+  }
 
-  /** 消息文本提取(兼容 string 与段数组) */
   function extractText(msg: unknown): string {
-    return napcatMessageText(msg)
+    return napcatMessageText(msg, botQQ())
   }
 
   function connect() {
-    if (stopped) return
+    if (stopped || circuitBroken) return
     const url = cfg().napcatWsUrl?.trim() || DEFAULT_WS_URL
     try {
       lastError = ''
-      // **手写 WS 传输(2026-08-13,见 wsclient.ts)**:替换 undici 全局
-      // WebSocket——补丁版 Electron 的 undici WS(llhttp 握手)实测必崩
-      // (段错误),net.Socket 直连 + 手写 Upgrade/帧编解码不经过 llhttp
       const socket = createWsSocket(url, {
         onOpen: () => {
           reconnectDelay = 1000
+          reconnectFails = 0
+          circuitBroken = false
           deps.notify?.('NapCat 已连接', `QQ 消息桥就绪(${url})`)
+          // 启动定期清理过期seen
+          if (!seenCleanupTimer) {
+            seenCleanupTimer = setInterval(pruneSeen, SEEN_CLEANUP_INTERVAL_MS)
+          }
         },
         onMessage: (text) => {
-        let data: unknown
-        try {
-          data = JSON.parse(String(text))
-        } catch {
-          return // 非 JSON(心跳二进制等)忽略
-        }
-        const obj = data as Record<string, unknown>
-        // 动作响应(echo 匹配)
-        if (typeof obj.echo === 'string' && pending.has(obj.echo)) {
-          const p = pending.get(obj.echo)!
-          pending.delete(obj.echo)
-          clearTimeout(p.timer)
-          p.resolve(obj)
-          return
-        }
-        // 事件
-        if (obj.post_type === 'message' && obj.message_type === 'private') {
-          const qq = String(obj.user_id ?? '')
-          if (!qq) return
-          // **跳过机器人自己发的消息(2026-08-12 修复"白名单私聊没有
-          // 自主回复"根因)**:NapCat 会推送自己发出的消息事件(回复主人
-          // 后 user_id = 机器人自身)——不跳过会被当"陌生人"消息覆盖
-          // 待回复队列、注入"先问主人"前缀进对话,回复链路被污染
-          if (qq === String(cfg().napcatBotQQ ?? BOT_QQ)) return
-          // **不做白名单过滤(2026-08-12 二轮,用户要求"非白名单消息也
-          // 进对话,LLM 问主人怎么回复")**:白名单判定移到 main.cjs
-          // 分级——白名单 = 自主回复,非白名单 = 询问用户后再回
-          // 去重(同一 message_id 只处理一次)
-          const messageId = String(obj.message_id ?? '')
-          if (messageId && messages.some((m) => m.messageId === messageId)) return
-          const raw = obj.message ?? obj.raw_message
-          const text = extractText(raw)
-          const images = napcatMessageImages(raw)
-          const msg: NapcatMessage = {
-            qq,
-            text,
-            messageId,
-            time: Number(obj.time ?? Math.floor(Date.now() / 1000)),
-            images,
+          let data: unknown
+          try {
+            data = JSON.parse(String(text))
+          } catch {
+            return
           }
-          messages.push(msg)
-          if (messages.length > MAX_CACHE) messages.shift()
-          receivedCount++
-          if (text) {
-            deps.notify?.(`QQ 消息(${qq})`, text.length > 50 ? text.slice(0, 50) + '…' : text)
+          const obj = data as Record<string, unknown>
+          // 动作响应
+          if (typeof obj.echo === 'string' && pending.has(obj.echo)) {
+            const p = pending.get(obj.echo)!
+            pending.delete(obj.echo)
+            clearTimeout(p.timer)
+            if (obj.status === 'failed' || obj.retcode !== 0) {
+              const msg = String(obj.msg ?? obj.wording ?? '动作执行失败')
+              p.reject(new Error(`NapCat ${msg}(retcode=${obj.retcode ?? '?'})`))
+            } else {
+              p.resolve(obj)
+            }
+            return
           }
-          deps.onMessage(msg)
-        }
-        // 群消息(2026-08-12,整合 Python 桥的群聊能力):群白名单过滤,
-        // 提取文本 + @ 标记 → onGroupMessage(main.cjs 自主判断接话)
-        if (obj.post_type === 'message' && obj.message_type === 'group') {
-          const groupId = String(obj.group_id ?? '')
-          const qq = String(obj.user_id ?? '')
-          if (!groupId || !qq) return
-          // 跳过机器人自己发的消息(防止自己接自己的话)
-          if (qq === String(cfg().napcatBotQQ ?? BOT_QQ)) return
-          const groups = cfg().napcatAllowedGroups ?? []
-          if (groups.length > 0 && !groups.includes(groupId)) return
-          const messageId = String(obj.message_id ?? '')
-          if (messageId && groupSeen.has(messageId)) return
-          groupSeen.add(messageId)
-          if (groupSeen.size > 200) groupSeen.clear()
-          const raw = obj.message ?? obj.raw_message
-          const text = extractText(raw)
-          const images = napcatMessageImages(raw)
-          // @ 机器人检测(段数组里 at 段 qq = 机器人自身)
-          const atMe = (Array.isArray(raw) ? raw : []).some(
-            (seg: { type?: string; data?: Record<string, unknown> }) =>
-              seg?.type === 'at' && String(seg.data?.qq ?? '') === String(BOT_QQ),
-          )
-          const msg: NapcatGroupMessage = {
-            groupId,
-            qq,
-            text,
-            atMe,
-            messageId,
-            time: Number(obj.time ?? Math.floor(Date.now() / 1000)),
-            images,
+          // 心跳(不处理)
+          if (obj.post_type === 'meta_event' && obj.meta_event_type === 'heartbeat') return
+          if (obj.post_type === 'meta_event' && obj.meta_event_type === 'lifecycle') return
+
+          // 通知事件(撤回/好友请求等)
+          if (obj.post_type === 'notice') {
+            handleNotice(obj)
+            return
           }
-          receivedCount++
-          // 系统通知(2026-08-12 用户要求"群里有人回复必须做成系统通知,
-          // 发了消息就直接告诉 LLM"):群消息到达即弹通知(内容预览)
-          if (text) {
-            deps.notify?.(
-              `${msg.atMe ? '@鲸鱼娘 ' : ''}群消息(QQ ${qq})`,
-              text.length > 50 ? text.slice(0, 50) + '…' : text,
-            )
+          if (obj.post_type === 'request') {
+            handleRequest(obj)
+            return
           }
-          deps.onGroupMessage(msg)
-        }
-      },
-      onError: (message) => {
+
+          // 私聊消息
+          if (obj.post_type === 'message' && obj.message_type === 'private') {
+            const qq = String(obj.user_id ?? '')
+            if (!qq) return
+            if (qq === botQQ()) return // 跳过自己
+            const messageId = String(obj.message_id ?? '')
+            // 去重键区分私聊/群聊前缀(2026-08-14:不同会话message_id可能同值,分开去重)
+            const dedupKey = messageId ? `private:${messageId}` : ''
+            if (dedupKey && seenHas(dedupKey)) return
+            if (dedupKey) seenAdd(dedupKey)
+            const raw = obj.message ?? obj.raw_message
+            const text = extractText(raw)
+            const images = napcatMessageImages(raw)
+            const msg: NapcatMessage = {
+              qq,
+              text,
+              messageId,
+              time: Number(obj.time ?? Math.floor(Date.now() / 1000)),
+              images,
+            }
+            messages.push(msg)
+            const limit = cacheSize()
+            while (messages.length > limit) messages.shift()
+            receivedCount++
+            if (text) {
+              deps.notify?.(`QQ 消息(${qq})`, text.length > 50 ? text.slice(0, 50) + '…' : text)
+            }
+            try { deps.onMessage(msg) } catch (e) { reportError(`onMessage处理失败:${(e as Error).message}`) }
+          }
+          // 群消息
+          if (obj.post_type === 'message' && obj.message_type === 'group') {
+            const groupId = String(obj.group_id ?? '')
+            const qq = String(obj.user_id ?? '')
+            if (!groupId || !qq) return
+            if (qq === botQQ()) return // 跳过自己
+            const groups = cfg().napcatAllowedGroups ?? []
+            if (groups.length > 0 && !groups.includes(groupId)) return
+            const messageId = String(obj.message_id ?? '')
+            // 去重键区分私聊/群聊前缀(2026-08-14:不同会话message_id可能同值,分开去重)
+            const dedupKey = messageId ? `group:${messageId}` : ''
+            if (dedupKey && seenHas(dedupKey)) return
+            if (dedupKey) seenAdd(dedupKey)
+            const raw = obj.message ?? obj.raw_message
+            const text = extractText(raw)
+            const images = napcatMessageImages(raw)
+            // @ 机器人检测:段数组 + CQ码字符串
+            const bqq = botQQ()
+            const atMe =
+              (Array.isArray(raw)
+                ? raw.some((seg: { type?: string; data?: Record<string, unknown> }) =>
+                    seg?.type === 'at' && String(seg.data?.qq ?? '') === bqq)
+                : false) || cqAtMe(raw, bqq)
+            const msg: NapcatGroupMessage = {
+              groupId,
+              qq,
+              text,
+              atMe,
+              messageId,
+              time: Number(obj.time ?? Math.floor(Date.now() / 1000)),
+              images,
+            }
+            receivedCount++
+            if (text) {
+              deps.notify?.(
+                `${msg.atMe ? '@鲸鱼娘 ' : ''}群消息(QQ ${qq})`,
+                text.length > 50 ? text.slice(0, 50) + '…' : text,
+              )
+            }
+            try { deps.onGroupMessage(msg) } catch (e) { reportError(`onGroupMessage处理失败:${(e as Error).message}`) }
+          }
+        },
+        onError: (message) => {
           lastError = message || '连接错误(请确认 NapCat 已启动且 WS 端口开放)'
         },
         onClose: () => {
           if (ws === socket) ws = null
+          reconnectFails++
+          if (reconnectFails >= MAX_RECONNECT_FAILS) {
+            circuitBroken = true
+            deps.notify?.('NapCat 连接失败', `连续${MAX_RECONNECT_FAILS}次连接失败，已停止重连。请确认NapCat已启动后重启应用或重新连接。`)
+            reportError(`NapCat连续${MAX_RECONNECT_FAILS}次连接失败，已熔断`)
+            return
+          }
           scheduleReconnect()
         },
       })
       ws = socket
     } catch (e) {
       lastError = (e as Error).message
+      reconnectFails++
+      if (reconnectFails >= MAX_RECONNECT_FAILS) {
+        circuitBroken = true
+        deps.notify?.('NapCat 连接失败', `连续${MAX_RECONNECT_FAILS}次连接失败，已停止重连。`)
+        return
+      }
       scheduleReconnect()
     }
   }
 
+  function handleNotice(obj: Record<string, unknown>) {
+    const noticeType = String(obj.notice_type ?? '')
+    // OneBot v11字段语义(2026-08-14 修复字段颠倒):
+    // - user_id: 事件主体(被踢的人/加入的人/离开的人/消息发送者)
+    // - operator_id: 操作者(踢人的管理员/邀请人/撤回操作者;主动退群时=user_id)
+    // 接口定义:userId=操作者,targetId=被操作者
+    const subjectId = obj.user_id !== undefined ? String(obj.user_id) : undefined
+    const operatorId = obj.operator_id !== undefined ? String(obj.operator_id) : undefined
+    const groupId = obj.group_id !== undefined ? String(obj.group_id) : undefined
+    const msg: NapcatNotice = {
+      type: noticeType as NapcatNotice['type'],
+      userId: operatorId ?? subjectId, // 操作者优先;无operator时主体即操作者
+      groupId,
+      targetId: operatorId ? subjectId : undefined, // 有操作者时主体是被操作目标
+    }
+    if (noticeType === 'group_recall' || noticeType === 'friend_recall') {
+      // 撤回事件:user_id=消息发送者,operator_id=撤回者(可能相同)
+      msg.type = noticeType
+      msg.userId = operatorId ?? subjectId
+      msg.targetId = operatorId && operatorId !== subjectId ? subjectId : undefined
+    } else if (noticeType === 'group_increase') {
+      msg.type = 'group_increase'
+      // 加入事件:user_id=加入者,operator_id=邀请者/同意者
+      msg.targetId = subjectId
+      msg.userId = operatorId ?? subjectId
+    } else if (noticeType === 'group_decrease') {
+      msg.type = 'group_decrease'
+      // 离开事件:user_id=离开者,operator_id=踢人者(主动退群时operator=user)
+      msg.targetId = subjectId
+      msg.userId = operatorId ?? subjectId
+    } else {
+      return // 其他notice暂不处理
+    }
+    deps.onNotice?.(msg)
+  }
+
+  function handleRequest(obj: Record<string, unknown>) {
+    const reqType = String(obj.request_type ?? '')
+    const flag = String(obj.flag ?? '')
+    const comment = obj.comment !== undefined ? String(obj.comment) : undefined
+    const userId = obj.user_id !== undefined ? String(obj.user_id) : undefined
+    const groupId = obj.group_id !== undefined ? String(obj.group_id) : undefined
+    if (reqType === 'friend') {
+      deps.onNotice?.({ type: 'friend_request', userId, flag, comment })
+      deps.notify?.('QQ好友请求', `QQ ${userId} 请求加好友${comment ? `:${comment}` : ''}`)
+    } else if (reqType === 'group' && (String(obj.sub_type ?? '') === 'add' || String(obj.sub_type ?? '') === 'invite')) {
+      deps.onNotice?.({ type: 'group_request', userId, groupId, flag, comment })
+      deps.notify?.('QQ群请求', `QQ ${userId} 请求加入/邀请加入群 ${groupId}${comment ? `:${comment}` : ''}`)
+    }
+  }
+
   function scheduleReconnect() {
-    if (stopped || reconnectTimer) return
+    if (stopped || reconnectTimer || circuitBroken) return
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null
       connect()
     }, reconnectDelay)
-    reconnectDelay = Math.min(reconnectDelay * 2, 30000)
+    reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_CAP_MS)
   }
 
-  /** 调 OneBot 动作(带 echo 等待响应);超时 reject */
-  function callAction<T = unknown>(action: string, params: Record<string, unknown>): Promise<T> {
+  function callAction<T = unknown>(action: string, params: Record<string, unknown>, timeoutMs: number = ACTION_TIMEOUT_MS): Promise<T> {
     return new Promise((resolve, reject) => {
       if (!ws || !ws.open) {
         reject(new Error('NapCat 未连接(请确认 NapCat 已启动)'))
         return
       }
-      const echo = `napcat-${++echoSeq}-${Math.random().toString(36).slice(2, 8)}`
+      const echo = `napcat-${++echoSeq}-${randomInt(1 << 24).toString(36)}`
       const timer = setTimeout(() => {
         pending.delete(echo)
-        reject(new Error(`NapCat 动作 ${action} 超时`))
-      }, ACTION_TIMEOUT_MS)
-      // 泛型 T 经闭包收窄:Map 存 unknown,resolve 时断言
-      pending.set(echo, { resolve: resolve as (v: unknown) => void, timer })
+        reject(new Error(`NapCat 动作 ${action} 超时(${Math.round(timeoutMs / 1000)}s)`))
+      }, timeoutMs)
+      pending.set(echo, {
+        resolve: resolve as (v: unknown) => void,
+        reject,
+        timer,
+      })
       try {
         ws.send(JSON.stringify({ action, params, echo }))
       } catch (e) {
@@ -785,21 +1031,15 @@ export function createNapcatClient(deps: NapcatDeps) {
     })
   }
 
-  /** 图片下载目录(userData/napcat-media/) */
   const mediaDir = () => path.join(userDataDir(), 'napcat-media')
 
-  /** 下载图片(2026-08-12 收图链路):
-   * ① file 缓存名(如 xxx.image)→ get_image 动作拿真实本地路径(优先);
-   * ② 无 file 或转换失败 → url 直链 HTTP 下载;
-   * ③ 复制到 userData/napcat-media/ 统一落点(带时间戳防重名)。
-   * 全部失败返回 null(不阻断消息链路,对话只显示文本标注) */
   async function downloadImage(img: NapcatImage): Promise<string | null> {
     try {
       await fs.mkdir(mediaDir(), { recursive: true })
       let localPath = ''
       if (img.file) {
         try {
-          const res = (await callAction<{ data?: { file?: string } }>('get_image', { file: img.file })) as {
+          const res = await callAction<{ data?: { file?: string } }>('get_image', { file: img.file }) as {
             status?: string
             retcode?: number
             data?: { file?: string }
@@ -807,37 +1047,61 @@ export function createNapcatClient(deps: NapcatDeps) {
           const p = res?.data?.file
           if (p && existsSync(p)) localPath = p
         } catch {
-          // get_image 失败(缓存已过期等)走 url 下载
+          // get_image失败走url下载
         }
       }
       if (!localPath && img.file && existsSync(img.file)) localPath = img.file
       if (!localPath && img.url) {
         try {
-          const resp = await fetch(img.url)
+          const controller = new AbortController()
+          const timer = setTimeout(() => controller.abort(), IMAGE_DOWNLOAD_TIMEOUT_MS)
+          const resp = await fetch(img.url, { signal: controller.signal })
+          clearTimeout(timer)
           if (resp.ok) {
             const buf = Buffer.from(await resp.arrayBuffer())
+            if (buf.length > MAX_IMAGE_SIZE) {
+              reportError(`图片过大(${Math.round(buf.length / 1024 / 1024)}MB>20MB)，跳过下载`)
+              return null
+            }
             const ct = String(resp.headers.get('content-type') ?? '')
             const ext = /image\/(png|jpe?g|gif|webp|bmp)/.exec(ct)?.[1]?.replace('jpeg', 'jpg') ?? 'jpg'
-            localPath = path.join(mediaDir(), `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`)
+            localPath = path.join(mediaDir(), `${Date.now()}-${randomInt(1 << 24).toString(36)}.${ext}`)
             await fs.writeFile(localPath, buf)
             return localPath
           }
-        } catch {
-          // 下载失败
+        } catch (e) {
+          const msg = (e as Error).message
+          if (msg?.includes('abort')) {
+            reportError(`图片下载超时(>${IMAGE_DOWNLOAD_TIMEOUT_MS / 1000}s)`)
+          } else {
+            reportError(`图片下载失败:${msg}`)
+          }
+          return null
         }
       }
       if (!localPath) return null
       const ext = path.extname(localPath) || '.img'
-      const dest = path.join(mediaDir(), `${Date.now()}-${Math.random().toString(36).slice(2, 8)}${ext}`)
+      const dest = path.join(mediaDir(), `${Date.now()}-${randomInt(1 << 24).toString(36)}${ext}`)
       await fs.copyFile(localPath, dest)
       return dest
-    } catch {
+    } catch (e) {
+      reportError(`图片处理失败:${(e as Error).message}`)
       return null
     }
   }
 
+  function prepareOutgoingText(text: string, isMaster: boolean): string {
+    let t = text
+    if (!isMaster) {
+      t = stripThinkingPreamble(stripMasterNarration(stripToolNarration(stripFingerprintMarks(t))))
+    } else {
+      t = stripFingerprintMarks(t)
+    }
+    return t
+  }
+
   return {
-    /** 下载消息里的图片段 → 本地路径列表(2026-08-12 收图链路) */
+    getBotQQ: botQQ,
     async downloadImages(images?: NapcatImage[]): Promise<string[]> {
       if (!images || images.length === 0) return []
       const out: string[] = []
@@ -847,70 +1111,53 @@ export function createNapcatClient(deps: NapcatDeps) {
       }
       return out
     },
-    /** 备份一条聊天记录(2026-08-12:工具记忆原始层,消息到达自动调用) */
     appendChat(record: Omit<NapcatChatRecord, 'time'> & { time?: number }) {
       appendNapcatChat({
         ...record,
         time: record.time ?? Math.floor(Date.now() / 1000),
-      })
+      }, chatsSize())
     },
     start() {
       stopped = false
+      circuitBroken = false
+      reconnectFails = 0
       connect()
     },
     stop() {
       stopped = true
-      if (reconnectTimer) clearTimeout(reconnectTimer)
-      reconnectTimer = null
-      for (const [, p] of pending) clearTimeout(p.timer)
-      pending.clear()
-      try {
-        ws?.close()
-      } catch {
-        // 已关闭
+      circuitBroken = true
+      if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null }
+      if (seenCleanupTimer) { clearInterval(seenCleanupTimer); seenCleanupTimer = null }
+      for (const [, p] of pending) {
+        clearTimeout(p.timer)
+        p.reject(new Error('NapCat已停止'))
       }
+      pending.clear()
+      try { ws?.close() } catch { /* 已关闭 */ }
       ws = null
     },
-    /** 给指定 QQ 发私聊消息(回复用户);返回 message_id。
-     * image 可选(2026-08-12 发图链路):本地路径或 URL → 组装 image 段
-     * 一并发送(文本 + 图);file 可选:upload_private_file 发文件本体 */
     async sendToQQ(qq: string, text: string, opts?: { image?: string; file?: string }): Promise<string> {
-      // **对外人剥离工具调用叙述(2026-08-12,用户实测"和主人外的人
-      // 聊天会暴露工具调用")**:LLM 把「我来找实时数据源,先探测接口」
-      // 这类内部工作流写进回复,外人可见;主人(MASTER_QQ)保留过程
-      // (对话窗口本就是过程展示)。询问轮发主人、白名单主人回复不受影响。
-      // **主人视角叙述剥离(2026-08-13,用户实测"私聊窗口泄露")**:
-      // 「魔精发来…展示给你看…魔精回你了…你可以看看」这类向主人汇报
-      // 的口吻也不能发给对方——两段剥离串行,先工具叙述再主人视角
-      if (qq !== MASTER_QQ) text = stripMasterNarration(stripToolNarration(text))
+      const isMaster = qq === MASTER_QQ
+      const cleaned = prepareOutgoingText(text, isMaster)
       const paramImage = typeof opts?.image === 'string' && opts.image.trim() ? opts.image.trim() : ''
       const file = typeof opts?.file === 'string' && opts.file.trim() ? opts.file.trim() : ''
-      // **文本夹带图片兜底(2026-08-12,用户质疑"发送图片应该不是只发
-      // 个路径吧")**:LLM 可能把图片路径写进 message 文本而非 image 参数
-      // ——提取出来转 image 段真发图(对方收到图片不是路径文字);显式
-      // image 参数仍校验存在(报错 LLM 可自纠),提取的本地路径不存在的
-      // 回填文本(不发假图、信息不丢)
-      const { text: cleanText, images: refImages } = extractImageRefs(text)
+      const { text: cleanText, images: refImages } = extractImageRefs(cleaned)
       if (!cleanText.trim() && refImages.length === 0 && !paramImage && !file) return ''
       if (file) {
-        // 校验文件存在(与 send_group 同款)
-        if (!existsSync(file)) {
-          throw new Error(`文件不存在:${file}(send 的 file 需要本地绝对路径)`)
-        }
-        const up = (await callAction<{ status?: string; retcode?: number }>('upload_private_file', {
-          user_id: qq,
-          file,
-          name: path.basename(file),
-        })) as { status?: string; retcode?: number }
-        if (up?.status !== 'ok' && up?.retcode !== 0) {
-          throw new Error(`文件上传失败(${up?.retcode ?? '未知'})`)
+        if (!existsSync(file)) throw new Error(`文件不存在:${file}(send 的 file 需要本地绝对路径)`)
+        try {
+          const up = await callAction<{ status?: string; retcode?: number }>('upload_private_file', {
+            user_id: qq, file, name: path.basename(file),
+          }, FILE_UPLOAD_TIMEOUT_MS) as { status?: string; retcode?: number }
+          if (up?.status !== 'ok' && up?.retcode !== 0) throw new Error(`文件上传失败(${up?.retcode ?? '未知'})`)
+        } catch (e) {
+          reportError(`私聊文件上传失败:${(e as Error).message}`)
+          throw e
         }
       }
-      // 显式 image 参数校验存在(与 send_group 同款)
       if (paramImage && !/^https?:|^data:image\//.test(paramImage) && !existsSync(paramImage)) {
         throw new Error(`图片不存在:${paramImage}(image 需要本地绝对路径或 http(s) 链接)`)
       }
-      // 合并显式 + 提取图片(去重);提取的本地路径不存在 → 回填文本
       const seen = new Set<string>()
       const finalImages: string[] = []
       const backToText: string[] = []
@@ -921,8 +1168,12 @@ export function createNapcatClient(deps: NapcatDeps) {
         else finalImages.push(p)
       }
       const finalText = [cleanText, ...backToText].join(' ').trim()
-      // 组装消息段:文本 + 图片段(多个)(file 传路径/URL,NapCat 读取
-      // 上传——**对方收到的是真图片,不是路径文本**)
+      // 发送频率限制检查(2026-08-14 防刷屏)
+      const rate = checkRateLimit(`private:${qq}`)
+      if (!rate.ok) {
+        reportError(`私聊发送限流(QQ ${qq}):${rate.reason}`)
+        throw new Error(rate.reason || '发送限流')
+      }
       let message: unknown = finalText
       if (finalImages.length > 0) {
         const segs: unknown[] = []
@@ -930,29 +1181,28 @@ export function createNapcatClient(deps: NapcatDeps) {
         for (const img of finalImages) segs.push({ type: 'image', data: { file: img } })
         message = segs
       }
-      const res = (await callAction<{ status?: string; data?: { message_id?: number } }>('send_private_msg', {
-        user_id: qq,
-        message,
-      })) as { status?: string; retcode?: number; data?: { message_id?: number } }
-      if (res?.status !== 'ok' && res?.retcode !== 0) {
-        throw new Error(`QQ 发送失败(${res?.retcode ?? '未知'})`)
+      try {
+        const res = await callAction<{ status?: string; data?: { message_id?: number } }>('send_private_msg', {
+          user_id: qq, message,
+        }) as { status?: string; retcode?: number; data?: { message_id?: number } }
+        if (res?.status !== 'ok' && res?.retcode !== 0) throw new Error(`QQ 发送失败(${res?.retcode ?? '未知'})`)
+        recordSend(`private:${qq}`)
+        const id = String(res?.data?.message_id ?? '')
+        recordSent({ messageId: id, type: 'private', target: qq, text: finalText.slice(0, 100) || '(图片/文件)' })
+        repliedCount++
+        deps.onSent?.({ type: 'private', target: qq, text: finalText, images: finalImages })
+        return id
+      } catch (e) {
+        reportError(`私聊消息发送失败(QQ ${qq}):${(e as Error).message}`)
+        throw e
       }
-      const id = String(res?.data?.message_id ?? '')
-      // 记录发出的消息(2026-08-12 撤回修复:自动回复/主动发送都走本方法,
-      // 记下 message_id 后 LLM 经 sent action 查到即可撤回)
-      recordSent({ messageId: id, type: 'private', target: qq, text: finalText.slice(0, 100) || '(图片/文件)' })
-      repliedCount++
-      return id
     },
-    /** 联系人档案读写(2026-08-12):LLM 经 napcat 工具 contacts 操作 */
     async getContacts(): Promise<Record<string, NapcatContact>> {
       return loadNapcatContacts()
     },
-    /** 聊天记录备份读取(2026-08-12:工具记忆的原始层,LLM 经 chats 查询) */
     async getChats(): Promise<NapcatChatRecord[]> {
-      return loadNapcatChats()
+      return loadNapcatChats(chatsSize())
     },
-    /** 会话人格(2026-08-12:不同会话不同人设,工具记忆持久化) */
     async getPersonas(): Promise<Record<string, NapcatPersona>> {
       return loadNapcatPersonas()
     },
@@ -973,45 +1223,27 @@ export function createNapcatClient(deps: NapcatDeps) {
       await saveNapcatContacts(contacts)
       return next
     },
-    /** 给指定群发消息(群聊接话回复);返回 message_id。
-     * filePath 可选(2026-08-12,用户要求"LLM 下载好群友提到的文件后
-     * 直接调工具发群里"):带本地路径时**真正上传文件本体**——走
-     * OneBot upload_group_file 动作(2026-08-12 二轮,用户指出"别甩
-     * 本地路径文本":CQ:file 传路径有"只发路径"风险,且中文路径在
-     * CQ 码里有 URL 编码坑——upload_group_file 的 file/name 是 JSON
-     * 参数直传,中文文件名/路径无编码问题),文件上传后再发文字;
-     * image 可选(2026-08-12 发图链路):本地路径/URL → 组装 image 段 */
     async sendToGroup(groupId: string, text: string, filePath?: string, image?: string): Promise<string> {
-      // **群友全外人:剥离工具调用叙述(2026-08-12,与 sendToQQ 同款)**——
-      // LLM 经 send_group 发回群的 message 也可能带内部工作流叙述;
-      // **主人视角叙述剥离(2026-08-13,与 sendToQQ 同款)**——「展示给你
-      // 看」「XX 回你了」「你可以看看」这类向主人汇报的口吻同样不能发群里
-      text = stripMasterNarration(stripToolNarration(text))
+      const cleaned = prepareOutgoingText(text, false)
       const paramImage = typeof image === 'string' && image.trim() ? image.trim() : ''
       const file = typeof filePath === 'string' && filePath.trim() ? filePath.trim() : ''
-      // **文本夹带图片兜底(2026-08-12,与 sendToQQ 同款)**:message 文本
-      // 里夹带的图片路径自动提取转 image 段(对方收到真图不是路径文字)
-      const { text: cleanText, images: refImages } = extractImageRefs(text)
+      const { text: cleanText, images: refImages } = extractImageRefs(cleaned)
       if (!cleanText.trim() && refImages.length === 0 && !file && !paramImage) return ''
       if (file) {
-        // 校验文件存在(不存在报错,LLM 可自纠路径)
-        if (!existsSync(file)) {
-          throw new Error(`文件不存在:${file}(send_group 的 file 需要本地绝对路径,如 D:/music/关羽之歌.mp3)`)
-        }
-        const up = (await callAction<{ status?: string; retcode?: number }>('upload_group_file', {
-          group_id: groupId,
-          file,
-          name: path.basename(file),
-        })) as { status?: string; retcode?: number }
-        if (up?.status !== 'ok' && up?.retcode !== 0) {
-          throw new Error(`群文件上传失败(${up?.retcode ?? '未知'})`)
+        if (!existsSync(file)) throw new Error(`文件不存在:${file}(send_group 的 file 需要本地绝对路径)`)
+        try {
+          const up = await callAction<{ status?: string; retcode?: number }>('upload_group_file', {
+            group_id: groupId, file, name: path.basename(file),
+          }, FILE_UPLOAD_TIMEOUT_MS) as { status?: string; retcode?: number }
+          if (up?.status !== 'ok' && up?.retcode !== 0) throw new Error(`群文件上传失败(${up?.retcode ?? '未知'})`)
+        } catch (e) {
+          reportError(`群文件上传失败(群 ${groupId}):${(e as Error).message}`)
+          throw e
         }
       }
-      // 显式 image 参数校验存在
       if (paramImage && !/^https?:|^data:image\//.test(paramImage) && !existsSync(paramImage)) {
         throw new Error(`图片不存在:${paramImage}(send_group 的 image 需要本地绝对路径或 http(s) 链接)`)
       }
-      // 合并显式 + 提取图片(去重);提取的本地路径不存在 → 回填文本
       const seen = new Set<string>()
       const finalImages: string[] = []
       const backToText: string[] = []
@@ -1022,7 +1254,13 @@ export function createNapcatClient(deps: NapcatDeps) {
         else finalImages.push(p)
       }
       const finalText = [cleanText, ...backToText].join(' ').trim()
-      // 组装消息段:文本 + 图片段(多个)
+      // 发送频率限制检查(2026-08-14 防刷屏)
+      const rateKey = `group:${groupId}`
+      const rate = checkRateLimit(rateKey)
+      if (!rate.ok) {
+        reportError(`群发送限流(群 ${groupId}):${rate.reason}`)
+        throw new Error(rate.reason || '发送限流')
+      }
       let message: unknown = finalText
       if (finalImages.length > 0) {
         const segs: unknown[] = []
@@ -1032,69 +1270,61 @@ export function createNapcatClient(deps: NapcatDeps) {
       }
       let messageId = ''
       if (finalText.trim() || finalImages.length > 0) {
-        const res = (await callAction<{ status?: string; data?: { message_id?: number } }>('send_group_msg', {
-          group_id: groupId,
-          message,
-        })) as { status?: string; retcode?: number; data?: { message_id?: number } }
-        if (res?.status !== 'ok' && res?.retcode !== 0) {
-          throw new Error(`群发送失败(${res?.retcode ?? '未知'})`)
+        try {
+          const res = await callAction<{ status?: string; data?: { message_id?: number } }>('send_group_msg', {
+            group_id: groupId, message,
+          }) as { status?: string; retcode?: number; data?: { message_id?: number } }
+          if (res?.status !== 'ok' && res?.retcode !== 0) throw new Error(`群发送失败(${res?.retcode ?? '未知'})`)
+          recordSend(rateKey)
+          messageId = String(res?.data?.message_id ?? '')
+        } catch (e) {
+          reportError(`群消息发送失败(群 ${groupId}):${(e as Error).message}`)
+          throw e
         }
-        messageId = String(res?.data?.message_id ?? '')
       }
-      // 记录发出的消息(2026-08-12 撤回修复):群消息也留 message_id——
-      // 原实现恒返回 'ok',工具回显的 message_id 是假的,LLM 无法撤回
-      // 自己发的群消息;只发文件(upload_group_file 无 message_id)不记
       recordSent({ messageId, type: 'group', target: groupId, text: finalText.slice(0, 100) || '(图片/文件)' })
+      deps.onSent?.({ type: 'group', target: groupId, text: finalText, images: finalImages })
       repliedCount++
       return messageId
     },
-    /** 撤回消息(2026-08-12 消息控制,私聊/群聊通用);返回 void */
     async recallMessage(messageId: string): Promise<void> {
-      const res = (await callAction<{ status?: string; retcode?: number }>('delete_msg', {
-        message_id: messageId,
-      })) as { status?: string; retcode?: number }
-      if (res?.status !== 'ok' && res?.retcode !== 0) {
-        throw new Error(`撤回失败(${res?.retcode ?? '未知'}——需要机器人有撤回权限)`)
+      try {
+        const res = await callAction<{ status?: string; retcode?: number }>('delete_msg', { message_id: messageId }) as {
+          status?: string; retcode?: number
+        }
+        if (res?.status !== 'ok' && res?.retcode !== 0) throw new Error(`撤回失败(${res?.retcode ?? '未知'})`)
+      } catch (e) {
+        reportError(`消息撤回失败:${(e as Error).message}`)
+        throw e
       }
     },
-    /** 群成员列表(2026-08-12 成员查询):get_group_member_list 原始返回 */
     async getGroupMembers(groupId: string): Promise<Array<{ user_id: string; nickname?: string; card?: string }>> {
-      const res = (await callAction<{ data?: Array<Record<string, unknown>> }>('get_group_member_list', {
-        group_id: groupId,
-      })) as { status?: string; retcode?: number; data?: Array<Record<string, unknown>> }
-      if (res?.status !== 'ok' && res?.retcode !== 0) {
-        throw new Error(`群成员列表获取失败(${res?.retcode ?? '未知'})`)
+      const res = await callAction<{ data?: Array<Record<string, unknown>> }>('get_group_member_list', { group_id: groupId }) as {
+        status?: string; retcode?: number; data?: Array<Record<string, unknown>>
       }
+      if (res?.status !== 'ok' && res?.retcode !== 0) throw new Error(`群成员列表获取失败(${res?.retcode ?? '未知'})`)
       return (res?.data ?? []).map((m) => ({
         user_id: String(m.user_id ?? ''),
         nickname: m.nickname !== undefined ? String(m.nickname) : undefined,
         card: m.card !== undefined ? String(m.card) : undefined,
       }))
     },
-    /** 好友列表(2026-08-12 成员查询):get_friend_list 原始返回 */
     async getFriendList(): Promise<Array<{ user_id: string; nickname?: string; remark?: string }>> {
-      const res = (await callAction<{ data?: Array<Record<string, unknown>> }>('get_friend_list', {})) as {
-        status?: string
-        retcode?: number
-        data?: Array<Record<string, unknown>>
+      const res = await callAction<{ data?: Array<Record<string, unknown>> }>('get_friend_list', {}) as {
+        status?: string; retcode?: number; data?: Array<Record<string, unknown>>
       }
-      if (res?.status !== 'ok' && res?.retcode !== 0) {
-        throw new Error(`好友列表获取失败(${res?.retcode ?? '未知'})`)
-      }
+      if (res?.status !== 'ok' && res?.retcode !== 0) throw new Error(`好友列表获取失败(${res?.retcode ?? '未知'})`)
       return (res?.data ?? []).map((m) => ({
         user_id: String(m.user_id ?? ''),
         nickname: m.nickname !== undefined ? String(m.nickname) : undefined,
         remark: m.remark !== undefined ? String(m.remark) : undefined,
       }))
     },
-    /** 陌生人资料(2026-08-12 成员查询):get_stranger_info */
     async getStrangerInfo(qq: string): Promise<{ nickname?: string; age?: number; sex?: string }> {
-      const res = (await callAction<{ data?: Record<string, unknown> }>('get_stranger_info', {
-        user_id: qq,
-      })) as { status?: string; retcode?: number; data?: Record<string, unknown> }
-      if (res?.status !== 'ok' && res?.retcode !== 0) {
-        throw new Error(`资料查询失败(${res?.retcode ?? '未知'})`)
+      const res = await callAction<{ data?: Record<string, unknown> }>('get_stranger_info', { user_id: qq }) as {
+        status?: string; retcode?: number; data?: Record<string, unknown>
       }
+      if (res?.status !== 'ok' && res?.retcode !== 0) throw new Error(`资料查询失败(${res?.retcode ?? '未知'})`)
       const d = res?.data ?? {}
       return {
         nickname: d.nickname !== undefined ? String(d.nickname) : undefined,
@@ -1102,46 +1332,35 @@ export function createNapcatClient(deps: NapcatDeps) {
         sex: d.sex !== undefined ? String(d.sex) : undefined,
       }
     },
-    /** 群信息(2026-08-12 群管理):get_group_info */
     async getGroupInfo(groupId: string): Promise<{ groupName?: string; memberCount?: number }> {
-      const res = (await callAction<{ data?: Record<string, unknown> }>('get_group_info', {
-        group_id: groupId,
-      })) as { status?: string; retcode?: number; data?: Record<string, unknown> }
-      if (res?.status !== 'ok' && res?.retcode !== 0) {
-        throw new Error(`群信息获取失败(${res?.retcode ?? '未知'})`)
+      const res = await callAction<{ data?: Record<string, unknown> }>('get_group_info', { group_id: groupId }) as {
+        status?: string; retcode?: number; data?: Record<string, unknown>
       }
+      if (res?.status !== 'ok' && res?.retcode !== 0) throw new Error(`群信息获取失败(${res?.retcode ?? '未知'})`)
       const d = res?.data ?? {}
       return {
         groupName: d.group_name !== undefined ? String(d.group_name) : undefined,
         memberCount: typeof d.member_count === 'number' ? d.member_count : undefined,
       }
     },
-    /** 查看 QQ 空间动态(2026-08-12,用户要求"添加查看QQ动态的接口"):
-     * NapCat 扩展 action 只有发说说(send_qzone_msg)/删说说
-     * (delete_qzone_msg),**没有查看动态列表的接口**——自行实现:
-     * ① get_cookies(domain=qzone.qq.com)拿登录 Cookie + bkn(CSRF
-     * token,即 g_tk);② 直接调 QQ 空间 taotao emotion_cgi_msglist_v6
-     * cgi 接口(带 Cookie/Referer/g_tk)拉说说列表。qq 缺省 = 主人
-     * (MASTER_QQ,即用户自己的空间);查别人的公开空间传 qq 即可 */
     async getQzoneFeeds(
       qq: string,
       num: number,
     ): Promise<Array<{ tid: string; content: string; createTime: number; picnum: number; commentnum: number; likenum: number }>> {
-      const res = (await callAction<{ cookies?: string; bkn?: string }>('get_cookies', { domain: 'qzone.qq.com' })) as {
-        status?: string
-        retcode?: number
-        cookies?: string
-        bkn?: string
+      // 简单频率限制
+      const now = Date.now()
+      if (now - lastQzoneCall < QZONE_RATE_LIMIT_MS) {
+        await new Promise((r) => setTimeout(r, QZONE_RATE_LIMIT_MS - (now - lastQzoneCall)))
       }
-      if (res?.status !== 'ok' && res?.retcode !== 0) {
-        throw new Error(`QQ 空间 Cookie 获取失败(${res?.retcode ?? '未知'})`)
+      lastQzoneCall = Date.now()
+      const res = await callAction<{ cookies?: string; bkn?: string }>('get_cookies', { domain: 'qzone.qq.com' }) as {
+        status?: string; retcode?: number; cookies?: string; bkn?: string
       }
+      if (res?.status !== 'ok' && res?.retcode !== 0) throw new Error(`QQ 空间 Cookie 获取失败(${res?.retcode ?? '未知'})`)
       const cookies = String(res?.cookies ?? '')
-      if (!cookies) throw new Error('QQ 空间 Cookie 为空(get_cookies 未返回——NapCat 版本可能过旧)')
-      // bkn 优先(go-cqhttp 返回的 CSRF token = g_tk),缺失时从
-      // p_skey/skey 现场计算兜底
+      if (!cookies) throw new Error('QQ 空间 Cookie 为空(NapCat版本可能过旧)')
       const gtk = String(res?.bkn ?? '') || gtkFromCookie(cookies)
-      if (!gtk) throw new Error('无法计算 g_tk(get_cookies 未返回 bkn 且 cookie 无 p_skey/skey)')
+      if (!gtk) throw new Error('无法计算 g_tk')
       const url =
         `https://user.qzone.qq.com/proxy/domain/taotao.qzone.qq.com/cgi-bin/emotion_cgi_msglist_v6` +
         `?uin=${encodeURIComponent(qq)}&ftype=0&sort=0&pos=0&num=${Math.min(Math.max(num, 1), 20)}&replynum=3&g_tk=${encodeURIComponent(gtk)}`
@@ -1177,40 +1396,24 @@ export function createNapcatClient(deps: NapcatDeps) {
         likenum: typeof m.likenum === 'number' ? m.likenum : 0,
       }))
     },
-    /** 禁言群成员(2026-08-12 群管理):duration 秒,0 = 解除禁言 */
     async setGroupBan(groupId: string, qq: string, durationSec: number): Promise<void> {
-      const res = (await callAction<{ status?: string; retcode?: number }>('set_group_ban', {
-        group_id: groupId,
-        user_id: qq,
-        duration: durationSec,
-      })) as { status?: string; retcode?: number }
-      if (res?.status !== 'ok' && res?.retcode !== 0) {
-        throw new Error(`禁言失败(${res?.retcode ?? '未知'}——需要管理员权限)`)
-      }
+      const res = await callAction<{ status?: string; retcode?: number }>('set_group_ban', {
+        group_id: groupId, user_id: qq, duration: durationSec,
+      }) as { status?: string; retcode?: number }
+      if (res?.status !== 'ok' && res?.retcode !== 0) throw new Error(`禁言失败(${res?.retcode ?? '未知'})`)
     },
-    /** 踢出群成员(2026-08-12 群管理) */
     async setGroupKick(groupId: string, qq: string): Promise<void> {
-      const res = (await callAction<{ status?: string; retcode?: number }>('set_group_kick', {
-        group_id: groupId,
-        user_id: qq,
-      })) as { status?: string; retcode?: number }
-      if (res?.status !== 'ok' && res?.retcode !== 0) {
-        throw new Error(`踢人失败(${res?.retcode ?? '未知'}——需要管理员权限)`)
-      }
+      const res = await callAction<{ status?: string; retcode?: number }>('set_group_kick', {
+        group_id: groupId, user_id: qq,
+      }) as { status?: string; retcode?: number }
+      if (res?.status !== 'ok' && res?.retcode !== 0) throw new Error(`踢人失败(${res?.retcode ?? '未知'})`)
     },
-    /** 全员禁言(2026-08-12 群管理):enable = 开/关全员禁言 */
     async setGroupWholeBan(groupId: string, enable: boolean): Promise<void> {
-      const res = (await callAction<{ status?: string; retcode?: number }>('set_group_whole_ban', {
-        group_id: groupId,
-        enable,
-      })) as { status?: string; retcode?: number }
-      if (res?.status !== 'ok' && res?.retcode !== 0) {
-        throw new Error(`全员禁言设置失败(${res?.retcode ?? '未知'}——需要管理员权限)`)
-      }
+      const res = await callAction<{ status?: string; retcode?: number }>('set_group_whole_ban', {
+        group_id: groupId, enable,
+      }) as { status?: string; retcode?: number }
+      if (res?.status !== 'ok' && res?.retcode !== 0) throw new Error(`全员禁言设置失败(${res?.retcode ?? '未知'})`)
     },
-    /** 批量补联系人昵称(2026-08-12 成员查询自动填充):只补**缺失**
-     * name 的条目(已有备注不覆盖——LLM 手动记录的备注优先),一次
-     * 合并写盘(不逐条原子写) */
     async mergeContactNames(entries: Array<{ qq: string; name?: string; source?: 'private' | 'group' }>): Promise<void> {
       try {
         const contacts = await loadNapcatContacts()
@@ -1230,15 +1433,21 @@ export function createNapcatClient(deps: NapcatDeps) {
           changed = true
         }
         if (changed) await saveNapcatContacts(contacts)
-      } catch {
-        // 档案填充失败忽略(不阻断查询)
+      } catch (e) {
+        reportError(`联系人昵称补全失败:${(e as Error).message}`)
       }
     },
-    /** 标记某条消息已回复(回复落定后) */
     markReplied(messageId: string) {
       const m = messages.find((x) => x.messageId === messageId)
       if (m) m.replied = true
     },
+    // 会话面板管理透传(2026-08-14 manage_sessions 工具:主进程经
+    // NapcatDeps 注入实现,这里只把 deps 回调暴露给工具层)
+    listSessions: () => deps.listSessions?.() ?? [],
+    muteSession: (key: string, muted: boolean) => deps.muteSession?.(key, muted),
+    bindSession: (key: string) => deps.bindSession?.(key),
+    watchSession: (kind: 'private' | 'group', id: string) => deps.watchSession?.(kind, id),
+    unwatchSession: (kind: 'private' | 'group', id: string) => deps.unwatchSession?.(kind, id),
     status(): NapcatStatus {
       return {
         connected: !!ws && ws.open,
@@ -1248,85 +1457,47 @@ export function createNapcatClient(deps: NapcatDeps) {
         repliedCount,
         allowed: cfg().napcatAllowed ?? [],
         allowedGroups: cfg().napcatAllowedGroups ?? [],
+        circuitBroken,
       }
     },
     getRecentMessages(): NapcatMessage[] {
       return [...messages].reverse()
     },
-    /** 机器人发出的消息记录(2026-08-12 撤回修复:带 message_id,供
-     * recall 撤回;新记录在前) */
     getSentMessages(): NapcatSentMessage[] {
       return [...sentMessages].reverse()
     },
   }
 }
 
-export type NapcatClient = ReturnType<typeof createNapcatClient>
+export type { NapcatClient as NapcatClientType }
 
-/**
- * napcat 工具(engine 注入 client 时注册):LLM 对话里查询连接状态 /
- * 查看最近收到的 QQ 消息 / 主动给 QQ 发消息。
- * 描述引导 LLM:QQ 消息自动回复走系统链路,本工具用于主动发消息与查状态。
- * 参数 = 引擎注入的窄接口(EngineDeps.napcat,只暴露工具用到的三个方法)
- */
-export function createNapcatTools(client: {
-  status(): NapcatStatus
-  sendToQQ(qq: string, text: string, opts?: { image?: string; file?: string }): Promise<string>
-  sendToGroup(groupId: string, text: string, filePath?: string, image?: string): Promise<string>
-  getRecentMessages(): NapcatMessage[]
-  getContacts(): Promise<Record<string, NapcatContact>>
-  updateContact(patch: { qq: string; name?: string; info?: string; source?: 'private' | 'group' }): Promise<NapcatContact>
-  getChats?(): Promise<NapcatChatRecord[]>
-  getPersonas?(): Promise<Record<string, NapcatPersona>>
-  listSessions?(): Array<{ key: string; title: string; kind: 'private' | 'group'; muted: boolean }>
-  muteSession?(key: string, muted: boolean): void
-  bindSession?(key: string): void
-  setPersona?(scope: string, persona: string): Promise<NapcatPersona | null>
-  recallMessage?(messageId: string): Promise<void>
-  mergeContactNames?(entries: Array<{ qq: string; name?: string; source?: 'private' | 'group' }>): Promise<void>
-  getGroupMembers?(groupId: string): Promise<Array<{ user_id: string; nickname?: string; card?: string }>>
-  getFriendList?(): Promise<Array<{ user_id: string; nickname?: string; remark?: string }>>
-  getStrangerInfo?(qq: string): Promise<{ nickname?: string; age?: number; sex?: string }>
-  getGroupInfo?(groupId: string): Promise<{ groupName?: string; memberCount?: number }>
-  setGroupBan?(groupId: string, qq: string, durationSec: number): Promise<void>
-  setGroupKick?(groupId: string, qq: string): Promise<void>
-  setGroupWholeBan?(groupId: string, enable: boolean): Promise<void>
-  /** 机器人发出的消息记录(2026-08-12 撤回修复:sent action 查询) */
-  getSentMessages?(): NapcatSentMessage[]
-  /** QQ 空间动态列表(2026-08-12:zone action 查询,自行实现) */
-  getQzoneFeeds?(
-    qq: string,
-    num: number,
-  ): Promise<Array<{ tid: string; content: string; createTime: number; picnum: number; commentnum: number; likenum: number }>>
-}): AgentTool[] {
+// ---- napcat 工具(给 LLM 用) ----
+export interface NapcatToolDeps {
+  client: NapcatClient
+  getSessionKey?(): string | null
+  /** 危险操作确认回调(群管理/踢人/禁言等) */
+  confirmDangerous?(action: string, detail: string): Promise<boolean>
+}
+
+export function createNapcatTools(deps: NapcatToolDeps): AgentTool[] {
+  const { client, confirmDangerous } = deps
+  const opts = { getSessionKey: deps.getSessionKey }
   return [
     {
       name: 'napcat',
       description:
-        'NapCat QQ 机器人(2026-08-12):查询连接状态 / 最近 QQ 消息 / **机器人发出的消息(带 ID 可撤回)** / 联系人档案 / **聊天记录备份(工具记忆)** / 主动发私聊或群消息 / **图片收发** / 群成员好友查询 / 撤回消息 / 群管理 / **查看 QQ 空间动态**。' +
+        'NapCat QQ 机器人(2026-08-14):查询连接状态 / 最近 QQ 消息 / **机器人发出的消息(带 ID 可撤回)** / 联系人档案 / **聊天记录备份(工具记忆)** / 主动发私聊或群消息 / **图片收发** / 群成员好友查询 / 撤回消息 / 群管理(需主人确认) / **查看 QQ 空间动态** / 会话管理。' +
         '**QQ 消息自动回复是系统链路**(收到私聊/群聊自动进入对话并回复——无需调用本工具);' +
-        '**收到图片自动下载保存并进对话**(主人窗口可见图片,文本标注路径——无需本工具处理);' +
+        '**收到图片自动下载保存并进对话**(主人窗口可见图片,文本标注路径);' +
         '本工具适合:用户问"QQ 那边有消息吗""NapCat 连上没""之前和谁聊过什么""看看我的 QQ 动态"时查询;' +
-        '**交流中认识新联系人/群成员时,用 contact_update 记录对方信息**(称呼/喜好/身份,方便下次交流);' +
-        '或需要**主动**发消息时(action=send 私聊 / action=send_group 群聊)。' +
-        'action=status 查连接与收发统计;action=recent 看最近收到的 QQ 消息;' +
-        'action=sent 看**机器人发出的消息**(发送成功自动记录,带 message_id——发错想撤时先查这里拿 ID,再 recall 撤回);' +
-        'action=contacts 查看联系人档案;action=contact_update 记录/更新联系人(qq 必填,name/info 可选,认识来源 source=private/group);' +
-        'action=chats 查看**聊天记录备份**(工具记忆,全部私聊/群聊原始消息,可按 user_id 或 group_id 过滤);' +
-        'action=persona 查看**会话人格**(不同会话不同人设:群聊一个、私聊一个,按 scope 存);' +
-        'action=persona_set 设置会话人格(scope 必填,如 group:1045765371 或 private:1178821869,' +
-        'persona = 该会话的人设/回复风格,整合该会话联系人的喜好与风格;persona 空串 = 删除该会话人格);' +
-        'action=send 发私聊(user_id 必填,message 必填;**image 可选 = 图片本地路径或 http(s) 链接**——' +
-        '把图片发给对方(文本+图一起发);**file 可选 = 本地文件路径**,私聊也能发文件);' +
-        'action=send_group 发群消息(group_id 必填,message 必填,**image 可选同 send**,' +
-        '**file 可选 = 本地文件路径**——**下载好群友要的文件后直接发到群里**,如 bili 下载完成的视频/音频);' +
-        'action=recall 撤回消息(message_id 必填,私聊/群聊通用——**自己发错的消息先用 sent 查 ID 再撤**,收到撤别人的需要机器人有撤回权限);' +
-        'action=zone 查看 **QQ 空间动态**(qq 可选 = 查看谁的动态,缺省主人自己的空间;num 可选 = 条数 1-20 缺省 10,' +
-        '返回说说内容/时间/图片数/点赞评论数——用户问"QQ 动态""空间说说"时调用);' +
-        'action=members 查**群成员列表**(group_id 必填——群里有谁、昵称是什么,自动补进联系人档案);' +
-        'action=friends 查**好友列表**;action=profile 按 QQ 号查**陌生人资料**(user_id 必填,昵称/性别/年龄);' +
-        'action=group_info 查群信息(group_id 必填,群名/人数);' +
-        'action=group_manage 群管理(group_id 必填,op=ban 禁言(配 user_id + duration 秒,0=解除)/ kick 踢人(配 user_id)/ whole_ban 全员禁言(配 enable true/false))。',
+        '**交流中认识新联系人/群成员时,用 contact_update 记录对方信息**;' +
+        '或需要**主动**发消息时(action=send/send_group)。' +
+        'action=status 查连接状态;action=recent 最近收到的消息;action=sent 已发出消息(可撤回);' +
+        'action=contacts/contact_update/chats/persona/persona_set 档案与人格管理;' +
+        'action=send/send_group 发消息(image 发图;file 发文件/视频,大视频上传可达 3 分钟);action=recall 撤回;' +
+        'action=zone QQ空间动态;action=members/friends/profile/group_info 查询;' +
+        'action=group_manage 群管理(踢人/禁言/全员禁言,需要主人确认);' +
+        'action=sessions/session_mute/session_bind 会话管理。',
       parameters: {
         type: 'object',
         properties: {
@@ -1335,169 +1506,109 @@ export function createNapcatTools(client: {
             enum: [
               'status', 'recent', 'sent', 'contacts', 'contact_update', 'chats', 'persona', 'persona_set', 'send',
               'send_group', 'recall', 'zone', 'members', 'friends', 'profile', 'group_info', 'group_manage',
+              'sessions', 'session_mute', 'session_bind',
             ],
-            description: '操作:status 连接 / recent 最近收到消息 / sent 机器人发出的消息(带 ID 可撤回) / contacts 联系人档案 / contact_update 记录联系人 / chats 聊天备份 / persona 会话人格 / persona_set 设置人格 / send 发私聊 / send_group 发群消息 / recall 撤回消息 / zone 查看 QQ 空间动态 / members 群成员列表 / friends 好友列表 / profile 陌生人资料 / group_info 群信息 / group_manage 群管理',
+            description: '操作类型',
           },
-          user_id: { type: 'string', description: 'send:目标 QQ 号;chats:按 QQ 号过滤备份;profile:要查资料的 QQ 号;group_manage(ban/kick):目标成员 QQ 号' },
-          group_id: { type: 'string', description: 'send_group:目标群号;chats:按群号过滤备份;members/group_info/group_manage:目标群号' },
-          message: { type: 'string', description: 'send/send_group:要发送的消息文本' },
-          image: {
-            type: 'string',
-            description:
-              'send/send_group:要一并发送的图片(本地绝对路径或 http(s) 链接,如 bili 下载的封面/截图)' +
-              '——**传本参数 = 真正发送图片给对方(NapCat 上传,对方看到的是图片)**,' +
-              '文本+图片一起发;本地路径必须存在(报错可自纠);' +
-              '**不要把图片路径写进 message 文本**(那样对方只会收到一串路径文字,看不到图——' +
-              '即使写了也会被自动提取转成图片发送,但请规范用 image 参数)',
-          },
-          file: {
-            type: 'string',
-            description:
-              'send/send_group:要一并发送的本地文件绝对路径(下载完成的文件直接发,如 D:/music/关羽之歌.mp3)。' +
-              '走 upload_*_file **真正上传文件本体**,不是发路径文本;中文文件名/路径无编码问题',
-          },
-          message_id: { type: 'string', description: 'recall:要撤回的消息 ID——撤回**机器人自己发的**消息先从 sent 拿 ID;撤回收到的消息可从 recent/chats 拿' },
-          qq: { type: 'string', description: 'contact_update:联系人 QQ 号(必填);zone:要查看谁的 QQ 空间动态(缺省 = 主人,即用户自己的空间)' },
-          num: { type: 'number', description: 'zone:动态条数(1-20,缺省 10)' },
-          name: { type: 'string', description: 'contact_update:备注名/群昵称' },
-          info: { type: 'string', description: 'contact_update:已知信息(身份/喜好/关系等,一句话)' },
-          source: { type: 'string', enum: ['private', 'group'], description: 'contact_update:认识来源(私聊/群聊)' },
-          scope: { type: 'string', description: 'persona_set:会话范围,如 group:1045765371 / private:1178821869(必填)' },
-          persona: { type: 'string', description: 'persona_set:该会话的人格/回复风格描述(整合联系人喜好;空串 = 删除)' },
-          op: { type: 'string', enum: ['ban', 'kick', 'whole_ban'], description: 'group_manage:操作(ban 禁言 / kick 踢人 / whole_ban 全员禁言)' },
-          duration: { type: 'number', description: 'group_manage ban:禁言时长(秒),0 = 解除禁言' },
-          enable: { type: 'boolean', description: 'group_manage whole_ban:true 开启全员禁言 / false 关闭' },
+          user_id: { type: 'string', description: 'send:目标QQ号;chats:按QQ过滤;profile:查询QQ;group_manage(ban/kick):目标成员' },
+          group_id: { type: 'string', description: 'send_group:目标群号;chats:按群过滤;members/group_info/group_manage:目标群' },
+          message: { type: 'string', description: 'send/send_group:消息文本' },
+          image: { type: 'string', description: 'send/send_group:图片路径或URL(真正发图)' },
+          file: { type: 'string', description: 'send/send_group:本地文件路径(真正上传文件/视频,如 .mp4)' },
+          message_id: { type: 'string', description: 'recall:要撤回的消息ID' },
+          qq: { type: 'string', description: 'contact_update:联系人QQ;zone:查看谁的动态(缺省主人)' },
+          num: { type: 'number', description: 'zone:条数(1-20,缺省10)' },
+          name: { type: 'string', description: 'contact_update:备注名' },
+          info: { type: 'string', description: 'contact_update:已知信息' },
+          source: { type: 'string', enum: ['private', 'group'], description: 'contact_update:认识来源' },
+          scope: { type: 'string', description: 'persona_set:会话范围(private:<QQ>/group:<群号>)' },
+          persona: { type: 'string', description: 'persona_set:人格描述(空串=删除)' },
+          op: { type: 'string', enum: ['ban', 'kick', 'whole_ban'], description: 'group_manage:操作类型' },
+          duration: { type: 'number', description: 'group_manage ban:禁言秒数(0=解除)' },
+          enable: { type: 'boolean', description: 'group_manage whole_ban:true开启/false关闭' },
+          key: { type: 'string', description: 'session_mute/session_bind:会话键' },
+          muted: { type: 'boolean', description: 'session_mute:true屏蔽/false解除' },
         },
         required: ['action'],
       },
+      // 引擎兜底超时覆盖(2026-08-14):file 发视频内部上传等待可达 180s,
+      // 引擎默认 60s 统一超时会把上传中途杀掉——QQ 实际收到了但工具报
+      // 超时,LLM 误报没发成功(与 xxt/doc_convert 同款审计陷阱)
+      timeoutMs: 200_000,
       async execute(params: ToolParams) {
         const action = String(params.action ?? '')
         if (action === 'status') {
           const s = client.status()
           return (
-            `NapCat 状态:${s.connected ? '已连接' : '未连接'}(${s.url})` +
+            `NapCat 状态:${s.connected ? '已连接' : s.circuitBroken ? '已熔断(需重启)' : '未连接'}(${s.url})` +
             (s.lastError ? `\n最近错误:${s.lastError}` : '') +
             `\n收到消息 ${s.receivedCount} 条,已回复 ${s.repliedCount} 条` +
-            // 白名单诊断(2026-08-12:换群监听后新群收不到 = 群白名单
-            // 没变,status 直接可见)
-            // **主人恒为 MASTER_QQ 硬编码(2026-08-12 用户要求"主人永远
-            // 只有 1178821869"):列表 = 扩展信任(额外可自主回复的 QQ),
-            // 空列表 = 只回复主人,不再是"全部信任"——"(全部)"文案误导,
-            // LLM 看到后可能把任意 QQ 当信任对象**
-            `\n主人:${MASTER_QQ}(硬编码,唯一主人)` +
+            `\n主人:${MASTER_QQ}(唯一主人,硬编码)` +
             `\n私聊扩展信任:${s.allowed && s.allowed.length > 0 ? s.allowed.join('、') : '(仅主人)'}` +
-            `\n监听群:${s.allowedGroups && s.allowedGroups.length > 0 ? s.allowedGroups.join('、') : '(无)'}` +
-            `\n(换群监听用 set_napcat_config 的 allowedGroups 参数)`
+            `\n监听群:${s.allowedGroups && s.allowedGroups.length > 0 ? s.allowedGroups.join('、') : '(无)'}`
           )
         }
         if (action === 'recent') {
           const list = client.getRecentMessages()
           if (list.length === 0) return '(最近没有收到 QQ 消息)'
-          return list
-            .slice(0, 10)
-            .map((m) => `- ${m.replied ? '[已回复]' : '[未回复]'} ${m.qq}(${new Date(m.time * 1000).toLocaleTimeString('zh-CN')}):${m.text.slice(0, 80)}`)
-            .join('\n')
+          return list.slice(0, 10).map((m) =>
+            `- ${m.replied ? '[已回复]' : '[未回复]'} ${m.qq}(${new Date(m.time * 1000).toLocaleTimeString('zh-CN')}):${m.text.slice(0, 80)}`
+          ).join('\n')
         }
         if (action === 'sent') {
-          // 机器人发出的消息(2026-08-12 撤回修复:发送成功自动记录,
-          // 带 message_id——发错想撤时先查这里拿 ID 再 recall)
-          if (!client.getSentMessages) throw new Error('发出的消息记录不可用')
           const list = client.getSentMessages()
-          if (list.length === 0) return '(机器人还没有发出过消息——主动发送或自动回复后自动记录)'
-          return list
-            .slice(0, 10)
-            .map(
-              (m) =>
-                `- ${new Date(m.time * 1000).toLocaleString('zh-CN')} [${m.type === 'group' ? `群${m.target}` : `QQ${m.target}`}] ${(m.text || '(图片/文件)').slice(0, 60)}(message_id ${m.messageId}——要撤回就 recall 这个 ID)`,
-            )
-            .join('\n')
+          if (list.length === 0) return '(机器人还没有发出过消息)'
+          return list.slice(0, 10).map((m) =>
+            `- ${new Date(m.time * 1000).toLocaleString('zh-CN')} [${m.type === 'group' ? `群${m.target}` : `QQ${m.target}`}] ${(m.text || '(图片/文件)').slice(0, 60)}(message_id ${m.messageId})`
+          ).join('\n')
         }
         if (action === 'zone') {
-          // 查看 QQ 空间动态(2026-08-12,用户要求"添加查看QQ动态的接口":
-          // NapCat 无此 action,client 自行走 get_cookies + taotao cgi)
-          if (!client.getQzoneFeeds) throw new Error('QQ 空间动态查询不可用')
           const qq = String(params.qq ?? '').trim()
           const num = params.num !== undefined ? Math.floor(Number(params.num)) : 10
-          if (!Number.isFinite(num) || num < 1 || num > 20) throw new Error('zone 的 num 需要在 1-20 之间(条数)')
-          // 缺省 = 主人自己的空间(用户问"看看我的 QQ 动态"最常查自己)
+          if (!Number.isFinite(num) || num < 1 || num > 20) throw new Error('zone 的 num 需要在 1-20 之间')
           const feeds = await client.getQzoneFeeds(qq || MASTER_QQ, num)
-          if (feeds.length === 0) return `(QQ ${qq || MASTER_QQ} 的动态为空——还没有说说,或空间对当前登录账号不可见)`
-          return (
-            `QQ ${qq || MASTER_QQ} 的最近动态(${feeds.length} 条):\n` +
-            feeds
-              .map(
-                (f, i) =>
-                  `${i + 1}. ${new Date(f.createTime * 1000).toLocaleString('zh-CN')} ${(f.content || '(无文字)').slice(0, 100)}` +
-                  `${f.picnum > 0 ? ` [图片×${f.picnum}]` : ''}${f.likenum > 0 ? ` 👍${f.likenum}` : ''}${f.commentnum > 0 ? ` 💬${f.commentnum}` : ''}`,
-              )
-              .join('\n')
-          )
+          if (feeds.length === 0) return `(QQ ${qq || MASTER_QQ} 的动态为空)`
+          return `QQ ${qq || MASTER_QQ} 的最近动态(${feeds.length} 条):\n` +
+            feeds.map((f, i) =>
+              `${i + 1}. ${new Date(f.createTime * 1000).toLocaleString('zh-CN')} ${(f.content || '(无文字)').slice(0, 100)}` +
+              `${f.picnum > 0 ? ` [图片×${f.picnum}]` : ''}${f.likenum > 0 ? ` 👍${f.likenum}` : ''}${f.commentnum > 0 ? ` 💬${f.commentnum}` : ''}`
+            ).join('\n')
         }
         if (action === 'sessions') {
-          // 会话列表(2026-08-13 会话隔离):key/标题/类型/屏蔽态——LLM
-          // 可据此了解外部会话,并可经 session_bind 切换窗口绑定
+          // 列表直接可查(2026-08-14);增删监听/屏蔽/绑定走 manage_sessions
           const list = client.listSessions?.() ?? []
-          if (list.length === 0) return '(暂无外部会话——收到 QQ 私聊/群消息后自动创建)'
-          return (
-            '外部会话列表:\n' +
-            list
-              .map((it) => `- ${it.key}(${it.kind === 'group' ? '群聊' : '私聊'}·${it.title})${it.muted ? ' [已屏蔽]' : ''}`)
-              .join('\n') +
-            '\n主对话(key=main)为主人专属,不在外部会话列表。'
-          )
+          if (list.length === 0) return '(暂无已知会话;可用 manage_sessions 工具 action=watch 新建监听会话)'
+          return list.map((s) => `- ${s.key}(${s.title})[${s.kind === 'group' ? '群聊' : '私聊'}]${s.muted ? '[已屏蔽]' : ''}`).join('\n')
         }
         if (action === 'session_mute') {
-          // 屏蔽/解除屏蔽会话(2026-08-13 用户要求"支持屏蔽"):屏蔽后该
-          // 会话消息只显示不回复(主人仍可在对话窗口看到与手动处理)
-          const key = String(params.key ?? '').trim()
-          if (!key) throw new Error('session_mute 需要 key(会话键,如 private:1536057397;可用 sessions 查询)')
-          if (key === 'main') throw new Error('主对话(key=main)是主人会话,不可屏蔽')
-          const muted = params.muted !== false
-          if (!client.muteSession) throw new Error('会话屏蔽不可用')
-          client.muteSession(key, muted)
-          return `已${muted ? '屏蔽' : '解除屏蔽'}会话 ${key}${muted ? '(消息只显示不回复)' : '(恢复自主回复)'}`
+          return '(会话屏蔽请通过 manage_sessions 工具操作)'
         }
         if (action === 'session_bind') {
-          // 绑定窗口到指定会话(2026-08-13 用户要求"LLM 可通过设置工具
-          // 进行窗口与会话的绑定"):渲染端切换当前显示的会话
-          const key = String(params.key ?? '').trim()
-          if (!key) throw new Error('session_bind 需要 key(会话键;main = 主人主对话)')
-          if (!client.bindSession) throw new Error('会话绑定不可用')
-          client.bindSession(key)
-          return `已把对话窗口切换到会话 ${key}`
+          return '(会话绑定请通过 manage_sessions 工具操作)'
         }
         if (action === 'contacts') {
           const contacts = await client.getContacts()
           const list = Object.values(contacts)
-          if (list.length === 0) return '(联系人档案为空——交流中认识新联系人时可用 contact_update 记录)'
-          return list
-            .slice()
-            .sort((a, b) => b.updatedAt - a.updatedAt)
-            .map((c) => `- ${c.qq}${c.name ? `(${c.name})` : ''}${c.info ? `: ${c.info}` : ''}${c.source === 'group' ? ' [群聊]' : ' [私聊]'}`)
-            .join('\n')
+          if (list.length === 0) return '(联系人档案为空)'
+          return list.slice().sort((a, b) => b.updatedAt - a.updatedAt).map((c) =>
+            `- ${c.qq}${c.name ? `(${c.name})` : ''}${c.info ? `: ${c.info}` : ''}${c.source === 'group' ? ' [群聊]' : ' [私聊]'}`
+          ).join('\n')
         }
         if (action === 'chats') {
-          if (!client.getChats) return '(聊天记录备份不可用)'
           const chats = await client.getChats()
           const qqFilter = String(params.user_id ?? '').trim()
           const groupFilter = String(params.group_id ?? '').trim()
           let list = chats
           if (qqFilter) list = list.filter((c) => c.type === 'private' && c.target === qqFilter)
           if (groupFilter) list = list.filter((c) => c.type === 'group' && c.target === groupFilter)
-          if (list.length === 0) {
-            return '(聊天记录备份为空' + (qqFilter || groupFilter ? `(按 ${qqFilter || groupFilter} 过滤)` : '') + '——有 QQ 消息后自动备份)'
-          }
-          return list
-            .slice(-20)
-            .map(
-              (c) =>
-                `- ${new Date(c.time * 1000).toLocaleString('zh-CN')} [${c.type === 'group' ? `群${c.target}` : `QQ${c.target}`}] ${c.qq}: ${c.text.slice(0, 80)}${c.atMe ? ' (@鲸鱼娘)' : ''}`,
-            )
-            .join('\n')
+          if (list.length === 0) return '(聊天记录为空' + (qqFilter || groupFilter ? `(按${qqFilter || groupFilter}过滤)` : '') + ')'
+          return list.slice(-20).map((c) =>
+            `- ${new Date(c.time * 1000).toLocaleString('zh-CN')} [${c.type === 'group' ? `群${c.target}` : `QQ${c.target}`}] ${c.qq}: ${c.text.slice(0, 80)}${c.atMe ? ' (@鲸鱼娘)' : ''}`
+          ).join('\n')
         }
         if (action === 'contact_update') {
           const qq = String(params.qq ?? '').trim()
-          if (!qq) throw new Error('contact_update 需要 qq(联系人 QQ 号)')
+          if (!qq) throw new Error('contact_update 需要 qq(联系人QQ号)')
           const c = await client.updateContact({
             qq,
             name: params.name !== undefined ? String(params.name) : undefined,
@@ -1507,133 +1618,189 @@ export function createNapcatTools(client: {
           return `已记录联系人 ${c.qq}${c.name ? `(${c.name})` : ''}${c.info ? `: ${c.info}` : ''}`
         }
         if (action === 'send') {
-          const qq = String(params.user_id ?? '').trim()
-          if (!qq) throw new Error('send 需要 user_id(目标 QQ 号)')
+          let qq = String(params.user_id ?? '').trim()
+          if (!qq) {
+            const pm = /^private:(\d+)$/.exec(opts?.getSessionKey?.() ?? '')
+            if (pm) qq = pm[1]
+          }
+          if (!qq) throw new Error('send 需要 user_id(目标QQ号)')
           const text = String(params.message ?? '').trim()
           const image = String(params.image ?? '').trim()
           const file = String(params.file ?? '').trim()
-          if (!text && !image && !file) throw new Error('send 需要 message(消息文本)、image(图片)或 file(文件)至少一个')
-          // 图片路径校验(2026-08-12 发图链路,工具层先校验——LLM 拿错
-          // 路径即时自纠,不用等 client 发送失败)
+          if (!text && !image && !file) throw new Error('send 需要 message/image/file 至少一个')
           if (image && !/^https?:|^data:image\//.test(image) && !existsSync(image)) {
-            throw new Error(`图片不存在:${image}(image 需要本地绝对路径或 http(s) 链接)`)
+            throw new Error(`图片不存在:${image}`)
           }
           const id = await client.sendToQQ(qq, text, { image: image || undefined, file: file || undefined })
-          return `已通过 QQ 发送给 ${qq}(message_id ${id}${image ? ',含图片' : ''}${file ? ',含文件' : ''})`
+          return `已发送给 ${qq}(message_id ${id}${image ? ',含图片' : ''}${file ? ',含文件' : ''})`
         }
         if (action === 'persona') {
-          if (!client.getPersonas) return '(会话人格不可用)'
           const personas = await client.getPersonas()
           const list = Object.entries(personas)
-          if (list.length === 0) {
-            return '(未设置会话人格——不同会话(群聊/私聊)可各设一个人设,用 persona_set 设置)'
-          }
-          return list
-            .sort((a, b) => b[1].updatedAt - a[1].updatedAt)
-            .map(([scope, p]) => `- ${scope}: ${p.persona}`)
-            .join('\n')
+          if (list.length === 0) return '(未设置会话人格)'
+          return list.sort((a, b) => b[1].updatedAt - a[1].updatedAt).map(([scope, p]) => `- ${scope}: ${p.persona}`).join('\n')
         }
         if (action === 'persona_set') {
-          if (!client.setPersona) throw new Error('会话人格不可用')
           const scope = String(params.scope ?? '').trim()
-          if (!/^(private|group):[0-9]+$/.test(scope)) {
-            throw new Error('scope 需要是 private:<QQ号> 或 group:<群号>(如 group:1045765371)')
-          }
+          if (!/^(private|group):[0-9]+$/.test(scope)) throw new Error('scope 需要是 private:<QQ> 或 group:<群号>')
           const persona = String(params.persona ?? '').trim()
           const next = await client.setPersona(scope, persona)
-          if (!next) return `已删除会话 ${scope} 的人格(恢复默认)`
-          return `已设置会话 ${scope} 的人格:「${next.persona}」——之后该会话的消息回复按此人格`
+          if (!next) return `已删除会话 ${scope} 的人格`
+          return `已设置会话 ${scope} 的人格:「${next.persona}」`
         }
         if (action === 'send_group') {
-          const groupId = String(params.group_id ?? '').trim()
+          let groupId = String(params.group_id ?? '').trim()
+          if (!groupId) {
+            const gm = /^group:(\d+)$/.exec(opts?.getSessionKey?.() ?? '')
+            if (gm) groupId = gm[1]
+          }
           if (!groupId) throw new Error('send_group 需要 group_id(目标群号)')
           const text = String(params.message ?? '').trim()
           const file = String(params.file ?? '').trim()
           const image = String(params.image ?? '').trim()
-          if (!text && !file && !image) throw new Error('send_group 需要 message、file 或 image(至少一个)')
+          if (!text && !file && !image) throw new Error('send_group 需要 message/file/image 至少一个')
           if (image && !/^https?:|^data:image\//.test(image) && !existsSync(image)) {
-            throw new Error(`图片不存在:${image}(send_group 的 image 需要本地绝对路径或 http(s) 链接)`)
+            throw new Error(`图片不存在:${image}`)
           }
           const id = await client.sendToGroup(groupId, text, file || undefined, image || undefined)
           return `已发送到群 ${groupId}${file ? '(含文件)' : ''}${image ? '(含图片)' : ''}(message_id ${id})`
         }
         if (action === 'recall') {
-          if (!client.recallMessage) throw new Error('撤回消息不可用')
           const messageId = String(params.message_id ?? '').trim()
-          if (!messageId) throw new Error('recall 需要 message_id(要撤回的消息 ID,可从 recent/chats 拿到)')
+          if (!messageId) throw new Error('recall 需要 message_id')
           await client.recallMessage(messageId)
           return `已撤回消息 ${messageId}`
         }
         if (action === 'members') {
-          if (!client.getGroupMembers) throw new Error('群成员查询不可用')
           const groupId = String(params.group_id ?? '').trim()
-          if (!groupId) throw new Error('members 需要 group_id(目标群号)')
+          if (!groupId) throw new Error('members 需要 group_id')
           const members = await client.getGroupMembers(groupId)
           if (members.length === 0) return '(群成员列表为空)'
-          // **自动补联系人档案昵称(2026-08-12 用户要求"读取并记忆群成员
-          // 信息")**:缺失备注的成员自动填昵称(群名片优先),一次性合并
-          // 写盘(不覆盖 LLM 手动记录的备注);失败静默不阻断查询
-          if (client.mergeContactNames) {
-            void client.mergeContactNames(
-              members.map((m) => ({ qq: m.user_id, name: m.card || m.nickname, source: 'group' as const })),
-            )
-          }
-          return members
-            .slice(0, 200)
-            .map((m) => `- ${m.user_id}${m.card || m.nickname ? `(${m.card || m.nickname})` : ''}`)
-            .join('\n')
+          void client.mergeContactNames(members.map((m) => ({ qq: m.user_id, name: m.card || m.nickname, source: 'group' as const })))
+          return members.slice(0, 200).map((m) => `- ${m.user_id}${m.card || m.nickname ? `(${m.card || m.nickname})` : ''}`).join('\n')
         }
         if (action === 'friends') {
-          if (!client.getFriendList) throw new Error('好友列表不可用')
           const list = await client.getFriendList()
           if (list.length === 0) return '(好友列表为空)'
-          return list
-            .slice(0, 200)
-            .map((m) => `- ${m.user_id}${m.remark || m.nickname ? `(${m.remark || m.nickname})` : ''}`)
-            .join('\n')
+          return list.slice(0, 200).map((m) => `- ${m.user_id}${m.remark || m.nickname ? `(${m.remark || m.nickname})` : ''}`).join('\n')
         }
         if (action === 'profile') {
-          if (!client.getStrangerInfo) throw new Error('资料查询不可用')
           const qq = String(params.user_id ?? '').trim()
-          if (!qq) throw new Error('profile 需要 user_id(要查资料的 QQ 号)')
+          if (!qq) throw new Error('profile 需要 user_id')
           const p = await client.getStrangerInfo(qq)
-          return `QQ ${qq} 的资料:${p.nickname ? `昵称 ${p.nickname}` : '无昵称'}${p.sex ? `,性别 ${p.sex}` : ''}${p.age !== undefined ? `,年龄 ${p.age}` : ''}`
+          return `QQ ${qq}:${p.nickname ? `昵称${p.nickname}` : '无昵称'}${p.sex ? `,性别${p.sex}` : ''}${p.age !== undefined ? `,年龄${p.age}` : ''}`
         }
         if (action === 'group_info') {
-          if (!client.getGroupInfo) throw new Error('群信息查询不可用')
           const groupId = String(params.group_id ?? '').trim()
-          if (!groupId) throw new Error('group_info 需要 group_id(目标群号)')
+          if (!groupId) throw new Error('group_info 需要 group_id')
           const g = await client.getGroupInfo(groupId)
-          return `群 ${groupId}:${g.groupName ? `群名「${g.groupName}」` : '群名未知'}${g.memberCount !== undefined ? `,成员 ${g.memberCount} 人` : ''}`
+          return `群 ${groupId}:${g.groupName ? `群名「${g.groupName}」` : '群名未知'}${g.memberCount !== undefined ? `,成员${g.memberCount}人` : ''}`
         }
         if (action === 'group_manage') {
-          if (!client.setGroupBan || !client.setGroupKick || !client.setGroupWholeBan) throw new Error('群管理不可用')
           const groupId = String(params.group_id ?? '').trim()
-          if (!groupId) throw new Error('group_manage 需要 group_id(目标群号)')
+          if (!groupId) throw new Error('group_manage 需要 group_id')
           const op = String(params.op ?? '').trim()
-          if (!op) throw new Error('group_manage 需要 op(ban / kick / whole_ban)')
+          if (!op) throw new Error('group_manage 需要 op(ban/kick/whole_ban)')
+          // 危险操作确认门
+          if (confirmDangerous) {
+            let confirmMsg = ''
+            if (op === 'ban') {
+              const qq = String(params.user_id ?? '').trim()
+              const duration = params.duration !== undefined ? Number(params.duration) : NaN
+              confirmMsg = `确认禁言 QQ ${qq} ${Math.floor(duration)}秒?`
+            } else if (op === 'kick') {
+              const qq = String(params.user_id ?? '').trim()
+              confirmMsg = `确认把 QQ ${qq} 移出群 ${groupId}?`
+            } else if (op === 'whole_ban') {
+              confirmMsg = `确认${params.enable ? '开启' : '解除'}群 ${groupId} 全员禁言?`
+            }
+            if (confirmMsg) {
+              const ok = await confirmDangerous('group_manage', confirmMsg)
+              if (!ok) return '操作已取消(主人未确认)'
+            }
+          }
           if (op === 'ban') {
             const qq = String(params.user_id ?? '').trim()
-            if (!qq) throw new Error('group_manage ban 需要 user_id(被禁言成员 QQ 号)')
+            if (!qq) throw new Error('ban 需要 user_id')
             const duration = params.duration !== undefined ? Number(params.duration) : NaN
-            if (!Number.isFinite(duration) || duration < 0) throw new Error('group_manage ban 需要 duration(禁言秒数,0 = 解除禁言)')
+            if (!Number.isFinite(duration) || duration < 0) throw new Error('ban 需要 duration(秒)')
             await client.setGroupBan(groupId, qq, Math.floor(duration))
-            return duration === 0 ? `已解除 ${qq} 在群 ${groupId} 的禁言` : `已禁言 ${qq}(群 ${groupId},${Math.floor(duration)} 秒)`
+            return duration === 0 ? `已解除 ${qq} 的禁言` : `已禁言 ${qq}(${Math.floor(duration)}秒)`
           }
           if (op === 'kick') {
             const qq = String(params.user_id ?? '').trim()
-            if (!qq) throw new Error('group_manage kick 需要 user_id(被踢成员 QQ 号)')
+            if (!qq) throw new Error('kick 需要 user_id')
             await client.setGroupKick(groupId, qq)
             return `已把 ${qq} 移出群 ${groupId}`
           }
           if (op === 'whole_ban') {
-            if (typeof params.enable !== 'boolean') throw new Error('group_manage whole_ban 需要 enable(true = 全员禁言 / false = 解除)')
+            if (typeof params.enable !== 'boolean') throw new Error('whole_ban 需要 enable')
             await client.setGroupWholeBan(groupId, params.enable)
-            return params.enable ? `已在群 ${groupId} 开启全员禁言` : `已解除群 ${groupId} 的全员禁言`
+            return params.enable ? `已开启全员禁言` : `已解除全员禁言`
           }
-          throw new Error('group_manage 的 op 仅支持 ban / kick / whole_ban')
+          throw new Error('op 仅支持 ban/kick/whole_ban')
         }
-        throw new Error('action 仅支持 status/recent/sent/contacts/contact_update/chats/persona/persona_set/send/send_group/recall/zone/sessions/session_mute/session_bind/members/friends/profile/group_info/group_manage')
+        throw new Error('未知action')
+      },
+    },
+    {
+      // 会话面板管理(2026-08-14 用户要求"灵动岛设置工具支持接入会话
+      // 面板,支持 LLM 直接将监听会话在会话面板中新建"):watch 把
+      // QQ/群号写入监听名单 → 配置变更自动广播会话种子 → 会话面板
+      // 立即出现新条目(不等消息到达)
+      name: 'manage_sessions',
+      description:
+        '会话面板管理(2026-08-14):灵动岛会话面板展示各 QQ 私聊/群聊会话窗口。' +
+        'action=list 列出已知会话(键/名称/类型/是否屏蔽);' +
+        'action=watch **把某个 QQ 或群加入监听名单**——对方消息将自动回复,且会话面板立即出现该会话条目' +
+        '(用户说"监听某某/接入某群/给他建个会话/盯着这个群"时用;kind=private私聊/group群聊,id=QQ号或群号);' +
+        'action=unwatch 移出监听名单(不再自动回复);' +
+        'action=mute/unmute 屏蔽/解除屏蔽会话(消息仍记录但不自动回复);' +
+        'action=bind 在挂件会话面板中打开指定会话。',
+      parameters: {
+        type: 'object',
+        properties: {
+          action: { type: 'string', enum: ['list', 'watch', 'unwatch', 'mute', 'unmute', 'bind'], description: '操作类型' },
+          kind: { type: 'string', enum: ['private', 'group'], description: 'watch/unwatch:目标类型(private=QQ私聊 / group=群聊)' },
+          id: { type: 'string', description: 'watch/unwatch:目标 QQ 号或群号(纯数字)' },
+          key: { type: 'string', description: 'mute/unmute/bind:会话键(private:<QQ> 或 group:<群号>;bind 可用 main 打开主对话)' },
+        },
+        required: ['action'],
+      },
+      async execute(params: ToolParams) {
+        const action = String(params.action ?? '')
+        if (action === 'list') {
+          const list = client.listSessions?.() ?? []
+          if (list.length === 0) return '(暂无已知会话;用 action=watch 新建监听会话)'
+          return list.map((s) => `- ${s.key}(${s.title})[${s.kind === 'group' ? '群聊' : '私聊'}]${s.muted ? '[已屏蔽]' : ''}`).join('\n')
+        }
+        if (action === 'watch' || action === 'unwatch') {
+          const kind = params.kind === 'group' ? 'group' : params.kind === 'private' ? 'private' : null
+          if (!kind) throw new Error(`${action} 需要 kind(private=QQ私聊 / group=群聊)`)
+          const id = String(params.id ?? '').trim()
+          if (!/^\d+$/.test(id)) throw new Error(`${action} 需要 id(纯数字的 QQ 号或群号)`)
+          if (action === 'watch') {
+            client.watchSession?.(kind, id)
+            return kind === 'group'
+              ? `已将群 ${id} 加入监听名单——群消息将自动回复,会话面板已出现该会话条目`
+              : `已将 QQ ${id} 加入监听名单(扩展信任)——其私聊消息将自动回复,会话面板已出现该会话条目`
+          }
+          client.unwatchSession?.(kind, id)
+          return kind === 'group' ? `已将群 ${id} 移出监听名单(不再自动回复)` : `已将 QQ ${id} 移出监听名单(不再自动回复)`
+        }
+        if (action === 'mute' || action === 'unmute') {
+          const key = String(params.key ?? '').trim()
+          if (!/^(private|group):\d+$/.test(key)) throw new Error('mute/unmute 需要 key(private:<QQ> 或 group:<群号>)')
+          client.muteSession?.(key, action === 'mute')
+          return action === 'mute' ? `已屏蔽会话 ${key}(消息仍记录,不再自动回复)` : `已解除会话 ${key} 的屏蔽`
+        }
+        if (action === 'bind') {
+          const key = String(params.key ?? '').trim()
+          if (!key) throw new Error('bind 需要 key(会话键;main = 主对话)')
+          client.bindSession?.(key)
+          return `已在会话面板中打开 ${key}`
+        }
+        throw new Error('manage_sessions action 仅支持 list/watch/unwatch/mute/unmute/bind')
       },
     },
   ]

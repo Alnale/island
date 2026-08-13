@@ -22,7 +22,7 @@
  */
 
 import { parseSse, sanitizeJsonStrings, truncateResult } from './sse'
-import { apiErrorMessage } from './constants'
+import { deepseekErrorMessage } from './deepseek-constants'
 import type { AgentConfig, AgentEvent, AgentMessage, AgentPart, AgentTool, ProviderOutcome } from './types'
 
 /** 历史 → Anthropic messages(工具结果重排 + 相邻同角色合并) */
@@ -157,7 +157,7 @@ export async function streamAnthropic(params: {
       // 忽略读失败
     }
     // 错误码映射(2026-08-10:401/429/5xx 等转可读中文,与 DeepSeek 同款)
-    throw new Error(apiErrorMessage(res.status, detail))
+    throw new Error(deepseekErrorMessage(res.status, detail))
   }
 
   // content_block_start 里的块(工具块流式累积 input JSON delta)

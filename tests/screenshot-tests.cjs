@@ -281,6 +281,130 @@ function runScreenshotTests({ win, app, fs, path, settingsPath, runIslandSetting
             })()`)
             console.log('[widget] test:', result)
           }
+          if (process.env.WIDGET_SCREENSHOT_MODE === 'probe-tools-height') {
+            // 诊断探针(2026-08-14):工具列表视图打开/返回/收起时窗口高度
+            // 响应时序——每 100ms 采样 win.getSize(),记录高度变化何时发生
+            const sleep = (ms) => new Promise((res) => setTimeout(res, ms))
+            const timeline = []
+            const startedAt = Date.now()
+            const sampler = () => {
+              const t = Date.now() - startedAt
+              const [w, h] = win.getSize()
+              timeline.push([t, w, h])
+            }
+            // 备份用户消息与模式,结束时恢复
+            let msgsBackup = null
+            try {
+              msgsBackup = await win.webContents.executeJavaScript(
+                `(localStorage.getItem('widget-agent-messages') ?? '')`,
+              )
+            } catch { /* 忽略 */ }
+            // 切 Agent 模式
+            win.webContents.send('widget:set-mode', { mode: 'agent', source: 'user' })
+            await sleep(600)
+            // 注入几条消息(localStorage 写后 reload,useAgent 载入)使聊天
+            // 有一定高度,测工具列表打开/关闭时窗口高度的响应
+            await win.webContents.executeJavaScript(`(() => {
+              const now = Date.now()
+              const msgs = [
+                { id: 'p1', role: 'user', parts: [{ type: 'text', text: '帮我看看有什么工具' }], createdAt: now - 60000 },
+                { id: 'p2', role: 'assistant', parts: [{ type: 'text', text: '好的,我可以帮你完成本机操作。' }], createdAt: now - 59000 },
+                { id: 'p3', role: 'user', parts: [{ type: 'text', text: '再详细点' }], createdAt: now - 58000 },
+                { id: 'p4', role: 'assistant', parts: [{ type: 'text', text: '我支持执行命令、读写文件、网页搜索、B站下载等能力,也可以打开媒体文件。' }], createdAt: now - 57000 },
+              ]
+              localStorage.setItem('widget-agent-messages', JSON.stringify(msgs))
+              location.reload()
+            })()`)
+            await sleep(2500)
+            // 长按展开
+            const expanded = await win.webContents.executeJavaScript(`(async () => {
+              const sleep = (ms) => new Promise((res) => setTimeout(res, ms))
+              const island = document.querySelector('.island-demo')
+              const r = island.getBoundingClientRect()
+              const x = r.left + r.width / 2
+              const y = r.top + r.height / 2
+              island.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, clientX: x, clientY: y, pointerId: 1, isPrimary: true, button: 0 }))
+              setTimeout(() => island.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, clientX: x, clientY: y, pointerId: 1, isPrimary: true, button: 0 })), 600)
+              await sleep(2200)
+              return island.classList.contains('expanded')
+            })()`)
+            console.log('[probe] expanded:', expanded, '| win:', win.getSize())
+            // 基线采样(展开稳定后)
+            for (let i = 0; i < 5; i++) { sampler(); await sleep(100) }
+            // 打开工具列表(⋯ 菜单项)
+            const toolsOpened = await win.webContents.executeJavaScript(`(async () => {
+              const sleep = (ms) => new Promise((res) => setTimeout(res, ms))
+              const item = [...document.querySelectorAll('.island-agent-head .island-quick-menu-item')].find((b) => b.textContent.includes('工具列表'))
+              if (!item) return false
+              item.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+              await sleep(100)
+              return !!document.querySelector('.island-agent-history-list')
+            })()`)
+            console.log('[probe] tools opened:', toolsOpened)
+            // 采样 2.5s:工具列表打开后的窗口高度时序
+            for (let i = 0; i < 25; i++) { sampler(); await sleep(100) }
+            // 返回对话
+            const backOk = await win.webContents.executeJavaScript(`(async () => {
+              const sleep = (ms) => new Promise((res) => setTimeout(res, ms))
+              document.querySelector('.island-agent-history-back')?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+              await sleep(300)
+              return !!document.querySelector('.island-agent-messages')
+            })()`)
+            console.log('[probe] back to chat:', backOk)
+            for (let i = 0; i < 20; i++) { sampler(); await sleep(100) }
+            // 收起为灵动岛(带渲染端状态细采样:expanded 类 / --agent-h / 面板视图)
+            const rendererLog = []
+            const rSampler = () =>
+              win.webContents
+                .executeJavaScript(`(() => {
+                  const island = document.querySelector('.island-demo')
+                  return JSON.stringify({
+                    expanded: island ? island.classList.contains('expanded') : null,
+                    agentH: island ? island.style.getPropertyValue('--agent-h') : null,
+                    hasChat: !!document.querySelector('.island-agent-messages'),
+                    hasTools: !!document.querySelector('.island-agent-history-list'),
+                    hasSettings: !!document.querySelector('.island-settings-items'),
+                    qmOpen: !!document.querySelector('.island-quick-menu.open'),
+                  })
+                })()`)
+                .then((s) => { try { return JSON.parse(s) } catch { return null } })
+                .catch(() => null)
+            const collapseClick = await win.webContents.executeJavaScript(`(async () => {
+              const sleep = (ms) => new Promise((res) => setTimeout(res, ms))
+              const items = [...document.querySelectorAll('.island-agent-head .island-quick-menu-item')]
+              const item = items.find((b) => b.textContent.includes('收起为灵动岛'))
+              if (!item) return 'no-item'
+              item.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+              await sleep(100)
+              return 'clicked'
+            })()`)
+            console.log('[probe] collapse click:', collapseClick)
+            for (let i = 0; i < 22; i++) {
+              const t = Date.now() - startedAt
+              const [w, h] = win.getSize()
+              timeline.push([t, w, h])
+              rendererLog.push({ t, ...(await rSampler()) })
+              await sleep(100)
+            }
+            const fmt = (from, to) =>
+              timeline.filter(([t]) => t >= from && t <= to).map(([t, w, h]) => `${t}ms:${w}x${h}`).join(' | ')
+            const t0 = timeline[0]?.[0] ?? 0
+            console.log('[probe] baseline..toolsOpen:', fmt(t0, t0 + 1200))
+            console.log('[probe] tools open 2.5s:', fmt(t0 + 1200, t0 + 3900))
+            console.log('[probe] back-to-chat 2s:', fmt(t0 + 3900, t0 + 5900))
+            console.log('[probe] collapse 2.2s:', fmt(t0 + 5900, t0 + 8100))
+            console.log(
+              '[probe] renderer:',
+              rendererLog.map((r) => `${r.t}ms:${r.expanded ? 'exp' : '---'} h=${r.agentH} chat=${r.hasChat ? 1 : 0} tools=${r.hasTools ? 1 : 0} st=${r.hasSettings ? 1 : 0} qm=${r.qmOpen ? 1 : 0}`).join(' | '),
+            )
+            // 恢复模式与消息
+            win.webContents.send('widget:set-mode', { mode: 'music', source: 'user' })
+            if (msgsBackup !== null) {
+              await win.webContents.executeJavaScript(
+                `(() => { localStorage.setItem('widget-agent-messages', ${JSON.stringify(JSON.stringify(msgsBackup))}) })()`,
+              )
+            }
+          }
           if (process.env.WIDGET_SCREENSHOT_MODE === 'probe-clear') {
             // 诊断探针(2026-08-11):新对话后 Agent 面板窗口应缩回扁平
             // (~176),实测仍 16:9。多场景:① 长对话直接清空 ② 含视频的
@@ -4018,6 +4142,1111 @@ function runScreenshotTests({ win, app, fs, path, settingsPath, runIslandSetting
             }
             console.log('[widget] mini-test:', JSON.stringify(out))
           }
+          if (process.env.WIDGET_SCREENSHOT_MODE === 'session-cleanup') {
+            // 一次性清理(2026-08-13 session-debug 巡检期间污染了用户真实
+            // localStorage):移除 mock LLM 回显/测试输入消息与测试会话键
+            const result = await win.webContents.executeJavaScript(`(() => {
+              const out = { removedMain: 0, removedKeys: [] }
+              const TEST_MARKS = ['$$napcat-send$$', '会话里输入的消息B', '【已收到】']
+              try {
+                const raw = localStorage.getItem('widget-agent-messages')
+                if (raw) {
+                  let msgs = JSON.parse(raw)
+                  if (Array.isArray(msgs)) {
+                    const before = msgs.length
+                    msgs = msgs.filter((m) => {
+                      const text = (m && m.parts || []).map((p) => (p && p.type === 'text' ? p.text : '')).join('')
+                      return !TEST_MARKS.some((t) => text.includes(t))
+                    })
+                    out.removedMain = before - msgs.length
+                    localStorage.setItem('widget-agent-messages', JSON.stringify(msgs))
+                  }
+                }
+                for (const key of ['widget-agent-session:private:222', 'widget-agent-session:private:333']) {
+                  if (localStorage.getItem(key) !== null) {
+                    localStorage.removeItem(key)
+                    out.removedKeys.push(key)
+                  }
+                }
+              } catch (e) {
+                return JSON.stringify({ error: String((e && e.stack) || e) })
+              }
+              return JSON.stringify(out)
+            })()`)
+            console.log('[widget] session-cleanup:', result)
+          }
+          if (process.env.WIDGET_SCREENSHOT_MODE === 'video-resume-check') {
+            // 视频续播标记回归巡检(2026-08-13 用户实测"从 Agent 设置回到
+            // 对话窗口时自动播放视频,不需要"):对话窗口播视频(loop 保活,
+            // 标记已设)→ 进 Agent 设置(面板卸载,播放停止,标记残留)→
+            // 返回对话窗口 → 断言**不自动播放**(位置恢复但保持暂停)。
+            // 不产生真实 LLM 调用;媒体消息注入后结束恢复。
+            const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+            const js = (code) => win.webContents.executeJavaScript(code)
+            const out = { asserts: [] }
+            const log = (k, v) => {
+              out[k] = v
+              console.log('[widget] video-resume-check', k, JSON.stringify(v))
+            }
+            const assert = (name, ok, detail) => {
+              out.asserts.push({ name, ok, detail })
+              console.log(`[widget] video-resume-check ASSERT ${ok ? 'PASS' : 'FAIL'} ${name}${detail ? ' :: ' + JSON.stringify(detail) : ''}`)
+            }
+            const msgBackup = await js(`localStorage.getItem('widget-agent-messages')`)
+            await js(`localStorage.removeItem('widget-agent-messages')`)
+            win.webContents.reload()
+            await sleep(3000)
+            try {
+              // 1. 切 Agent 模式 + 长按展开
+              win.webContents.send('widget:set-mode', { mode: 'agent', source: 'user' })
+              await sleep(1600)
+              await js(`(async () => {
+                const sleep = (ms) => new Promise((res) => setTimeout(res, ms))
+                const island = document.querySelector('.island-demo')
+                const r = island.getBoundingClientRect()
+                const x = r.left + r.width / 2
+                const y = r.top + r.height / 2
+                island.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, clientX: x, clientY: y, pointerId: 1, isPrimary: true, button: 0 }))
+                setTimeout(() => island.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, clientX: x, clientY: y, pointerId: 1, isPrimary: true, button: 0 })), 600)
+                await sleep(2000)
+              })()`)
+              // 2. 真实 mp4 优先(JiJiDown 下载目录第一个 mp4,有真实时长/
+              // 可 seek,currentTime 正常推进——MediaRecorder webm 无时长
+              // 元数据,currentTime 恒 0,位置缓存与 seek 断言无法验证);
+              // 不可读则回退 MediaRecorder webm(位置断言跳过)
+              const JIJI_DIR = 'C:\\Program Files\\JiJiDown\\Download'
+              let realVideoPath = null
+              try {
+                const files = fs.readdirSync(JIJI_DIR)
+                realVideoPath = files.find((f) => /\.mp4$/i.test(f)) ? path.join(JIJI_DIR, files.find((f) => /\.mp4$/i.test(f))) : null
+              } catch {
+                // 目录不可读:回退
+              }
+              let mediaUrl = realVideoPath
+              if (!mediaUrl) {
+                const videoDataUrl = await js(`(async () => {
+                  try {
+                    const canvas = document.createElement('canvas')
+                    canvas.width = 320
+                    canvas.height = 180
+                    const ctx = canvas.getContext('2d')
+                    ctx.fillStyle = '#4d6bfe'
+                    ctx.fillRect(0, 0, 320, 180)
+                    ctx.fillStyle = '#fff'
+                    ctx.font = '26px sans-serif'
+                    ctx.fillText('RESUME TEST', 90, 100)
+                    const stream = canvas.captureStream(10)
+                    const rec = new MediaRecorder(stream, { mimeType: 'video/webm' })
+                    const chunks = []
+                    rec.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data) }
+                    const done = new Promise((res) => { rec.onstop = () => res() })
+                    rec.start()
+                    await new Promise((r) => setTimeout(r, 5000))
+                    rec.stop()
+                    await done
+                    const blob = new Blob(chunks, { type: 'video/webm' })
+                    const dataUrl = await new Promise((res) => {
+                      const fr = new FileReader()
+                      fr.onload = () => res(fr.result)
+                      fr.readAsDataURL(blob)
+                    })
+                    return String(dataUrl)
+                  } catch (e) {
+                    return 'ERR:' + String((e && e.message) || e)
+                  }
+                })()`)
+                if (!videoDataUrl.startsWith('data:')) {
+                  assert('测试媒体生成', false, videoDataUrl)
+                  return
+                }
+                mediaUrl = videoDataUrl
+              }
+              log('media', { real: !!realVideoPath, name: realVideoPath ? path.basename(realVideoPath) : 'webm-fallback' })
+              // 3. 注入 media 消息(自动播放机制:落定消息首条媒体自动播,
+              // play 事件 → dispatchAgentMedia playing:true → 标记设置)
+              win.webContents.send('agent:event', {
+                type: 'message',
+                message: {
+                  id: 'vr-msg-1',
+                  role: 'assistant',
+                  parts: [
+                    { type: 'text', text: '续播巡检测试' },
+                    { type: 'media', kind: 'video', url: mediaUrl, name: realVideoPath ? path.basename(realVideoPath) : 'vr-test.webm' },
+                  ],
+                },
+              })
+              await sleep(2500)
+              // 4. 设 loop 保活 + 轮询等播放 ≥2s(1Hz 进度上报把位置写进
+              // agentMediaPositions 缓存,返回后的 seek 断言才有意义)
+              const s1 = await js(`(async () => {
+                const sleep = (ms) => new Promise((res) => setTimeout(res, ms))
+                const v0 = document.querySelector('.island-media-frame video')
+                if (!v0) return JSON.stringify({ hasVideo: false })
+                v0.loop = true
+                if (v0.paused) v0.play().catch(() => {})
+                // 每轮**重新查询**(元素可能被重挂载替换)+ 记录诊断
+                let last = null
+                for (let i = 0; i < 30; i++) {
+                  await sleep(300)
+                  const v = document.querySelector('.island-media-frame video')
+                  if (!v) return JSON.stringify({ hasVideo: false, gone: true, i })
+                  last = {
+                    paused: v.paused,
+                    t: Math.round(v.currentTime * 10) / 10,
+                    rs: v.readyState,
+                    err: v.error ? v.error.code : 0,
+                    sameEl: v === v0,
+                    frames: v.getVideoPlaybackQuality ? v.getVideoPlaybackQuality().totalVideoFrames : -1,
+                    vw: v.videoWidth,
+                  }
+                  if (v.currentTime >= 2) break
+                }
+                return JSON.stringify({ hasVideo: true, ...last })
+              })()`)
+              const p1 = JSON.parse(s1)
+              log('before-settings', p1)
+              assert('视频已挂载且在播(≥2s,标记已设)', p1.hasVideo === true && p1.paused === false && p1.t >= 2, p1)
+              // 5. ⋯ 菜单 → 设置(AgentView onOpenSettings → agent-settings 视图)
+              await js(`(async () => {
+                const sleep = (ms) => new Promise((res) => setTimeout(res, ms))
+                const menu = document.querySelector('.island-agent-head .island-quick-menu')
+                menu?.dispatchEvent(new MouseEvent('mouseover', { bubbles: true, relatedTarget: null }))
+                await sleep(400)
+                const item = [...document.querySelectorAll('.island-quick-menu-item')].find((el) => (el.textContent || '').includes('设置'))
+                item?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+                await sleep(900)
+                return !!document.querySelector('.island-agent-settings')
+              })()`)
+              const inSettings = await js(`!!document.querySelector('.island-agent-settings')`)
+              log('in-settings', inSettings)
+              assert('已进入 Agent 设置视图(面板卸载)', inSettings === true)
+              // 6. 返回:agent-settings → settings → 收起 → 长按重新展开
+              await js(`(async () => {
+                const sleep = (ms) => new Promise((res) => setTimeout(res, ms))
+                // agent-settings 返回键 → settings
+                const back1 = [...document.querySelectorAll('.island-agent-settings button, .island-panel-list:has(.island-agent-settings) .island-bg-back')].find((b) => (b.textContent || '').includes('返回'))
+                if (back1) {
+                  back1.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+                  await sleep(700)
+                }
+                // settings 返回键 → 收起
+                const back2 = [...document.querySelectorAll('.island-panel-list:has(.island-settings-view) .island-bg-back, .island-settings-view button')].find((b) => (b.textContent || '').includes('返回'))
+                if (back2) {
+                  back2.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+                  await sleep(1200)
+                }
+                // 长按重新展开 → agent 视图
+                const island = document.querySelector('.island-demo')
+                const r = island.getBoundingClientRect()
+                const x = r.left + r.width / 2
+                const y = r.top + r.height / 2
+                island.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, clientX: x, clientY: y, pointerId: 1, isPrimary: true, button: 0 }))
+                setTimeout(() => island.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, clientX: x, clientY: y, pointerId: 1, isPrimary: true, button: 0 })), 600)
+                await sleep(2600)
+              })()`)
+              // 7. 断言:回到对话窗口后视频**不自动播放**(位置恢复、保持暂停)
+              const s2 = await js(`(() => {
+                const v = document.querySelector('.island-media-frame video')
+                if (!v) return JSON.stringify({ hasVideo: false, agentView: !!document.querySelector('.island-agent-view') })
+                return JSON.stringify({
+                  hasVideo: true,
+                  paused: v.paused,
+                  t: Math.round(v.currentTime * 10) / 10,
+                  agentView: !!document.querySelector('.island-agent-view'),
+                })
+              })()`)
+              const p2 = JSON.parse(s2)
+              log('after-return', p2)
+              assert('回到 Agent 对话视图且视频已重挂载', p2.agentView === true && p2.hasVideo === true, p2)
+              assert('视频不自动播放(保持暂停)', p2.paused === true, p2)
+              // 位置恢复断言仅真实 mp4 有意义(MediaRecorder webm 无时长
+              // 元数据,currentTime 恒 0;其恢复语义本身也无法验证)
+              if (realVideoPath) {
+                assert('播放位置已恢复(seek 到缓存位置)', p2.t > 0, p2)
+              } else {
+                assert('播放位置已恢复(webm 回退跳过,无时长元数据)', true, p2)
+              }
+            } catch (err) {
+              log('error', String((err && err.stack) || err))
+            } finally {
+              // 恢复:消息备份 + 切回音乐模式
+              await js(`(() => {
+                if (${JSON.stringify(msgBackup)} === null) localStorage.removeItem('widget-agent-messages')
+                else localStorage.setItem('widget-agent-messages', ${JSON.stringify(msgBackup)})
+                return 'ok'
+              })()`).catch(() => {})
+              win.webContents.send('widget:set-mode', { mode: 'music', source: 'user' })
+              log('asserts-summary', out.asserts.filter((x) => !x.ok).map((x) => x.name))
+            }
+          }
+          if (process.env.WIDGET_SCREENSHOT_MODE === 'session-debug') {
+            // 会话隔离三 bug 复现巡检(2026-08-13):
+            // ① 切会话(单条消息)收起面板后消息被截断(布局);
+            // ② 会话里发送的消息 LLM 不知道(mock LLM 回显验证);
+            // ③ 主对话让 LLM 发的消息切到会话看不到(mock LLM 工具调用
+            //    + 假 OneBot 服务器 ACK send_private_msg → onSent 回显链路);
+            // ④ 场景 E(2026-08-13 泄露根治):LLM 询问主人意见的询问轮 +
+            //    执行轮汇报绝不发回对方——询问轮拦截留窗口 + 同步主人 QQ,
+            //    执行回复标记化发回。
+            // ⑤ 场景 F(2026-08-13 二轮指纹严格验证):负向路径——无指纹直接
+            //    回复(忘带指纹的自主回复)/ 错误过期指纹 全部扣留不发送
+            //    (指纹对不上就不发送,自主回复同样指纹门控),扣留原因经
+            //    global.__fpGate 可归因,各轮指纹互不相同(每轮唯一)。
+            // ⑥ 场景 E0/G(2026-08-13 会话情况记录 + 快捷清空):记录经
+            //    agent:send 回传主进程注入引擎输入(每轮参考);横幅 UI
+            //    记录/清空按钮 → 编辑保存落盘 + 两段式清空擦除历史
+            //    (记录保留)。
+            // 全部走假服务器:mock LLM(Responses API SSE,回显最后一条用户
+            // 消息 = 证明 LLM 收到) + 假 OneBot WS(手写握手/帧,ACK 动作)。
+            // 不产生真实 LLM 调用与真实 QQ 消息。
+            const http = require('node:http')
+            const crypto = require('node:crypto')
+            const net = require('node:net')
+            const out = { asserts: [] }
+            const log = (k, v) => {
+              out[k] = v
+              console.log('[widget] session-debug', k, JSON.stringify(v))
+            }
+            const assert = (name, ok, detail) => {
+              out.asserts.push({ name, ok, detail })
+              console.log(`[widget] session-debug ASSERT ${ok ? 'PASS' : 'FAIL'} ${name}${detail ? ' :: ' + JSON.stringify(detail) : ''}`)
+            }
+            const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+            const js = (code) => win.webContents.executeJavaScript(code)
+            // 诊断采样:每 5s 记录 set-size IPC 计数与主进程堆(定位 OOM/死循环)
+            const sampleTimer = setInterval(() => {
+              const mem = process.memoryUsage()
+              console.log('[session-debug] SAMPLE setSize=' + (global.__dbgSetSize || 0) + ' last=' + JSON.stringify(global.__dbgLastSetSize || null) + ' heapMB=' + Math.round(mem.heapUsed / 1048576) + ' rssMB=' + Math.round(mem.rss / 1048576))
+            }, 5000)
+            // 设置与渲染端存储备份(巡检结束恢复)
+            const settingsFile = settingsPath()
+            let settingsBackup = null
+            // **崩溃安全侧备份(2026-08-13 实测:OOM 崩溃的运行跳过 finally,
+            // 污染版 settings 落盘后,下一轮把它当"备份"恢复 → 用户真实
+            // 配置(含 apiKey)永久丢失)。侧备份文件在**污染前**写一次、
+            // 永不覆盖;运行开始若发现上次崩溃残留(现文件 ≠ 侧备份),
+            // 先用侧备份恢复,再以之为本轮基线
+            const sideBackupFile = settingsFile + '.session-debug-bak'
+            try {
+              const side = fs.existsSync(sideBackupFile) ? fs.readFileSync(sideBackupFile, 'utf8') : null
+              const current = fs.readFileSync(settingsFile, 'utf8')
+              // 仅当现文件是**测试污染版**(baseURL 指向本机 mock)才从侧备份
+              // 恢复——用户两次巡检之间正常改的配置绝不回滚
+              let currentIsPolluted = false
+              try {
+                currentIsPolluted = String(JSON.parse(current).agent?.baseURL ?? '').startsWith('http://127.0.0.1')
+              } catch {}
+              if (side !== null && currentIsPolluted && side !== current) {
+                fs.writeFileSync(settingsFile, side)
+                resetSettingsCache()
+                console.log('[widget] session-debug 检测到上次崩溃残留设置,已从侧备份恢复')
+              }
+              settingsBackup = side !== null && currentIsPolluted ? side : current
+              // 侧备份保持新鲜:首次播种或现文件是合法配置时刷新
+              // (用户正常改配置后崩溃,恢复的也是最新合法版)
+              if (side === null || !currentIsPolluted) fs.writeFileSync(sideBackupFile, current)
+            } catch {
+              // 读取失败走原逻辑
+              try { settingsBackup = fs.readFileSync(settingsFile, 'utf8') } catch {}
+            }
+            const storageBackup = await js(`(() => {
+              const out = {}
+              for (let i = 0; i < localStorage.length; i++) {
+                const k = localStorage.key(i)
+                if (k && k.indexOf('widget-agent') === 0) out[k] = localStorage.getItem(k)
+              }
+              return out
+            })()`)
+            log('storage-keys-at-start', Object.keys(storageBackup))
+            // ---- mock LLM(Responses API SSE,data-only 帧 + JSON 内 type)----
+            const llmRequests = []
+            const llmServer = http.createServer((req, res) => {
+              let body = ''
+              req.on('data', (c) => { body += c })
+              req.on('end', () => {
+                let parsed = null
+                try { parsed = JSON.parse(body) } catch {}
+                const items = Array.isArray(parsed && parsed.input) ? parsed.input : []
+                const users = items.filter((it) => it && it.type === 'message' && it.role === 'user')
+                const lastUser = users.length > 0
+                  ? String((users[users.length - 1].content ?? []).map((c) => (c && c.text) || '').join('\n'))
+                  : ''
+                // **标记检测只看本条消息文本(2026-08-13 实测)**:消息注入的
+                // 【档案卡】段里"最近发言"会逐字引用历史消息——历史消息
+                // 自带的测试标记($$ask-turn$$ 等)会让分支误触发;原始
+                // 消息文本在【档案卡】之前,检测用它
+                const msgText = lastUser.split('【档案卡】')[0]
+                // 工具轮标记:仅当输入**最后一项**是带标记的用户消息时发
+                // 工具调用(工具执行后的续轮输入以 function_call_output 结尾,
+                // 不会再触发——用户真实历史里本就有历史 napcat 调用,
+                // 不能按"出现过 napcat 调用"判定)
+                const lastItem = items[items.length - 1]
+                const markerTurn = lastItem && lastItem.type === 'message' && lastItem.role === 'user'
+                const jsonMode = !!(parsed && parsed.text && parsed.text.format && parsed.text.format.type === 'json_object')
+                // **本轮指纹(2026-08-13 指纹协议,用户要求"指纹对不上就不
+                // 发送")**:从系统指令提取本轮唯一指纹——取**最后一个**匹配
+                // (历史里可能出现旧指纹残留,当轮系统指令在 input 末尾);
+                // mock 模拟遵守协议的 LLM——发给对方的话必须以「【指纹:xxxx】」
+                // 开头回显(路由层剥指纹发送;询问/汇报不带指纹 = 路由层不发送)
+                const fpMatches = [...String(JSON.stringify(parsed?.input ?? [])).matchAll(/【指纹:([2-9A-HJ-NP-Z]{6})】/g)]
+                const turnFp = fpMatches.length > 0 ? fpMatches[fpMatches.length - 1][1] : ''
+                // 会话情况记录(2026-08-13):输入里是否带【本会话情况记录】
+                // 系统项——验证主进程注入链路
+                const noteSeen = String(JSON.stringify(parsed?.input ?? [])).includes('本会话情况记录')
+                // 当前会话对象(2026-08-13 指向性):外部会话输入是否带
+                // 【当前会话对象】注入——LLM 知道"他/对方"指谁
+                const sessObjSeen = String(JSON.stringify(parsed?.input ?? [])).includes('当前会话对象')
+                llmRequests.push({ lastUser: lastUser.slice(0, 120), markerTurn, jsonMode, turnFp, noteSeen, sessObjSeen })
+                res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' })
+                const frame = (obj) => res.write('data: ' + JSON.stringify(obj) + '\n\n')
+                ;(async () => {
+                  try {
+                    frame({ type: 'response.created', response: {} })
+                    await sleep(20)
+                    if (jsonMode) {
+                      frame({ type: 'response.output_text.delta', delta: '{"title":"测试会话"}' })
+                    } else if (msgText.includes('$$napcat-send$$') && markerTurn) {
+                      const m = /\$\$napcat-send\$\$\s*([\s\S]*)$/.exec(lastUser)
+                      const msgText = (m && m[1] ? m[1] : '测试消息C').trim()
+                      const args = { action: 'send', user_id: '222', message: msgText }
+                      frame({ type: 'response.output_item.added', output_index: 0, item: { id: 'item_1', type: 'function_call', call_id: 'call_1', name: 'napcat', arguments: '' } })
+                      await sleep(10)
+                      frame({ type: 'response.function_call_arguments.delta', output_index: 0, item_id: 'item_1', delta: JSON.stringify(args) })
+                      await sleep(10)
+                      frame({ type: 'response.function_call_arguments.done', output_index: 0, item_id: 'item_1', arguments: JSON.stringify(args) })
+                    } else if (msgText.includes('$$ask-turn$$')) {
+                      // 询问轮场景(2026-08-13 泄露根治,用户实测"LLM 询问我
+                      // 意见时把本应给我的消息全部发给了别人"):mock LLM 回复 =
+                      // 征求主人意见,遵守指纹协议**不带指纹**——路由层必须
+                      // 拦截(指纹对不上 = 不发送),绝不能发回对方
+                      frame({ type: 'response.output_text.delta', delta: '要不要我回他一句调侃?你说回啥,我马上发~' })
+                    } else if (msgText.includes('$$mark-reply$$')) {
+                      // 执行轮场景:主人指示后的执行回复,带本轮指纹 = 发给
+                      // 对方的话(路由层剥指纹发送,展示层显示剥离后的正文)
+                      frame({ type: 'response.output_text.delta', delta: '【指纹:' + turnFp + '】哈哈确实拉胯,心疼你一秒' })
+                    } else if (msgText.includes('$$no-fp$$')) {
+                      // 负向验证(2026-08-13 二轮严格验证):**不遵守指纹协议**
+                      // 的 LLM——直接回复但不带指纹 → 路由层必须扣留
+                      // (指纹对不上就不发送)
+                      frame({ type: 'response.output_text.delta', delta: '好的,这事包在我身上啦' })
+                    } else if (msgText.includes('$$wrong-fp$$')) {
+                      // 负向验证:LLM 用了**错误的/过期的指纹** → 对不上本轮
+                      // → 不发送(历史里抄来的旧指纹同样对不上)
+                      frame({ type: 'response.output_text.delta', delta: '【指纹:ZZZZZZ】错指纹也能发吗?' })
+                    } else if (msgText.includes('$$ask-fp$$')) {
+                      // 防御层验证:LLM **误把询问内容带指纹** → isAsk 拦截
+                      // (不发给对方)+ 记 pending + 同步主人 QQ
+                      frame({ type: 'response.output_text.delta', delta: '【指纹:' + turnFp + '】要不要我回他一句?你说回啥,我马上发~' })
+                    } else if (msgText.includes('$$session-note-tool$$') && markerTurn) {
+                      // LLM 会话工具(2026-08-13):set_session_note 工具调用
+                      // → 主进程桥写 localStorage。**markerTurn 守卫(2026-08-13
+                      // 二轮实测)**:工具执行后的续轮请求 lastUser 仍是带标记
+                      // 的消息,不守卫会无限重发工具调用 → 引擎 busy 卡死,
+                      // 后续消息(场景 I)被 busy 拒绝
+                      const args = { note: 'LLM 生成的情况记录:魔精是电竞好友,回复要懂梗' }
+                      frame({ type: 'response.output_item.added', output_index: 0, item: { id: 'item_1', type: 'function_call', call_id: 'call_1', name: 'set_session_note', arguments: '' } })
+                      await sleep(10)
+                      frame({ type: 'response.function_call_arguments.delta', output_index: 0, item_id: 'item_1', delta: JSON.stringify(args) })
+                      await sleep(10)
+                      frame({ type: 'response.function_call_arguments.done', output_index: 0, item_id: 'item_1', arguments: JSON.stringify(args) })
+                    } else if (msgText.includes('$$clear-context-tool$$') && markerTurn) {
+                      // LLM 会话工具:clear_session_context 工具调用 → 主进程
+                      // 擦除持久化历史 + 派发 session-context-cleared 事件
+                      frame({ type: 'response.output_item.added', output_index: 0, item: { id: 'item_1', type: 'function_call', call_id: 'call_1', name: 'clear_session_context', arguments: '' } })
+                      await sleep(10)
+                      frame({ type: 'response.function_call_arguments.done', output_index: 0, item_id: 'item_1', arguments: '{}' })
+                    } else if (msgText.includes('$$session-send$$') && markerTurn) {
+                      // 指向性(2026-08-13 用户要求"发消息给他 = 直接给私聊
+                      // 会话这个 QQ 发"):mock LLM 调 napcat send **不带
+                      // user_id** → 工具缺省 = 当前会话对象(private:222)
+                      const args = { action: 'send', message: '消息直接发给会话对象' }
+                      frame({ type: 'response.output_item.added', output_index: 0, item: { id: 'item_1', type: 'function_call', call_id: 'call_1', name: 'napcat', arguments: '' } })
+                      await sleep(10)
+                      frame({ type: 'response.function_call_arguments.delta', output_index: 0, item_id: 'item_1', delta: JSON.stringify(args) })
+                      await sleep(10)
+                      frame({ type: 'response.function_call_arguments.done', output_index: 0, item_id: 'item_1', arguments: JSON.stringify(args) })
+                    } else {
+                      // 直接回复:遵守指纹协议——发给对方的话以本轮指纹开头
+                      const echo = '【已收到】' + lastUser.replace(/【[^】]*】/g, '').trim().slice(0, 40)
+                      frame({ type: 'response.output_text.delta', delta: (turnFp ? '【指纹:' + turnFp + '】' : '') + echo })
+                    }
+                    await sleep(10)
+                    frame({ type: 'response.completed', response: { usage: { input_tokens: 100, output_tokens: 20, input_tokens_details: {} } } })
+                    res.end()
+                  } catch {
+                    try { res.end() } catch {}
+                  }
+                })()
+              })
+            })
+            await new Promise((r) => llmServer.listen(0, '127.0.0.1', r))
+            const llmUrl = `http://127.0.0.1:${llmServer.address().port}`
+            // ---- 假 OneBot WS 服务器(手写握手/帧;ACK 动作;可推消息)----
+            const onebotReceived = []
+            const wsState = { socket: null, buf: Buffer.alloc(0), upgraded: false, connCount: 0, upgradedCount: 0 }
+            let msgSeq = 0
+            const wsFrame = (text) => {
+              const payload = Buffer.from(text, 'utf8')
+              let header
+              if (payload.length < 126) header = Buffer.from([0x81, payload.length])
+              else if (payload.length < 65536) {
+                header = Buffer.alloc(4)
+                header[0] = 0x81
+                header[1] = 126
+                header.writeUInt16BE(payload.length, 2)
+              } else {
+                header = Buffer.alloc(10)
+                header[0] = 0x81
+                header[1] = 127
+                header.writeBigUInt64BE(BigInt(payload.length), 2)
+              }
+              return Buffer.concat([header, payload])
+            }
+            const wsSend = (obj) => {
+              if (wsState.socket && wsState.upgraded) wsState.socket.write(wsFrame(JSON.stringify(obj)))
+            }
+            const wsServer = net.createServer((socket) => {
+              wsState.connCount += 1
+              log('ws-conn', { n: wsState.connCount, at: Date.now() })
+              wsState.socket = socket
+              wsState.buf = Buffer.alloc(0)
+              wsState.upgraded = false
+              const processFrames = () => {
+                // **循环条件与解析每轮都读最新 wsState.buf(2026-08-13
+                // 实测 OOM 修复):原实现 const b = wsState.buf 捕获在循环
+                // 外,消费后 b 仍是旧引用 → while(b.length>=2) 恒真、
+                // 同一帧无限重解析 + 每轮 slice 分配 → 主进程事件循环
+                // 卡死 + 堆 3.9GB OOM(首次收到客户端帧即触发)
+                while (wsState.buf.length >= 2) {
+                  const b = wsState.buf
+                  const b0 = b[0]
+                  const b1 = b[1]
+                  const opcode = b0 & 0x0f
+                  const masked = (b1 & 0x80) !== 0
+                  let len = b1 & 0x7f
+                  let off = 2
+                  if (len === 126) {
+                    if (b.length < 4) return
+                    len = b.readUInt16BE(2)
+                    off = 4
+                  } else if (len === 127) {
+                    if (b.length < 10) return
+                    len = Number(b.readBigUInt64BE(2))
+                    off = 10
+                  }
+                  const maskLen = masked ? 4 : 0
+                  if (b.length < off + maskLen + len) return
+                  let payload = b.slice(off + maskLen, off + maskLen + len)
+                  if (masked) {
+                    const mask = b.slice(off, off + 4)
+                    payload = Buffer.from(payload.map((x, i) => x ^ mask[i % 4]))
+                  }
+                  wsState.buf = b.slice(off + maskLen + len)
+                  if (opcode === 8) {
+                    try { socket.end() } catch {}
+                    return
+                  }
+                  if (opcode === 9) {
+                    socket.write(Buffer.from([0x8a, 0]))
+                    continue
+                  }
+                  if (opcode !== 1) continue
+                  let obj = null
+                  try { obj = JSON.parse(payload.toString('utf8')) } catch { continue }
+                  if (obj && typeof obj.echo === 'string' && obj.action) {
+                    onebotReceived.push({ action: obj.action, params: obj.params, at: Date.now() })
+                    if (obj.action === 'send_private_msg') {
+                      wsSend({ status: 'ok', retcode: 0, data: { message_id: 111222 }, echo: obj.echo })
+                    } else if (obj.action === 'send_group_msg') {
+                      wsSend({ status: 'ok', retcode: 0, data: { message_id: 222333 }, echo: obj.echo })
+                    } else {
+                      wsSend({ status: 'ok', retcode: 0, data: {}, echo: obj.echo })
+                    }
+                  }
+                }
+              }
+              socket.on('data', (chunk) => {
+                wsState.buf = Buffer.concat([wsState.buf, chunk])
+                if (!wsState.upgraded) {
+                  const idx = wsState.buf.indexOf('\r\n\r\n')
+                  if (idx === -1) return
+                  const head = wsState.buf.slice(0, idx).toString('utf8')
+                  const keyM = /Sec-WebSocket-Key:\s*(.+)\r?\n/i.exec(head)
+                  const key = keyM ? keyM[1].trim() : ''
+                  const accept = crypto
+                    .createHash('sha1')
+                    .update(key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11')
+                    .digest('base64')
+                  socket.write(
+                    'HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ' +
+                      accept +
+                      '\r\n\r\n',
+                  )
+                  wsState.upgraded = true
+                  wsState.upgradedCount += 1
+                  log('ws-upgraded', { n: wsState.upgradedCount, keyOk: !!keyM })
+                  wsState.buf = wsState.buf.slice(idx + 4)
+                  if (wsState.buf.length > 0) processFrames()
+                  return
+                }
+                processFrames()
+              })
+              socket.on('error', () => {})
+              socket.on('close', () => {
+                if (wsState.socket === socket) {
+                  wsState.socket = null
+                  wsState.upgraded = false
+                }
+              })
+            })
+            await new Promise((r) => wsServer.listen(0, '127.0.0.1', r))
+            const wsUrl = `ws://127.0.0.1:${wsServer.address().port}`
+            const pushPrivate = (qq, text) => {
+              msgSeq += 1
+              wsSend({
+                post_type: 'message',
+                message_type: 'private',
+                user_id: Number(qq),
+                message_id: msgSeq,
+                message: [{ type: 'text', data: { text } }],
+                raw_message: text,
+                time: Math.floor(Date.now() / 1000),
+              })
+            }
+            try {
+              // ---- 改写设置 → mock 端点 + 触发 NapCat 连接 ----
+              let settings = {}
+              try { settings = JSON.parse(settingsBackup ?? '{}') } catch {}
+              settings.agent = {
+                ...(settings.agent ?? {}),
+                apiKey: 'test-key',
+                baseURL: llmUrl,
+                model: 'deepseek-v4-flash',
+                napcatEnabled: true,
+                napcatWsUrl: wsUrl,
+                napcatAllowed: ['222', '333'],
+                napcatAllowedGroups: [],
+                mutedSessions: ['private:333'],
+                mcpServers: [],
+                proactiveEnabled: false,
+              }
+              fs.writeFileSync(settingsFile, JSON.stringify(settings, null, 2))
+              resetSettingsCache()
+              // **两段式重连(2026-08-13 实测坑)**:用户真实配置
+              // napcatEnabled=true → whenReady 已连上**真实 NapCat**(3001)。
+              // syncNapcatLifecycle 只在 !active 时启动,直接改 wsUrl 不会
+              // 重连——且场景 C 的工具调用会经真实 NapCat 发出真消息!
+              // 先 disable 断开真实连接,再 enable 连上假 OneBot 服务器
+              await js(`window.desktop?.agentSetConfig?.({ napcatEnabled: false })`)
+              await sleep(900)
+              await js(`window.desktop?.agentSetConfig?.({ napcatEnabled: true })`)
+              // 等假服务器收到升级(最多 5s)
+              for (let i = 0; i < 25 && wsState.upgradedCount === 0; i++) await sleep(200)
+              const cfgCheck = await js(`window.desktop?.agentGetConfig?.()`)
+              log('cfg-check', { napcatEnabled: cfgCheck?.napcatEnabled, napcatWsUrl: cfgCheck?.napcatWsUrl, napcatAllowed: cfgCheck?.napcatAllowed, wsUpgraded: wsState.upgradedCount })
+              await sleep(500)
+              // 安全闸:假连接未建立 → 跳过一切会发 QQ 的场景(防真实 NapCat 发出真消息)
+              const wsReady = wsState.upgradedCount >= 1
+              // 切 Agent 模式 + 长按展开(与段 3 同款)
+              win.webContents.send('widget:set-mode', { mode: 'agent', source: 'user' })
+              await sleep(800)
+              const enterResult = await js(`(async () => {
+                const sleep = (ms) => new Promise((res) => setTimeout(res, ms))
+                const island = document.querySelector('.island-demo')
+                if (!island) return JSON.stringify({ fatal: 'no island' })
+                const r = island.getBoundingClientRect()
+                const x = r.left + r.width / 2
+                const y = r.top + r.height / 2
+                island.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, clientX: x, clientY: y, pointerId: 1, isPrimary: true, button: 0 }))
+                setTimeout(() => island.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, clientX: x, clientY: y, pointerId: 1, isPrimary: true, button: 0 })), 600)
+                await sleep(2500)
+                return JSON.stringify({
+                  expanded: island.classList.contains('expanded'),
+                  agentView: !!document.querySelector('.island-agent-view'),
+                })
+              })()`)
+              log('enter', JSON.parse(enterResult))
+              // ===== A0:监听会话启动即入面板(2026-08-13 用户要求"只要是
+              // 监听的,自动加入"——原只预注册群,私聊要等消息到达才建
+              // 会话,每次进程序只有两个群没有私聊)=====
+              await js(`(async () => {
+                const fold = document.querySelector('.island-session-fold')
+                if (!document.querySelector('.island-session-dock.open')) fold?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+                return 'ok'
+              })()`)
+              await sleep(500)
+              const a0Result = await js(`(() => {
+                const items = [...document.querySelectorAll('.island-session-item')].map((el) => (el.textContent || '').replace(/\\s+/g, ' '))
+                return JSON.stringify(items)
+              })()`)
+              const a0Items = JSON.parse(a0Result)
+              log('seed-items', a0Items)
+              // 注意:本断言在巡检改写设置**之前**的应用启动种子(真实配置)已
+              // 广播——面板此时是用户真实配置的监听会话(222/333 是巡检设置,
+              // 应用启动时尚未生效,随后由消息到达注册)。判定 = 特性本身:
+              // **私聊监听(QQ 号 caption)+ 群监听启动即入面板,无需任何消息**
+              assert(
+                'A0 监听私聊/群启动即入面板(无需消息)',
+                a0Items.some((t) => /QQ \d+/.test(t)) && a0Items.some((t) => t.includes('群 ')),
+                a0Items,
+              )
+              // ===== 场景 A:假 OneBot 推私聊(QQ 222 信任)→ 全链路 =====
+              if (!wsReady) {
+                assert('A0 假 OneBot 连接就绪', false, { upgraded: wsState.upgradedCount, conn: wsState.connCount })
+              }
+              pushPrivate('222', '在吗')
+              await sleep(3000)
+              const aResult = await js(`(() => {
+                const out = {}
+                const raw = localStorage.getItem('widget-agent-session:private:222')
+                let msgs = []
+                try { msgs = JSON.parse(raw || '[]') } catch {}
+                out.count = msgs.length
+                out.roles = msgs.map((m) => m.role)
+                out.lastText = msgs.length
+                  ? (msgs[msgs.length - 1].parts ?? []).map((p) => (p.type === 'text' ? p.text : '')).join('')
+                  : ''
+                out.dockItems = [...document.querySelectorAll('.island-session-item')].map((el) => (el.textContent || '').replace(/\\s+/g, ' '))
+                const rawMain = localStorage.getItem('widget-agent-messages')
+                out.mainHasLeak = (rawMain || '').indexOf('【已收到】在吗') !== -1
+                out.allTexts = msgs.map((m) => (m.parts ?? []).map((p) => (p.type === 'text' ? p.text : '')).join('').slice(0, 30))
+                return JSON.stringify(out)
+              })()`)
+              const a = JSON.parse(aResult)
+              log('scenarioA', a)
+              assert('A1 会话 private:222 已创建(会话坞条目)', a.dockItems.some((t) => t.indexOf('222') !== -1), a.dockItems)
+              assert('A2 会话历史含用户消息(QQ 在吗)', a.roles.includes('user'), a.roles)
+              assert('A3 会话历史含助手回显(LLM 收到消息)', a.roles.includes('assistant') && a.lastText.includes('在吗'), a.lastText)
+              assert('A4 回复回发 QQ(假 OneBot 收到 send_private_msg)', onebotReceived.some((r) => r.action === 'send_private_msg' && String(r.params && r.params.user_id) === '222'), onebotReceived.map((r) => r.action + ':' + (r.params && r.params.user_id)))
+              assert('A5 回复未串进主对话历史', !a.mainHasLeak)
+              log('llm-requests-A', llmRequests.map((r) => ({ u: r.lastUser.slice(0, 60), call: r.hasCall, json: r.jsonMode })))
+              // ===== 场景 B:会话视图里输入 → LLM 收到 + 回复发对方 =====
+              if (wsReady) {
+              await js(`(async () => {
+                const sleep = (ms) => new Promise((res) => setTimeout(res, ms))
+                const fold = document.querySelector('.island-session-fold')
+                if (!document.querySelector('.island-session-dock.open')) fold?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+                await sleep(600)
+                const item = [...document.querySelectorAll('.island-session-item')].find((el) => (el.textContent || '').indexOf('222') !== -1)
+                item?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+                await sleep(900)
+                const ta = document.querySelector('.island-agent-input textarea')
+                if (!ta) return JSON.stringify({ fatal: 'no input' })
+                const setVal = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set
+                setVal.call(ta, '会话里输入的消息B')
+                ta.dispatchEvent(new Event('input', { bubbles: true }))
+                await sleep(150)
+                ta.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+                return JSON.stringify({ ok: true })
+              })()`)
+              await sleep(3000)
+              const bResult = await js(`(() => {
+                const out = {}
+                const raw = localStorage.getItem('widget-agent-session:private:222')
+                let msgs = []
+                try { msgs = JSON.parse(raw || '[]') } catch {}
+                out.count = msgs.length
+                out.roles = msgs.map((m) => m.role)
+                out.lastText = msgs.length
+                  ? (msgs[msgs.length - 1].parts ?? []).map((p) => (p.type === 'text' ? p.text : '')).join('')
+                  : ''
+                out.bannerShown = !!document.querySelector('.island-session-current')
+                out.bannerText = document.querySelector('.island-session-current')?.textContent ?? ''
+                out.winShownMsgs = [...document.querySelectorAll('.island-msgs-window .island-agent-text, .island-msgs-window .island-agent-msg-user-text')].map((el) => (el.textContent || '').slice(0, 40))
+                return JSON.stringify(out)
+              })()`)
+              const b = JSON.parse(bResult)
+              log('scenarioB', b)
+              assert('B1 会话历史新增用户消息(我发的)', b.roles.filter((r) => r === 'user').length >= 2, b.roles)
+              assert('B2 助手回显含我输入的消息(LLM 完全知道)', b.lastText.includes('消息B'), b.lastText)
+              assert('B3 回复发回 QQ 222', onebotReceived.some((r) => r.action === 'send_private_msg' && String(r.params && r.params.message).includes('消息B')), onebotReceived.map((r) => r.action + ':' + (r.params && r.params.message)))
+              assert('B4 会话横幅显示(当前查看 222)', b.bannerShown, b.bannerText)
+              }
+              // ===== 场景 C:主对话让 LLM 发消息 → 对应会话可见 =====
+              if (!wsReady) {
+                assert('C0 假 OneBot 连接就绪(跳过工具调用防真实发送)', false, { upgraded: wsState.upgradedCount })
+              } else {
+              await js(`(async () => {
+                const sleep = (ms) => new Promise((res) => setTimeout(res, ms))
+                const item = [...document.querySelectorAll('.island-session-item')].find((el) => (el.textContent || '').indexOf('主对话') !== -1)
+                item?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+                await sleep(900)
+                const ta = document.querySelector('.island-agent-input textarea')
+                if (!ta) return JSON.stringify({ fatal: 'no input' })
+                const setVal = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set
+                setVal.call(ta, '$$napcat-send$$测试消息C')
+                ta.dispatchEvent(new Event('input', { bubbles: true }))
+                await sleep(150)
+                ta.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+                return JSON.stringify({ ok: true })
+              })()`)
+              await sleep(4000)
+              const cResult = await js(`(() => {
+                const out = {}
+                const raw = localStorage.getItem('widget-agent-session:private:222')
+                let msgs = []
+                try { msgs = JSON.parse(raw || '[]') } catch {}
+                out.sessionTexts = msgs.map((m) => (m.parts ?? []).map((p) => (p.type === 'text' ? p.text : '')).join(''))
+                return JSON.stringify(out)
+              })()`)
+              const c = JSON.parse(cResult)
+              log('scenarioC', c)
+              assert('C1 假 OneBot 收到 send_private_msg(消息=测试消息C)', onebotReceived.some((r) => r.action === 'send_private_msg' && String(r.params && r.params.message).includes('测试消息C')), onebotReceived.map((r) => r.action + ':' + (r.params && r.params.message)))
+              assert('C2 对应会话历史含已发消息(切会话可见)', c.sessionTexts.some((t) => t.includes('测试消息C')), c.sessionTexts)
+              }
+              // ===== 场景 D:单条消息会话收起面板 → 布局断言 =====
+              // QQ 333 信任 + muted → 仅一条用户消息、无回复(精确复现单消息场景)
+              pushPrivate('333', '你好呀')
+              await sleep(3000)
+              await js(`(async () => {
+                const sleep = (ms) => new Promise((res) => setTimeout(res, ms))
+                const fold = document.querySelector('.island-session-fold')
+                if (!document.querySelector('.island-session-dock.open')) fold?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+                await sleep(600)
+                const item = [...document.querySelectorAll('.island-session-item')].find((el) => (el.textContent || '').indexOf('333') !== -1)
+                item?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+                await sleep(1000)
+                // 收起会话面板(复现用户步骤)
+                document.querySelector('.island-session-fold')?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+                return 'ok'
+              })()`)
+              await sleep(1800)
+              const dResult = await js(`(() => {
+                const rect = (el) => {
+                  if (!el) return null
+                  const r = el.getBoundingClientRect()
+                  return { top: Math.round(r.top), bottom: Math.round(r.bottom), height: Math.round(r.height) }
+                }
+                const msgs = document.querySelector('.island-agent-messages')
+                const items = [...document.querySelectorAll('.island-msgs-item')]
+                const last = items[items.length - 1]
+                const island = document.querySelector('.island-demo')
+                const out = {
+                  island: rect(island),
+                  banner: rect(document.querySelector('.island-session-current')),
+                  head: rect(document.querySelector('.island-agent-head')),
+                  msgs: rect(msgs),
+                  input: rect(document.querySelector('.island-agent-input')),
+                  lastMsg: last ? rect(last) : null,
+                  msgsScroll: msgs ? { sh: msgs.scrollHeight, ch: msgs.clientHeight } : null,
+                  agentHVar: island ? island.style.getPropertyValue('--agent-h') : '',
+                  dockOpen: !!document.querySelector('.island-session-dock.open'),
+                  winH: window.innerHeight,
+                }
+                return JSON.stringify(out)
+              })()`)
+              const d = JSON.parse(dResult)
+              log('scenarioD', d)
+              if (d.lastMsg && d.msgs && d.input) {
+                const cut = d.lastMsg.bottom - d.msgs.bottom
+                const gapToInput = d.input.top - d.msgs.bottom
+                assert('D1 消息未被截断(最后消息底 ≤ 消息区底 + 2px)', cut <= 2, { cut, lastMsg: d.lastMsg, msgs: d.msgs })
+                assert('D2 消息与输入框之间留空(≥6px)', gapToInput >= 6, { gapToInput })
+                assert('D3 消息区无溢出滚动(单条消息应完整可见)', d.msgsScroll && d.msgsScroll.sh <= d.msgsScroll.ch, d.msgsScroll)
+              } else {
+                assert('D1 消息未被截断', false, d)
+                assert('D2 消息与输入框之间留空', false, d)
+                assert('D3 消息区无溢出滚动', false, d)
+              }
+              // 截图(布局视觉确认)
+              {
+                const image = await win.webContents.capturePage()
+                fs.writeFileSync(process.env.WIDGET_SCREENSHOT + '.session-debug.png', image.toPNG())
+                console.log('[widget] session-debug screenshot saved')
+              }
+              // ===== 场景 E:LLM 询问主人意见 → 询问与汇报绝不发回对方 =====
+              // (2026-08-13 用户实测"LLM 询问我意见时,在回复别人消息之后又
+              // 向别人发送本应对我的消息"——扩展信任联系人(222)的回复 =
+              // 征求主人意见,原实现整条发回对方;执行轮向主人的汇报(已用
+              // send 工具发出)也被面板路径整条发回)。修复:询问轮判定
+              // isAskTurnToMaster 拦截 + 记 pending + 同步主人 QQ;执行轮
+              // 标记化(只有【回复对方】才发回)+ 防重发。
+              // **会话情况记录(2026-08-13)**:为 222 会话写记录 → 主进程
+              // 注入引擎输入(E/F 各轮的 mock 请求都应看到【本会话情况记录】)
+              if (wsReady) {
+                await js(`localStorage.setItem('widget-agent-session-note:private:222', '测试情况记录:魔精是好友,喜欢电竞,回复简短活泼')`)
+                pushPrivate('222', '魔精要被零封了$$ask-turn$$')
+                await sleep(3000)
+                const e1Result = await js(`(() => {
+                  const out = {}
+                  const raw = localStorage.getItem('widget-agent-session:private:222')
+                  let msgs = []
+                  try { msgs = JSON.parse(raw || '[]') } catch {}
+                  out.lastText = msgs.length
+                    ? (msgs[msgs.length - 1].parts ?? []).map((p) => (p.type === 'text' ? p.text : '')).join('')
+                    : ''
+                  return JSON.stringify(out)
+                })()`)
+                const e1 = JSON.parse(e1Result)
+                log('scenarioE1', { e1, to222: onebotReceived.filter((r) => r.action === 'send_private_msg' && String(r.params && r.params.user_id) === '222') })
+                assert('E0 会话情况记录注入引擎输入(每轮参考)', llmRequests.slice(-3).some((r) => r.noteSeen), llmRequests.slice(-3).map((r) => ({ noteSeen: r.noteSeen, u: r.lastUser.slice(0, 30) })))
+                assert('E1 询问轮回复未发回对方(222 未收到询问内容)', !onebotReceived.some((r) => r.action === 'send_private_msg' && String(r.params && r.params.user_id) === '222' && String(r.params && r.params.message).includes('要不要我回他')), onebotReceived.map((r) => r.action + ':' + (r.params && r.params.user_id)))
+                assert('E1b 询问内容留在会话历史(对话窗口可见)', e1.lastText.includes('要不要我回他'), e1.lastText)
+                assert('E1c 询问同步到主人 QQ(1178821869)', onebotReceived.some((r) => r.action === 'send_private_msg' && String(r.params && r.params.user_id) === '1178821869' && String(r.params && r.params.message).includes('要不要我回他')), onebotReceived.map((r) => r.action + ':' + (r.params && r.params.user_id)))
+                // 主人在 222 会话面板指示 → 执行回复带标记 → 剥离标记发回
+                await js(`(async () => {
+                  const sleep = (ms) => new Promise((res) => setTimeout(res, ms))
+                  const fold = document.querySelector('.island-session-fold')
+                  if (!document.querySelector('.island-session-dock.open')) fold?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+                  await sleep(600)
+                  const item = [...document.querySelectorAll('.island-session-item')].find((el) => (el.textContent || '').indexOf('222') !== -1)
+                  item?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+                  await sleep(900)
+                  const ta = document.querySelector('.island-agent-input textarea')
+                  if (!ta) return JSON.stringify({ fatal: 'no input' })
+                  const setVal = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set
+                  setVal.call(ta, '$$mark-reply$$你自由发挥吧')
+                  ta.dispatchEvent(new Event('input', { bubbles: true }))
+                  await sleep(150)
+                  ta.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+                  return JSON.stringify({ ok: true })
+                })()`)
+                await sleep(3500)
+                const e2Result = await js(`(() => {
+                  const out = {}
+                  out.winTexts = [...document.querySelectorAll('.island-msgs-window .island-agent-text')].map((el) => (el.textContent || ''))
+                  return JSON.stringify(out)
+                })()`)
+                const e2 = JSON.parse(e2Result)
+                log('scenarioE2', { e2, to222: onebotReceived.filter((r) => r.action === 'send_private_msg' && String(r.params && r.params.user_id) === '222').map((r) => r.params && r.params.message) })
+                assert('E2 执行回复发回对方(剥离标记的调侃原文)', onebotReceived.some((r) => r.action === 'send_private_msg' && String(r.params && r.params.user_id) === '222' && String(r.params && r.params.message).includes('哈哈确实拉胯') && !String(r.params && r.params.message).includes('【回复对方】') && !String(r.params && r.params.message).includes('你自由发挥')), onebotReceived.map((r) => r.action + ':' + (r.params && r.params.message)))
+                assert('E2b 对话窗口展示剥离标记后的执行回复', e2.winTexts.some((t) => t.includes('哈哈确实拉胯') && !t.includes('【回复对方】')), e2.winTexts)
+                // ===== 场景 F:指纹负向严格验证(2026-08-13 二轮)=====
+                // 指纹协议的核心保证 = "对不上就不发送":F1 无指纹直接回复
+                // (不遵守协议的 LLM)、F2 错误/过期指纹(从历史抄来的旧指纹
+                // 同样对不上)、F3 询问误带指纹(防御层 isAsk 拦截)——三种
+                // 都必须扣留,绝不能发回对方;F4 各轮指纹互不相同(每轮
+                // 唯一,历史里的旧指纹抄不到)
+                pushPrivate('222', '$$no-fp$$在吗?')
+                await sleep(3000)
+                pushPrivate('222', '$$wrong-fp$$在吗?')
+                await sleep(3000)
+                pushPrivate('222', '$$ask-fp$$魔精要零封了')
+                await sleep(3000)
+                const fResult = await js(`(() => {
+                  const out = {}
+                  const raw = localStorage.getItem('widget-agent-session:private:222')
+                  let msgs = []
+                  try { msgs = JSON.parse(raw || '[]') } catch {}
+                  out.texts = msgs.map((m) => (m.parts ?? []).map((p) => (p.type === 'text' ? p.text : '')).join(''))
+                  return JSON.stringify(out)
+                })()`)
+                const f = JSON.parse(fResult)
+                const to222F = onebotReceived.filter((r) => r.action === 'send_private_msg' && String(r.params && r.params.user_id) === '222').map((r) => String(r.params && r.params.message))
+                const fpGates = (global.__fpGate || []).map((g) => g.reason)
+                const fpsAll = llmRequests.map((r) => r.turnFp).filter(Boolean)
+                log('scenarioF', { f, to222F, fpGates, fpsAll, fpsUnique: new Set(fpsAll).size })
+                // 2026-08-13 二轮语义(用户要求"给 LLM 自主回复也加上指纹"):
+                // 无指纹直接回复(忘带指纹的自主回复)/ 错误过期指纹 **不发送**
+                // (指纹对不上就不发送);错配指纹即便进入发送路径也被发送
+                // 边界剥离(恶性泄露根治);询问误带指纹 isAsk 拦截
+                assert('F1 无指纹直接回复不发送(留在窗口)', !to222F.some((m) => m.includes('包在我身上')) && f.texts.some((t) => t.includes('包在我身上')), { to222F })
+                assert('F2 错误/过期指纹不发送', !to222F.some((m) => m.includes('错指纹')) && f.texts.some((t) => t.includes('错指纹')), { to222F })
+                assert('F3 询问误带指纹被拦截(不发给对方)', !to222F.some((m) => m.includes('要不要我回他')), { to222F })
+                assert('F3b 询问误带指纹同步主人 QQ', onebotReceived.some((r) => r.action === 'send_private_msg' && String(r.params && r.params.user_id) === '1178821869' && String(r.params && r.params.message).includes('要不要我回他')), onebotReceived.map((r) => r.action + ':' + (r.params && r.params.user_id)))
+                assert('F3c 指纹扣留原因可归因(global.__fpGate)', fpGates.includes('qq-no-fp') && fpGates.includes('qq-ask-with-fp'), fpGates)
+                assert('F4 各轮指纹互不相同(每轮唯一)', new Set(fpsAll).size === fpsAll.length, { count: fpsAll.length })
+                // ===== 场景 G:会话情况记录 UI + 快捷清空上下文(2026-08-13)=====
+                // 横幅操作:「记录」→ 编辑态(textarea + 保存/取消)→ 写
+                // localStorage;「清空」→ 两段式确认(首次点击进入确认态,
+                // 再次点击执行)→ 该会话消息历史擦除
+                await js(`(async () => {
+                  const sleep = (ms) => new Promise((res) => setTimeout(res, ms))
+                  const fold = document.querySelector('.island-session-fold')
+                  if (!document.querySelector('.island-session-dock.open')) fold?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+                  await sleep(600)
+                  const item = [...document.querySelectorAll('.island-session-item')].find((el) => (el.textContent || '').indexOf('222') !== -1)
+                  item?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+                  await sleep(900)
+                  return 'ok'
+                })()`)
+                const g1Result = await js(`(() => {
+                  const out = {}
+                  out.banner = !!document.querySelector('.island-session-current')
+                  out.ctlBtns = [...document.querySelectorAll('.island-session-current .island-session-ctl')].map((el) => (el.textContent || '').trim())
+                  return JSON.stringify(out)
+                })()`)
+                const g1 = JSON.parse(g1Result)
+                log('scenarioG1', g1)
+                assert('G1 会话横幅显示 记录/清空 按钮', g1.banner && g1.ctlBtns.includes('记录') && g1.ctlBtns.includes('清空'), g1.ctlBtns)
+                // 进入编辑态 → 输入 → 保存 → localStorage 落盘
+                await js(`(() => {
+                  const btns = [...document.querySelectorAll('.island-session-current .island-session-ctl')]
+                  btns.find((el) => (el.textContent || '').includes('记录'))?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+                  return 'ok'
+                })()`)
+                await sleep(300)
+                const g2Result = await js(`(() => {
+                  const out = {}
+                  out.editor = !!document.querySelector('.island-session-note-input')
+                  out.hasSave = !!document.querySelector('.island-session-note-actions')
+                  return JSON.stringify(out)
+                })()`)
+                const g2 = JSON.parse(g2Result)
+                log('scenarioG2', g2)
+                assert('G2 点击记录进入编辑态(输入框 + 保存/取消)', g2.editor && g2.hasSave, g2)
+                await js(`(async () => {
+                  const ta = document.querySelector('.island-session-note-input')
+                  if (!ta) return 'no-ta'
+                  const setVal = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set
+                  setVal.call(ta, 'UI 测试:魔精是同学,别太正式')
+                  ta.dispatchEvent(new Event('input', { bubbles: true }))
+                  await new Promise((res) => setTimeout(res, 100))
+                  ;[...document.querySelectorAll('.island-session-note-actions .island-session-ctl')].find((el) => (el.textContent || '').includes('保存'))?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+                  return 'ok'
+                })()`)
+                await sleep(400)
+                const g3Result = await js(`(() => {
+                  const out = {}
+                  out.note = localStorage.getItem('widget-agent-session-note:private:222') ?? ''
+                  out.editorGone = !document.querySelector('.island-session-note-input')
+                  out.btnTitle = document.querySelector('.island-session-current .island-session-ctl')?.getAttribute('title') ?? ''
+                  return JSON.stringify(out)
+                })()`)
+                const g3 = JSON.parse(g3Result)
+                log('scenarioG3', g3)
+                assert('G3 保存情况记录 → localStorage 落盘 + 退出编辑态', g3.note.includes('UI 测试') && g3.editorGone, g3)
+                // 两段式清空:首次点击进入确认态,再次点击执行 → 历史擦除
+                await js(`(() => {
+                  const btns = [...document.querySelectorAll('.island-session-current .island-session-ctl')]
+                  btns.find((el) => (el.textContent || '').includes('清空'))?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+                  return 'ok'
+                })()`)
+                await sleep(300)
+                const g4Armed = await js(`(() => {
+                  const btns = [...document.querySelectorAll('.island-session-current .island-session-ctl')]
+                  return btns.some((el) => (el.textContent || '').includes('确认清空'))
+                })()`)
+                log('scenarioG4-armed', g4Armed)
+                assert('G4 首次点击清空进入确认态', g4Armed === true, g4Armed)
+                await js(`(() => {
+                  const btns = [...document.querySelectorAll('.island-session-current .island-session-ctl')]
+                  btns.find((el) => (el.textContent || '').includes('确认清空'))?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+                  return 'ok'
+                })()`)
+                await sleep(800)
+                const g5Result = await js(`(() => {
+                  const out = {}
+                  const raw = localStorage.getItem('widget-agent-session:private:222')
+                  let msgs = []
+                  try { msgs = JSON.parse(raw || '[]') } catch {}
+                  out.count = msgs.length
+                  out.noteKept = (localStorage.getItem('widget-agent-session-note:private:222') ?? '').includes('UI 测试')
+                  // 窗口内对话记录(2026-08-13 用户实测"清空后窗口内对话记录
+                  // 没有清空"):消息列表 DOM 与空态(.island-agent-welcome)
+                  out.domItems = document.querySelectorAll('.island-msgs-window .island-msgs-item').length
+                  out.domEmpty = !!document.querySelector('.island-agent-welcome')
+                  out.streamText = document.querySelector('.island-msgs-window')?.textContent ?? ''
+                  return JSON.stringify(out)
+                })()`)
+                const g5 = JSON.parse(g5Result)
+                log('scenarioG5', g5)
+                assert('G5 再次点击清空 → 会话历史擦除(记录保留)', g5.count === 0 && g5.noteKept, g5)
+                assert('G5b 窗口内对话记录同步清空(DOM 消息数为 0 + 空态)', g5.domItems === 0 && g5.domEmpty, g5)
+                // ===== 场景 H:LLM 自己生成记录 / 自己清空当前会话上下文 =====
+                // (2026-08-13 用户要求"支持放 LLM 自己生成记录,自己清空
+                // 当前会话上下文"):set_session_note 工具 → 主进程桥写
+                // localStorage;clear_session_context 工具 → 擦除持久化
+                // 历史 + session-context-cleared 事件 → 渲染端清消息状态
+                pushPrivate('222', '$$session-note-tool$$帮我看下记录')
+                await sleep(3500)
+                const h1Note = await js(`localStorage.getItem('widget-agent-session-note:private:222') ?? ''`)
+                log('scenarioH1', { h1Note })
+                assert('H1 LLM set_session_note 工具生成记录(localStorage 落盘)', String(h1Note).includes('LLM 生成'), h1Note)
+                pushPrivate('222', '$$clear-context-tool$$上下文太长了,清空吧')
+                await sleep(3500)
+                const h2Result = await js(`(() => {
+                  const out = {}
+                  const raw = localStorage.getItem('widget-agent-session:private:222')
+                  let msgs = []
+                  try { msgs = JSON.parse(raw || '[]') } catch {}
+                  out.stored = msgs.map((m) => (m.parts ?? []).map((p) => (p.type === 'text' ? p.text : '')).join('')).join(' ')
+                  out.note = localStorage.getItem('widget-agent-session-note:private:222') ?? ''
+                  out.domText = document.querySelector('.island-msgs-window')?.textContent ?? ''
+                  return JSON.stringify(out)
+                })()`)
+                const h2 = JSON.parse(h2Result)
+                log('scenarioH2', h2)
+                assert('H2 LLM clear_session_context 清空上下文(旧记录消失)', !h2.stored.includes('包在我身上') && !h2.domText.includes('包在我身上'), h2)
+                assert('H2b 清空上下文不清除情况记录', h2.note.includes('LLM 生成'), h2.note)
+                // ===== 场景 I:会话指向性(2026-08-13 用户要求"发消息给他 =
+                // 直接给私聊会话这个 QQ 发")=====
+                // I1:外部会话输入带【当前会话对象】注入(LLM 知道"他/对方"
+                // 指谁);I2:mock LLM 调 napcat send **不带 user_id** → 工具
+                // 缺省 = 当前会话对象(private:222)→ 直接发给 222
+                assert('I1 外部会话输入带【当前会话对象】注入', llmRequests.some((r) => r.sessObjSeen), llmRequests.slice(-6).map((r) => ({ s: r.sessObjSeen, u: r.lastUser.slice(0, 20) })))
+                pushPrivate('222', '$$session-send$$发消息给他')
+                await sleep(3500)
+                const i2Sends = onebotReceived.filter((r) => r.action === 'send_private_msg' && String(r.params && r.params.message).includes('消息直接发给会话对象'))
+                log('scenarioI2', { i2Sends })
+                assert('I2 不带 user_id 的 send → 缺省发给当前会话对象(222)', i2Sends.some((r) => String(r.params && r.params.user_id) === '222'), i2Sends.map((r) => r.params && r.params.user_id))
+              }
+            } catch (err) {
+              log('error', String((err && err.stack) || err))
+            } finally {
+              // ---- 恢复:设置文件 + 渲染端存储 + 模式 ----
+              let settingsRestoredOk = false
+              try {
+                if (settingsBackup !== null) fs.writeFileSync(settingsFile, settingsBackup)
+                resetSettingsCache()
+                // 校验恢复确实落盘(2026-08-13:静默失败让污染版残留,
+                // 下一轮把它当备份 = 用户真实配置永久丢失)
+                settingsRestoredOk = fs.readFileSync(settingsFile, 'utf8') === settingsBackup
+                log('settings-restore', settingsRestoredOk ? 'ok' : 'MISMATCH')
+              } catch (e) {
+                log('settings-restore', 'error:' + String(e && e.message))
+              }
+              const restoreResult = await js(`(async () => {
+                try {
+                  for (const key of ['widget-agent-session:private:222', 'widget-agent-session:private:333']) localStorage.removeItem(key)
+                  const backup = ${JSON.stringify(storageBackup)}
+                  if (backup) {
+                    for (let i = 0; i < localStorage.length; i++) {
+                      const k = localStorage.key(i)
+                      if (k && k.indexOf('widget-agent') === 0 && !(k in backup)) localStorage.removeItem(k)
+                    }
+                    for (const k of Object.keys(backup)) {
+                      if (backup[k] === null) localStorage.removeItem(k)
+                      else localStorage.setItem(k, backup[k])
+                    }
+                  }
+                } catch (e) { return 'err:' + String(e && e.stack || e) }
+                return 'restored'
+              })()`).catch((e) => 'rejected:' + String(e && e.stack || e))
+              log('restore', restoreResult)
+              win.webContents.send('widget:set-mode', { mode: 'music', source: 'user' })
+              // 清测试 QQ(222/333)在工具记忆里的痕迹(联系人档案/聊天备份
+              // 自动落盘在主进程,不经 localStorage;不清理会残留进用户数据)
+              try {
+                const userData = path.dirname(settingsFile)
+                const contactsP = path.join(userData, 'napcat-contacts.json')
+                const chatsP = path.join(userData, 'napcat-chats.json')
+                try {
+                  const c = JSON.parse(fs.readFileSync(contactsP, 'utf8'))
+                  for (const k of ['222', '333']) delete c[k]
+                  fs.writeFileSync(contactsP, JSON.stringify(c, null, 2), 'utf8')
+                } catch {}
+                try {
+                  const c = JSON.parse(fs.readFileSync(chatsP, 'utf8'))
+                  const list = c.records || c || []
+                  const kept = list.filter((r) => !(String(r.qq ?? r.target ?? '') === '222' || String(r.qq ?? r.target ?? '') === '333'))
+                  if (kept.length !== list.length) {
+                    if (Array.isArray(c.records)) {
+                      c.records = kept
+                      fs.writeFileSync(chatsP, JSON.stringify(c, null, 2), 'utf8')
+                    } else {
+                      fs.writeFileSync(chatsP, JSON.stringify(kept, null, 2), 'utf8')
+                    }
+                  }
+                } catch {}
+              } catch {}
+              try { llmServer.close() } catch {}
+              try { wsServer.close() } catch {}
+              clearInterval(sampleTimer)
+              log('asserts-summary', out.asserts.filter((x) => !x.ok).map((x) => x.name))
+            }
+          }
+
           const image = await win.webContents.capturePage()
           fs.writeFileSync(process.env.WIDGET_SCREENSHOT, image.toPNG())
           console.log('[widget] screenshot saved')

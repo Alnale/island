@@ -10,6 +10,15 @@ type IslandAgentConfig = {
   model: string
   systemPrompt: string
   reasoningEffort: string
+  /** 最大输出 token 数(2026-08-14 模型参数面板,默认 8192) */
+  maxOutputTokens: number
+  /** 当前激活的 LLM 供应商(2026-08-14 多供应商独立存储:deepseek / mimo) */
+  activeProvider: 'deepseek' | 'mimo'
+  /** 各供应商独立凭据(apiKey/baseURL/model 按供应商分别保存,切换不覆盖) */
+  providers: {
+    deepseek: { apiKey: string; baseURL: string; model: string }
+    mimo: { apiKey: string; baseURL: string; model: string }
+  }
   mcpServers: Array<{
     name: string
     command: string
@@ -32,10 +41,17 @@ type IslandAgentConfig = {
   proactiveIntervalUnit: 's' | 'm' | 'h'
   /** NapCat 监听群白名单(2026-08-13 会话面板种子用) */
   napcatAllowedGroups?: string[]
+  /** NapCat 私聊扩展信任(2026-08-13 二轮会话面板种子用:监听私聊启动即入面板) */
+  napcatAllowed?: string[]
   /** 总结标题文风(Sub Agent 设置:预设 id 或自定义 ≤100 字) */
   summaryStyle: string
   /** 心理揣测人格(Sub Agent 设置:预设 id 或自定义 ≤100 字) */
   mindPersona: string
+  /** 工具输出根目录(2026-08-12,Agent 设置「工具与能力」配置) */
+  outputDir?: string
+  /** 撤销监控目录(2026-08-14 停止与撤销分离:须为 git 仓库;空 = 撤销
+   * 只回滚上下文不动文件) */
+  undoWatchDirs?: string[]
 }
 
 interface DesktopApi {
@@ -72,7 +88,7 @@ interface DesktopApi {
    * source='qq'(target = QQ 号)/'group'(target = 群号)/'ask'(询问轮,
    * target = 陌生人 QQ——回复发到主人 QQ 同步询问)= NapCat 触发轮,
    * 2026-08-12) */
-  agentSend(text: string, history: unknown[], sessionId?: string, source?: 'qq' | 'group' | 'ask' | 'window' | 'system', target?: string, sessionKey?: string): void
+  agentSend(text: string, history: unknown[], sessionId?: string, source?: 'qq' | 'group' | 'ask' | 'window' | 'system', target?: string, sessionKey?: string, noteText?: string): void
   /** NapCat 私聊消息订阅(2026-08-12):payload = {qq, text, messageId,
    * time, trusted};渲染端作为用户消息进入对话(同步上下文)。
    * trusted: true = 白名单 QQ(自主回复,回复发回);false = 陌生人
@@ -93,9 +109,25 @@ interface DesktopApi {
    * 会话('main' = 主人主对话;private:<QQ>/group:<群号> = 外部会话) */
   onSessionBind(callback: (payload: { key: string }) => void): () => void
   /** 监听群种子(2026-08-13):配置的监听群列表,渲染端注册群会话条目 */
-  onSessionsSeed(callback: (payload: { groups: string[] }) => void): () => void
-  /** Agent:中止当前轮 */
-  agentAbort(): void
+  onSessionsSeed(
+    callback: (payload: {
+      groups: Array<string | { id: string; name?: string }>
+      privates?: Array<string | { id: string; name?: string }>
+    }) => void,
+  ): () => void
+  /** 会话活动(2026-08-13):主动发送成功等,渲染端注册会话条目;
+   * text/images(2026-08-13 已发消息回显):发送成功的消息正文/图片,
+   * 渲染端注入对应会话窗口(主对话让 LLM 发的消息,切会话能看到) */
+  onSessionActivity(callback: (payload: { key: string; kind: 'private' | 'group'; title: string; caption: string; text?: string; images?: string[] }) => void): () => void
+  /** Agent:中止当前轮(sessionKey = 会话隔离键,缺省主对话) */
+  agentAbort(sessionKey?: string): void
+  /** Agent:撤销拍快照(2026-08-14):主人输入轮 send 前调;监控目录未
+   * 配置 → 空 id(撤销只回滚上下文)。dirs 各项 ok=false 时 reason 为
+   * 失败原因(非 git 目录/无 git 等) */
+  agentUndoSnapshot(sessionKey?: string): Promise<{ id: string; dirs: Array<{ dir: string; ok: boolean; reason?: string }> }>
+  /** Agent:撤销回滚快照(精确还原工作区到拍快照前;ok=false 时 reason
+   * 为失败原因;成功后该快照从登记表移除) */
+  agentUndoRestore(snapshotId: string): Promise<{ ok: boolean; reason?: string; dirs?: Array<{ dir: string; ok: boolean; reason?: string }> }>
   /** Agent:exec_command 确认门回执(用户允许/拒绝) */
   agentConfirmTool(approved: boolean, sessionKey?: string): void
   /** Agent:订阅引擎事件流(状态/文本增量/工具调用/工具结果/消息落定);
@@ -110,6 +142,15 @@ interface DesktopApi {
         'apiKey' | 'baseURL' | 'model' | 'systemPrompt' | 'reasoningEffort',
         string
       > & {
+        /** 最大输出 token 数(2026-08-14) */
+        maxOutputTokens?: number
+        /** 当前激活的 LLM 供应商(2026-08-14 多供应商独立存储) */
+        activeProvider?: 'deepseek' | 'mimo'
+        /** 各供应商独立凭据(apiKey/baseURL/model 按供应商分别保存) */
+        providers?: {
+          deepseek?: { apiKey?: string; baseURL?: string; model?: string }
+          mimo?: { apiKey?: string; baseURL?: string; model?: string }
+        }
         mcpServers?: Array<{
           name: string
           command: string
@@ -130,6 +171,8 @@ interface DesktopApi {
         mindPersona?: string
         /** 工具输出根目录(2026-08-12,Agent 设置「工具与能力」配置) */
         outputDir?: string
+        /** 撤销监控目录(2026-08-14 停止与撤销分离,须为 git 仓库) */
+        undoWatchDirs?: string[]
         /** NapCat QQ 机器人(2026-08-12) */
         napcatWsUrl?: string
         napcatEnabled?: boolean
@@ -237,6 +280,12 @@ interface DesktopApi {
   pickMediaFiles(): Promise<Array<{ path: string; name: string; size: number }>>
   /** 托盘"多媒体库"菜单:订阅回调(展开岛体进入多媒体库视图);返回取消订阅函数 */
   onOpenMediaLibrary(callback: () => void): () => void
+  /** 音乐控制 IPC 注册(审计 SEC-1,2026-08-14):主进程下发控制请求,
+   *  渲染端回调处理(op='control'|'status', args=参数)。
+   *  返回取消订阅函数 */
+  onMusicControlRequest(
+    callback: (op: string, args: unknown) => unknown,
+  ): () => void
 }
 
 declare global {

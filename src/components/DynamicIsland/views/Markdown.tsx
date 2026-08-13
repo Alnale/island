@@ -127,33 +127,15 @@ function openExternalUrl(url: string) {
  * 缩放变化会触发窗口 resize → 监听重算;原图尺寸加载后读 naturalWidth
  */
 export function AgentImage({ src, alt }: { src: string; alt?: string }) {
-  const [natural, setNatural] = useState<number | null>(null)
-  const [, force] = useState(0)
-  useEffect(() => {
-    const img = new Image()
-    img.onload = () => setNatural(img.naturalWidth || null)
-    img.src = src
-    return () => {
-      img.onload = null
-    }
-  }, [src])
-  // 缩放变化 → 窗口 resize → 重渲染重读 --agent-s
-  useEffect(() => {
-    const read = () => force((v) => v + 1)
-    window.addEventListener('resize', read)
-    return () => window.removeEventListener('resize', read)
-  }, [])
-  const root = document.querySelector('.island-demo.expanded')
-  const raw = root ? getComputedStyle(root).getPropertyValue('--agent-s') : ''
-  const scale = Number.parseFloat(raw)
-  const s = Number.isFinite(scale) && scale > 0 ? scale : 1
-  const width = natural != null && natural > 0 ? Math.round(natural * s * 0.25) : undefined
+  // 纯 CSS 控制尺寸:max-width:100% 兜底防超宽,height:auto 保持比例;
+  // 不再用 JS 计算 naturalWidth * scale * 0.25(计算值可能超过内容区
+  // 宽度导致撑大,且 resize/预加载逻辑增加重渲染与时序问题)
   return (
     <img
       src={src}
       alt={alt ?? ''}
       className="island-agent-md-img"
-      style={width ? { width, height: 'auto' } : undefined}
+      style={{ maxWidth: '100%', height: 'auto' }}
       onPointerDown={(event) => {
         if (event.button === 0) event.stopPropagation()
       }}
@@ -1471,8 +1453,18 @@ let lastPlayingVideoSrc: string | null = null
  * 播放的视频切换回来"):
  * - 面板/视频岛**卸载且播放停止**的场景(收起为灵动岛、模式切换、清
  *   数据)调用——重挂载不再"诈尸续播";
- * - **视频岛在播 → 展开面板的路径不清**(展开不是模式切换/收起,小窗
- *   卸载后播放状态由面板接管,续播保留);
+ * - **会话切换同样调用**(2026-08-13 用户要求"禁止切换会话时自动播放
+ *   视频,仅保留多媒体岛和对话窗口的同步"——切换会话让消息列表整体
+ *   替换,残留标记会让新会话里的视频诈尸续播;WidgetApp 的
+ *   selectPanelSession/onSessionBind 在切换前清除,位置缓存仍保留,
+ *   重挂载回到暂停位置);
+ * - **离开对话视图同样调用**(2026-08-13 用户实测"从 Agent 设置回到
+ *   对话窗口时自动播放视频,不需要"——panelView 离开 'agent' 去设置/
+ *   多媒体库等 = 面板卸载、播放停止,残留标记让返回重挂载诈尸续播;
+ *   DynamicIsland 的 panelView effect 在离开 'agent' 且目标非 'control'
+ *   时清除,收起路径(control)仍由 doCollapse 按 mediaMini 区分);
+ * - **视频岛在播 → 展开面板的路径不清**(展开不是模式切换/收起/会话
+ *   切换,小窗卸载后播放状态由面板接管,续播保留);
  * - 视频岛暂停/播完本就经 dispatch playing:false 清除(本函数兜底
  *   非事件路径)
  */
@@ -1632,10 +1624,13 @@ export function MediaFrame({
   if (err) return <MediaError src={resolved} kind={kind} code={err.code} />
   // 音频 = 语音气泡(不参与拖拽缩放;LLM 播放的音频自动播放)
   if (kind === 'audio') return <VoiceBubble src={resolved} alt={alt} autoPlay={autoPlay} />
-  // 图片原图优先(2026-08-11):width(拖拽/小窗缓存) → 图片原图宽 →
-  // 媒体窗口默认宽;视频保持默认宽(无"原图"概念,元数据加载后按
-  // 真实比例,16/9 兜底)
-  const w = width ?? (kind === 'img' ? (naturalW ?? readMediaWindowWidth()) : readMediaWindowWidth())
+  // 图片原图优先(2026-08-11):width(拖拽/小窗缓存) → 图片原图宽(钳制
+  // 在拖拽上限 MEDIA_MAX_W 内,防止 4000px 截图等超大原图把容器高算成
+  // 几千px导致撑大) → 媒体窗口默认宽;视频保持默认宽(无"原图"概念,
+  // 元数据加载后按真实比例,16/9 兜底)。CSS max-width:100% 在 frame
+  // 上兜底防超气泡宽。
+  const imgAutoW = naturalW != null ? Math.min(naturalW, MEDIA_MAX_W) : readMediaWindowWidth()
+  const w = width ?? (kind === 'img' ? imgAutoW : readMediaWindowWidth())
   // 图片/视频:气泡容器固定宽 + 按自然比例的高,内容 100% 填充(无留白)。
   // 外层 wrap 承载拖拽手柄(2026-08-08 用户要求"手柄移到气泡外面"——
   // 与全屏按键重叠):frame 有 overflow:hidden 裁剪内容圆角,手柄放

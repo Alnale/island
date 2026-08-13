@@ -8,7 +8,7 @@
 
 import { memo, useEffect, useRef, useState } from 'react'
 import type { AgentMessage, AgentPart } from '../../../agent/types'
-import { stripNapcatInstructions, textFromMessage, textFromParts } from '../../../agent/text'
+import { stripNapcatInstructions, stripTurnMarks, textFromMessage, textFromParts } from '../../../agent/text'
 import { firstMediaKindInText } from './markdownParser'
 import { AgentImage, CopyButton, Markdown, MediaFrame } from './Markdown'
 
@@ -21,7 +21,7 @@ import { AgentImage, CopyButton, Markdown, MediaFrame } from './Markdown'
  * 来源标注与原始消息(实现已抽到 src/agent/text.ts,与 useAgent 历史
  * 发送防污染共用) */
 
-export const UserBubble = memo(function UserBubble({ m }: { m: AgentMessage }) {
+export const UserBubble = memo(function UserBubble({ m, onUndo }: { m: AgentMessage; onUndo?: (messageId: string) => void }) {
   const text = stripNapcatInstructions(textFromMessage(m))
   // 收到的 QQ/群图片(2026-08-12 收图链路):用户消息 media part →
   // MediaFrame 展示图片(main.cjs 已下载到本地路径)
@@ -29,8 +29,60 @@ export const UserBubble = memo(function UserBubble({ m }: { m: AgentMessage }) {
   // 档案卡展开态(2026-08-13 优化:受控展开 + 0fr↔1fr 高度动画,
   // 与工具卡同款曲线;原 details 原生折叠无动画)
   const [cardOpen, setCardOpen] = useState(false)
+  // 撤销两段式确认(2026-08-14 停止与撤销分离):首次点击进确认态
+  // (3s 自动复位),再点执行——回滚具破坏性(丢该轮 git 提交与新建
+  // 文件),与快捷清空上下文同款交互兑底
+  const [undoArmed, setUndoArmed] = useState(false)
+  useEffect(() => {
+    if (!undoArmed) return
+    const t = window.setTimeout(() => setUndoArmed(false), 3000)
+    return () => window.clearTimeout(t)
+  }, [undoArmed])
   return (
-    <div className="island-agent-msg-user">
+    <div className="island-agent-msg-user-row">
+      {onUndo && (
+        <button
+          type="button"
+          className={`island-agent-msg-undo${undoArmed ? ' armed' : ''}`}
+          title={
+            undoArmed
+              ? '再点一次确认撤销:上下文与文件(git)回滚到这条消息之前'
+              : '撤销:上下文与文件(git)回滚到这条消息之前'
+          }
+          onClick={(event) => {
+            event.stopPropagation()
+            if (!undoArmed) {
+              setUndoArmed(true)
+              return
+            }
+            setUndoArmed(false)
+            onUndo(m.id)
+          }}
+          onPointerDown={(event) => {
+            if (event.button === 0) event.stopPropagation()
+          }}
+        >
+          {undoArmed ? (
+            <span className="island-agent-msg-undo-confirm">确认?</span>
+          ) : (
+            <svg
+              width="11"
+              height="11"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth={2}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M9 14 4 9l5-5" />
+              <path d="M4 9h10.5a5.5 5.5 0 0 1 5.5 5.5v0a5.5 5.5 0 0 1-5.5 5.5H11" />
+            </svg>
+          )}
+        </button>
+      )}
+      <div className="island-agent-msg-user">
       <div className="island-agent-msg-user-text">
         {/* NapCat 来源头(2026-08-13 布局细分重构,用户要求"总体 QQ →
             私聊/群聊 → 发言 QQ 号 → 档案卡"):第一行 类别 + QQ 号 +
@@ -95,6 +147,60 @@ export const UserBubble = memo(function UserBubble({ m }: { m: AgentMessage }) {
         ))}
       </div>
       <CopyButton text={text} />
+      </div>
+    </div>
+  )
+})
+
+/** "发给对方"指纹标签(2026-08-14 指纹 UI):本轮指纹命中的回复 =
+ * 路由发给 QQ 对方的话,气泡上方挂一行小标签(指纹图标 + 文案)与
+ * 给主人的普通回复区分;配色跟随全局文字色,纯结构区分。
+ * 落定消息(AssistantBlock)与流式气泡(AgentView)共用 */
+export const PeerTurnTag = memo(function PeerTurnTag() {
+  return (
+    <div className="island-agent-msg-peer-tag" title="这条回复带本轮指纹,会路由发给 QQ 对方">
+      <svg
+        width="10"
+        height="10"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth={2}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        aria-hidden="true"
+      >
+        <path d="M12 10a2 2 0 0 0-2 2c0 1.02-.1 2.51-.26 4" />
+        <path d="M14 13.12c0 2.38 0 6.38-1 8.88" />
+        <path d="M17.29 21.02c.12-.6.43-2.3.5-3.02" />
+        <path d="M2 12a10 10 0 0 1 18-6" />
+        <path d="M2 16h.01" />
+        <path d="M21.8 16c.2-2 .131-5.354 0-6" />
+        <path d="M5 19.5C5.5 18 6 15 6 12a6 6 0 0 1 .34-2" />
+        <path d="M8.65 22c.21-.66.45-1.32.57-2" />
+        <path d="M9 6.8a6 6 0 0 1 9 5.2v2" />
+      </svg>
+      <span>发给对方</span>
+    </div>
+  )
+})
+
+/** "已停止"标签(2026-08-14 软停止):手动停止落定的部分工作消息,
+ * 气泡上方挂一行小标签与正常回复区分(复用 PeerTurnTag 同款结构,
+ * 配色跟随全局文字色纯结构区分) */
+export const InterruptedTag = memo(function InterruptedTag() {
+  return (
+    <div className="island-agent-msg-stopped-tag" title="这一轮被手动停止,以下是已完成的部分">
+      <svg
+        width="9"
+        height="9"
+        viewBox="0 0 24 24"
+        fill="currentColor"
+        aria-hidden="true"
+      >
+        <rect x="6" y="6" width="12" height="12" rx="2" />
+      </svg>
+      <span>已停止</span>
     </div>
   )
 })
@@ -264,6 +370,8 @@ export const AssistantBlock = memo(function AssistantBlock({
   id,
   parts,
   usage,
+  sentToPeer = false,
+  interrupted = false,
   mediaAutoPlay = false,
   onMediaAutoPlayed,
 }: {
@@ -274,6 +382,13 @@ export const AssistantBlock = memo(function AssistantBlock({
   id?: string
   parts: AgentMessage['parts']
   usage?: AgentMessage['usage']
+  /** 轮次指纹命中(2026-08-14 指纹 UI):true = 本条回复路由发给了
+   * QQ 对方——气泡换"发给对方"风格(镜像角形/虚线边框/指纹标签),
+   * 与给主人的普通回复一眼区分(主题色全局,纯结构区分) */
+  sentToPeer?: boolean
+  /** 软停止落定(2026-08-14):true = 本条是手动停止时保留的部分工作,
+   * 气泡上方挂"已停止"标签 */
+  interrupted?: boolean
   /** 2026-08-10 自动播放只限"当次对话":本会话流式落定且未消费的消息才
    * true(LLM 播放的那一轮自动播一次);历史/重挂载读到 false */
   mediaAutoPlay?: boolean
@@ -334,13 +449,16 @@ export const AssistantBlock = memo(function AssistantBlock({
     }
   }
   return (
-    <div className="island-agent-msg-assistant">
+    <div className={`island-agent-msg-assistant${sentToPeer ? ' qq-peer' : ''}`}>
+      {sentToPeer && <PeerTurnTag />}
+      {interrupted && <InterruptedTag />}
       {textParts.map((p, i) => (
         <div key={`t-${i}`} className="island-agent-text">
-          {/* 执行回复标记剥离(2026-08-13 串台根治):「【回复对方】」是
-              给主进程路由用的标记(带标记才发给待回复陌生人),气泡里
-              不显示——首个文本段开头剥离 */}
-          <Markdown text={i === 0 ? p.text.replace(/^【回复对方】\s*/, '') : p.text} mediaAutoPlay={mediaAutoPlay && i === grantTextIdx} />
+          {/* 轮次标记剥离(2026-08-13 指纹协议):「【回复对方】」(旧静态
+              标记)与「【指纹:xx】」(每轮随机指纹)是给主进程路由层验证
+              用的,气泡里不显示——首个文本段开头剥离(历史存储路径已在
+              useAgent 剥过,此处兜底流式/回放) */}
+          <Markdown text={i === 0 ? stripTurnMarks(p.text) : p.text} mediaAutoPlay={mediaAutoPlay && i === grantTextIdx} />
         </div>
       ))}
       {/* 工具图片附件(如 bili 登录二维码):引擎注入的 image part,

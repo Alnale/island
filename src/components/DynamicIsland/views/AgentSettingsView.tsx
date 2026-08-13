@@ -9,11 +9,18 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { AgentConfig, AgentToolInfo, McpServerConfig, MemoryEntry } from '../../../agent/types'
-import { MIND_PERSONAS, SUMMARY_STYLES, providerLabel } from '../../../../electron/agent/constants'
+import type { AgentConfig, AgentToolInfo, McpServerConfig, MemoryEntry, ProviderId, ProviderCredentials } from '../../../agent/types'
+import { MIND_PERSONAS, SUMMARY_STYLES } from '../../../../electron/agent/constants'
+import { MIMO_DEFAULT_BASE_URL, MIMO_DEFAULT_MODEL, MIMO_PLATFORM_URL, mimoProviderLabel } from '../../../../electron/agent/mimo-constants'
+import { DEEPSEEK_DEFAULT_BASE_URL, DEEPSEEK_DEFAULT_MODEL, DEEPSEEK_TOPUP_URL, deepseekProviderLabel } from '../../../../electron/agent/deepseek-constants'
 import { useLeavingList } from '../../../hooks/useLeavingList'
 import { BackFoot, PanelHead } from './shared'
 import { QuickMenu } from './QuickMenu'
+
+/** 空凭据(DeepSeek 默认地址/模型) */
+const EMPTY_DEEPSEEK: ProviderCredentials = { apiKey: '', baseURL: DEEPSEEK_DEFAULT_BASE_URL, model: DEEPSEEK_DEFAULT_MODEL }
+/** 空凭据(MiMo 默认地址/模型) */
+const EMPTY_MIMO: ProviderCredentials = { apiKey: '', baseURL: MIMO_DEFAULT_BASE_URL, model: MIMO_DEFAULT_MODEL }
 
 export interface AgentSettingsViewProps {
   config: AgentConfig | null
@@ -462,9 +469,16 @@ export function AgentSettingsView({
   onBack,
 }: AgentSettingsViewProps) {
   const [form, setForm] = useState({
+    // 多供应商独立存储(2026-08-14):每个供应商 Key/地址/模型互不覆盖
+    activeProvider: 'deepseek' as ProviderId,
+    providers: {
+      deepseek: { ...EMPTY_DEEPSEEK },
+      mimo: { ...EMPTY_MIMO },
+    } as Record<ProviderId, ProviderCredentials>,
+    // 以下三个字段 = providers[activeProvider] 的镜像(兼容现有输入框 onChange)
     apiKey: '',
-    baseURL: 'https://api.deepseek.com',
-    model: 'deepseek-v4-flash',
+    baseURL: DEEPSEEK_DEFAULT_BASE_URL,
+    model: DEEPSEEK_DEFAULT_MODEL,
     systemPrompt: '',
     reasoningEffort: 'high',
     // 主对话输出预算(2026-08-08):缺省 8192(与 main 默认一致;
@@ -481,9 +495,51 @@ export function AgentSettingsView({
     mindPersona: '',
     // 工具输出根目录(2026-08-12):空 = 未启用,工具保持默认位置
     outputDir: '',
+    // 撤销监控目录(2026-08-14 停止与撤销分离):多行文本,每行一个
+    // git 仓库路径;空 = 撤销只回滚上下文不动文件
+    undoWatchDirs: '',
     mcpServers: [] as McpServerForm[],
     skillsDirs: [] as string[],
   })
+
+  /** 切换当前查看/编辑的供应商(保留当前正在编辑的字段到旧供应商,再加载新供应商的已存值) */
+  const switchProvider = useCallback((pid: ProviderId) => {
+    setForm((f) => {
+      if (f.activeProvider === pid) return f
+      // 1. 把当前输入框的 apiKey/baseURL/model 保存到旧 activeProvider 的 bucket
+      const oldPid = f.activeProvider
+      const updatedProviders: Record<ProviderId, ProviderCredentials> = {
+        ...f.providers,
+        [oldPid]: { apiKey: f.apiKey, baseURL: f.baseURL, model: f.model },
+      }
+      // 2. 加载新 pid 的凭据
+      const nextCreds = updatedProviders[pid] ?? (pid === 'mimo' ? { ...EMPTY_MIMO } : { ...EMPTY_DEEPSEEK })
+      return {
+        ...f,
+        activeProvider: pid,
+        providers: updatedProviders,
+        apiKey: nextCreds.apiKey,
+        baseURL: nextCreds.baseURL,
+        model: nextCreds.model,
+      }
+    })
+  }, [])
+
+  /** 更新当前激活供应商的凭据字段(输入框 onChange 用,同步到 providers bucket) */
+  const patchActiveCred = useCallback((patch: Partial<ProviderCredentials>) => {
+    setForm((f) => {
+      const pid = f.activeProvider
+      const current = f.providers[pid] ?? (pid === 'mimo' ? { ...EMPTY_MIMO } : { ...EMPTY_DEEPSEEK })
+      const next = { ...current, ...patch }
+      return {
+        ...f,
+        providers: { ...f.providers, [pid]: next },
+        apiKey: next.apiKey,
+        baseURL: next.baseURL,
+        model: next.model,
+      }
+    })
+  }, [])
   // 分组菜单(2026-08-07 布局重构):连接 / 行为与界面 / 工具与能力 /
   // 记忆与进化 / Sub Agent;切换只重挂载内容区,表单状态共享不丢失
   const [tab, setTab] = useState(0)
@@ -654,10 +710,30 @@ export function AgentSettingsView({
   // 配置到达后填充表单(config 未变时不覆盖用户正在编辑的内容)
   useEffect(() => {
     if (config) {
+      // providers 从 config 读(主进程 currentAgentConfig 已做迁移与合并),
+      // 若没有则从顶层 apiKey/baseURL/model 回填(兼容极旧配置)
+      const emptyProviders: Record<ProviderId, ProviderCredentials> = {
+        deepseek: { ...EMPTY_DEEPSEEK },
+        mimo: { ...EMPTY_MIMO },
+      }
+      const cfgProviders: Record<ProviderId, ProviderCredentials> =
+        (config.providers && typeof config.providers === 'object')
+          ? { ...emptyProviders, ...config.providers }
+          : {
+              deepseek: { apiKey: config.apiKey, baseURL: config.baseURL, model: config.model },
+              mimo: { ...EMPTY_MIMO },
+            }
+      const activePid: ProviderId = (config.activeProvider === 'mimo') ? 'mimo' : 'deepseek'
+      const activeCreds: ProviderCredentials = cfgProviders[activePid] ?? (activePid === 'mimo' ? EMPTY_MIMO : EMPTY_DEEPSEEK)
       setForm({
-        apiKey: config.apiKey,
-        baseURL: config.baseURL,
-        model: config.model,
+        activeProvider: activePid,
+        providers: {
+          deepseek: { ...EMPTY_DEEPSEEK, ...cfgProviders.deepseek },
+          mimo: { ...EMPTY_MIMO, ...cfgProviders.mimo },
+        },
+        apiKey: activeCreds.apiKey,
+        baseURL: activeCreds.baseURL,
+        model: activeCreds.model,
         systemPrompt: config.systemPrompt,
         reasoningEffort: config.reasoningEffort || 'high',
         maxOutputTokens: config.maxOutputTokens ?? 8192,
@@ -670,6 +746,8 @@ export function AgentSettingsView({
         mindPersona: config.mindPersona ?? '',
         // 工具输出根目录(2026-08-12):旧配置无字段 → 空(未启用)
         outputDir: config.outputDir ?? '',
+        // 撤销监控目录(2026-08-14):旧配置无字段 → 空(未启用)
+        undoWatchDirs: (config.undoWatchDirs ?? []).join('\n'),
         mcpServers: (config.mcpServers ?? []).map(fromConfigServer),
         skillsDirs: config.skillsDirs ?? [],
       })
@@ -736,7 +814,16 @@ export function AgentSettingsView({
   // 反而被清空)
 
   const save = () => {
+    // 保存前先把当前输入框的 apiKey/baseURL/model 同步到 providers[activeProvider]
+    const pid = form.activeProvider
+    const finalProviders: Record<ProviderId, ProviderCredentials> = {
+      ...form.providers,
+      [pid]: { apiKey: form.apiKey, baseURL: form.baseURL, model: form.model },
+    }
     onSave({
+      activeProvider: pid,
+      providers: finalProviders,
+      // 顶层 apiKey/baseURL/model = 当前激活供应商(主进程 applyAgentConfigPatch 会再次同步,双保险)
       apiKey: form.apiKey,
       baseURL: form.baseURL,
       model: form.model,
@@ -749,9 +836,12 @@ export function AgentSettingsView({
       summaryStyle: form.summaryStyle,
       mindPersona: form.mindPersona,
       outputDir: form.outputDir.trim(),
+      undoWatchDirs: form.undoWatchDirs.split('\n').map((d) => d.trim()).filter(Boolean),
       mcpServers: form.mcpServers.map(toConfigServer),
       skillsDirs: form.skillsDirs.map((d) => d.trim()).filter(Boolean),
     })
+    // 保存后更新本地 providers 引用(避免下次切换时丢刚保存的值)
+    setForm((f) => ({ ...f, providers: finalProviders }))
     setSaved(true)
     window.clearTimeout(savedTimerRef.current)
     savedTimerRef.current = window.setTimeout(() => setSaved(false), 2000)
@@ -1007,8 +1097,14 @@ export function AgentSettingsView({
     }
   }
 
-  // Provider 判定与引擎共用(垂直解耦:规则只存 constants.ts 一处)
-  const protocol = providerLabel(form.baseURL)
+  // Provider 判定:优先用 activeProvider(用户明确选择),再用 baseURL 兜底检测协议子类型
+  const isMimo = form.activeProvider === 'mimo'
+  const isAnthropic = form.baseURL.toLowerCase().includes('anthropic')
+  const protocol = isAnthropic
+    ? 'Anthropic Messages'
+    : isMimo
+      ? mimoProviderLabel(form.baseURL)
+      : deepseekProviderLabel(form.baseURL)
 
   return (
     <div className="island-panel-list island-agent-settings">
@@ -1046,8 +1142,7 @@ export function AgentSettingsView({
                     className="island-agent-account-topup"
                     onClick={(event) => {
                       event.stopPropagation()
-                      // openExternal 校验 http/https 后 shell.openExternal
-                      window.desktop?.openExternal?.('https://platform.deepseek.com/top_up')
+                      window.desktop?.openExternal?.(isMimo ? MIMO_PLATFORM_URL : DEEPSEEK_TOPUP_URL)
                     }}
                   >
                     去充值
@@ -1055,7 +1150,7 @@ export function AgentSettingsView({
                   <button
                     type="button"
                     className="island-agent-account-refresh"
-                    disabled={balanceLoading}
+                    disabled={balanceLoading || isMimo}
                     onClick={(event) => {
                       event.stopPropagation()
                       void queryBalance()
@@ -1065,10 +1160,15 @@ export function AgentSettingsView({
                   </button>
                 </div>
               </div>
-              {balanceError && (
+              {isMimo && (
+                <div className="island-agent-account-empty">
+                  小米 MiMo 暂不支持余额查询,请前往 MiMo 平台查看余额与充值
+                </div>
+              )}
+              {!isMimo && balanceError && (
                 <div className="island-agent-account-error">{balanceError}</div>
               )}
-              {!balanceError && balance && balance.balances.length > 0 && (
+              {!isMimo && !balanceError && balance && balance.balances.length > 0 && (
                 <div className="island-agent-account-bal">
                   {balance.balances.map((b) => (
                     <div key={b.currency} className="island-agent-account-row">
@@ -1089,7 +1189,7 @@ export function AgentSettingsView({
                   )}
                 </div>
               )}
-              {!balanceError && !balance && !balanceLoading && (
+              {!isMimo && !balanceError && !balance && !balanceLoading && (
                 <div className="island-agent-account-empty">
                   未查询余额。填写下方 API Key 后点「刷新」(仅 DeepSeek API 支持余额查询)
                 </div>
@@ -1098,19 +1198,43 @@ export function AgentSettingsView({
             {/* 连接配置:协议提示 + API Key / Base URL / 模型 / 思考强度 */}
             <div className="island-agent-protocol">
               {protocol === 'Anthropic Messages'
-                ? 'Anthropic 协议:填写含 anthropic 的地址自动切换(如 https://api.deepseek.com/anthropic,模型填 deepseek-chat 等)'
-                : protocol === 'DeepSeek Chat'
-                  ? 'Chat 协议:地址含 chat 自动切换(模型 deepseek-v4-flash 或 deepseek-v4-pro)'
-                  : 'Responses 协议(默认):DeepSeek 官方端点,模型 deepseek-v4-flash'}
+                ? 'Anthropic 协议:填写含 anthropic 的地址自动切换'
+                : protocol === 'MiMo Chat'
+                  ? 'MiMo Chat 协议:小米 MiMo 官方 Chat Completions 端点,模型 mimo-v2.5-pro(推荐)或 mimo-v2.5'
+                  : protocol === 'MiMo Responses'
+                    ? 'MiMo Responses 协议(推荐):小米 MiMo 官方 Responses API 端点,模型 mimo-v2.5-pro,支持深度思考/联网搜索/多模态'
+                    : protocol === 'DeepSeek Chat'
+                      ? 'DeepSeek Chat 协议:地址含 chat 自动切换'
+                      : 'DeepSeek Responses 协议(默认):DeepSeek 官方端点,模型 deepseek-v4-flash'}
+            </div>
+            {/* 供应商快捷切换(DeepSeek ↔ MiMo):切换时自动保存当前输入到旧供应商,加载新供应商已存凭据 */}
+            <div className="island-agent-field">
+              <span>供应商选择</span>
+              <div className="island-agent-scale-row">
+                <button
+                  type="button"
+                  className={`island-agent-scale-btn${form.activeProvider === 'deepseek' ? ' on' : ''}`}
+                  onClick={() => switchProvider('deepseek')}
+                >
+                  DeepSeek
+                </button>
+                <button
+                  type="button"
+                  className={`island-agent-scale-btn${form.activeProvider === 'mimo' ? ' on' : ''}`}
+                  onClick={() => switchProvider('mimo')}
+                >
+                  小米 MiMo
+                </button>
+              </div>
             </div>
             <label className="island-agent-field">
-              <span>API Key</span>
+              <span>API Key{isMimo ? ' (小米 MiMo)' : ' (DeepSeek)'}</span>
               <input
                 type="text"
                 value={form.apiKey}
-                placeholder="sk-…(DeepSeek 平台创建)"
+                placeholder={isMimo ? `小米 MiMo API Key(${MIMO_PLATFORM_URL} 创建)` : 'sk-…(DeepSeek 平台创建)'}
                 spellCheck={false}
-                onChange={(event) => setForm((f) => ({ ...f, apiKey: event.target.value }))}
+                onChange={(event) => patchActiveCred({ apiKey: event.target.value })}
               />
             </label>
             <label className="island-agent-field">
@@ -1119,7 +1243,7 @@ export function AgentSettingsView({
                 type="text"
                 value={form.baseURL}
                 spellCheck={false}
-                onChange={(event) => setForm((f) => ({ ...f, baseURL: event.target.value }))}
+                onChange={(event) => patchActiveCred({ baseURL: event.target.value })}
               />
             </label>
             <label className="island-agent-field">
@@ -1128,7 +1252,7 @@ export function AgentSettingsView({
                 type="text"
                 value={form.model}
                 spellCheck={false}
-                onChange={(event) => setForm((f) => ({ ...f, model: event.target.value }))}
+                onChange={(event) => patchActiveCred({ model: event.target.value })}
               />
             </label>
         {/* 思考强度(2026-08-08 QuickMenu 化):默认高;none 关闭思考模式
@@ -1309,6 +1433,39 @@ export function AgentSettingsView({
               type="button"
               className="island-agent-scale-btn"
               title="保存输出目录(保存配置一并生效;留空保存 = 恢复默认位置)"
+              onClick={(event) => {
+                event.stopPropagation()
+                save()
+              }}
+            >
+              保存
+            </button>
+          </div>
+        </div>
+
+        {/* 撤销监控目录(2026-08-14 停止与撤销分离):撤销 = 原停止的回滚
+            语义——每轮主人输入前对这些目录拍 git 隐藏快照,点撤销精确
+            还原(该轮提交与新建文件被丢弃);须为 git 仓库,留空 = 撤销
+            只回滚上下文不动文件 */}
+        <div className="island-agent-section">
+          <span className="island-agent-section-title">撤销监控目录(撤销时回滚文件的 git 仓库)</span>
+          <span className="island-agent-section-hint">
+            每行一个 git 仓库路径:你发消息前会自动拍隐藏快照,点消息旁的 ↩
+            可把该目录的上下文与文件一起回滚到该消息之前(该轮的提交与新建
+            文件会被丢弃,两段式确认)。留空 = 撤销只回滚上下文不动文件
+          </span>
+          <div className="island-agent-scale-row">
+            <textarea
+              value={form.undoWatchDirs}
+              placeholder={'每行一个 git 仓库绝对路径,如 D:\\projects\\my-app(留空 = 不监控)'}
+              spellCheck={false}
+              rows={3}
+              onChange={(event) => setForm((f) => ({ ...f, undoWatchDirs: event.target.value }))}
+            />
+            <button
+              type="button"
+              className="island-agent-scale-btn"
+              title="保存撤销监控目录(保存配置一并生效;留空保存 = 不监控)"
               onClick={(event) => {
                 event.stopPropagation()
                 save()

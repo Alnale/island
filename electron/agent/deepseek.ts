@@ -26,7 +26,7 @@
  */
 
 import { parseSse, sanitizeJsonStrings, truncateResult } from './sse'
-import { apiErrorMessage } from './constants'
+import { deepseekErrorMessage } from './deepseek-constants'
 import type { AgentConfig, AgentEvent, AgentMessage, AgentPart, AgentTool, ProviderOutcome } from './types'
 
 /** 工具调用流式累积器 */
@@ -232,7 +232,7 @@ export async function streamResponse(params: {
     }
     // 错误码映射(2026-08-10,官方 error_codes 文档;401/402/429 等
     // 转可读中文,LLM 与用户都能看懂——原"HTTP 400:xxx"太裸)
-    throw new Error(apiErrorMessage(res.status, detail))
+    throw new Error(deepseekErrorMessage(res.status, detail))
   }
 
   const calls = new Map<string, StreamCall>()
