@@ -1,10 +1,11 @@
-# 灵动岛桌面挂件 V2.0 — 部署与调试说明
+# 灵动岛桌面挂件 V3.0 — 部署与调试说明
 
 本文档是**桌面挂件版**(widget/ 入口 + Electron 主进程)的运行、开发与
-调试说明,面向维护者。V2.0 重点:**HEVC 补丁操作手册**(第 2 章)与
-**提示词约束工程概览**(第 3 章)。用户使用指南见 [README.md](README.md);
-完整技术文档见 [docs/TECH.md](docs/TECH.md)(V2.0,第 15/16 章为两大
-工程专章);引擎级操作手册见 [CLAUDE.md](CLAUDE.md)。
+调试说明,面向维护者。V3.0 重点:**插件化架构重构概览**(第 1 章,完整
+设计见 TECH.md 第 42 章);V2.0 重点保留:**HEVC 补丁操作手册**(第 2 章)
+与**提示词约束工程概览**(第 3 章)。用户使用指南见 [README.md](README.md);
+完整技术文档见 [docs/TECH.md](docs/TECH.md)(V3.0,第 42 章为插件化架构
+重构专章);引擎级操作手册见 [CLAUDE.md](CLAUDE.md)。
 
 ---
 
@@ -12,6 +13,7 @@
 
 - [文档分工](#文档分工)
 - [运行与退出](#运行与退出)
+- [插件化架构重构概览(V3.0)](#插件化架构重构概览v30)
 - [HEVC 补丁操作手册(V2.0)](#hevc-补丁操作手册v20)
 - [提示词约束工程概览(V2.0)](#提示词约束工程概览v20)
 - [挂件版与 Web 演示版差异](#挂件版与-web-演示版差异)
@@ -26,9 +28,9 @@
 
 | 文档 | 面向 | 内容 |
 | --- | --- | --- |
-| README.md | 用户 | 功能/使用指南/FAQ(V2.0 两大工程导读) |
+| README.md | 用户 | 功能/使用指南/FAQ(V3.0 插件化架构导读) |
 | **本文档** | 挂件维护者 | 运行、调试、巡检、HEVC 补丁操作 |
-| docs/TECH.md | 工程师 | 完整技术文档(V2.0;第 15 章 HEVC 补丁工程、第 16 章提示词约束工程) |
+| docs/TECH.md | 工程师 | 完整技术文档(V3.0;第 42 章插件化架构重构、第 15/16 章 V2.0 工程专章) |
 | CLAUDE.md | Claude Code | 引擎级操作手册(踩坑实录/测试断言/约束) |
 
 ---
@@ -41,6 +43,30 @@
 - 单实例:重复启动会激活已有实例(锁文件)。改代码后重启必须 `dev.bat`
   (它先按路径过滤结束本项目旧实例;若提示"检测到 dynamic-island-official
   副本实例在运行",先关闭日常副本)。
+
+---
+
+## 插件化架构重构概览(V3.0)
+
+V3.0 把 Agent 引擎改造为"一切皆插件":自研插件内核
+(`electron/agent/plugin/kernel.ts`,服务容器 + 可逆效果 + emit/waterfall/
+serial 类型化通道,零外部依赖),引擎能力树由**声明式组合层**
+(`plugin/composition.ts`,Profile/Patch 行清单)装配。维护者须知:
+
+- **六域目录**:`electron/agent/` 扁平文件已收编为 engine/(装配入口
+  engine.ts + 主循环等 8 文件)、plugin/(内核与接缝 14 文件)、providers/
+  (五 LLM 适配器)、tools/(工具族 13 文件)、napcat/(QQ 通道 7 文件)、
+  subagents/;esbuild 入口 = `engine/engine.ts`;
+- **扩展纪律**:新能力 = 写一个插件 + `PLUGIN_REGISTRY` 注册工厂 +
+  `defaultProfile` 加一行——不改 engine-loop、不改其他插件;观察/统计挂
+  生命周期事件(agent/turn-start/end、step-start/end),工具策略挂能力
+  事件(tools/pre-execute/post-execute 瀑布);
+- **大声失败**:装配/服务/适配器错误均有专属错误码(AGENT_PLUGIN_DEP_
+  MISSING / AGENT_SERVICE_MISSING / LLM_ADAPTER_AMBIGUOUS /
+  AGENT_COMPOSITION_ID_DUP 等)——报错按码定位,见 TECH.md 42.3;
+- **会话日志**:Model-visible ⟺ Logged,每次 LLM 请求与助手落定写入
+  `userDataDir/session-log.jsonl`(排查"模型看到了什么"直接读日志回放);
+- 完整设计(七大支柱/三角色接缝/事件模型/十四期节奏):TECH.md 第 42 章。
 
 ---
 
@@ -86,6 +112,7 @@ node scripts/brand-electron-icon.mjs --check
 
 **验证基线**:补丁版 + 真实 QQ 流量 + 气泡通知 3×3 轮 90s 全稳定;
 155 用例单测;hevc-frame 巡检(补丁应用断言持续出帧、缺失断言错误文案)。
+(V3.0 收官后核心测试升至 221 用例,含插件内核/接缝/事件套件。)
 
 ### 日常检查清单
 
@@ -160,9 +187,9 @@ V2.0 把提示词当工程对象:分层拼装、逐条身份判定、注入/剥�
 ```bash
 dev.bat                # 一键构建 + 启动(自动应用 HEVC 补丁)
 pnpm dev:widget        # 构建挂件页 + 启动 Electron(日常调试主入口,已前置 build:electron)
-pnpm watch:electron    # 热重建 Agent 引擎/桥(改 electron/agent/*.ts 用)
+pnpm watch:electron    # 热重建 Agent 引擎/桥(改 electron/agent/ 下源码用)
 pnpm bridge            # 独立运行 SMTC 桥
-node tests/test-agent-core.mjs   # 引擎核心测试(155 用例)
+node tests/test-agent-core.mjs   # 引擎核心测试(221 用例,含插件内核套件)
 npx electron --disable-gpu tests/test-title-live.cjs  # 标题/揣测真实 API 测试
 ```
 
@@ -178,7 +205,7 @@ lint + 单测。
 
 ## 常见调试场景
 
-- **改 agent/*.ts 后工具没变化**:dev:widget 已前置 build:electron;
+- **改 electron/agent/ 源码后工具没变化**:dev:widget 已前置 build:electron;
   独立跑记得先 `pnpm build:electron`;
 - **窗口拖拽/穿透异常**:先重启(单实例锁);拖拽是右键长按(约 0.4s);
 - **QQ 机器人收不到消息**:查 NapCat WS 端口、napcatEnabled、白名单;

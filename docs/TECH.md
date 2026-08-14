@@ -1,13 +1,18 @@
 # 灵动岛挂件 · 技术文档
 
-> 版本:**V2.0** · 更新:2026-08-13 · 配套代码:dynamic-island(桌面挂件 + Web 演示版双入口)
+> 版本:**V3.0** · 更新:2026-08-14 · 配套代码:dynamic-island(桌面挂件 + Web 演示版双入口)
 >
 > 本文档是灵动岛桌面挂件(Windows)的完整技术说明——架构设计、模块实现、
 > 交互细节、踩坑记录、测试体系与调试工具。同时作为 Agent 模式的功能引导
 > 知识库:LLM 对话中可调用 `get_feature_guide` 工具按话题读取本文档章节,
 > 向用户介绍灵动岛有什么功能、怎么用(见「第 11 章 功能清单与使用引导」)。
 >
-> **V2.0 两大工程重点**(本版文档新增专章):
+> **V3.0 工程重点**(本版文档新增专章):
+> [第 42 章 插件化架构重构(V3.0 重点)](#第-42-章-插件化架构重构v30-重点)——
+> Agent 引擎"一切皆插件"改造(插件内核 / 能力接缝 / 类型化事件 / 会话日志
+> 约束 / 声明式组合层)与六域目录化整合。
+>
+> V2.0 两大工程重点仍保留专章:
 > [第 15 章 HEVC 补丁工程](#第-15-章-hevc-补丁工程v20-重点)与
 > [第 16 章 提示词约束工程](#第-16-章-提示词约束工程v20-重点)。
 
@@ -57,6 +62,7 @@
 - [第 39 章 灵动岛设置工具端到端示例(真实对话)](#第-39-章-灵动岛设置工具端到端示例真实对话)
 - [第 40 章 版本历史与演进时间线](#第-40-章-版本历史与演进时间线)
 - [第 41 章 新开发者 30 分钟上手](#第-41-章-新开发者-30-分钟上手)
+- [第 42 章 插件化架构重构(V3.0 重点)](#第-42-章-插件化架构重构v30-重点)
 - [结语](#结语)
 - [附录 A:Agent 事件一览](#附录-aagent-事件一览)
 - [附录 B:常量与阈值表](#附录-b常量与阈值表)
@@ -152,24 +158,32 @@ dynamic-island/
 │   ├── agent.cjs               # esbuild 产物(引擎,不入库)
 │   ├── bridge.cjs              # esbuild 产物(SMTC 桥,不入库)
 │   ├── settings-store.cjs      # 设置持久化(原子写/加密)
-│   └── agent/                  # Agent 引擎源码(TypeScript)
-│       ├── engine.ts           # 引擎循环/工具执行/子代理/主动陪伴
-│       ├── provider.ts         # 三 provider 统一入口
-│       ├── deepseek.ts         # DeepSeek Responses API
-│       ├── chat.ts             # DeepSeek Chat Completions(备选)
-│       ├── anthropic.ts        # Anthropic Messages API
-│       ├── sse.ts              # SSE 解析公共层
-│       ├── tools.ts            # 内置工具注册表(命令/文件/搜索/B站…)
-│       ├── settingsTools.ts    # 灵动岛设置工具(改挂件设置)
-│       ├── configTools.ts      # 自我配置工具(MCP/技能/主动陪伴/预算)
-│       ├── subagents.ts        # 总结标题/心理揣测/主动陪伴判断
-│       ├── mcp.ts              # MCP 客户端(stdio/sse 双传输)
-│       ├── skills.ts           # 技能扫描与注册
-│       ├── memory.ts           # 长期记忆存储
-│       ├── evolution.ts        # 自我进化 harness
-│       ├── tasks.ts            # 通用后台任务注册表
-│       ├── constants.ts        # 共享常量(零 node 依赖)
-│       └── types.ts            # 引擎类型(零 node 依赖)
+│   └── agent/                  # Agent 引擎源码(V3.0 起按域目录组织)
+│       ├── engine/             # ★ 引擎核心域(esbuild 入口 engine/engine.ts)
+│       │   ├── engine.ts       # 装配入口(builtinPlugins + 组合层)
+│       │   ├── engine-loop.ts          # 主循环
+│       │   ├── engine-builtins.ts      # 内置工具
+│       │   ├── engine-tool-execution.ts# 工具执行(delegate 子代理共用)
+│       │   ├── engine-confirm-gate.ts  # 确认门
+│       │   └── engine-history/manual-call/turn-text.ts  # 历史/手动调用/回合文本
+│       ├── plugin/             # ★ 插件内核与接缝(V3.0 重构核心,见第 42 章)
+│       │   ├── kernel.ts       # 轻量服务/效果容器(零依赖)
+│       │   ├── composition.ts  # 声明式组合层(Profile/Patch/dump)
+│       │   ├── host.ts / host-bridge.ts # 宿主服务与唯一接触 EngineDeps 的插件
+│       │   ├── llm.ts / tool-registry.ts # 能力接缝(ctx.llm / ctx.tools)
+│       │   ├── tool-plugins.ts / prompt-plugins.ts      # 工具组/提示段落插件
+│       │   ├── tool-events.ts / lifecycle-events.ts     # 能力事件/生命周期事件
+│       │   ├── session-log.ts / prompt.ts / errors.ts / index.ts
+│       ├── providers/          # LLM 供应商域(deepseek/chat/anthropic/mimo-*
+│       │                       #  五适配器 + sse 公共层 + provider.ts 分发)
+│       ├── tools/              # 工具族域(tools.ts 主入口 + env/bili/docflow/
+│       │                       #  search/media 分簇 + settingsTools 四文件
+│       │                       #  + sessionTools/configTools/tool-args)
+│       ├── napcat/             # QQ 通道域(napcat.ts 入口 + client/message/
+│       │                       #  session/store/text + wsclient 手写 WS)
+│       ├── subagents/          # 后台子代理域(subagents.ts + helpers)
+│       └── (根层共享模块)       # constants/evolution/mcp/memory/notify/
+│                               #  skills/tasks/types/undo
 ├── tools/                      # 外部工具(源码/脚本,dev 直跑)
 │   ├── bili/                   # bili-tool(Rust 单二进制)
 │   ├── xxt/                    # 超星答题(python 脚本)
@@ -487,9 +501,14 @@ seek 并返回 false。验证结果按 sourceAppId 持久化(localStorage
 
 ### 5.1 架构总览
 
-- **引擎**:`electron/agent/*.ts` → esbuild 打包 `electron/agent.cjs`(零第三方
-  依赖,`electron` external;入口仍是 engine.ts,evolution 经 re-export 打进
+- **引擎**:`electron/agent/` 六域目录(engine/plugin/providers/tools/
+  napcat/subagents)→ esbuild 打包 `electron/agent.cjs`(零第三方依赖,
+  `electron` external;入口 `engine/engine.ts`,evolution 经 re-export 打进
   同一产物),主进程内运行(非 utilityProcess:纯异步网络/文件 IO)。
+- **一切皆插件(V3.0)**:引擎能力树由插件内核(`plugin/kernel.ts` 服务
+  容器)装配——LLM 接缝(ctx.llm 五适配器)、工具接缝(ctx.tools)、提示
+  段落、会话日志全部是插件,声明式组合层(Profile/Patch)驱动;架构全貌
+  与重构过程见[第 42 章 插件化架构重构](#第-42-章-插件化架构重构v30-重点)。
 - **无状态**:渲染端每次 send 回传完整历史(参考后端"客户端持有历史"模式)。
 - **Provider 按 Base URL 自动判定**(detectProvider):
   - 地址含 "anthropic" → Anthropic Messages;
@@ -597,7 +616,7 @@ send(text, history)
 
 #### 5.3.4 公共层
 
-- `parseSse`(electron/agent/sse.ts)单一实现(yield SseFrame {type, data}),
+- `parseSse`(electron/agent/providers/sse.ts)单一实现(yield SseFrame {type, data}),
   deepseek/chat/anthropic 三处共用;8000 截断 ×3 → `truncateResult`。
 - **上下文硬盘缓存(DeepSeek 自动开启)**:请求前缀**完整匹配缓存前缀单元**
   才命中;多轮对话天然命中(完整历史回传 = 前缀递增);**前缀必须稳定**——
@@ -1585,7 +1604,7 @@ direction?('right'|'left'), wheelWhenOpen?}>`,四处复用:Agent 设置菜单 /
 - **get_feature_guide 的姊妹能力**:文档引导工具让 LLM 具备"知道灵动岛有
   什么"的元知识(见 5.4 与第 11 章)。
 
-### 7.3 NapCat QQ 机器人(electron/agent/napcat.ts,2026-08-12)
+### 7.3 NapCat QQ 机器人(electron/agent/napcat/ 域,2026-08-12;V3.0 五期拆分)
 
 用户要求"灵动岛 LLM 接管 QQ 回复:同步上下文、调用长期记忆、偏袒主人、分会话人格、工具记忆备份"。在旧 Python 桥(NapCatQQNode/bridge/qq_bridge.py)的基础上整合,桥退役。
 
@@ -1622,7 +1641,13 @@ direction?('right'|'left'), wheelWhenOpen?}>`,四处复用:Agent 设置菜单 /
   Notification 记录到 global.__notifications 供断言),mock MCP 服务器
   (tests/mocks/):stdio(新行 JSON-RPC,含自杀/慢响应/错误/图像工具)
   + sse(GET 事件流 + POST 回传,含直接响应体与 bare 推送变体)。
-- **93 用例**,覆盖:记忆增删改查/去重/上限/串行写/并发互斥/导入合并
+- **221 用例**(V3.0 收官;tests/plugin-kernel-tests.ts 并入同入口执行),
+  覆盖:插件内核(注册/大声失败/逆序 dispose/inject 依赖校验/waterfall
+  中间件与短路/serial 观察钩子)、LLM 接缝(五适配器协议判定与解析错误
+  码)、工具接缝(静态注册排除与动态源)、pre-step 提示拼装顺序、工具执行
+  能力事件(tools/pre-execute deny/改写 + post-execute)、turn/step 生命
+  周期事件(全出口覆盖与顺序)、组合层(Profile/patch/dump/未知 name 与
+  重复 id 大声失败),以及原有:记忆增删改查/去重/上限/串行写/并发互斥/导入合并
   importEntries(去重/置顶/超限淘汰最旧)、MCP 双传输握手/命名/参数转换/
   isError/崩溃重启/并发 connect 单进程、skills 扫描/slug/重名/截断/执行、
   自我配置工具、进化快照/回滚防降级/无 Key 优雅失败、手动调用解析、设置
@@ -1906,7 +1931,7 @@ main.cjs 的 safeHandle 实现);渲染端错误要挂 `unhandledrejection` 捕�
    43 内置 Node 22 未修)——三个 provider 不再给 fetch 传 signal,中止判定
    移到 sse.ts parseSse 的安全点(read() 返回 = 当前分块解析已出栈,此刻
    cancel 销毁 socket 不撞 freeParser;readOrAborted 处理中止与读取竞态);
-5. 加固:**NapCat WS 换手写传输**(electron/agent/wsclient.ts:net.Socket
+5. 加固:**NapCat WS 换手写传输**(electron/agent/napcat/wsclient.ts:net.Socket
    直连 + 手写 HTTP Upgrade/帧编解码,不经 llhttp;排障初期怀疑 undici WS,
    虽非真源但保留——更稳且与"手写 MCP/SSE"路线一致,测试 +2 用例)。
 
@@ -2733,7 +2758,7 @@ global.__fpGate 可归因;F4 各轮指纹互不相同(7 轮全唯一)。mock 标
   markerTurn 守卫(工具执行后的续轮请求 lastUser 仍带标记 → 无限重发
   工具调用 → 引擎 busy 卡死,后续消息被 busy 拒绝,实测)。
 - **LLM 会话工具(2026-08-13 二轮,用户要求"支持放 LLM 自己生成记录,
-  自己清空当前会话上下文"):**`electron/agent/sessionTools.ts`
+  自己清空当前会话上下文"):**`electron/agent/tools/sessionTools.ts`
   createSessionTools(主进程注入 getSessionNote/setSessionNote/
   clearSessionContext 才注册)——`get_session_note`(查看当前记录)/
   `set_session_note`(生成/更新记录,note ≤500 字,空串 = 清除)/
@@ -3308,18 +3333,23 @@ DynamicIsland(进度条/歌词/控制)
 
 ### 32.1 如何新增一个内置工具
 
-1. `electron/agent/tools.ts` 的 createTools 返回数组里加
+1. `electron/agent/tools/` 域:工具实现按所属分簇文件(tools.ts 主入口 /
+   tools-env/bili/docflow/search/media)添加
    `{name, description, parameters, execute}`(中文描述,含"适合/注意",
    LLM 据此生成参数;需要超时覆盖加 timeoutMs);
-2. 需要主进程能力 → EngineDeps 加字段,main.cjs 注入;
-3. 需要持久状态 → settings.json agent 段(applyAgentConfigPatch 加字段
+2. **V3.0 插件纪律**:工具组经 `plugin/tool-plugins.ts` 的 Consumer 插件注册
+   进 ctx.tools 接缝;新工具组 = 写一个插件工厂 + PLUGIN_REGISTRY 注册 +
+   defaultProfile 加一行,不改 loop(见第 42 章);
+3. 需要主进程能力 → EngineDeps 加字段,main.cjs 注入;
+4. 需要持久状态 → settings.json agent 段(applyAgentConfigPatch 加字段
    校验)或 localStorage/IndexedDB(设置桥);
-4. 补测试(tests/test-agent-core.ts:注册/参数校验/执行路径/错误路径);
-5. 文档同步(本文档 5.4 工具表 + 第 11 章引导小节)。
+5. 补测试(tests/test-agent-core.ts:注册/参数校验/执行路径/错误路径);
+6. 文档同步(本文档 5.4 工具表 + 第 11 章引导小节)。
 
 ### 32.2 如何新增一个灵动岛设置工具操作
 
-1. `electron/agent/settingsTools.ts`:IslandSettingsOp 联合类型加 op +
+1. `electron/agent/tools/settingsTools.ts`(四文件簇:组合装配 + 外观 +
+   媒体库 + 辅助):IslandSettingsOp 联合类型加 op +
    工具对象(name/description/parameters/execute,桥返回值带 previous
    原值、已是目标值提示「无需修改」);
 2. `src/settingsBridge.ts`:IslandSettingsBridge 接口加方法 + 实现(写存储
@@ -3645,6 +3675,7 @@ remember / forget / list_memory / update_memory / evolve_memory
 | **V2.0**(2026-08-13) | **文档 V2.0 重写**:README/WIDGET-README 重写 + TECH.md 新增第 15 章 HEVC 补丁工程(原理/换装/图标/排障治理汇总)与第 16 章 提示词约束工程(分层拼装/身份判定/注入模板/档案卡/剥离链/Sub Agent/防泄露简表);配套代码:受保护记忆、NapCat 主人视角叙述剥离、补丁版段错误根治(toast 迁移托盘气泡 + fetch 软中止 + 手写 WS)、恢复硬件加速、图标优化、QQ 统一注入模板 + 档案卡 + 历史隔离 + 主人身份逐条判定、Sub Agent 提示词精简、视频岛边缘裁切、档案卡 UI 动画 |
 | 2026-08-12 | **HEVC 原生软解**(自编译 Electron:ffmpeg HEVC 解码器 + media 层门控补丁,apply-hevc-electron.mjs 换装/回退,dev.bat 自动应用;AV1 验证本就支持)、hevc-frame 巡检改断言、**lint 警告清零(12 处)+ TS2367 修复 + 音乐控制桥实时状态修复(ref 镜像,原空依赖闭包读到首次渲染值)**、NapCat 主人硬编码、群消息直进对话与记忆强化、分会话人格、工具输出目录、set_audio_config/set_output_budget 等工具、消息列表虚拟滚动 |
 | 2026-08-13 | **受保护记忆条目**(进化丢失岛灵设定修复:protected 标记 + 人设自动锁定/加载迁移/applyChanges 硬拦截/forget 拒删/设置界面 🔒)、**NapCat 主人视角叙述剥离**(私聊窗口泄露修复:stripMasterNarration + 回他「…」引号回复提取 + 三处注入指令补人称约束)、**补丁版段错误根治**(toast 迁移托盘气泡 showNotify 统一出口 + fetch 移除 AbortSignal(llhttp UAF 规避,中止移 parseSse 安全点)+ NapCat 手写 WS 传输 wsclient.ts;补丁版 + 真流量 3×3 轮 90s 全稳定)、**恢复硬件加速**(roundedCorners:false 等透明窗口硬化,GPU 合成 + 视频硬解)、**图标优化**(make-icon 产出多尺寸 icon.ico(16-256 PNG-in-ICO)+ brand-electron-icon.mjs rcedit 烙进自编译 exe,弹窗/托盘/进程图标 256 高清;托盘与窗口图标 32→256)、**视频岛边缘裁切加固**(内层容器 + 视频/图片自身 22px 圆角 + isolation,GPU 合成层逃逸父级裁剪的四角矩形残留根治;全屏态重置圆角;mini 巡检增小窗截图 + 前后 DOM 几何诊断)、**QQ 提示词约束与窗口布局重构**(统一注入模板:类别行 QQ私聊/群聊·QQ号·称呼 + 原文 + 档案卡 + 编号回复规则[含安全红线:拒绝教唆操控主人电脑];buildProfileCard 按 QQ 号聚合联系人/人格/记忆 = 档案卡;UserBubble 分层显示 QQ→私聊/群聊→QQ号→可展开档案卡;Sub Agent 提示词精简:标题降级链 3→2、揣测四条规则;**档案卡 UI 动画化**(受控展开 + 0fr↔1fr 高度过渡与工具卡同款曲线,箭头旋转 180°,标签行轻强调,内容随高度渐入/收起淡出;历史剥离双通道:历史保留档案卡做消息隔离)、**档案卡称呼实时更新 + 唯一主人称呼**(主人缺名兜底「主人」,LLM 经 contact_update 实时更新档案下次生效,「主人」称呼只属于 1178821869)、**群聊冒泡**(主动陪伴判断注入群聊状态块,群里安静超陪伴间隔时偶尔 send_group 活跃气氛)、**bili 完成通知防吞**(background-done busy 时入队,idle 后逐条补发)、**QQ 回复路由泄露根治**(2026-08-13 用户实测:询问内容与后台下载完成的窗口回复被发给了陌生人——轮次来源三分类 qq/group/ask/window/system,只有主人窗口直发或主人 QQ 轮才消费陌生人 pending 且一次性,主动陪伴/系统轮永不路由;陌生人规则补"执行回复只写发给对方的话")、**陌生人执行轮防重发与防串线**(规则:执行轮禁止调 send/send_group 工具[回复文字即消息],禁止给主人发 QQ 消息;代码:agent:send 快照已发给该陌生人的私聊消息数,落定路由时对比——本轮已用工具发过则跳过 pending 路由,对方不再收到 2-3 条重复)、**媒体消息常驻**(MessageWindow 窗口化渲染扩范围覆盖全部媒体消息——新消息插入把播放中的视频顶出 overscan 不再卸载,进度/音量/倍速/播放态不丢)、**执行回复标记化串台根治**(「【回复对方】」标记:只有带标记的回复才路由给待回复陌生人并消费 pending——主人先回"嗯/让我想想"这类应答不再串台给陌生人也不清空 pending,真正指示轮的回复必达对方;无标记回复留在主人侧;气泡显示层剥离标记)、**主人权限显式化**(MASTER_IDENTITY_LINE 拼进主引擎系统提示:**逐条按标记判定身份**——带 QQ 来源标注 = 外部消息(只有 1178821869 是主人,不继承主人权限)、无来源标注窗口直发 = 主人最高权限、系统通知 = 系统事件;QQ 四处回复规则同步声明;档案卡增「最近发言」段(聊天记录备份按 QQ 过滤计入,群聊发言归到各人卡内,当前消息排除)) |、**会话隔离三 bug 联修**(17.6,用户实测:① 外部会话消息 LLM 完全不知道——agent:send 对 {engine,route} 条目直接 .send 是 undefined 抛 uncaughtException,改 .engine.send;② 会话首条消息回复不回发——routeFor 在引擎创建前回退 mainRoute,来源标记写进主对话路由,先取条目再取路由;③ 主对话让 LLM 发的消息切会话看不到——onSent → session-activity 回显链路 + 去重空白归一;stripToolNarration/stripMasterNarration 保留段尾换行,多行回复不再粘连;④ 单消息会话收起面板后消息被截断——岛体高度预算零余量,AGENT_PANEL_HEIGHT_SLACK 6px 计入;新增 session-debug 巡检(mock LLM 回显 + 假 OneBot 服务器 14 断言全链路复现,设置侧备份崩溃安全)) |
+| **V3.0**(2026-08-14) | **插件化架构重构十四期收官**(详见第 42 章):① 自研插件内核 kernel.ts(服务容器 + 可逆效果 + emit/waterfall/serial 类型化四通道,零外部依赖,per-engine ctx);② 能力接缝 ctx.llm(五适配器:DeepSeek Responses/Chat、Anthropic、MiMo Responses/Chat,执行时解析 + 专属错误码)与 ctx.tools(静态注册 + 动态源);③ 能力事件 tools/pre-execute/post-execute(瀑布可改写/否决)与生命周期事件 agent/turn-start/end、step-start/end(turn-end finally 全出口);④ 会话日志约束 Model-visible⟺Logged(session-log.ts,JSONL sink 可替换 + 图片清洗);⑤ 声明式组合层 composition.ts(PLUGIN_REGISTRY 18 工厂 + defaultProfile/applyPatch/dump,缺省装配与既往硬编码逐位一致);⑥ **域目录化整合**:electron/agent 扁平文件收编为 engine/plugin/providers/tools/napcat/subagents 六域,构建入口改 engine/engine.ts;验证基线 tsc 0 错、221/221 通过、build + smoke 全绿;**文档 V3.0 重写**:README/TECH.md 升级 V3.0(第 42 章插件化架构重构专章)|
 
 
 ---
@@ -3666,7 +3697,8 @@ pnpm dev:widget      # 构建 + 启动挂件(默认完成标准)
 2. `src/components/DynamicIsland/DynamicIsland.tsx` —— 岛体(布局/手势/
    视图分发);
 3. `electron/main.cjs` —— 主进程(窗口/托盘/IPC/桥接调度);
-4. `electron/agent/engine.ts` —— Agent 引擎循环;
+4. `electron/agent/engine/engine.ts` —— Agent 引擎装配入口(主循环在
+   engine-loop.ts;插件内核与接缝在 `electron/agent/plugin/`,见第 42 章);
 5. `src/hooks/useAgent.ts` —— 渲染端事件流状态机。
 
 ### 第 3 步:跑通测试(5 分钟)
@@ -3674,7 +3706,7 @@ pnpm dev:widget      # 构建 + 启动挂件(默认完成标准)
 ```bash
 pnpm build            # tsc -b 双端类型
 pnpm lint
-node tests/test-agent-core.mjs   # 93 用例
+node tests/test-agent-core.mjs   # 221 用例(含插件内核/接缝/事件套件)
 pnpm test:markdown    # 39 断言
 ```
 
@@ -3688,6 +3720,220 @@ pnpm test:markdown    # 39 断言
 
 - 全中文注释;改引擎补测试;改渲染端跑 dev:widget 实机验证;文档三件套
   (README/WIDGET-README/TECH.md)+ CLAUDE.md 同步(附录 D 清单)。
+
+
+---
+
+## 第 42 章 插件化架构重构(V3.0 重点)
+
+> V3.0(2026-08-14)工程重点:Agent 引擎完成"一切皆插件"改造与六域目录化
+> 整合。设计哲学对齐 deepseek-harness 审查报告
+> (根目录 `plugin-design-review.zh.md`),内核自研、零外部依赖。
+
+### 42.1 为什么重构
+
+重构前的引擎是"巨型工厂 + 扁平文件"形态:engine.ts 装配序列硬编码、
+tools.ts/settingsTools.ts/napcat.ts 各自膨胀成数千行工厂、新能力必须改
+主循环或工厂本体。症状:
+
+1. **扩展 = 改核心**:加一个工具组/提示段落要动 engine 装配代码,回归面
+   不可控;
+2. **耦合靠 import**:供应商、工具、提示拼装互相直接引用实现文件,替换
+   任何一部分都要牵一串;
+3. **无观察点**:统计/日志/审计只能塞进主循环 if 分支;
+4. **装配不可见**:引擎启动时到底装了什么,只有读代码才知道。
+
+重构目标:**没有需要打补丁的"特权核心"**——引擎主循环、LLM 适配、工具
+注册、提示拼装、会话日志全都是插件,每一部分都可以从配置替换;扩展方式
+永远是"在其他插件旁边挂载一个新插件"。
+
+### 42.2 七大支柱
+
+| 支柱 | 落地文件 | 一句话 |
+| --- | --- | --- |
+| 服务接缝(Seam) | `plugin/llm.ts`、`plugin/tool-registry.ts` | 可替换能力 = 接口 + 提供者 + 消费者三角色,按 key 发现、永不 import 实现 |
+| 注册即可逆效果 | `kernel.ts` `ctx.effect` | 一切注册返回 disposer,卸载按注册逆序回滚全部副作用 |
+| 类型化事件 | `kernel.ts` `emit/on` | 声明合并扩展事件表,即发即忘的观察通道 |
+| 能力事件 | `plugin/tool-events.ts` | `tools/pre-execute`(瀑布,可改写/否决)/ `tools/post-execute`,不碰循环即可给工具执行挂策略 |
+| 生命周期事件 | `plugin/lifecycle-events.ts` | `agent/turn-start/end`、`agent/step-start/end` 全链路观察,turn-end 具 finally 语义 |
+| 会话日志约束 | `plugin/session-log.ts` | **Model-visible ⟺ Logged**:能到达模型的内容必可从会话日志重建 |
+| 声明式组合层 | `plugin/composition.ts` | Profile/Patch 驱动装配,dump 即见真实启动树 |
+
+### 42.3 插件内核(kernel.ts)
+
+轻量服务/效果容器(Cordis 风格,零外部依赖,**不引入 Cordis 本体**):
+
+- **上下文 = 服务仓库**:`ctx.register('llm', …)` / `ctx.get('llm')`——
+  服务认领稳定 key,插件之间按 key 发现,**永不 import 具体实现**;key 经
+  TS 声明合并类型化(接缝模块 `declare module './kernel'` 扩展
+  `ContextServices`),编译期类型完整、运行期实现可替换;
+- **四种类型化通道**(各自声明合并扩展点):
+  | 通道 | 语义 | 用途 |
+  | --- | --- | --- |
+  | `emit/on` | 即发即忘,注册顺序观察 | 生命周期事件、日志 |
+  | `waterfall/runWaterfall` | around 中间件:监听器收 `(value, next)`,**必须调用 `next` 委托**;不调用即短路 | pre-step 提示拼装、tools/pre-execute |
+  | `serial/runSerial` | 按注册顺序逐个 await 收集返回值;单监听器异常记日志不中断 | 观察/审计钩子 |
+  | `effect` | 立即执行 + 返回清理函数 | 一切副作用注册 |
+- **插件约定**:`{ name, inject?, apply(ctx) }`——`inject` 列出依赖的服务
+  key,缺失**大声失败**(`AGENT_PLUGIN_DEP_MISSING`),绝不静默跳过;
+- **每引擎一份独立 ctx**(per-agent 上下文):主对话与每个外部会话引擎
+  各自 `createContext`,天然隔离(对接第 17 章会话隔离);
+- **dispose 逆序回滚**:`ctx.dispose()` 按注册逆序撤销一切;之后任何注册
+  大声失败(`AGENT_CONTEXT_DISPOSED`)。
+
+错误码体系(`plugin/errors.ts`,配置错误大声失败,每种失败有专属码):
+`AGENT_SERVICE_MISSING`(取未注册服务)/ `AGENT_PLUGIN_DEP_MISSING`
+(inject 缺失)/ `AGENT_CONTEXT_DISPOSED` / `LLM_ADAPTER_MISSING`、
+`LLM_ADAPTER_UNAVAILABLE`、`LLM_ADAPTER_AMBIGUOUS` /
+`AGENT_COMPOSITION_LINE_UNKNOWN`、`AGENT_COMPOSITION_ID_DUP` 等。
+
+### 42.4 能力接缝:三角色模型
+
+一个 **seam** 是一个可替换的能力,由三个角色组成(缺一不可):
+**Service Definition**(声明接口,拥有 `ctx.<key>`)+ **Service Provider**
+(实现接口,注册进接缝,**不拥有** key)+ **Consumer**(使用该能力)。
+
+#### ctx.llm(LLM 接缝,`plugin/llm.ts`)
+
+- **Definition**:`LlmRuntime` 拥有 `ctx.llm`,维护适配器注册表,**执行时
+  解析**——指定 id 未注册 → `LLM_ADAPTER_MISSING`;零个可用 →
+  `LLM_ADAPTER_UNAVAILABLE`;多个未指定 → `LLM_ADAPTER_AMBIGUOUS`(选择
+  永不依赖注册顺序);恰好一个 → 自动选中;
+- **Provider**:五个适配器实现同一 `LlmAdapter` 接口(`providers/` 域):
+  DeepSeek Responses(默认)/ DeepSeek Chat / Anthropic Messages /
+  MiMo Responses / MiMo Chat——协议按 Base URL 细分(详见 5.3 与第 38 章);
+- **Consumer**:engine-loop(主循环)/ engine-tool-execution(delegate 子
+  代理)/ subagents / evolution 经 `ctx.get('llm').stream()` 调用。
+
+#### ctx.tools(工具接缝,`plugin/tool-registry.ts`)
+
+- **Definition**:`ToolRegistry` 拥有 `ctx.tools`,维护静态注册工具 + 动态
+  源;`listTurn` 在**每轮执行时**解析(注册表 → 动态源,应用 excludedTools
+  排除)——MCP/技能配置变更下一轮即生效;
+- **Provider**:各工具组插件(`plugin/tool-plugins.ts`:core/island-
+  settings/napcat/music-control/session/delegate/memory/config/builtin/
+  external-source)+ 外部源(MCP + 技能);注册即逆效果(返回 disposer,
+  卸载自动注销);
+- **Consumer**:engine-loop(每轮取清单)/ engine-tool-execution(delegate
+  经 `listTurn` 取全集)。
+
+宿主桥(`plugin/host-bridge.ts`)是**唯一接触 EngineDeps 的插件**——把
+main.cjs 注入的宿主能力(通知/配置/会话状态)翻译成 ctx 服务,其余插件
+对宿主零感知。
+
+### 42.5 事件模型:扩展点选型
+
+一个回合的执行流全程由事件串起:
+
+```text
+agent/pre-step            (waterfall:决定模型看到什么,提示段落按注册顺序拼装)
+agent/turn-start          (emit:历史组装完成,载荷 text/proactive/historySize)
+  agent/step-start        (emit:每个 LLM 步开始)
+  LLM 请求 → 流式事件
+  tool/call → tools/pre-execute (waterfall:可改写 args;deny = 否决执行)
+           → 执行 → tools/post-execute (waterfall:可改写结果做记账/备注)
+  agent/step-end          (emit:载荷 step/callCount/truncated/durationMs)
+agent/turn-end            (emit:finally 语义——成功/中止/异常/工具未找到/
+                           拒绝/预算耗尽全出口必发,载荷 ok/aborted/steps/
+                           durationMs/usage)
+```
+
+**能力事件与生命周期事件的分工**(硬约定):
+
+- **能力事件用于决策/改写**(瀑布):监听器可以改写载荷、否决执行——
+  策略就挂在这里,不导入 loop;
+- **生命周期事件为纯观察**(只读载荷,fire-and-forget,不阻塞执行流):
+  统计/埋点/遥测挂在这里,永不改 engine-loop;
+- **"Plugins, not loop changes"**:新行为必须挂在文档化扩展点上;直接
+  修改主循环(engine-loop.ts)必须同步更新本章。
+
+主循环与 delegate 子代理经同一入口(`toolExecHooksOf(ctx)`)取工具事件
+钩子——两条执行路径同一套扩展面板。
+
+### 42.6 会话日志约束(Model-visible ⟺ Logged)
+
+`plugin/session-log.ts` 实现强约束:**任何能到达模型请求的内容,必须可以
+从会话日志重建**——
+
+- 主循环每次调用 LLM 前记录一条 `model-request`(system 全文 + 历史精简 +
+  可见工具清单);助手消息落定记一条 `assistant-message`;任何注入的模型
+  可见内容(pre-step 段落、会话记录)皆可从全量日志回放;
+- 运行态 `sessionLog.append(payload)`(带 ts 与 sessionKey,sink 内部统一
+  补全),loop 只交数据;
+- **sink 可替换**:测试/观察用内存 sink;缺省为
+  `userDataDir/session-log.jsonl`(JSONL 追加,写失败只进诊断日志,绝不打
+  断对话);图片 dataUrl 清洗为占位符,日志不膨胀。
+
+### 42.7 声明式组合层(composition.ts)
+
+引擎启动树不再由硬编码序列决定,而由一份**有序 Profile(行清单)**声明,
+每行 `id + name + config`:
+
+```text
+builtinPlugins(deps, emit, outputBudget, sessionState, opts?)
+  → composeProfile(env, opts?.profile, opts?.patch)
+  → 校验(assertLinesValid)→ 逐行取工厂(PLUGIN_REGISTRY)→ 产出插件树
+```
+
+- **工厂注册表** `PLUGIN_REGISTRY`(name → factory,18 个工厂)是组合层
+  唯一的实现解析点;**换实现 = 换行的 name**;
+- **patch 行语义**:`applyPatch` 按 id 定位——命中**整体替换该行**
+  (name/config 一并换,不是合并),未命中追加到末尾;`enabled: false`
+  的行被跳过;
+- **大声失败**:未知 name(`AGENT_COMPOSITION_LINE_UNKNOWN`)/ 重复 id
+  (`AGENT_COMPOSITION_ID_DUP`)在装配前最早可解析点抛出;
+- **dump 可见**:`dumpComposition` 导出真实启动树——"这台机器上真正装配
+  的是什么"完全透明;
+- **缺省 Profile**(defaultProfile,18 行)与重构前硬编码序列**逐位一致,
+  行为零变化**:host-bridge → seam-llm → seam-tools → session-log →
+  tools-core → tools-island-settings → tools-napcat → tools-music-control →
+  tools-session → tools-delegate → tools-memory → tools-config →
+  tools-builtin → tools-external-source → prompt-memory → prompt-evolution →
+  prompt-bg-tasks → prompt-tools-guide。
+
+**新增能力的纪律**:在对应领域文件写一个插件 + PLUGIN_REGISTRY 注册工厂 +
+Profile 加一行——不改 loop、不改其他插件;装配清单在 defaultProfile 单点
+声明、dump 可见。
+
+### 42.8 域目录化整合(十四期收官)
+
+十四期目录化整合把所有扁平文件收编为六个域目录(导入经批量改写,构建
+入口改 `engine/engine.ts`,不再需要平铺 barrel 层):
+
+| 域 | 文件数 | 内容 |
+| --- | --- | --- |
+| `engine/` | 8 | engine.ts 装配入口 + loop/builtins/tool-execution/confirm-gate/history/manual-call/turn-text |
+| `plugin/` | 14 | 内核与接缝:kernel/composition/host/host-bridge/llm/tool-registry/tool-plugins/prompt-plugins/tool-events/lifecycle-events/session-log/prompt/errors/index |
+| `providers/` | 9 | deepseek/chat/anthropic/mimo-chat/mimo-constants/mimo-responses/deepseek-constants + sse 公共层 + provider 分发 |
+| `tools/` | 13 | tools.ts 主入口 + env/bili/docflow/search/media 分簇 + settingsTools 四文件 + sessionTools/configTools/tool-args |
+| `napcat/` | 7 | napcat.ts 入口 + client/message/session/store/text + wsclient(QQ 通道五期拆分) |
+| `subagents/` | 2 | subagents.ts + helpers |
+| (根层) | 9 | constants/evolution/mcp/memory/notify/skills/tasks/types/undo(跨域共享) |
+
+### 42.9 十四期重构节奏与验证
+
+重构按"一期一主题、测试先行"推进:一期内核 → LLM/工具/pre-step 接缝 →
+tools/pre-execute 能力事件 → 生命周期事件(turn-end finally 全出口)→
+会话日志约束 → 声明式组合层(dsh 差距清零)→ 十四期目录化整合收官。
+
+**验证基线(收官态)**:`tsc -b` 0 错、核心测试 **221/221 通过**
+(tests/plugin-kernel-tests.ts 并入 test-agent-core 入口:内核注册/大声
+失败/逆序 dispose/inject 校验/waterfall 短路/serial 钩子、接缝解析错误码、
+pre-step 拼装顺序、能力事件 deny/改写、生命周期全出口覆盖与顺序、组合层
+patch/dump/重复 id)、`pnpm build:electron` 构建通过、冒烟会话全绿、
+oxlint 无告警。
+
+### 42.10 开发速查(常见扩展任务)
+
+| 任务 | 做法 |
+| --- | --- |
+| 加一个工具组 | tools/ 域写实现 → tool-plugins.ts 写 Consumer 插件工厂 → PLUGIN_REGISTRY 注册 → defaultProfile 加一行 |
+| 加一个提示段落 | prompt-plugins.ts 写插件(waterfall `agent/pre-step`)→ 注册 + Profile 加行 |
+| 加一个 LLM 供应商 | providers/ 域写适配器(实现 LlmAdapter)→ llm.ts ALL_LLM_ADAPTERS 注册 |
+| 加一个观察点(统计/日志) | 生命周期事件 `ctx.on`(绝不改 loop) |
+| 拦截/审计工具执行 | `ctx.waterfall('tools/pre-execute' / 'tools/post-execute')` |
+| 换掉某个实现 | builtinPlugins 传 opts.patch:按 id 换行(或整体替换 profile) |
+| 看真实启动树 | dumpComposition |
 
 
 ---
@@ -3726,6 +3972,11 @@ provider/工具/任务/总结/揣测/主动陪伴/记忆/进化/MCP/技能/预�
 | tool-confirm-request | {seq, command} | 确认门请求 |
 | background-done | {title, message} | 后台任务终态 → 自动触发对话 |
 | mind-proactive | {messageId, guess} | 主动回合心理揣测 |
+
+> 上表为**引擎 → 渲染端**的对外事件(AgentEvent)。插件内核另有一套
+> **ctx 内部事件通道**(agent/pre-step、agent/turn-start/end、
+> agent/step-start/end、tools/pre-execute/post-execute),供插件观察与
+> 拦截,不经 AgentEvent 出口——见第 42.5 节。
 
 ---
 

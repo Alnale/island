@@ -1,8 +1,10 @@
-# 灵动岛挂件 V2.0 (Dynamic Island Widget) — Windows
+# 灵动岛挂件 V3.0 (Dynamic Island Widget) — Windows
 
-> **V2.0(2026-08-13)** 本版两大工程重点:**HEVC 补丁工程**(自编译 Electron
-> 软解 HEVC 视频 + 二进制换装/图标烙入)与**提示词约束工程**(主人身份逐条
-> 判定、QQ 消息分级注入、档案卡消息隔离、防泄露剥离链)。详见下文专章。
+> **V3.0(2026-08-14)** 本版重点是**插件化架构重构**:Agent 引擎完成
+> "一切皆插件"改造——插件内核(服务容器)、能力接缝、类型化事件、声明式
+> 组合层,全部扁平文件收编为六个域目录。详见
+> [插件化架构重构](#插件化架构重构v30-重点)与
+> [docs/TECH.md 第 42 章](docs/TECH.md)。
 
 把 iOS 灵动岛带到 Windows 桌面的独立小程序:一个悬浮在屏幕顶部的灵动岛,
 自动感知当前正在播放的音乐(QQ音乐 / 网易云音乐 / 酷狗 / 酷我 / 汽水音乐 /
@@ -26,8 +28,8 @@
 会话(SMTC)与系统媒体交互。项目当前处于**源码运行/开发阶段**(不提供安装
 发行版),运行方式见[快速开始](#快速开始)与[开发与构建](#开发与构建)。
 
-> 开发者与详细技术说明见 [docs/TECH.md](docs/TECH.md)(V2.0 技术文档,
-> 第 15/16 章为 HEVC 补丁工程与提示词约束工程专章)与
+> 开发者与详细技术说明见 [docs/TECH.md](docs/TECH.md)(V3.0 技术文档,
+> 第 42 章为插件化架构重构专章)与
 > [WIDGET-README.md](WIDGET-README.md)(挂件部署/调试说明)。
 
 ---
@@ -35,6 +37,8 @@
 ## 目录
 
 - [快速开始](#快速开始)
+- [插件化架构重构(V3.0 重点)](#插件化架构重构v30-重点)
+- [架构版图:六域目录](#架构版图六域目录)
 - [HEVC 补丁工程(V2.0 重点)](#hevc-补丁工程v20-重点)
 - [提示词约束工程(V2.0 重点)](#提示词约束工程v20-重点)
 - [界面与基础操作](#界面与基础操作)
@@ -71,103 +75,150 @@ dynamic-island-official 副本实例在运行",请先关闭日常副本再启动
 
 ---
 
+## 插件化架构重构(V3.0 重点)
+
+V3.0 把 Agent 引擎从"巨型工厂 + 扁平文件"改造为 **"一切皆插件"** 的
+组合式架构(设计哲学对齐 deepseek-harness 审查报告
+[plugin-design-review.zh.md](plugin-design-review.zh.md),内核自研、零外部
+依赖)。没有需要打补丁的"特权核心":引擎主循环、LLM 适配、工具注册、
+提示拼装、会话日志**全都是插件**,每一部分都可以从配置替换——扩展方式
+永远是"在其他插件旁边挂载一个新插件"。
+
+### 七大支柱
+
+| 支柱 | 落地 | 一句话 |
+| --- | --- | --- |
+| 服务接缝(Seam) | `plugin/llm.ts` / `plugin/tool-registry.ts` | 可替换能力 = 接口 + 提供者 + 消费者三角色,按 key 发现、永不 import 实现 |
+| 注册即可逆效果 | `kernel.ts` `ctx.effect` | 一切注册返回 disposer,卸载按逆序回滚全部副作用 |
+| 类型化事件 | `kernel.ts` `emit/on` | 声明合并扩展事件表,即发即忘的观察通道 |
+| 能力事件 | `plugin/tool-events.ts` | `tools/pre-execute`(瀑布,可改写/否决)/ `tools/post-execute`,不碰循环即可给工具执行挂策略 |
+| 生命周期事件 | `plugin/lifecycle-events.ts` | `agent/turn-start/end`、`agent/step-start/end` 全链路观察,turn-end 具 finally 语义(全出口必发) |
+| 会话日志约束 | `plugin/session-log.ts` | **Model-visible ⟺ Logged**:能到达模型的内容必可从会话日志重建(JSONL sink,图片清洗) |
+| 声明式组合层 | `plugin/composition.ts` | Profile/Patch 驱动装配,"想换实现,把那一行的 name 换掉即可",dump 即见真实启动树 |
+
+### 插件内核(kernel.ts)
+
+轻量服务/效果容器(Cordis 风格,零依赖)。每个引擎一份独立上下文
+(per-agent ctx:主对话与每个外部会话各自隔离):
+
+- **服务仓库**:`ctx.register('llm', …)` / `ctx.get('llm')`——key 经 TS
+  声明合并类型化(`ContextServices` 扩展点),缺失大声失败;
+- **四种通道**:`emit/on`(即发即忘)、`waterfall`(around 中间件,监听器
+  必须调用 `next` 委托,不调用即短路——短路本身也是设计)、`serial`
+  (按注册顺序逐个等待,观察/审计钩子);
+- **插件约定**:`{ name, inject?, apply(ctx) }`——`inject` 声明依赖的服务
+  key,缺失立即大声失败(`AGENT_PLUGIN_DEP_MISSING`),绝不静默跳过;
+- **配置错误大声失败**:服务缺失、装配重复 id、未知工厂名均有专属错误码,
+  在最早可解析点抛出。
+
+### 能力接缝示例:ctx.llm 三角色
+
+- **Service Definition**:`llm.ts` 的 `LlmRuntime` 拥有 `ctx.llm` key,维护
+  适配器注册表,**执行时解析**(指定 id 未注册 / 零个可用 / 多个歧义各有
+  专属错误码,唯一可用自动选中——选择永不依赖注册顺序);
+- **Service Provider**:五个适配器实现同一 `LlmAdapter` 接口——DeepSeek
+  Responses(默认)/ DeepSeek Chat / Anthropic Messages / MiMo Responses /
+  MiMo Chat,注册进接缝,**不拥有** key;
+- **Consumer**:引擎主循环、delegate 子代理、subagents、evolution 经
+  `ctx.get('llm').stream()` 调用,从不 import 具体供应商实现。
+
+工具接缝 `ctx.tools` 同构:静态注册工具 + 动态源(MCP/技能,每轮执行时
+实时解析),注册即逆效果。
+
+### 声明式组合层(composition.ts)
+
+引擎启动树不再由硬编码序列决定,而由一份**有序 Profile(行清单)**声明,
+每行 `id + name + config`:
+
+- 工厂注册表 `PLUGIN_REGISTRY`(18 个工厂:name → factory)是唯一实现
+  解析点;**换实现 = 换行的 name**;
+- `applyPatch` 按 id 整体替换某行或插入新行;`enabled: false` 跳过;
+- 未知 name / 重复 id 大声失败;`dumpComposition` 导出真实启动树;
+- 缺省装配(`defaultProfile`,18 行:host-bridge → seam-llm → seam-tools →
+  session-log → 10 个工具组插件 → 4 个提示段落插件)与重构前硬编码序列
+  **逐位一致,行为零变化**。
+
+新增能力的纪律:**在对应领域文件写一个插件 + 注册工厂 + Profile 加一行,
+不改 loop、不改其他插件**。
+
+### 事件模型(扩展点选型)
+
+- **能力事件用于决策/改写**(瀑布):`agent/pre-step`(决定模型看到什么,
+  提示段落按注册顺序拼装)、`tools/pre-execute`(可改写 args / `deny` 否决
+  执行)、`tools/post-execute`(可改写结果做记账/备注);
+- **生命周期事件为纯观察**(只读载荷,不阻塞执行流):turn/step 四事件
+  覆盖回合全出口,统计/埋点/日志挂在这里,永不改 engine-loop;
+- **"Plugins, not loop changes"**:新行为必须挂在文档化扩展点上,直接改
+  主循环必须同步更新架构文档。
+
+---
+
+## 架构版图:六域目录
+
+V3.0 同步完成**域目录化整合**:`electron/agent` 下所有扁平文件按域
+收编,导入路径经批量改写,构建入口改为 `engine/engine.ts`:
+
+```
+electron/agent/
+├── engine/       # 引擎核心(8 文件):engine.ts 装配入口 + loop(主循环)/
+│                 # builtins(内置工具)/ tool-execution(工具执行)/
+│                 # confirm-gate(确认门)/ history / manual-call / turn-text
+├── plugin/       # ★ 插件内核与接缝(14 文件):kernel/composition/host/
+│                 # host-bridge/llm/tool-registry/tool-plugins/prompt-plugins/
+│                 # tool-events/lifecycle-events/session-log/prompt/errors/index
+├── providers/    # LLM 供应商(9 文件):deepseek/chat/anthropic/mimo-* +
+│                 # sse 公共层 + provider 分发入口
+├── tools/        # 工具族(13 文件):tools.ts 主入口 + env/bili/docflow/
+│                 # search/media 分簇 + settingsTools 四文件 + session/config
+├── napcat/       # QQ 通道(7 文件):napcat.ts 入口 + client/message/
+│                 # session/store/text + wsclient(手写 WS 传输)
+├── subagents/    # 后台子代理(2 文件):总结标题/心理揣测/主动陪伴判断
+└── (根层)         # constants/evolution/mcp/memory/notify/skills/tasks/
+                  # types/undo —— 跨域共享模块
+```
+
+配套的十四期重构节奏(一期内核 → 各接缝 → 各事件 → 会话日志 → 组合层 →
+目录化收官)全程测试驱动:**tsc 0 错、核心测试 221/221 通过、build 与
+smoke 全绿**,re-export 与装配顺序保证行为零变化。
+
+---
+
 ## HEVC 补丁工程(V2.0 重点)
 
-### 为什么需要补丁
-
-官方 Electron **没有 HEVC(H.265)解码能力**:ffmpeg 按 Chromium 默认配置
-排除了专有编码(无解码器),且 media 层把 HEVC 门控在"平台解码器能力"上——
-直接表现就是 bili 下载的 HEVC 高清视频在对话窗口里"播放中全黑"(时间轴
-正常、无报错、零帧呈现)。AV1 官方版即可软解,无需补丁。
-
-V2.0 的正解 = **自编译 Electron**(源码树 `C:\electron-gn`,与官方 43.2.0
-同一 tag):ffmpeg 侧补入 HEVC 解码器/解析器,media 层门控补丁直接放行软解。
-构建产物在 `C:\electron-hevc-dist`,经换装脚本应用。
-
-### 三条命令
+官方 Electron **没有 HEVC(H.265)解码能力**(ffmpeg 默认配置排除专有编码 +
+media 层平台能力门控)——bili 下载的 HEVC 高清视频在对话窗口里"播放中全黑"。
+V2.0 的正解 = **自编译 Electron**(ffmpeg 补入 HEVC 解码器,media 门控放行
+软解),构建产物经换装脚本应用:
 
 ```bash
-node scripts/apply-hevc-electron.mjs            # 应用补丁(幂等,缺哪个补哪个;dev.bat 自动执行)
+node scripts/apply-hevc-electron.mjs            # 应用补丁(幂等;dev.bat 自动执行)
 node scripts/apply-hevc-electron.mjs --restore  # 恢复官方版(7 个文件全量回退)
 node scripts/apply-hevc-electron.mjs --check    # 只报告状态,不修改
 ```
 
 换装内容 = 7 个构建相关文件(electron.exe / ffmpeg.dll / V8 快照 ×2 / pak ×3,
-**必须与 exe 同源**——快照不匹配启动即崩),官方版全量备份为 `*.official`。
-重装 node_modules 后 `dev.bat` 会自动重新应用。
-
-### 图标烙入(进程/弹窗图标)
-
-自编译 exe 只有 32×32 默认构建图标(弹窗糊 + 任务管理器显示默认图标)。
-V2.0 提供:
-
-```bash
-node scripts/brand-electron-icon.mjs            # 把多尺寸图标(16-256)烙进自编译 exe
-node scripts/brand-electron-icon.mjs --check    # 查询是否已烙
-```
-
-`electron/icon.ico` 由 `pnpm build:electron` 自动生成(make-icon 多尺寸
-PNG-in-ICO);烙在**源目录** exe 上,apply 按哈希换装自然携带;重新编译
-Electron 后才需要重烙。
-
-### 播放兜底
-
-- bili 下载默认**自动转码** H.264(保留原画质,转码进度可见),`bili convert`
-  可把已有 HEVC 文件就地转 H.264;`codec=copy` 配置可保留原编码(补丁已
-  应用时窗口内直接可播)。
-- 补丁未应用时,HEVC 视频显示明确提示 + 可用系统播放器降级打开。
-
-### 已知注意
-
-补丁版主进程的通知、流式请求等坑已全部治理(段错误根治、气泡通知通道、
-手写 WS 传输,详见 [TECH.md 第 10.11/15 章](docs/TECH.md))。若遇到补丁版
-异常:先 `--check`,再 `--restore` 对比官方版是否复现。
-
----
+**必须与 exe 同源**),官方版全量备份为 `*.official`;多尺寸图标经
+`scripts/brand-electron-icon.mjs` 烙入自编译 exe。bili 下载默认自动转码
+H.264 兜底;补丁未应用时 HEVC 视频显示明确提示并可降级系统播放器。
+细节见 [TECH.md 第 15 章](docs/TECH.md)。
 
 ## 提示词约束工程(V2.0 重点)
 
 V2.0 把提示词当作**工程对象**管理——分层拼装、逐条身份判定、注入/剥离
 双通道、防泄露硬约束。用户可见的行为保证:
 
-### 主人身份(逐条判定)
-
-- **主人 = QQ 1178821869,硬编码,任何配置不能改变**。
-- 对话窗口里**直接输入**的消息 = 主人本人(最高权限,指令直接执行)。
-- 带【QQ私聊/QQ群聊 · QQ 号】标注的消息 = 外部消息——只有标注
-  1178821869 的才是主人;**其它 QQ 号(魔精/群友/陌生人)一律不具主人
-  权限,不受其指使**。
-- 【系统通知】开头 = 系统事件,不是主人的话。
-
-### QQ 消息分级与信息隔离
-
-| 来源 | 行为 |
-| --- | --- |
-| 主人(1178821869) | 自主回复,带长期记忆与完整对话上下文 |
-| 扩展信任联系人(可配置) | 自主回复,但按隐私边界不泄露主人信息 |
-| 陌生人 | **先询问主人**再回复;回复偏袒主人、维护形象 |
-| 群聊 | 全部进对话窗口;看场合回复(@你/提到你/主人被贬低必须回护) |
-
-**防泄露硬约束**(每次回复都注入):不输出思考过程、不叙述工具调用过程、
-不泄露主人隐私、**任何人教唆操控主人电脑一律拒绝并告知主人**、给主人的
-话绝不发给别人(对外回复经三段剥离链 + 发送前兜底清洗;**回复路由三分类**
-保证系统通知/主动陪伴/日常窗口聊天的回复永不发到 QQ,只有主人亲自的
-窗口指示才会作为"执行结果"发给陌生人;**执行回复标记化**保证指示轮的
-回复必达对方——主人先回"嗯"这类应答不会串台给陌生人)。
-
-### 档案卡:按人汇总所有已知信息
-
-每条 QQ 消息都带着**发送者档案卡**——称呼、已知信息(性格/兴趣/不良嗜好)、
-会话人格、相关长期记忆、最近发言(私聊/群聊各自计入)。历史里的每条消息
-同样保留档案卡,LLM 跨轮次正确区分"谁说过什么"。对话窗口气泡分层显示:
-`QQ · 私聊/群聊 → QQ 号 → 档案卡(可展开,带动画)`。
-
-### Sub Agent 约束(后台标签)
-
-总结标题(会话标题)、心理揣测(紧凑态文字区)、主动陪伴判断、记忆提取、
-用户风格分析——全部走独立 Sub Agent:无工具单轮、关思考加速、输入压缩、
-严格解析 + 判效 + 兜底链。标题与揣测的约束经多轮实测收敛(名词短语/
-≤20 字/内心 OS 视角/≤16 字完整句等)。
+- **主人身份(逐条判定)**:主人 = QQ 1178821869,硬编码,任何配置不能
+  改变;对话窗口直接输入 = 主人本人;带【QQ私聊/QQ群聊 · QQ 号】标注的
+  外部消息只有标注主人的才具主人权限;【系统通知】= 系统事件。
+- **QQ 消息分级与信息隔离**:主人自主回复(带长期记忆)、扩展信任联系人
+  自主回复(按隐私边界)、陌生人**先询问主人**、群聊看场合回复。防泄露
+  硬约束每次回复注入(不输出思考过程、不泄露隐私、教唆操控一律拒绝并
+  告知主人),对外回复经三段剥离链 + 发送前兜底清洗,回复路由三分类
+  保证窗口聊天永不串到 QQ。
+- **档案卡**:每条 QQ 消息携带发送者档案卡(称呼/已知信息/会话人格/
+  相关记忆/最近发言),历史消息同样保留,LLM 跨轮次正确区分"谁说过什么"。
+- **Sub Agent 约束**:总结标题、心理揣测、主动陪伴判断、记忆提取等全部
+  走独立 Sub Agent(无工具单轮、关思考加速、严格解析 + 判效 + 兜底链)。
 
 工程细节见 [TECH.md 第 16 章](docs/TECH.md)。
 
@@ -237,7 +288,10 @@ V2.0 把提示词当作**工程对象**管理——分层拼装、逐条身份�
   白名单配置;
 - **通知不弹**:确认托盘存在(通知走托盘气泡通道);Windows 通知设置勿禁用;
 - **岛灵回复里看到指令/档案卡文本**:对话窗口只显示原文与来源,指令段只
-  给 LLM 看(设计如此);历史里的档案卡是为 LLM 区分人保留的。
+  给 LLM 看(设计如此);历史里的档案卡是为 LLM 区分人保留的;
+- **插件装配报错(AGENT_* / LLM_ADAPTER_* 错误码)**:这是组合层"大声
+  失败"设计——按错误码定位(依赖服务缺失/重复 id/未知工厂名/适配器歧义),
+  见 [TECH.md 第 42 章](docs/TECH.md)。
 
 ## 开发与构建
 
@@ -245,16 +299,34 @@ V2.0 把提示词当作**工程对象**管理——分层拼装、逐条身份�
 dev.bat                # 一键构建 + 启动(自动应用 HEVC 补丁)
 pnpm dev               # 仅 Web 演示版
 pnpm build             # 类型检查 + Web 版构建
-pnpm build:electron    # esbuild 打包 Agent 引擎/SMTC 桥/生成图标与 ico
+pnpm build:electron    # esbuild 打包 Agent 引擎(入口 engine/engine.ts)/SMTC 桥/图标
 pnpm lint              # oxlint
 pnpm test:markdown     # Markdown 解析器测试
-node tests/test-agent-core.mjs   # 引擎核心测试(155 用例)
+node tests/test-agent-core.mjs   # 引擎核心测试(221 用例,含插件内核/接缝/事件套件)
 ```
 
-架构与踩坑记录见 [docs/TECH.md](docs/TECH.md);部署与调试见
-[WIDGET-README.md](WIDGET-README.md)。
+验证基线(V3.0 收官):`tsc -b` 0 错、核心测试 221/221 通过、
+`pnpm build:electron` 与冒烟会话全绿、oxlint 无告警。
+
+架构与踩坑记录见 [docs/TECH.md](docs/TECH.md)(第 42 章 插件化架构重构);
+部署与调试见 [WIDGET-README.md](WIDGET-README.md)。
 
 ## 更新日志
+
+### V3.0(2026-08-14)
+
+- **插件化架构重构(十四期收官)**:自研插件内核 kernel.ts(服务容器 +
+  可逆效果 + 类型化四通道,零外部依赖);能力接缝 ctx.llm(五适配器:
+  DeepSeek Responses/Chat、Anthropic、MiMo Responses/Chat)与 ctx.tools
+  (静态注册 + 动态源);能力事件 tools/pre-execute/post-execute(瀑布,
+  可改写/否决)与生命周期事件 agent/turn-start/end、step-start/end
+  (turn-end finally 全出口);会话日志约束 Model-visible⟺Logged(JSONL
+  sink + 图片清洗,sink 可替换);声明式组合层 composition.ts(Profile/
+  Patch/dump,18 工厂,缺省装配与既往硬编码逐位一致);
+- **域目录化整合**:electron/agent 扁平文件收编为 engine/plugin/providers/
+  tools/napcat/subagents 六域目录,构建入口改 engine/engine.ts;
+- **测试**:plugin-kernel-tests.ts 并入核心测试(221 用例),覆盖内核、
+  接缝、事件、组合层全链路。
 
 ### V2.0(2026-08-13)
 
@@ -266,7 +338,10 @@ node tests/test-agent-core.mjs   # 引擎核心测试(155 用例)
   主人权限);QQ 注入统一模板(类别行 + 档案卡 + 编号回复规则,含安全红线);
   档案卡按 QQ 聚合全部已知信息 + 最近发言,历史消息隔离;Sub Agent 提示词
   精简重构(标题 2 级链、揣测 4 规则);受保护记忆(人设锁定,进化不改);
-  防泄露剥离链三段(思考腔/工具叙述/主人视角) + 发送前兜底。
+  防泄露剥离链三段(思考腔/工具叙述/主人视角) + 发送前兜底;
+- **会话隔离与并发**:会话键体系(主/private/group),每会话独立引擎与
+  路由状态,渲染端 SessionHost 多实例 + 会话坞;撤销与停止分离(git 快照
+  私有引用,撤销只回滚上下文、停止只中止回合);MiMo 第三供应商接入。
 
 ### V1.0(2026-08-10 前)
 
