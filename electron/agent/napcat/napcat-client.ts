@@ -218,6 +218,21 @@ export function createNapcatClient(deps: NapcatDeps): NapcatClient {
     }
     return { ok: true }
   }
+  /** 等待可发送槽位(2026-08-14,修复"偶现没发出去"):同目标 800ms 间隔
+   * 限流改为**等待重试**而非硬失败——对方连发两条消息(QQ 聊天常态)时,
+   * 第二条自主回复等待到间隔满足再发,不再被限流抛错吞掉;仅 25 条/分钟
+   * 全局硬上限(防 LLM 工具循环刷屏)与等待超时仍抛错 */
+  const SEND_RETRY_WAIT_MS = 200
+  const SEND_RETRY_MAX_WAIT_MS = 3000
+  async function waitSendSlot(target: string): Promise<void> {
+    const deadline = Date.now() + SEND_RETRY_MAX_WAIT_MS
+    for (;;) {
+      const rate = checkRateLimit(target)
+      if (rate.ok) return
+      if (Date.now() >= deadline) throw new Error(rate.reason || '发送限流')
+      await new Promise((resolve) => setTimeout(resolve, SEND_RETRY_WAIT_MS))
+    }
+  }
   function recordSend(target: string): void {
     const now = Date.now()
     sendTimestamps.push(now)
@@ -623,12 +638,8 @@ export function createNapcatClient(deps: NapcatDeps): NapcatClient {
         else finalImages.push(p)
       }
       const finalText = [cleanText, ...backToText].join(' ').trim()
-      // 发送频率限制检查(2026-08-14 防刷屏)
-      const rate = checkRateLimit(`private:${qq}`)
-      if (!rate.ok) {
-        reportError(`私聊发送限流(QQ ${qq}):${rate.reason}`)
-        throw new Error(rate.reason || '发送限流')
-      }
+      // 发送频率限制检查(2026-08-14 防刷屏;等待重试,见 waitSendSlot)
+      await waitSendSlot(`private:${qq}`)
       let message: unknown = finalText
       if (finalImages.length > 0) {
         const segs: unknown[] = []
@@ -709,13 +720,9 @@ export function createNapcatClient(deps: NapcatDeps): NapcatClient {
         else finalImages.push(p)
       }
       const finalText = [cleanText, ...backToText].join(' ').trim()
-      // 发送频率限制检查(2026-08-14 防刷屏)
+      // 发送频率限制检查(2026-08-14 防刷屏;等待重试,见 waitSendSlot)
       const rateKey = `group:${groupId}`
-      const rate = checkRateLimit(rateKey)
-      if (!rate.ok) {
-        reportError(`群发送限流(群 ${groupId}):${rate.reason}`)
-        throw new Error(rate.reason || '发送限流')
-      }
+      await waitSendSlot(rateKey)
       let message: unknown = finalText
       if (finalImages.length > 0) {
         const segs: unknown[] = []

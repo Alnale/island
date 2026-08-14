@@ -4338,6 +4338,11 @@ await test('isAskTurnToMaster:询问轮判定(2026-08-13 泄露根治——LLM �
   )
   // 常见询问措辞
   assert(isAskTurnToMaster('要不要我回他一句?'), '要不要我回他一句应判询问')
+  assert(isAskTurnToMaster('要不要我发给他一份资料?'), '要不要我发给他(第三人称)应判询问')
+  // 2026-08-14:第二人称"你" = 发给对方的话(自问自答式建议),不应误判
+  assert(isAskTurnToMaster('要不要我把链接发给你?') === false, '要不要我发给你(第二人称)不应判询问')
+  assert(isAskTurnToMaster('要不要我回你一句?') === false, '要不要我回你(第二人称)不应判询问')
+  assert(isAskTurnToMaster('要不要我发你一份资料?') === false, '要不要我发你(第二人称)不应判询问')
   assert(isAskTurnToMaster('你说回啥,我马上发~'), '你说回啥应判询问')
   assert(isAskTurnToMaster('你想怎么回他?'), '你想怎么回应判询问')
   assert(isAskTurnToMaster('等你指示,主人'), '等你指示应判询问')
@@ -4392,9 +4397,17 @@ await test('extractTurnFingerprint:指纹提取与匹配(2026-08-13 指纹协议
   assert(extractTurnFingerprint(`【回复对方】【指纹:${fp}】哈哈`, fp) !== null, '容忍先导旧【回复对方】标记')
   assert(extractTurnFingerprint(`【指纹:${fp}】`, fp)?.content === '', '仅指纹返回空正文')
   assert(extractTurnFingerprint('', fp) === null && extractTurnFingerprint('  ', fp) === null, '空输入')
+  // ---- 语气词前缀容忍(2026-08-14 修复"偶现没发出去"——LLM 偶发在
+  // 指纹前加语气词,严格开头匹配被扣留;白名单词 + ≤2 标点/空白后仍
+  // 紧跟本轮指纹才提取,指纹值验证不变)----
+  assert(extractTurnFingerprint(`好的~【指纹:${fp}】哈哈`, fp)?.content === '哈哈', '容忍语气词+~')
+  assert(extractTurnFingerprint(`好的,【指纹:${fp}】哈哈`, fp)?.content === '哈哈', '容忍好的+逗号')
+  assert(extractTurnFingerprint(`收到 【指纹:${fp}】哈哈`, fp)?.content === '哈哈', '容忍收到+空格')
+  assert(extractTurnFingerprint(`回复:【指纹:${fp}】哈哈`, fp)?.content === '哈哈', '容忍回复:')
+  assert(extractTurnFingerprint(`好的,已按【指纹:${fp}】回复他`, fp) === null, '汇报引用指纹(白名单词后是"已"非标点)不误提取')
+  assert(extractTurnFingerprint(`知道了【指纹:${fp}】哈哈`, fp) === null, '非白名单语气词不匹配')
   // ---- 严格性对抗用例(2026-08-13 二轮)----
-  // 指纹必须在开头:语气词/问候前置 = 不发送(规则明确"指纹前面不要加任何话")
-  assert(extractTurnFingerprint(`好的~【指纹:${fp}】哈哈`, fp) === null, '语气词前置(非开头)不应匹配')
+  // 指纹必须在开头:非白名单内容前置 = 不发送(规则明确"指纹前面不要加任何话")
   assert(extractTurnFingerprint(`哈哈【指纹:${fp}】哈哈`, fp) === null, '指纹在中间不应匹配')
   // 旧轮次指纹对不上本轮(历史里抄来的 = 不发送)
   assert(extractTurnFingerprint('【指纹:OLDOLD】哈哈', fp) === null, '旧轮次指纹对不上本轮')

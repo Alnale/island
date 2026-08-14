@@ -46,7 +46,11 @@ const ASK_TURN_STRONG = [
   /你(想|要|说)怎么回/,
   /等你(的)?(指示|发话)/,
   /问(问|一下)?主人/,
-  /要不要我(回|发|说)/,
+  // (?!给?你):排除第二人称——「要不要我发给你?」是发给对方的建议,
+  // 「要不要我回他?」才是询问主人(2026-08-14 修复"自主回复发给主人":
+  // LLM 自主回复常带"要不要我把链接发给你"自问句式,原规则误判询问
+  // → 回复被拦截并发到主人 QQ)
+  /要不要我(回|发|说)(?!给?你)/,
   /我建议[^。！？]{0,12}(回|发|说)/,
   /要(不)要我[^。！？]{0,10}(回|发|说)他/,
 ]
@@ -78,12 +82,23 @@ export function fingerprintMark(fp: string): string {
 export function stripFingerprintMarks(text: string): string {
   return String(text ?? '').replace(/【指纹:[2-9A-HJ-NP-Z]{6}】/g, '')
 }
+/** 语气词前缀(2026-08-14,修复"偶现没发出去"——LLM 偶发在指纹前加
+ * 语气词,严格开头匹配导致提取失败被扣留):允许「好的/收到/行/回复」等
+ * 语气词 + ≤2 个标点/空白后紧跟指纹标记。安全性不削弱:指纹值验证不变
+ * (必须是本轮 fp);白名单词后必须紧跟标点/空白再是指纹——汇报引用
+ * 指纹的场景("好的,已按【指纹:xxx】回复他")白名单词后是"已"非标点,
+ * 不提取,不会把汇报误发给对方 */
+const FINGERPRINT_TONE_PREFIX = /^(?:好的?|收到|嗯+|行|好|回复|发送|这就|马上)[,，。!！:：\s~～]{0,2}/
 export function extractTurnFingerprint(text: string, fp: string): { content: string } | null {
-  const t = String(text ?? '')
+  let t = String(text ?? '')
     .replace(/^\s*/, '')
     .replace(/^【回复对方】\s*/, '')
     .trimStart()
   const mark = fingerprintMark(fp)
-  if (!t.startsWith(mark)) return null
+  if (!t.startsWith(mark)) {
+    // 语气词前缀容忍:白名单词 + 标点后仍是指纹标记才提取
+    t = t.replace(FINGERPRINT_TONE_PREFIX, '')
+    if (!t.startsWith(mark)) return null
+  }
   return { content: t.slice(mark.length).trim() }
 }

@@ -225,20 +225,16 @@ export default function WidgetApp() {
       const card = (msg as { profileCard?: string }).profileCard ?? ''
       const nameM = /^称呼:(.+)$/m.exec(card)
       if (key === 'ask') {
-        // **陌生人自动建会话(2026-08-14 修复"对方给 LLM 的 QQ 发消息
-        // 没有自动创建会话")**:ask 流仍由当前活跃实例处理,但面板为
-        // private:QQ 建会话条目;对方原消息仅显示注入(不能用
-        // ingestNapcatMessage——会触发引擎二次发送)。用户正查看该
-        // 会话时其实例已收 ask 消息,跳过防重复
+        // **陌生人消息按私聊对象路由(2026-08-14 修复"私聊消息出现在
+        // 群聊会话 + 回复发给主人")**:ask 流不再投当前活跃实例——用户
+        // 查看群会话时陌生人私聊会进群会话上下文(上下文错乱)。现在为
+        // private:QQ 建会话条目,消息由该会话实例订阅直接 send(显示 +
+        // 引擎处理),父级不再投递(防双 send);实例未挂载时暂存,挂载后
+        // 经 extRegister 补投 ingestNapcatMessage
         const pKey = `private:${msg.qq}`
         reg(pKey, nameM ? nameM[1].trim() : `QQ ${msg.qq}`, 'private', `QQ ${msg.qq}`)
-        if (panelKeyRef.current !== pKey) {
-          const display = { kind: 'display-user', text: (msg as { text?: string }).text, profileCard: card }
-          const ctl = extControllersRef.current.get(pKey)
-          if (ctl) ctl.ingestDisplayUserMessage(display)
-          else {
-            pendingSessionMsgsRef.current.set(pKey, [...(pendingSessionMsgsRef.current.get(pKey) ?? []), display])
-          }
+        if (!extControllersRef.current.has(pKey)) {
+          pendingSessionMsgsRef.current.set(pKey, [...(pendingSessionMsgsRef.current.get(pKey) ?? []), msg])
         }
         return
       }

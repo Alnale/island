@@ -1043,14 +1043,16 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
       // 键带私聊前缀(2026-08-13:与群聊 message_id 可能同值,分开去重)
       if (dedupNapcatMsg(msg.messageId, 'private', { qq: msg.qq, text: msg.text })) return
       // 会话过滤(2026-08-13):只处理属于本实例的消息;
-      // 'ask' 哨兵(2026-08-13 八轮,用户要求"询问直接发送在已打开的
-      // 会话窗口"):只有**当前查看中**的实例接收询问消息
-      const msgKey = msg.sessionKey || `private:${String(msg.qq ?? '')}`
-      if (msgKey === 'ask') {
-        if (!opts?.active) return
-      } else if (msgKey !== myKey) {
-        return
-      }
+      // 'ask' 哨兵(2026-08-13 八轮"询问显示在当前打开的会话窗口"——
+      // 2026-08-14 修复"私聊消息出现在群聊会话 + 回复发给主人"):
+      // 原实现 ask 投给**当前活跃实例**——用户在群会话时,陌生人私聊
+      // 进群会话上下文(上下文错乱),LLM 在错误上下文回复,落定后仍按
+      // ask 轮发到主人 QQ。改为按私聊对象路由到对应 private:<QQ> 会话
+      // 实例(与扩展信任/主人私聊同路径),消息永远进它自己的会话
+      const msgKey = msg.sessionKey === 'ask'
+        ? `private:${String(msg.qq ?? '')}`
+        : msg.sessionKey || `private:${String(msg.qq ?? '')}`
+      if (msgKey !== myKey) return
       // trusted: true = 白名单(自主回复,带 source='qq');false = 陌生人
       // (source='ask'——询问同步:回复发到主人 QQ;2026-08-13 三轮起
       // 陌生人消息 sessionKey='main',询问留在主对话)
@@ -1070,7 +1072,7 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
       }
       send(msg.text, { source: msg.trusted === false ? 'ask' : 'qq', target: msg.qq, media: msg.media, profileCard: msg.profileCard })
     },
-    [send, myKey, opts?.active, dedupNapcatMsg],
+    [send, myKey, dedupNapcatMsg],
   )
   const processNapcatGroupMessage = useCallback(
     (msg: { text?: string; qq?: string; groupId?: string; media?: string[]; profileCard?: string; muted?: boolean; sessionKey?: string; messageId?: string }) => {
