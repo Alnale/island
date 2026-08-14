@@ -104,7 +104,7 @@ export function createBuiltinTools(
       type: 'object',
       properties: {
         focus: { type: 'string', description: '可选:本次进化的关注点(如"去重""补充偏好")' },
-        rounds: { type: 'number', description: '候选轮数,缺省 2,最大 4(每轮一个候选版本)' },
+        rounds: { type: 'number', description: '候选轮数,缺省 2,最大 6(记忆条目多时会按需自动放大,约每 15 条一轮)' },
       },
     },
     async execute(params: ToolParams) {

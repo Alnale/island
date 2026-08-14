@@ -14,7 +14,10 @@
  * 4. **多轮循环**:每轮 评审(评分+问题+假说建议) → 快照 Reference →
  *    应用候选 → 复评 → 棘轮接受(严格更高分,版本+1 存档)/ 拒绝
  *    (从快照恢复,结果作下一轮 evidence);轮数预算 rounds(工具参数,
- *    默认 2 上限 4),评分 ≥92 或提升 <2 分提前停;LLM 调用失败不消耗轮数;
+ *    默认 2)按记忆规模自适应放大(约每 15 条一轮,上限 6,
+ *    2026-08-14 可扩展性修复),评分 ≥92 或提升 <2 分提前停;
+ *    LLM 调用失败不消耗轮数;评审输出 token 上限与超时同样按记忆
+ *    规模放大(evalOutputBudget / evalTimeoutMs),防大记忆集截断崩溃;
  * 5. **独立评估**:评审/复评是独立无工具调用(只给公开记忆内容,
  *    黑盒打分,防自评偏差);
  * 6. **CONTRACT**:进化只改记忆(可编辑资产),不触碰引擎/工具代码。
@@ -31,14 +34,52 @@ import { showNotify } from './notify'
 import { getDefaultLlmRuntime, type LlmStreamParams } from './plugin/llm'
 import type { AgentConfig, AgentEvent, MemoryEntry, MemoryStoreLike, ProviderOutcome } from './types'
 
-/** 评估 Sub Agent 单次调用超时(评审/复评各一次,后台任务无整体时限) */
+/** 评估 Sub Agent 单次调用基础超时(条目多时按 evalTimeoutMs 自适应放大) */
 const EVAL_TIMEOUT_MS = 60_000
+/** 评估超时上限(2026-08-14 可扩展性:条目再多也不超过 3 分钟) */
+const EVAL_TIMEOUT_MAX_MS = 180_000
 /** 日志保留条数 */
 const LOG_MAX = 20
-/** 每轮候选上限(轮数预算;LLM 失败不消耗) */
-const MAX_ROUNDS = 4
+/** 每轮候选上限(轮数预算;LLM 失败不消耗)——2026-08-14 从 4 提到 6:
+ * 大记忆集(40+ 条)每轮只清最严重的几个主题(见评审提示词"输出预算"),
+ * 需要更多轮次收敛 */
+const MAX_ROUNDS = 6
 /** 评分达标线:达到即提前停 */
 const TARGET_SCORE = 92
+
+/**
+ * 轮数预算按记忆规模自适应(2026-08-14 可扩展性修复,测试用导出):
+ * 用户实测"条目超过 40 个进化基本就崩了"——根因之一是评审被要求一次
+ * 整合全部主题,条目多时输出 JSON 超出模型输出上限被截断、解析失败、
+ * 整个进化中止。修复后每轮只处理最严重的若干主题(评审提示词"输出
+ * 预算"),轮数按条目数放大:约每 15 条一轮,下限 = 用户请求轮数,
+ * 上限 MAX_ROUNDS。导出供测试(纯函数)。
+ */
+export function resolveRoundBudget(requested: number, entryCount: number): number {
+  const base = Math.min(Math.max(Math.round(requested) || 2, 1), MAX_ROUNDS)
+  const need = Math.ceil(Math.max(entryCount, 0) / 15)
+  return Math.min(Math.max(base, need), MAX_ROUNDS)
+}
+
+/**
+ * 评审输出 token 预算按输入规模自适应(2026-08-14,测试用导出):
+ * 原实现不传 maxOutputTokens → DeepSeek/Anthropic 适配器缺省 4096 token;
+ * 40+ 条目时评审 JSON(merge 整合必须保留全部信息点,体积 ≈ 记忆总量)
+ * 远超 4096 → 输出截断成残缺 JSON → parseJsonLoose 失败 → 降级重试同样
+ * 截断 → "评审输出无法解析"中止(用户实测"崩了"的直接根因)。
+ * 预算 ≈ 输入字符数(中文 ≈ 1.5 字符/token + JSON 结构开销),
+ * 下限 6144(小记忆集也比缺省 4096 宽裕)、上限 16384(防烧 token)。
+ */
+export function evalOutputBudget(inputChars: number): number {
+  return Math.min(16384, Math.max(6144, Math.round(Math.max(inputChars, 0))))
+}
+
+/** 评估超时按条目数自适应(2026-08-14):基础 60s + 每条 2s,上限 180s。
+ * 大记忆集的评审要生成长 JSON,固定 60s 超时把慢而正确的输出掐死 →
+ * 重试再超时 → 中止 */
+export function evalTimeoutMs(entryCount: number): number {
+  return Math.min(EVAL_TIMEOUT_MAX_MS, EVAL_TIMEOUT_MS + Math.max(entryCount, 0) * 2000)
+}
 
 export interface EvolutionHandle {
   /** 触发一次进化(已在进化中则忽略,返回说明);立即返回,后台执行 */
@@ -318,8 +359,17 @@ export function createEvolution(deps: {
        * 降级重试时传 false**(2026-08-11 实测:jsonMode 下评审/复评偶发
        * 返回空/垃圾,parse 失败 → before=0 → 空轮次被棘轮接受,版本
        * 空转、记忆原样——与总结标题的 json_mode 三级降级链同策略)
+       * @param maxOutputTokens 输出上限覆盖(2026-08-14 可扩展性:大记忆集
+       * 评审 JSON 超缺省 4096 被截断 → 解析失败中止;按输入规模放大,
+       * 见 evalOutputBudget)
+       * @param timeoutMs 单次调用超时覆盖(按条目数放大,见 evalTimeoutMs)
        */
-      async evaluate(system: string, input: string, phase: string, opts?: { jsonMode?: boolean }): Promise<string> {
+      async evaluate(
+        system: string,
+        input: string,
+        phase: string,
+        opts?: { jsonMode?: boolean; maxOutputTokens?: number; timeoutMs?: number },
+      ): Promise<string> {
         onEvent({ type: 'evolution-progress', phase })
         const config = getConfig()
         if (!config.apiKey.trim()) throw new Error('尚未配置 API Key,无法评估')
@@ -337,10 +387,11 @@ export function createEvolution(deps: {
               system,
               history: [{ id: 'eval', role: 'user', parts: [{ type: 'text', text: input }] }],
               tools: [],
-              signal: AbortSignal.timeout(EVAL_TIMEOUT_MS),
+              signal: AbortSignal.timeout(opts?.timeoutMs ?? EVAL_TIMEOUT_MS),
               onEvent: () => {},
               jsonMode,
               noThinking: true,
+              maxOutputTokens: opts?.maxOutputTokens,
             })
             if (result.aborted) throw new Error('评估被中止')
             return result.text
@@ -372,6 +423,9 @@ export function createEvolution(deps: {
       '{"op": "update", "id": 该条序号, "content": 整合全部要点后的精炼内容(保留各条的全部信息点,不丢失任何信息), "merge": true},' +
       '该主题其余条目逐条输出 {"op": "delete", "id": 序号}。**合并后逐条核对:同一主题必须只剩一条,' +
       '不允许残留任何重复**;不同主题不要互相合并(垂直细分,不是大杂烩)。' +
+      '**输出预算(条目多时尤其重要)**:单次最多输出 12 条 changes——优先处理最严重的 2~3 个' +
+      '重复/低价值主题并把它们整合干净,其余问题留给后续轮次(进化共多轮,不必一轮清完);' +
+      'changes 过多会超出输出上限被截断,整轮 JSON 报废、前功尽弃。' +
       '**受保护条目(清单中带【受保护·主人设定】标记)是主人指定的岛灵设定/人设/角色,绝对不可触碰**(2026-08-13):' +
       '任何 change 都不得以受保护条目为目标——不得 delete、不得 update/merge 改写其内容、' +
       '不得把其它条目合并进它、也不得把它并入其它条目;主题整合时受保护条目原样保留。' +
@@ -418,10 +472,19 @@ export function createEvolution(deps: {
 
     // 1. 评审(评分 + 问题 + 假说建议)——委托独立评估 Sub Agent
     const reviewInput = `【系统提示词】${config.systemPrompt.slice(0, 500)}\n\n【当前记忆】\n${memoryDump(entries)}${focusLine}`
+    // **可扩展性预算(2026-08-14,用户实测"条目超 40 个进化就崩了")**:
+    // 输出 token 上限与超时按记忆规模放大——原缺省 4096 token/60s 在
+    // 大记忆集下把评审 JSON 截断/掐死,两次降级重试同样失败 → 中止
+    const dumpChars = entries.reduce((n, e) => n + e.content.length, 0)
+    const evalOpts = {
+      maxOutputTokens: evalOutputBudget(dumpChars),
+      timeoutMs: evalTimeoutMs(entries.length),
+    }
     const reviewText = await evaluator.evaluate(
       reviewSystemPrompt(),
       reviewInput,
       `第 ${roundNo}/${rounds} 轮:评估子代理评审`,
+      evalOpts,
     )
     let review = parseJsonLoose(reviewText)
     // **评审 JSON 解析失败降级(2026-08-11 实测:jsonMode 下评审返回
@@ -435,7 +498,7 @@ export function createEvolution(deps: {
         reviewSystemPrompt(),
         reviewInput,
         `第 ${roundNo}/${rounds} 轮:评估子代理评审(纯文本重试)`,
-        { jsonMode: false },
+        { ...evalOpts, jsonMode: false },
       )
       review = parseJsonLoose(retryText)
     }
@@ -464,10 +527,13 @@ export function createEvolution(deps: {
     let after = before
     if (!cleanupApplied && hasRealChange) {
       const afterEntries = await store.list()
+      // 复评只输出 {"total":N},无需放大输出预算;但输入同样大,超时同步放大
+      const reevalOpts = { timeoutMs: evalOpts.timeoutMs }
       const reevalText = await evaluator.evaluate(
         reevalSystemPrompt(),
         `【改进后记忆】\n${memoryDump(afterEntries)}`,
         `第 ${roundNo}/${rounds} 轮:评估子代理复评`,
+        reevalOpts,
       )
       let reeval = parseJsonLoose(reevalText)
       if (!reeval || typeof reeval.total !== 'number') {
@@ -476,7 +542,7 @@ export function createEvolution(deps: {
           reevalSystemPrompt(),
           `【改进后记忆】\n${memoryDump(afterEntries)}`,
           `第 ${roundNo}/${rounds} 轮:评估子代理复评(纯文本重试)`,
-          { jsonMode: false },
+          { ...reevalOpts, jsonMode: false },
         )
         reeval = parseJsonLoose(retryText)
       }
@@ -516,10 +582,14 @@ export function createEvolution(deps: {
     return { ok: true, applied, before, after, version: state.version, summary, cleanupApplied }
   }
 
-  /** 完整进化会话:多轮候选循环,直到轮数预算/达标/拒绝后停止 */
+  /** 完整进化会话:多轮候选循环,直到轮数预算/达标/拒绝后停止。
+   * **轮数按记忆规模自适应(2026-08-14)**:每轮只清最严重的几个主题
+   * (评审提示词"输出预算"),条目多时需要更多轮收敛——见 resolveRoundBudget */
   async function runEvolution(focus?: string, rounds = 2): Promise<EvolutionResult[]> {
     const results: EvolutionResult[] = []
-    const roundBudget = Math.min(Math.max(Math.round(rounds) || 2, 1), MAX_ROUNDS)
+    const store = getStore()
+    const entryCount = store ? (await store.list()).length : 0
+    const roundBudget = resolveRoundBudget(rounds, entryCount)
     for (let round = 1; round <= roundBudget; round++) {
       let result: EvolutionResult
       try {
@@ -567,7 +637,12 @@ export function createEvolution(deps: {
           busy = false
           onEvent({ type: 'evolution-done' })
         })
-      return { started: true, message: `记忆进化已开始(共 ${Math.min(Math.max(Math.round(rounds) || 2, 1), MAX_ROUNDS)} 轮,后台执行,完成后有系统通知)` }
+      return {
+        started: true,
+        // 轮数与 runEvolution 同款自适应(按条目数放大,见 resolveRoundBudget),
+        // 提示与实际执行一致
+        message: `记忆进化已开始(共 ${resolveRoundBudget(rounds, (await getStore()?.list())?.length ?? 0)} 轮,后台执行,完成后有系统通知)`,
+      }
     },
     async getStatus() {
       await initPromise

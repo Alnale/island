@@ -95,7 +95,7 @@ import {
 } from '../electron/agent/tasks'
 import { createMusicControlTools, createSettingsTools } from '../electron/agent/tools/settingsTools'
 import { createSessionTools } from '../electron/agent/tools/sessionTools'
-import { applyChanges, createEvolution, isCleanupChange, mapSeqToEntry } from '../electron/agent/evolution'
+import { applyChanges, createEvolution, evalOutputBudget, evalTimeoutMs, isCleanupChange, mapSeqToEntry, resolveRoundBudget } from '../electron/agent/evolution'
 import type { AgentMessage, AgentTool, McpServerConfig, MemoryEntry } from '../electron/agent/types'
 
 // exec_command 的 shell stub(2026-08-14):测试里 `start "some title"`/`dir`
@@ -1026,6 +1026,27 @@ await test('isCleanupChange:delete 与 merge 整合 = 清理类(豁免假说);ad
   assert(isCleanupChange({ op: 'update', id: '1', content: '整合', merge: true }), 'merge 整合是清理类')
   assert(!isCleanupChange({ op: 'update', id: '1', content: '改' }), '普通 update 不是清理类')
   assert(!isCleanupChange({ op: 'add', content: 'x' }), 'add 不是清理类')
+})
+
+await test('可扩展性预算:轮数/输出/超时按记忆规模自适应(40+ 条目崩溃修复)', () => {
+  // 2026-08-14 用户实测"条目超过 40 个进化基本就崩了":评审输出缺省
+  // 4096 token 被截断 + 固定 60s 超时 + 一轮清不完 → 三个预算自适应
+  // 轮数:下限 = 请求轮数,约每 15 条一轮,上限 6
+  assert(resolveRoundBudget(2, 10) === 2, '小记忆集保持请求轮数')
+  assert(resolveRoundBudget(2, 45) === 3, '45 条 → 3 轮')
+  assert(resolveRoundBudget(2, 90) === 6, '90 条 → 封顶 6 轮')
+  assert(resolveRoundBudget(1, 900) === 6, '极端规模仍封顶 6')
+  assert(resolveRoundBudget(5, 3) === 5, '请求轮数高于自动值时取请求值')
+  assert(resolveRoundBudget(0, 3) === 2, '非法请求轮数回落默认 2')
+  // 输出预算:下限 6144(高于缺省 4096),随输入放大,上限 16384
+  assert(evalOutputBudget(500) === 6144, '小输入取下限 6144')
+  assert(evalOutputBudget(9000) === 9000, '中等输入 ≈ 字符数')
+  assert(evalOutputBudget(50000) === 16384, '大输入封顶 16384')
+  assert(evalOutputBudget(-5) === 6144, '负输入不越界')
+  // 超时:基础 60s + 每条 2s,上限 180s
+  assert(evalTimeoutMs(10) === 80_000, '10 条 → 80s')
+  assert(evalTimeoutMs(45) === 150_000, '45 条 → 150s')
+  assert(evalTimeoutMs(200) === 180_000, '超大集封顶 180s')
 })
 
 await test('applyChanges:merge 整合 + delete 无假说也执行(垂直细分合并端到端)', async () => {

@@ -934,6 +934,28 @@ export function AgentView({
     }
   }, [messages, streaming, status, lastError])
 
+  // 会话切换强制贴底(2026-08-14 用户反馈"切会话不滚到底"):上面的
+  // 贴底 effect 以 atBottomRef 为条件——上一会话若上翻过(标志 false),
+  // 新会话列表整体替换后停在旧滚动位置。切换语义 = 查看新上下文的
+  // 最新进展,无论旧位置如何:先置贴底标志(后续 MessageWindow 高度
+  // 真实化推高内容时跟随保持),再跳底 + 150ms 校正(虚拟列表估算
+  // 高度真实化兜底,与上方同款)。首挂载不触发([view, phase] 的进入
+  // 滚动已覆盖)
+  const prevSessionKeyRef = useRef(currentSessionKey)
+  useEffect(() => {
+    if (prevSessionKeyRef.current === currentSessionKey) return
+    prevSessionKeyRef.current = currentSessionKey
+    atBottomRef.current = true
+    const el = scrollRef.current
+    if (el) {
+      jumpToBottom(el)
+      const t = window.setTimeout(() => {
+        if (el.isConnected && atBottomRef.current) jumpToBottom(el)
+      }, 150)
+      return () => window.clearTimeout(t)
+    }
+  }, [currentSessionKey])
+
   // 对话历史/工具列表视图的滚动(聊天视图滚动由 MessageWindow 接管:
   // 它同时更新贴底标志与可视范围,见 MessageWindow 内部 scroll 监听)
   const handleScroll = () => {
