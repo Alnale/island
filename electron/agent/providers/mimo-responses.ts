@@ -27,7 +27,7 @@
 
 import { parseSse, sanitizeJsonStrings, truncateResult } from './sse'
 import { mimoErrorMessage } from './mimo-constants'
-import type { AgentConfig, AgentEvent, AgentMessage, AgentPart, AgentTool, ProviderOutcome } from './types'
+import type { AgentConfig, AgentEvent, AgentMessage, AgentPart, AgentTool, ProviderOutcome } from '../types'
 
 /** 工具调用流式累积器(MiMo  Responses 格式:item_id + output_index 匹配) */
 interface MimoStreamCall {

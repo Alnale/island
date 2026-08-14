@@ -31,7 +31,7 @@ async function rebuild() {
       logLevel: 'error',
     }),
     build({
-      entryPoints: [path.join(electronDir, 'agent', 'engine.ts')],
+      entryPoints: [path.join(electronDir, 'agent', 'engine', 'engine.ts')],
       outfile: path.join(electronDir, 'agent.cjs'),
       bundle: true,
       platform: 'node',

@@ -43,7 +43,7 @@
 
 import { parseSse, sanitizeJsonStrings, truncateResult } from './sse'
 import { deepseekErrorMessage } from './deepseek-constants'
-import type { AgentConfig, AgentEvent, AgentMessage, AgentPart, AgentTool, ProviderOutcome } from './types'
+import type { AgentConfig, AgentEvent, AgentMessage, AgentPart, AgentTool, ProviderOutcome } from '../types'
 
 /** 工具 → Chat Completions tools(官方格式:function 嵌套) */
 function chatTools(tools: AgentTool[]) {

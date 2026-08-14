@@ -183,6 +183,12 @@ export interface AgentConfig {
   baseURL: string
   /** 当前激活供应商的模型 */
   model: string
+  /**
+   * 显式指定 LLM 适配器 id(2026-08-14 插件化重构:LLM 接缝按 baseURL
+   * 自动解析适配器;配置本字段则强制使用该适配器——未注册时大声失败
+   * LLM_ADAPTER_MISSING)。缺省 = 自动解析
+   */
+  llmAdapter?: string
   /** 系统提示词(默认值在 main.cjs 兜底) */
   systemPrompt: string
   /** 思考强度(官方文档 reasoning.effort:low/medium/high,默认 high) */

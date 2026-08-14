@@ -19,8 +19,8 @@ try {
 }
 
 // 动态导入编译后的模块
-const { mimoStreamResponse, mimoHistoryToItems } = await import('../electron/agent/mimo-responses.js')
-const { mimoStreamChatCompletion, mimoHistoryToMessages } = await import('../electron/agent/mimo-chat.js')
+const { mimoStreamResponse, mimoHistoryToItems } = await import('../electron/agent/providers/mimo-responses.js')
+const { mimoStreamChatCompletion, mimoHistoryToMessages } = await import('../electron/agent/providers/mimo-chat.js')
 
 const API_KEY = 'sk-cmmnv07jyrdncjhymfpsa4kxixyl6e4t31f4idzg53j3r1hc'
 const BASE_URL = 'https://api.xiaomimimo.com'

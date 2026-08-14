@@ -12,7 +12,7 @@
  * 会话键(引擎 currentSessionKey:main / private:<QQ> / group:<群号>)。
  */
 
-import type { AgentTool } from './types'
+import type { AgentTool } from '../types'
 
 export function createSessionTools(deps: {
   /** 当前会话键(null = 无会话上下文,工具拒绝) */

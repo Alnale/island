@@ -28,8 +28,8 @@ import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { isProtectedEntry } from './constants'
 import { showNotify } from './notify'
-import { streamByConfig } from './provider'
-import type { AgentConfig, AgentEvent, MemoryEntry, MemoryStoreLike } from './types'
+import { getDefaultLlmRuntime, type LlmStreamParams } from './plugin/llm'
+import type { AgentConfig, AgentEvent, MemoryEntry, MemoryStoreLike, ProviderOutcome } from './types'
 
 /** 评估 Sub Agent 单次调用超时(评审/复评各一次,后台任务无整体时限) */
 const EVAL_TIMEOUT_MS = 60_000
@@ -207,8 +207,11 @@ export function createEvolution(deps: {
   /** 记忆文件与日志目录(userData) */
   getMemoryDir(): string
   onEvent(event: AgentEvent): void
+  /** LLM 流式调用(可注入;缺省经 LLM 接缝默认运行时) */
+  stream?(params: LlmStreamParams): Promise<ProviderOutcome>
 }): EvolutionHandle {
   const { getConfig, getStore, getMemoryDir, onEvent } = deps
+  const stream = deps.stream ?? ((params: LlmStreamParams) => getDefaultLlmRuntime().stream(params))
   // 评估 Sub Agent(独立实例):评审与复评委托给它,优化流程自身不评分
   const evaluator = createEvaluatorAgent()
   let busy = false
@@ -323,7 +326,7 @@ export function createEvolution(deps: {
         const jsonMode = opts?.jsonMode !== false
         for (let retry = 0; retry < 2; retry++) {
           try {
-            const result = await streamByConfig({
+            const result = await stream({
               // **noThinking + 低强度(2026-08-11 实测修复:评审/复评空白
               // content 的根因——原用 config 默认 effort=high,复杂评审
               // 任务把输出 token 全烧在思维链上,最终文本恒为空(两次

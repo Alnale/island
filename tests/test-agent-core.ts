@@ -43,8 +43,8 @@ import {
   salvageMindClause,
   sanitizeMind,
   fallbackTitle,
-} from '../electron/agent/engine'
-import { buildToolsGuideBlock, createTools, toolOutputDir } from '../electron/agent/tools'
+} from '../electron/agent/engine/engine'
+import { buildToolsGuideBlock, createTools, toolOutputDir } from '../electron/agent/tools/tools'
 import {
   buildProfileCard,
   createNapcatTools,
@@ -65,19 +65,23 @@ import {
   turnAlreadySentToPending,
   turnAlreadySentToTarget,
   type NapcatToolDeps,
-} from '../electron/agent/napcat'
+  type NapcatClient,
+} from '../electron/agent/napcat/napcat'
 import { MASTER_IDENTITY_LINE, MASTER_QQ } from '../electron/agent/constants'
-import { streamResponse } from '../electron/agent/deepseek'
-import { sanitizeUnpairedSurrogates } from '../electron/agent/sse'
+import { streamResponse } from '../electron/agent/providers/deepseek'
+import { sanitizeUnpairedSurrogates } from '../electron/agent/providers/sse'
 
 // createNapcatTools 现签名收 { client, getSessionKey?, confirmDangerous? } 单参
 // (engine.ts 以 deps.napcat 包成 client 注入);测试直接平铺 mock client 方法,
 // 这里统一包一层,第二参并入 deps(旧两参调用兼容)
-function napcatTools(mockClient: object, opts?: Omit<NapcatToolDeps, 'client'>) {
-  return createNapcatTools({ ...(opts ?? {}), client: mockClient as NapcatToolDeps['client'] })
+// Partial 让 mock 方法参数获得上下文类型推断(免逐个标注);
+// 运行时 createNapcatTools 只调 mock 里实现了的方法,缺失方法不会命中
+function napcatTools(mockClient: Partial<NapcatClient>, opts?: Omit<NapcatToolDeps, 'client'>) {
+  return createNapcatTools({ ...(opts ?? {}), client: mockClient as NapcatClient })
 }
-import { createWsSocket, encodeWsFrame, parseWsUrl, WsFrameParser } from '../electron/agent/wsclient'
+import { createWsSocket, encodeWsFrame, parseWsUrl, WsFrameParser } from '../electron/agent/napcat/wsclient'
 import { snapshotWatchDirs, restoreUndoSnapshot, releaseUndoRef, type GitExec } from '../electron/agent/undo'
+import { runPluginKernelTests } from './plugin-kernel-tests'
 import { stripNapcatHistoryInstructions, stripNapcatInstructions, stripTurnMarks } from '../src/agent/text'
 import {
   getTasksStatusBlock,
@@ -89,8 +93,8 @@ import {
   updateTask,
   type AgentTask,
 } from '../electron/agent/tasks'
-import { createMusicControlTools, createSettingsTools } from '../electron/agent/settingsTools'
-import { createSessionTools } from '../electron/agent/sessionTools'
+import { createMusicControlTools, createSettingsTools } from '../electron/agent/tools/settingsTools'
+import { createSessionTools } from '../electron/agent/tools/sessionTools'
 import { applyChanges, createEvolution, isCleanupChange, mapSeqToEntry } from '../electron/agent/evolution'
 import type { AgentMessage, AgentTool, McpServerConfig, MemoryEntry } from '../electron/agent/types'
 
@@ -103,6 +107,15 @@ process.env.AGENT_TEST_STUB_SHELL = '1'
 // mock 服务器目录由 esbuild define 注入(__ROOT__ = 项目根)
 declare const __ROOT__: string
 const mockDir = path.join(__ROOT__, 'tests', 'mocks')
+
+/** 多供应商字段(AgentConfig 2026-08-14 新增):测试运行时不读取,纯满足类型检查 */
+const MOCK_PROVIDERS = {
+  activeProvider: 'deepseek' as const,
+  providers: {
+    deepseek: { apiKey: '', baseURL: '', model: '' },
+    mimo: { apiKey: '', baseURL: '', model: '' },
+  },
+}
 
 // ---------------------------------------------------------------------------
 // 测试框架(顺序执行,失败不中断)
@@ -665,6 +678,7 @@ function makeConfigToolsDeps(
 ) {
   const state = {
     config: {
+      ...MOCK_PROVIDERS,
       apiKey: '',
       baseURL: '',
       model: '',
@@ -978,7 +992,7 @@ console.log('\n=== 自我进化(evolution.ts) ===')
 function makeEvolutionDeps() {
   // 进化测试的 memory.json 必须与 memory-state.json / memory-snapshots 同目录
   const store = createMemoryStore(() => path.join(memoryDir, 'memory.json'))
-  const config = { apiKey: '', baseURL: '', model: '', systemPrompt: '提示词', reasoningEffort: 'high', mcpServers: [], skillsDirs: [] }
+  const config = { ...MOCK_PROVIDERS, apiKey: '', baseURL: '', model: '', systemPrompt: '提示词', reasoningEffort: 'high', mcpServers: [], skillsDirs: [] }
   const events: Array<{ type: string }> = []
   const evo = createEvolution({
     getConfig: () => config,
@@ -1555,7 +1569,7 @@ await test('buildMemoryExtractSystem / buildUserStyleSystem:拼装含指令,不�
 })
 
 await test('extractMemories / analyzeUserStyle:无 Key 优雅失败(零 LLM 调用)', async () => {
-  const noKey = { apiKey: '', baseURL: '', model: '', systemPrompt: '', reasoningEffort: 'high' as const, mcpServers: [], skillsDirs: [] }
+  const noKey = { ...MOCK_PROVIDERS, apiKey: '', baseURL: '', model: '', systemPrompt: '', reasoningEffort: 'high' as const, mcpServers: [], skillsDirs: [] }
   const summaryAgent = createSummaryAgent({ getConfig: () => noKey })
   const mindAgent = createMindAgent({ getConfig: () => noKey })
   const history = [{ id: 'u1', role: 'user' as const, parts: [{ type: 'text' as const, text: '你好' }] }]
@@ -1573,6 +1587,7 @@ console.log('\n=== 引擎集成(createAgentEngine) ===')
 
 await test('listAllTools 含内置 + MCP + 技能;dispose 无异常', async () => {
   const cfg = {
+    ...MOCK_PROVIDERS,
     apiKey: '',
     baseURL: 'https://api.deepseek.com',
     model: 'deepseek-v4-flash',
@@ -1610,7 +1625,7 @@ await test('listAllTools 含内置 + MCP + 技能;dispose 无异常', async () =
 
 await test('testMCP:真实 stdio 服务连通', async () => {
   const engine = createAgentEngine({
-    getConfig: () => ({ apiKey: '', baseURL: '', model: '', systemPrompt: '', reasoningEffort: 'high', mcpServers: [], skillsDirs: [] }),
+    getConfig: () => ({ ...MOCK_PROVIDERS, apiKey: '', baseURL: '', model: '', systemPrompt: '', reasoningEffort: 'high', mcpServers: [], skillsDirs: [] }),
     onEvent: () => {},
     onSwitchToMusic: () => {},
   })
@@ -1675,6 +1690,7 @@ function budgetSseServer(captured: Array<Record<string, unknown>>, call: Record<
 function budgetEngine(patched: Array<Record<string, unknown>>, maxOutputTokens?: number) {
   return createAgentEngine({
     getConfig: () => ({
+      ...MOCK_PROVIDERS,
       apiKey: 'k',
       baseURL: 'https://api.deepseek.com',
       model: 'deepseek-v4-flash',
@@ -2575,6 +2591,7 @@ function sseResponse(frames: Array<Record<string, unknown>>): Response {
 }
 
 const mockConfig = {
+  ...MOCK_PROVIDERS,
   apiKey: 'test-key',
   baseURL: 'https://api.deepseek.com',
   model: 'deepseek-v4-flash',
@@ -2799,7 +2816,7 @@ await test('get_feature_guide:读真实引导文档;话题过滤与目录;纯函
   const miss = String(await guide!.execute({ topic: '不存在的功能xyz' }))
   assert(miss.includes('未找到') && miss.includes('话题'), '无匹配应给可读兜底')
   // 纯函数:小样本切分/过滤/截断
-  const { extractGuideSections } = await import('../electron/agent/tools')
+  const { extractGuideSections } = await import('../electron/agent/tools/tools')
   const sample = [
     '# 章A',
     '## 节1 音乐',
@@ -2830,6 +2847,7 @@ await test('open_file 媒体拦截端到端:引擎执行后 message parts 含 me
   const messages: Array<{ parts: Array<{ type: string; kind?: string; url?: string }> }> = []
   const engine = createAgentEngine({
     getConfig: () => ({
+      ...MOCK_PROVIDERS,
       apiKey: 'k',
       baseURL: 'https://api.deepseek.com',
       model: 'deepseek-v4-flash',
@@ -2889,6 +2907,7 @@ await test('exec_command start 拦截端到端:引擎执行后 message parts 含
   const messages: Array<{ parts: Array<{ type: string; kind?: string; url?: string }> }> = []
   const engine = createAgentEngine({
     getConfig: () => ({
+      ...MOCK_PROVIDERS,
       apiKey: 'k',
       baseURL: 'https://api.deepseek.com',
       model: 'deepseek-v4-flash',
@@ -2980,6 +2999,7 @@ await test('手动调用端到端:技能名+描述无空格分离 + DeepSeek rea
   const capturedBodies: string[] = []
   const engine = createAgentEngine({
     getConfig: () => ({
+      ...MOCK_PROVIDERS,
       apiKey: 'k',
       baseURL: 'https://api.deepseek.com',
       model: 'deepseek-v4-flash',
@@ -3089,6 +3109,7 @@ await test('fetchDeepseekBalance:结构化余额/Anthropic 拒绝/未配置 Key/
 await test('余额查询工具:get_deepseek_balance 注册并格式化余额', async () => {
   const engine = createAgentEngine({
     getConfig: () => ({
+      ...MOCK_PROVIDERS,
       apiKey: 'k',
       baseURL: 'https://api.deepseek.com',
       model: 'deepseek-v4-flash',
@@ -3129,6 +3150,7 @@ await test('余额查询工具:get_deepseek_balance 注册并格式化余额', a
   // Anthropic 兼容端点:工具报错提示(不请求)
   const engine2 = createAgentEngine({
     getConfig: () => ({
+      ...MOCK_PROVIDERS,
       apiKey: 'k',
       baseURL: 'https://api.deepseek.com/anthropic',
       model: 'deepseek-v4-flash',
@@ -4568,6 +4590,12 @@ await test('undo 回滚:快照不完整(无 headSha/snapSha)拒绝执行不动�
   // releaseUndoRef 尽力而为:失败不抛错
   await releaseUndoRef('/repo/x', 'u-gone', async () => { throw new Error('ref not found') })
 })
+
+// ---------------------------------------------------------------------------
+// 插件内核与能力接缝(kernel / llm / tools / prompt,2026-08-14 插件化重构)
+// ---------------------------------------------------------------------------
+
+await runPluginKernelTests({ test, assert, assertRejects })
 
 // ---------------------------------------------------------------------------
 // 收尾

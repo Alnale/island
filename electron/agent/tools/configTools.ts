@@ -8,8 +8,8 @@
 
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
-import { MIND_PERSONAS, SUMMARY_STYLES } from './constants'
-import type { AgentConfig, AgentTool, McpServerConfig, ToolParams } from './types'
+import { MIND_PERSONAS, SUMMARY_STYLES } from '../constants'
+import type { AgentConfig, AgentTool, McpServerConfig, ToolParams } from '../types'
 
 export function createConfigTools(deps: {
   getConfig(): AgentConfig

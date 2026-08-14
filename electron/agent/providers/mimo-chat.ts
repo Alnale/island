@@ -25,7 +25,7 @@
 
 import { parseSse, sanitizeJsonStrings, truncateResult } from './sse'
 import { mimoErrorMessage } from './mimo-constants'
-import type { AgentConfig, AgentEvent, AgentMessage, AgentPart, AgentTool, ProviderOutcome } from './types'
+import type { AgentConfig, AgentEvent, AgentMessage, AgentPart, AgentTool, ProviderOutcome } from '../types'
 
 /** 工具 → MiMo Chat Completions tools(function 嵌套格式) */
 function mimoChatTools(tools: AgentTool[]) {

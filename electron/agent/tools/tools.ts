@@ -9,40 +9,40 @@
  *
  * 借鉴:MS Agent 参考后端的 UnifiedToolRegistry / Tool 定义,
  * 及 opencode src/tool/registry.ts 的注册语义(这里不引入 zod)。
+ *
+ * 细分版图:tools-env(路径环境簇)/ tools-bili(bili 域)/
+ * tools-docflow(docflow 域)/ tools-search(联网搜索)/ tools-media(媒体拦截)
+ * 已拆出,本文件保留 xxt/系统音量/功能引导/命令执行与 createTools 装配;
+ * barrel 兼容 re-export(engine.ts/测试既有路径不变)。
  */
 
-import { exec, spawn, type ChildProcess } from 'node:child_process'
+
+import { exec, spawn } from 'node:child_process'
 // 注意:promises 命名空间没有 mkdirSync/existsSync(CLAUDE.md 约定
 // "tools.ts 的 fs 只用 promises as fs"——mkdirSync 需单独从 node:fs 导入,
 // 曾用 fs.mkdirSync 调 undefined 被空 catch 吞掉,目录从未创建,
 // spawn cwd 不存在 → ENOENT,2026-08-08 工具逐一验证实测)
-import { existsSync, mkdirSync, promises as fs } from 'node:fs'
+import { existsSync, promises as fs } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { app, shell } from 'electron'
-import { showNotify } from './notify'
-import { listTasks, registerTask, setTaskDoneHandler, updateTask } from './tasks'
-import type { AgentTool, ToolParams } from './types'
+import { shell } from 'electron'
+import { showNotify } from '../notify'
+import { setTaskDoneHandler } from '../tasks'
+import type { AgentTool, ToolParams } from '../types'
+// 已拆出的领域簇:本文件内部仍需使用的部分显式导入(barrel re-export 见下方)
+import { webSearch } from './tools-search'
+import { extractMediaPathFromStart, mediaKindForPath } from './tools-media'
+import { toolsRoot, userDataDir, toolOutputDir, setOutputEnv } from './tools-env'
+import { biliQuery, BILI_CWD, setBiliConfirmAction } from './tools-bili'
+import { docConvert, disposeDocflow } from './tools-docflow'
 
-/**
- * 内置工具根目录(2026-08-07 三个外部工具移植进 tools/):
- * 项目根 tools/(cwd = 项目根;不用 __dirname —— agent.cjs
- * 是 CJS 而测试 bundle 是 ESM,__dirname 在 ESM 下不可用(实测报错))
- */
-function toolsRoot(): string {
-  const res = process.resourcesPath ? path.join(process.resourcesPath, 'tools') : ''
-  return res && existsSync(res) ? res : path.resolve(process.cwd(), 'tools')
-}
+// ---- 已拆出簇 barrel 兼容 re-export(engine.ts/测试既有路径不变) ----
+export * from './tools-search'
+export * from './tools-media'
+export * from './tools-env'
+export * from './tools-bili'
+export * from './tools-docflow'
 
-/** 用户数据目录(可写;bili 下载落点 / xxt 登录态 / docflow 运行时产物;
- * = %APPDATA%/dynamic-island;测试回退临时路径) */
-function userDataDir(): string {
-  try {
-    return app.getPath('userData')
-  } catch {
-    return path.join(process.env.APPDATA ?? os.homedir(), 'dynamic-island')
-  }
-}
 
 /**
  * 审计修复(2026-08-14 SEC-2):文件路径安全校验——拦截写入/读取系统
@@ -67,50 +67,6 @@ function assertPathSafe(filePath: string): void {
 const XXT_EXE = path.join(toolsRoot(), 'xxt', 'dist', 'xxt', 'xxt.exe')
 /** xxt 源码脚本(python 模式) */
 const XXT_SCRIPT = path.join(toolsRoot(), 'xxt', 'auto_answer.py')
-/** bili-tool 二进制(纯 Rust 单二进制;查询命令 --json 输出到 stdout) */
-const BILI_BIN = path.join(toolsRoot(), 'bili', 'bili-tool.exe')
-/**
- * bili-tool 工作目录(**必须显式固定**):config 的 outdir=downloads 是相对
- * 路径,不指定 cwd 时下载会落在 Electron 的启动目录(用户和 LLM 都找不到);
- * 固定到 userData/bili——下载落在 userData/bili/downloads/
- */
-const BILI_CWD = path.join(userDataDir(), 'bili')
-/**
- * bili-tool 环境:base_dir 经 BILI_BASE_DIR 指向 userData/bili ——
- * cookies.json/配置落可写目录(登录态与下载同目录,清理一致)
- */
-const BILI_ENV = {
-  ...process.env,
-  BILI_BASE_DIR: BILI_CWD,
-}
-/** DocFlow 服务地址(本地 Flask;未运行时 doc_convert 自动拉起) */
-const DOCFLOW_BASE = 'http://127.0.0.1:5000'
-
-/**
- * 工具输出目录环境(2026-08-12,引擎经 createTools deps 注入):
- * - getOutputDir = Agent 配置的工具输出根目录(空 = 未启用,工具保持
- *   默认位置 userData 下);
- * - getSessionId = 当前会话 ID(send/proactiveTurn 更新)。
- * 目录结构 = <根>/<工具名>/[<会话ID>]——每工具文件夹分类、文件按
- * 对话 ID 分类(用户要求);会话 ID 缺失(测试/历史调用)回退
- * <根>/<工具名>。write_file/exec_command 是用户指定路径的写入,
- * 不重定向,只有工具自产文件(bili 下载 / xxt 截图 / doc_convert 输出)
- * 走本机制
- */
-let outputEnv: { getOutputDir: () => string | null; getSessionId: () => string | null } = {
-  getOutputDir: () => null,
-  getSessionId: () => null,
-}
-
-/** 工具输出目录解析(测试导出):未配置根目录返回 null,否则
- * <根>/<工具名>/[<会话ID>](会话 ID 缺失落在 <根>/<工具名>) */
-export function toolOutputDir(tool: string): string | null {
-  const root = outputEnv.getOutputDir()
-  if (!root) return null
-  const base = path.join(root, tool)
-  const sid = outputEnv.getSessionId()
-  return sid ? path.join(base, sid) : base
-}
 
 /**
  * 本机工具存放路径与用法清单(2026-08-12,用户要求"LLM 不知道各个工具
@@ -142,32 +98,6 @@ export function buildToolsGuideBlock(): string {
     `- 功能引导文档:${path.resolve(process.cwd(), 'docs', 'TECH.md')}(第 11 章 = 功能清单,get_feature_guide 工具读取)`,
   ]
   return lines.join('\n')
-}
-
-// bili-tool 工作目录必须存在:spawn 的 cwd 不存在会 ENOENT(且被误报为
-// "二进制缺失")——download/saved/trending 等分支都直接 spawn,从不创建
-// 目录,首次使用必然失败(2026-08-08 工具逐一验证实测);login 分支虽有
-// mkdir 但只管二维码路径。模块加载时同步创建(开销可忽略,userData/bili
-// 本就是约定落点)。注意 mkdirSync 来自 node:fs 顶层,不是 promises
-try {
-  mkdirSync(BILI_CWD, { recursive: true })
-} catch {
-  // 目录创建失败不致命:后续 spawn 会给出真实错误
-}
-
-/** 解析任务的输出目录(--outdir 参数,相对 BILI_CWD 解析;缺省默认目录);
- * 返回绝对路径,供通知/状态注入/LLM 报告真实落点 */
-function biliOutdir(args: string[]): string {
-  const i = args.indexOf('--outdir')
-  const dir = i >= 0 && args[i + 1] ? args[i + 1] : 'downloads'
-  return path.isAbsolute(dir) ? path.normalize(dir) : path.join(BILI_CWD, dir)
-}
-
-/** saved 记录里的相对路径 → 绝对路径(相对 BILI_CWD;已是绝对路径则原样) */
-function absolutizeBiliPath(rel: string): string {
-  const p = rel.trim()
-  if (!p || path.isAbsolute(p)) return p
-  return path.join(BILI_CWD, p)
 }
 
 /** 运行 xxt 工具(本地构建的 xxt.exe 存在则优先,否则系统 python +
@@ -210,599 +140,11 @@ function runXxt(args: string[], timeoutMs: number): Promise<string> {
   })
 }
 
-/** 后台 bili-tool 长任务记录(进行中;close 后即删除——完成信息已写入
- * 通用任务注册表(tasks.ts),状态块/对话感知由它统一提供) */
-interface BiliJob {
-  pid: number
-  startedAt: number
-  args: string[]
-  /** 是否已结束(close 事件落定;未落定视为进行中) */
-  finished: boolean
-  exitCode: number | null
-  finishedAt: number
-  /** 成功后的输出文件绝对路径(close 后查 saved 记录解析;空 = 未查/查不到) */
-  outputPaths: string[]
-}
-
-/** 后台 bili 任务(完成/失败时发系统通知,用户无需轮询等待) */
-const biliJobs = new Map<number, BiliJob>()
-
-/** 任务的人话标签与目标(args[0]:get = 单视频、download = UP 批量) */
-function biliJobLabel(args: string[]): string {
-  const target = args[1] ?? ''
-  return args[0] === 'download' ? `UP 主批量下载(${target})` : `视频下载(${target})`
-}
-
-/**
- * 完成时查询 saved 记录,提取本次输出的文件绝对路径。
- * 记录路径是相对 BILI_CWD 的,必须转绝对路径,否则 LLM/通知
- * 说不清视频落在哪个文件夹(用户实测反馈)。
- * 取最新 limit 条里落在本任务输出目录下的记录(刚完成的文件在最前;
- * 并发任务/手动下载混入时会多报几条,比漏报好)
- */
-async function resolveBiliOutputs(job: BiliJob): Promise<string[]> {
-  try {
-    const out = await runBili(['saved', '--limit', '10'], 15000)
-    const outdir = biliOutdir(job.args).toLowerCase()
-    const files: string[] = []
-    for (const line of out.split('\n')) {
-      const i = line.lastIndexOf(' | ')
-      if (i === -1) continue
-      const abs = absolutizeBiliPath(line.slice(i + 3))
-      if (abs.toLowerCase().startsWith(outdir)) files.push(abs)
-    }
-    return files
-  } catch {
-    return []
-  }
-}
-
-/** 后台启动 bili-tool 长任务(视频下载):detached 独立进程,立即返回,
- * 不阻塞对话;注册到通用任务注册表(tasks.ts)——进行中状态实时注入
- * 系统提示,进入终态(完成/失败)经 done 回调 → background-done →
- * 渲染端自动触发对话,LLM 主动告知用户结果(反馈空间);同时发系统
- * 通知(下载中查询 saved 没有记录是正常的)。
- * 返回文本明确"无需等待",防止 Agent 自行反复轮询造成等待感 */
-function runBiliBackground(args: string[]): string {
-  try {
-    // 实时进度(2026-08-11,用户要求"下载到哪了可查"):单视频下载(get)
-    // 追加 --progress-file,bili-tool 每 1.5s 原子写进度 JSON;下方轮询器
-    // 每 2s 读取,把百分比注入任务状态块(detail)——LLM 对话里直接能
-    // 回答"下载到 68%"。批量下载(download_up)任务粒度是"UP 主",进度
-    // 文件会被多个分P 互相覆盖,不启用
-    const taskIdPrefix = `bili-dl-`
-    let progressPath: string | null = null
-    let progressTimer: ReturnType<typeof setInterval> | null = null
-    if (args[0] === 'get') {
-      progressPath = path.join(BILI_CWD, '.progress', `${taskIdPrefix}${Date.now()}-${Math.random().toString(36).slice(2, 8)}.json`)
-      mkdirSync(path.dirname(progressPath), { recursive: true })
-      args = [...args, '--progress-file', progressPath]
-    }
-    const child = spawn(BILI_BIN, args, {
-      windowsHide: true,
-      stdio: 'ignore',
-      detached: true,
-      cwd: BILI_CWD,
-      env: BILI_ENV,
-    })
-    child.unref()
-    const pid = child.pid ?? -1
-    biliJobs.set(pid, { pid, startedAt: Date.now(), args, finished: false, exitCode: null, finishedAt: 0, outputPaths: [] })
-    const taskId = `${taskIdPrefix}${pid}`
-    const outdir = biliOutdir(args)
-    registerTask({
-      id: taskId,
-      title: 'B站下载',
-      status: 'running',
-      // 进行中也带输出目录:LLM 回答"下载到哪"时能给真实绝对路径
-      detail: `${biliJobLabel(args)}(进程 ${pid}),输出目录 ${outdir}`,
-    })
-    // 进度轮询:读 bili-tool 写的进度 JSON → 更新任务 detail(可读化)
-    const fmtMb = (n: number) => `${(n / 1024 / 1024).toFixed(1)}MB`
-    const progressFile = progressPath
-    if (progressFile) {
-      progressTimer = setInterval(() => {
-        if (biliJobs.get(pid)?.finished) return
-        void fs
-          .readFile(progressFile, 'utf8')
-          .then((text) => {
-            const p = JSON.parse(text) as { stage?: string; label?: string; done?: number; total?: number; percent?: number }
-            if (!p || typeof p.stage !== 'string') return
-            let detail: string
-            if (p.stage === 'download' && typeof p.percent === 'number' && p.percent >= 0) {
-              detail = `${biliJobLabel(args)} ${p.percent}%(${p.label ?? ''} ${fmtMb(p.done ?? 0)}/${fmtMb(p.total ?? 0)}),输出目录 ${outdir}`
-            } else if (p.stage === 'transcode') {
-              detail = `${biliJobLabel(args)} 下载完成,正在转码为 H.264(约需几分钟),输出目录 ${outdir}`
-            } else if (p.stage === 'mux') {
-              detail = `${biliJobLabel(args)} 下载完成,正在合并音视频,输出目录 ${outdir}`
-            } else {
-              return
-            }
-            updateTask(taskId, { detail })
-          })
-          .catch(() => {
-            // 文件未就绪/半截写入:跳过本轮
-          })
-      }, 2000)
-    }
-    child.on('close', (code) => {
-      if (progressTimer) clearInterval(progressTimer)
-      if (progressFile) {
-        void fs.rm(progressFile, { force: true }).catch(() => {})
-      }
-      const job = biliJobs.get(pid)
-      if (!job) return
-      // 状态推进:进行中 → 结束(记录 close 后即删,终态信息在任务注册表)
-      job.finished = true
-      job.exitCode = code
-      job.finishedAt = Date.now()
-      biliJobs.delete(pid)
-      const label = biliJobLabel(job.args)
-      if (code !== 0) {
-        showNotify('B站下载结束', `${label}异常退出(退出码 ${code}),请用 bili saved 查看记录或重试`)
-        // 失败也进入终态 → background-done → 自动对话告知用户(失败
-        // 不再"只弹通知",LLM 与用户都在对话里知道结果)
-        updateTask(taskId, {
-          status: 'failed',
-          detail: `${label}异常退出(退出码 ${code}),可用 bili saved 查看记录或重试`,
-        })
-        return
-      }
-      // 成功:后台查 saved 记录解析输出文件绝对路径 → 终态 + 通知
-      void resolveBiliOutputs(job).then((files) => {
-        job.outputPaths = files
-        const message =
-          files.length > 0 ? `${label}已完成:\n${files.join('\n')}` : `${label}已完成,输出目录:${outdir}`
-        showNotify('B站下载完成', message)
-        updateTask(taskId, { status: 'done', detail: message })
-      })
-    })
-    return (
-      `已后台启动 bili-tool 下载:${args.join(' ')}(进程 ${pid})。` +
-      `输出目录:${biliOutdir(args)}。` +
-      '**这是长任务,通常 1-10 分钟,不要等待**:请立即告知用户"下载已开始,完成后会有系统通知";' +
-      '完成/失败都会自动发系统通知,并在对话里告知结果,不需要反复查询。' +
-      '仅当用户主动询问下载进度时,调用 bili progress 查询实时进度(如"下载到 68%")。' +
-      '**完成后若要播放,用 open_file 打开下载的文件——媒体会作为附件在对话窗口内直接播放**,' +
-      '不要切换音乐模式,也不要让用户去文件管理器里找。'
-    )
-  } catch (e) {
-    throw new Error(`无法启动 bili-tool:${(e as Error).message}(二进制缺失:${BILI_BIN})`)
-  }
-}
-
-/**
- * 后台轮询扫码登录确认(2026-08-07):login 工具生成二维码后立即调用,
- * spawn `bili-tool login --resume <key>` 轮询 poll(最长 120s)——
- * 用户扫码确认后 bili-tool 走 crossDomain 拿 SESSDATA 写 cookies.json;
- * 注册到通用任务注册表(tasks.ts):等待扫码状态实时注入系统提示(LLM
- * 回答"登录好了吗"时依据真实状态),进入终态经 done 回调 →
- * background-done → 自动触发对话。**成功与失败都有对话反馈**(失败不再
- * 只弹通知——LLM 在对话里告知用户"二维码过期,可重新生成")
- */
-function startBiliLoginPoll(key: string): void {
-  // 每次登录尝试独立任务 id(重新生成二维码时旧尝试的超时/失败不会
-  // 覆盖新尝试的状态;同一 key 才会覆盖)
-  const taskId = `bili-login-${key}`
-  registerTask({
-    id: taskId,
-    title: 'B站扫码登录',
-    status: 'waiting',
-    detail: '等待用户扫码确认(二维码 2 分钟内有效)',
-  })
-  const child = spawn(
-    BILI_BIN,
-    ['login', '--resume', key, '--timeout', '120'],
-    { windowsHide: true, stdio: 'ignore', cwd: BILI_CWD, env: BILI_ENV, detached: true },
-  )
-  child.unref()
-  child.on('exit', (code) => {
-    if (code === 0) {
-      showNotify('B站登录成功', '扫码确认完成,已登录 B 站')
-      updateTask(taskId, { status: 'done', detail: '用户已扫码确认,已登录 B 站' })
-    } else {
-      showNotify('B站登录未完成', '二维码已过期或未扫码确认,可重新生成')
-      updateTask(taskId, { status: 'failed', detail: '二维码已过期或未扫码确认,可重新生成' })
-    }
-  })
-}
-
-/** 运行 bili-tool(查询类命令,stdout 为 JSON;超时杀进程;
- * cwd 固定 BILI_CWD,saved 记录等相对路径才能按同一基准解析) */
-function runBili(args: string[], timeoutMs: number): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(BILI_BIN, args, {
-      windowsHide: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      cwd: BILI_CWD,
-      env: BILI_ENV,
-    })
-    let out = ''
-    let err = ''
-    child.stdout.on('data', (d: Buffer) => (out += d.toString()))
-    child.stderr.on('data', (d: Buffer) => (err += d.toString()))
-    const timer = setTimeout(() => {
-      child.kill()
-      reject(new Error(`bili-tool 执行超时(${Math.round(timeoutMs / 1000)}s)`))
-    }, timeoutMs)
-    child.on('error', (e: Error) => {
-      clearTimeout(timer)
-      reject(new Error(`无法启动 bili-tool:${e.message}(二进制缺失:${BILI_BIN})`))
-    })
-    child.on('close', (code) => {
-      clearTimeout(timer)
-      resolve(out || err || `(进程退出码 ${code})`)
-    })
-  })
-}
-
-/** B站数据查询(bili-tool 查询命令 --json 输出结构化数据到 stdout);
- * login 返回文本 + 二维码图片附件(引擎注入助手消息 image part) */
-async function biliQuery(params: ToolParams): Promise<string | { text: string; image?: string }> {
-  const action = String(params.action ?? '')
-  const query = String(params.query ?? '').trim()
-  let args: string[] = []
-  switch (action) {
-    case 'up_info': {
-      if (!query) throw new Error('up_info 需要 UP 主 mid 或空间链接')
-      args = ['info', query, '--json']
-      break
-    }
-    case 'up_videos': {
-      if (!query) throw new Error('up_videos 需要 UP 主 mid')
-      args = ['list', query, '--json']
-      break
-    }
-    case 'search': {
-      if (!query) throw new Error('search 需要关键词')
-      const type = String(params.type ?? 'video')
-      if (!['video', 'user', 'bangumi'].includes(type)) {
-        throw new Error('type 仅支持 video/user/bangumi')
-      }
-      args = ['search', query, '--type', type, '--json']
-      break
-    }
-    case 'trending': {
-      const rid = Number(params.rid) || 0
-      args = ['trending', '--rid', String(rid), '--json']
-      break
-    }
-    case 'comments': {
-      if (!query) throw new Error('comments 需要视频 BV 号或链接')
-      args = ['comments', query, '--json']
-      break
-    }
-    case 'download': {
-      // 单视频下载:长任务后台启动(detached 独立进程),立即返回;
-      // 完成情况用 saved action 查询
-      if (!query) throw new Error('download 需要视频 BV 号或链接')
-      // 未登录提示(2026-08-11):未登录时高清受限(通常只能 360p/480p),
-      // 返回文本附提示让用户知情(不阻塞下载)
-      let loginHint = ''
-      try {
-        const whoami = await runBili(['whoami'], 15000)
-        if (!whoami.includes('已登录')) {
-          loginHint = '当前未登录,高清画质受限(可能只能下 360p/480p);需要高清可先 login 扫码登录。'
-        }
-      } catch {
-        // 登录态查询失败不阻塞下载
-      }
-      const dargs = ['get', query]
-      if (params.audio) dargs.push('--audio', String(params.audio))
-      if (params.quality) dargs.push('--quality', String(params.quality))
-      // 输出目录(2026-08-12):LLM 显式传 outdir 恒优先;否则配置了
-      // 工具输出根目录时缺省 = <根>/bili/[<会话ID>](下载按对话分类)
-      const biliOut = toolOutputDir('bili')
-      if (params.outdir) dargs.push('--outdir', String(params.outdir))
-      else if (biliOut) dargs.push('--outdir', biliOut)
-      if (params.page) dargs.push('--page', String(Number(params.page) || 1))
-      if (params.subs) dargs.push('--subs')
-      if (params.no_danmaku) dargs.push('--no-danmaku')
-      const started = runBiliBackground(dargs)
-      return loginHint ? `${started}\n${loginHint}` : started
-    }
-    case 'download_up': {
-      // UP 主视频批量下载:后台启动,立即返回。
-      // **批量下载必须先征得用户同意(2026-08-10 用户要求)**:经
-      // confirmAction 确认门(与 exec_command 确认同款 UI 卡,标题 +
-      // 详情),拒绝 = 不启动,返回"用户拒绝"文本(LLM 可告知用户/
-      // 改单视频 download)。确认等待期间引擎兜底超时由 bili 工具
-      // timeoutMs 覆盖(130s > 确认 120s 超时)
-      if (!query) throw new Error('download_up 需要 UP 主 mid')
-      const dargs = ['download', query]
-      if (params.limit) dargs.push('--limit', String(Number(params.limit) || 0))
-      if (params.days) dargs.push('--days', String(Number(params.days) || 0))
-      if (params.regex) dargs.push('--regex', String(params.regex))
-      if (params.audio) dargs.push('--audio', String(params.audio))
-      if (params.quality) dargs.push('--quality', String(params.quality))
-      // 与单视频 download 同款:LLM 显式 outdir 优先,否则输出目录缺省
-      const biliOut = toolOutputDir('bili')
-      if (params.outdir) dargs.push('--outdir', String(params.outdir))
-      else if (biliOut) dargs.push('--outdir', biliOut)
-      if (params.dry_run) dargs.push('--dry-run')
-      // 确认门(未注入 = 放行,测试/无 UI 环境):批量下载是占用磁盘与
-      // 带宽的动作,LLM 不能未经用户同意就启动
-      const confirmDeps = biliConfirmRef.current
-      if (confirmDeps) {
-        const label = `批量下载 UP 主 ${query} 的视频${params.limit ? `(最近 ${params.limit} 个)` : ''}`
-        const approved = await confirmDeps.confirmAction(
-          'B站批量下载',
-          `${label},将下载到 ${biliOutdir(dargs)}(可能消耗较多磁盘与带宽)。是否继续?`,
-        )
-        if (!approved) {
-          return '用户拒绝了批量下载。请告知用户"已取消批量下载";如需下载单个视频可用 download 指定 BV 号。'
-        }
-      }
-      return runBiliBackground(dargs)
-    }
-    case 'danmaku': {
-      // 弹幕下载(快,前台等):XML/ASS/TXT/JSON
-      if (!query) throw new Error('danmaku 需要视频 BV 号或链接')
-      const dargs = ['danmaku', query]
-      if (params.format) dargs.push('--fmt', String(params.format))
-      return runBili(dargs, 60000)
-    }
-    case 'subtitle': {
-      // CC 字幕下载(srt,前台等)
-      if (!query) throw new Error('subtitle 需要视频 BV 号或链接')
-      return runBili(['subtitle', query], 60000)
-    }
-    case 'saved': {
-      // 已下载记录(查询后台下载任务是否完成)。
-      // 记录里的路径是相对 BILI_CWD 的,逐行转绝对路径——
-      // 否则 LLM 看到 downloads\xxx.mp4 不知道真实落点(用户实测反馈)
-      const limit = Math.min(Math.max(Number(params.limit) || 20, 1), 200)
-      const out = await runBili(['saved', '--limit', String(limit)], 30000)
-      return out
-        .split('\n')
-        .map((line) => {
-          const i = line.lastIndexOf(' | ')
-          if (i === -1) return line
-          return line.slice(0, i + 3) + absolutizeBiliPath(line.slice(i + 3))
-        })
-        .join('\n')
-    }
-    case 'progress': {
-      // 实时下载进度(2026-08-11):查询进行中的 bili 后台下载任务——
-      // detail 由引擎轮询 bili-tool 进度文件持续更新(如"68%"),任务
-      // 已完成/失败则不在列表(自动对话告知结果);无进行中任务返回提示
-      const running = listTasks().filter((t) => t.id.startsWith('bili-dl-'))
-      if (running.length === 0) return '当前没有进行中的 bili 下载任务(最近下载完成/失败后已自动告知结果,可用 bili saved 查记录)'
-      return running.map((t) => `- ${t.detail}`).join('\n')
-    }
-    case 'login': {
-      // 扫码登录(对话内二维码图片方案,2026-08-07):bili-tool 生成
-      // 二维码 PNG(no-wait 不阻塞),返回 **文本 + 图片附件** —— 引擎
-      // 注入助手消息 image part,消息气泡直接展示二维码,不依赖 LLM
-      // 复述长 base64(实测 LLM 复述不可靠,图片不显示);
-      // **后台自动轮询确认**(2026-08-07 修复:原实现只生成二维码,
-      // 扫码后无人 poll 写登录态,whoami 永远未登录)——解析 no-wait
-      // 输出的 qrcode key,spawn --resume 轮询,成功写 cookies.json 并
-      // 通知 + background-done 触发自动对话告知,失败通知重扫
-      const qrPath = path.join(BILI_CWD, 'login-qrcode.png')
-      await fs.mkdir(path.dirname(qrPath), { recursive: true })
-      const genOut = await runBili(['login', '--qrcode-img', qrPath, '--no-wait'], 30000)
-      const keyMatch = genOut.match(/二维码key:\s*([A-Za-z0-9]+)/)
-      const key = keyMatch?.[1]
-      const buf = await fs.readFile(qrPath).catch(() => null)
-      if (!buf || buf.length === 0) throw new Error('二维码生成失败')
-      if (key) startBiliLoginPoll(key)
-      return {
-        text:
-          'B站扫码登录二维码已生成(2 分钟内有效),二维码图片已随本消息展示给用户。' +
-          '请用户用 B 站手机 App「扫一扫」扫码并确认。' +
-          (key ? '引擎正在后台等待扫码确认,扫码成功/失败都会自动通知并在对话里告知结果。' : ''),
-        image: `data:image/png;base64,${buf.toString('base64')}`,
-      }
-    }
-    case 'whoami': {
-      // 登录状态确认(扫码后调用;已登录显示 UID,未登录提示)
-      const out = await runBili(['whoami'], 15000)
-      return out.trim()
-    }
-    case 'config': {
-      // 查看/修改 bili-tool 默认配置(2026-08-11):quality/codec/outdir/
-      // jobs/parallel 等持久化在 BILI_CWD/config/config.json——
-      // 对话里"以后 B站都下 720p""下载默认转码"即可改,不用手动编辑
-      // 文件;校验值域由 bili-tool config 命令完成(错误会直接返回)
-      if (params.key) {
-        const key = String(params.key).trim()
-        if (!key) throw new Error('config 需要 key(如 quality/codec/outdir)')
-        const value = String(params.value ?? '').trim()
-        if (!value) throw new Error(`config 需要 value(设置 ${key} 的值)`)
-        const out = await runBili(['config', '--set', key, value], 15000)
-        return out.trim()
-      }
-      const out = await runBili(['config'], 15000)
-      return out.trim()
-    }
-    case 'convert': {
-      // 把已有 HEVC(H.265)视频就地转码为 H.264(2026-08-11,修复
-      // "bili 下载的 HEVC 视频在对话窗口播放全黑"):挂件窗口的 Chromium
-      // 在禁用硬件加速(透明窗口稳定需要)下无法呈现 HEVC 帧;转码后
-      // 窗口内直接可播。长任务后台执行(33 分钟 1080p 约 1-2 分钟,
-      // 更长视频更久),完成/失败自动通知 + 对话反馈
-      if (!query) throw new Error('convert 需要本地视频文件路径')
-      return runBiliBackground(['convert', query])
-    }
-    case 'open': {
-      // 搜索并直接打开第一个结果(一次调用完成"搜索+打开",
-      // 免去 LLM 解析 JSON 再拼接 BV 链接的中间步骤)。
-      // 默认视频 → bvid 拼视频页;type=user → mid 拼 UP 空间页
-      if (!query) throw new Error('open 需要搜索关键词')
-      const type = String(params.type ?? 'video')
-      if (!['video', 'user', 'bangumi'].includes(type)) {
-        throw new Error('type 仅支持 video/user/bangumi')
-      }
-      const json = await runBili(['search', query, '--type', type, '--json'], 30000)
-      let items: unknown = null
-      try {
-        items = JSON.parse(json)
-      } catch {
-        // 解析失败走下方无结果分支
-      }
-      const first = Array.isArray(items) && items.length > 0 ? items[0] : null
-      const rec = first && typeof first === 'object' ? (first as Record<string, unknown>) : null
-      const url =
-        type === 'user' && typeof rec?.mid === 'number'
-          ? `https://space.bilibili.com/${rec.mid}`
-          : typeof rec?.bvid === 'string' && rec.bvid
-            ? `https://www.bilibili.com/video/${rec.bvid}`
-            : ''
-      if (!url) throw new Error(`搜索"${query}"无结果或格式异常,请改用 search 查看`)
-      const title =
-        typeof rec?.title === 'string' ? rec.title : typeof rec?.name === 'string' ? rec.name : ''
-      // 标题自带《》时不重复包裹(如 B站 标题常含书名号)
-      const shown = title ? (title.includes('《') ? title : `《${title}》`) : ''
-      await shell.openExternal(url)
-      return `已打开第一个搜索结果:${shown}\n${url}`
-    }
-    default:
-      throw new Error(
-        `未知 action:${action}(支持 up_info/up_videos/search/open/trending/comments/download/download_up/danmaku/subtitle/saved)`,
-      )
-  }
-  return runBili(args, 30000)
-}
-
-/**
- * bili 批量下载确认门(2026-08-10):createTools 注入 deps.confirmAction
- * (引擎 → 主进程 → tool-confirm-request → 渲染端确认卡);biliQuery 是
- * 模块级函数,经 ref 读取当前注入的确认函数(未注入 = 不确认,测试环境)
- */
-const biliConfirmRef: { current: { confirmAction: (title: string, detail: string) => Promise<boolean> } | null } = {
-  current: null,
-}
-
-/** DocFlow 服务进程(自动拉起后持有;disposeTools 关闭,防挂件退出残留) */
-let docflowProc: ChildProcess | null = null
-/** 并发互斥:多次 doc_convert 并行(executeToolBatch 的 Promise.all)
- * 同时探测失败会拉起多个服务进程——单例 promise,只拉一次 */
-let docflowStartPromise: Promise<void> | null = null
-
-/** 探测 DocFlow 服务是否就绪(/api/engine 是现有接口,轻量) */
-function probeDocflow(): Promise<boolean> {
-  return fetch(`${DOCFLOW_BASE}/api/engine`, { signal: AbortSignal.timeout(2000) })
-    .then((r) => r.ok)
-    .catch(() => false)
-}
-
-/**
- * 确保 DocFlow 服务在跑:未运行则**自动拉起**(2026-08-07 改造:
- * 本地构建的 docflow.exe 存在则优先,否则系统 python + server.py),
- * 轮询等待就绪——冻结启动慢(warmup imports + onnxruntime 加载),给 60s
- */
-async function ensureDocflowInner(): Promise<void> {
-  if (await probeDocflow()) return
-  const exe = path.join(toolsRoot(), 'docflow', 'dist', 'docflow', 'docflow.exe')
-  const script = path.join(toolsRoot(), 'docflow', 'server.py')
-  if (!existsSync(exe) && !existsSync(script)) {
-    throw new Error('DocFlow 工具缺失(tools/docflow 未找到)')
-  }
-  docflowProc = existsSync(exe)
-    ? spawn(exe, [], { windowsHide: true, stdio: 'ignore' })
-    : spawn('python', [script], { windowsHide: true, stdio: 'ignore', cwd: path.dirname(script) })
-  docflowProc.on('exit', () => {
-    docflowProc = null
-  })
-  const deadline = Date.now() + 60_000
-  for (;;) {
-    if (await probeDocflow()) return
-    if (Date.now() > deadline) {
-      throw new Error('DocFlow 服务启动超时,请检查 tools/docflow 是否完整')
-    }
-    await new Promise((r) => setTimeout(r, 1000))
-  }
-}
-
-function ensureDocflow(): Promise<void> {
-  if (!docflowStartPromise) {
-    docflowStartPromise = ensureDocflowInner().finally(() => {
-      docflowStartPromise = null
-    })
-  }
-  return docflowStartPromise
-}
-
-/** 引擎销毁:关闭自动拉起的 DocFlow 服务(挂件退出时清理,防进程残留) */
+/** 引擎销毁:清理工具域资源(当前 = 关闭自动拉起的 DocFlow 服务) */
 export function disposeTools(): void {
-  if (docflowProc) {
-    docflowProc.kill()
-    docflowProc = null
-  }
+  disposeDocflow()
 }
 
-/** 文档转换:对接本机 DocFlow 服务(上传 → 转换 → 轮询 → 下载) */
-async function docConvert(params: ToolParams): Promise<string> {
-  const inputPath = String(params.inputPath ?? '')
-  if (!inputPath) throw new Error('inputPath 不能为空')
-  if (!existsSync(inputPath)) throw new Error(`文件不存在:${inputPath}`)
-  const ext = path.extname(inputPath).toLowerCase()
-  if (!['.doc', '.docx', '.pdf'].includes(ext)) throw new Error('仅支持 .doc/.docx/.pdf 文件')
-  const target = String(params.target ?? (ext === '.pdf' ? 'docx' : 'pdf'))
-  if (!['pdf', 'docx', 'markdown'].includes(target)) throw new Error('target 仅支持 pdf/docx/markdown')
-  // 输出目录(2026-08-12):配置了工具输出根目录时缺省 =
-  // <根>/doc_convert/[<会话ID>](转换产物按对话分类);未配置保持
-  // 原语义 = 输入文件所在目录(LLM 显式传 outputDir 恒优先)
-  const outputDir =
-    typeof params.outputDir === 'string' && params.outputDir
-      ? params.outputDir
-      : (toolOutputDir('doc_convert') ?? path.dirname(inputPath))
-  const timeoutMs = Math.min(Math.max(Number(params.waitTimeout) || 120, 10), 600) * 1000
-
-  // 1. 服务探测:未运行则自动拉起(2026-08-07——用户无需手动
-  // python server.py;优先本地构建的 docflow.exe,否则系统 python)
-  await ensureDocflow()
-
-  // 2. 上传(mode=to_markdown 走 Markdown 转换;否则按扩展名自动判定)
-  const buf = await fs.readFile(inputPath)
-  const fd = new FormData()
-  fd.append('files', new Blob([buf]), path.basename(inputPath))
-  if (target === 'markdown') fd.append('mode', 'to_markdown')
-  const up = await fetch(`${DOCFLOW_BASE}/api/upload`, {
-    method: 'POST',
-    body: fd,
-    signal: AbortSignal.timeout(30000),
-  })
-  if (!up.ok) throw new Error(`DocFlow 上传失败 HTTP ${up.status}:${(await up.text()).slice(0, 300)}`)
-  const upJson = (await up.json()) as { jobs?: Array<{ id: string; name: string }> }
-  const jobId = upJson.jobs?.[0]?.id
-  if (!jobId) throw new Error('DocFlow 未接受该文件(格式不支持)')
-
-  // 3. 启动转换
-  const conv = await fetch(`${DOCFLOW_BASE}/api/convert/${jobId}`, {
-    method: 'POST',
-    signal: AbortSignal.timeout(10000),
-  })
-  if (!conv.ok) throw new Error(`DocFlow 转换启动失败 HTTP ${conv.status}`)
-
-  // 4. 轮询状态
-  const started = Date.now()
-  for (;;) {
-    if (Date.now() - started > timeoutMs) throw new Error('转换超时,请稍后在 DocFlow 页面查看')
-    const st = await fetch(`${DOCFLOW_BASE}/api/status/${jobId}`, {
-      signal: AbortSignal.timeout(10000),
-    }).catch(() => null)
-    if (st?.ok) {
-      const s = (await st.json()) as { status: string; error?: string | null }
-      if (s.status === 'done') break
-      if (s.status === 'error') throw new Error(`转换失败:${s.error ?? '未知错误'}`)
-    }
-    await new Promise((r) => setTimeout(r, 1500))
-  }
-
-  // 5. 下载到输出目录
-  const dl = await fetch(`${DOCFLOW_BASE}/api/download/${jobId}`, {
-    signal: AbortSignal.timeout(60000),
-  })
-  if (!dl.ok) throw new Error(`DocFlow 下载失败 HTTP ${dl.status}`)
-  const outBuf = Buffer.from(await dl.arrayBuffer())
-  const outName = `${path.basename(inputPath, ext)}.${target === 'markdown' ? 'md' : target}`
-  await fs.mkdir(outputDir, { recursive: true })
-  const outPath = path.join(outputDir, outName)
-  await fs.writeFile(outPath, outBuf)
-  return `转换完成:${outPath}(${outBuf.length} 字节)`
-}
 
 /** 工具输出 → LLM 回填的最大长度(参考后端 token 预算治理语义) */
 const RESULT_MAX = 8000
@@ -830,8 +172,10 @@ function runCommand(command: string, cwd: string, timeoutMs: number): Promise<st
         const out = [stdout, stderr].filter((s) => s && s.trim()).join('\n')
         if (err) {
           // 命令非零退出:输出仍有价值,带错误标记返回,不直接抛
-          const code = (err as NodeJS.ErrnoException & { code?: string | number }).code
-          resolve(`${out || '(无输出)'}\n[命令退出码 ${code ?? '未知'}]`)
+          // (ExecException.code 是 number、ErrnoException.code 是 string,
+          // 两类型不充分重叠无法交叉 cast,收窄为 unknown 字段探测)
+          const errLike = err as { code?: unknown; signal?: unknown }
+          resolve(`${out || '(无输出)'}\n[命令退出码 ${errLike.code ?? errLike.signal ?? '未知'}]`)
           return
         }
         resolve(out || '(命令完成,无输出)')
@@ -840,117 +184,7 @@ function runCommand(command: string, cwd: string, timeoutMs: number): Promise<st
   })
 }
 
-/** HTML 标签与实体清理 */
-function stripHtml(s: string): string {
-  return s
-    .replace(/<[^>]*>/g, ' ')
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#x27;|&#39;/g, "'")
-    .replace(/&nbsp;/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-}
 
-const SEARCH_UA =
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36'
-
-/** Bing 搜索(国内可达;解析 b_algo 结果块) */
-async function searchBing(query: string, n: number): Promise<string> {
-  const url = `https://www.bing.com/search?q=${encodeURIComponent(query)}&count=${n}`
-  const res = await fetch(url, { headers: { 'User-Agent': SEARCH_UA }, signal: AbortSignal.timeout(15000) })
-  if (!res.ok) throw new Error(`Bing 返回 HTTP ${res.status}`)
-  const html = await res.text()
-  const itemRe =
-    /<li class="b_algo"[\s\S]*?<h2[^>]*>\s*<a[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?(?:<p[^>]*>([\s\S]*?)<\/p>)?[\s\S]*?<\/li>/g
-  const results: string[] = []
-  let m: RegExpExecArray | null
-  while ((m = itemRe.exec(html)) && results.length < n) {
-    const href = m[1]
-    if (!/^https?:\/\//i.test(href)) continue
-    const title = stripHtml(m[2])
-    const snippet = stripHtml(m[3] ?? '')
-    if (!title) continue
-    results.push(`${results.length + 1}. ${title}\n   ${href}\n   ${snippet}`)
-  }
-  if (results.length === 0) throw new Error('Bing 未解析到结果')
-  return results.join('\n')
-}
-
-/** DuckDuckGo 搜索(回退;国内不可达,部分网络环境可用) */
-async function searchDuckDuckGo(query: string, n: number): Promise<string> {
-  const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`
-  const res = await fetch(url, { headers: { 'User-Agent': SEARCH_UA }, signal: AbortSignal.timeout(15000) })
-  if (!res.ok) throw new Error(`DDG 返回 HTTP ${res.status}`)
-  const html = await res.text()
-  const linkRe = /<a[^>]*class="[^"]*result__a[^"]*"[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/g
-  const snippetRe = /<a[^>]*class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/a>/g
-  const links: Array<{ href: string; title: string }> = []
-  let m: RegExpExecArray | null
-  while ((m = linkRe.exec(html)) && links.length < n) {
-    const href = m[1].replace(/^\/\/duckduckgo\.com\/l\/\?uddg=/, '').replace(/&rut=.*$/, '')
-    links.push({ href: decodeURIComponent(href), title: stripHtml(m[2]) })
-  }
-  const snippets: string[] = []
-  while ((m = snippetRe.exec(html)) && snippets.length < n) snippets.push(stripHtml(m[1]))
-  if (links.length === 0) throw new Error('DDG 未解析到结果')
-  return links.map((l, i) => `${i + 1}. ${l.title}\n   ${l.href}\n   ${snippets[i] ?? ''}`).join('\n')
-}
-
-/** 网页搜索(Bing 主用,DDG 回退;均失败给出明确提示) */
-async function webSearch(query: string, count: number): Promise<string> {
-  const n = Math.min(Math.max(count || 5, 1), 10)
-  try {
-    return await searchBing(query, n)
-  } catch {
-    try {
-      return await searchDuckDuckGo(query, n)
-    } catch {
-      return '(搜索服务暂不可达,可稍后重试或换关键词)'
-    }
-  }
-}
-
-/** 媒体扩展名 → 媒体类型(open_file / exec_command 媒体拦截共用,
- * 2026-08-08) */
-function mediaKindForPath(target: string): 'img' | 'video' | 'audio' | null {
-  if (/\.(png|jpe?g|gif|webp|bmp)$/i.test(target)) return 'img'
-  if (/\.(mp4|m4v|mov|webm)$/i.test(target)) return 'video'
-  if (/\.(mp3|wav|flac|ogg|oga|opus|m4a|aac)$/i.test(target)) return 'audio'
-  return null
-}
-
-/**
- * 从 `start` 命令提取媒体文件路径(2026-08-08,exec_command 媒体拦截):
- * LLM 播放视频常用 `start "标题" "C:\x.mp4"`(cmd 引号语义:第一个引号
- * 串是窗口标题)或 `start C:\x.mp4`(裸 token)。返回绝对路径(相对路径
- * 按 cwd 解析);非 start 命令或提取不出媒体路径返回 null
- */
-function extractMediaPathFromStart(command: string, cwd: string): string | null {
-  const m = /^start\s+/i.exec(command)
-  if (!m) return null
-  const rest = command.slice(m[0].length).trim()
-  if (!rest) return null
-  let target = ''
-  if (rest.startsWith('"')) {
-    // 引号形式:start "标题" "路径"(两段)或 start "路径"(单段——
-    // cmd 语义单段是标题,不打开文件,不拦截防误判)
-    const q1 = /^"([^"]*)"/.exec(rest)
-    if (q1) {
-      const after = rest.slice(q1[0].length).trim()
-      if (after.startsWith('"')) {
-        const q2 = /^"([^"]*)"/.exec(after)
-        if (q2) target = q2[1]
-      }
-    }
-  } else {
-    target = rest.split(/\s+/)[0]
-  }
-  if (!target) return null
-  return path.isAbsolute(target) ? target : path.resolve(cwd, target)
-}
 
 /** 模块化工具清单(每次注册都是独立对象,便于后续按需增删) */
 /**
@@ -1074,13 +308,13 @@ export function createTools(deps: {
   getOutputDir?(): string | null
   getSessionId?(): string | null
 }): AgentTool[] {
-  // 工具输出目录环境注入(模块级,工具执行时读取)
-  outputEnv = {
+  // 工具输出目录环境注入(tools-env 模块级,工具执行时读取)
+  setOutputEnv({
     getOutputDir: deps.getOutputDir ?? (() => null),
     getSessionId: deps.getSessionId ?? (() => null),
-  }
-  // bili 批量下载确认门注入(模块级 ref,biliQuery 同步读取)
-  biliConfirmRef.current = deps.confirmAction ? { confirmAction: deps.confirmAction } : null
+  })
+  // bili 批量下载确认门注入(tools-bili 模块级 ref,biliQuery 同步读取)
+  setBiliConfirmAction(deps.confirmAction ?? null)
   // 通用任务注册表接线(替代原 bili 专用 bgDone 模块级回调):任何工具
   // 注册的任务进入终态(完成/失败/取消)都走这里 → background-done
   setTaskDoneHandler((task) => {

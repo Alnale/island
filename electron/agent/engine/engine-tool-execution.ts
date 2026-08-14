@@ -2,22 +2,26 @@
  * 工具执行业务
  *
  * 职责:批量工具执行、子代理(delegate)运行、delegate 工具定义。
- * 本文件自包含所有需要的常量和辅助函数(raceWithTimeout、validateRequiredArgs 等),
- * 不依赖其他 engine-* 拆分文件(允许与主循环里的同名函数代码重复——业务独立演化)。
+ * 自包含工具执行所需的辅助函数(raceWithTimeout、validateRequiredArgs,
+ * 导出供主循环复用——允许与主循环独立演化);回合级共享文案经
+ * engine-turn-text.ts 单点维护。
  */
 
 import { randomUUID } from 'node:crypto'
-import { parseToolArgs } from './deepseek'
-import { streamByConfig } from './provider'
+import { parseToolArgs } from '../tools/tool-args'
 import { createTurnConfirmGate } from './engine-confirm-gate'
+import { BUDGET_TRUNCATE_HINT } from './engine-turn-text'
+import type { ToolExecHooks } from '../plugin/tool-events'
+import type { LlmStreamParams } from '../plugin/llm'
 import type {
   AgentConfig,
   AgentMessage,
   AgentPart,
   AgentTool,
   MediaAttachment,
+  ProviderOutcome,
   ToolParams,
-} from './types'
+} from '../types'
 
 /** 工具循环迭代上限(程序级保险) */
 const MAX_STEPS = 1000
@@ -27,18 +31,9 @@ const TOOL_TIMEOUT_MS = 60_000
 const SUBAGENT_STEP_TIMEOUT_MS = 55_000
 
 /**
- * 预算不足提示(子代理用)
+ * 工具执行兜底超时(导出供主循环复用)
  */
-const BUDGET_TRUNCATE_HINT =
-  '【系统提示,非用户输入】上一轮回复因输出预算(max_output_tokens)不足被截断。' +
-  '如果当前任务需要更长的输出:请调用 set_output_budget 工具(action=get 查看当前预算,' +
-  'action=set 按需调大,不必顶满上限),然后继续完成被截断的回复;' +
-  '若任务已基本完成,直接给出收尾回复即可。'
-
-/**
- * 工具执行兜底超时(本文件用)
- */
-function raceWithTimeout<T>(
+export function raceWithTimeout<T>(
   promise: Promise<T>,
   ms: number,
   name: string,
@@ -74,9 +69,9 @@ function raceWithTimeout<T>(
 }
 
 /**
- * 工具参数校验(本文件用)
+ * 工具参数校验(导出供主循环复用)
  */
-function validateRequiredArgs(
+export function validateRequiredArgs(
   tool: AgentTool,
   args: Record<string, unknown>,
 ): string | null {
@@ -109,7 +104,11 @@ function validateRequiredArgs(
 }
 
 /**
- * 并发执行一批工具调用(每个独立超时),按传入顺序返回结果
+ * 并发执行一批工具调用(每个独立超时),按传入的顺序返回结果
+ *
+ * hooks(2026-08-14 能力事件):每次调用前跑 tools/pre-execute 瀑布
+ * (可改写参数或 deny 拒绝),后跑 tools/post-execute 瀑布(可改写结果);
+ * 未注入钩子时行为与旧版完全一致。
  */
 export async function executeToolBatch(
   batch: Array<{ id: string; name: string; args: Record<string, unknown> }>,
@@ -117,6 +116,7 @@ export async function executeToolBatch(
   list: AgentTool[],
   confirmGate?: (name: string, args: Record<string, unknown>) => Promise<boolean>,
   signal?: AbortSignal,
+  hooks?: ToolExecHooks,
 ): Promise<
   Array<{
     id: string
@@ -136,39 +136,54 @@ export async function executeToolBatch(
       let ok: boolean
       let image: string | undefined
       let media: MediaAttachment[] | undefined
+      let execArgs = args
       if (!tool) {
         out = `未知工具:${name}(可用工具:${list.map((t) => t.name).join('、')})`
         ok = false
       } else {
-        try {
-          if (confirmGate && !(await confirmGate(name, args))) {
-            out = '用户拒绝了命令执行'
-            ok = false
-          } else {
-            const argError = validateRequiredArgs(tool, args)
-            if (argError) {
-              out = `工具执行失败:${argError}`
+        // tools/pre-execute:策略插件可改写参数或 deny 拒绝(大声失败)
+        const plan = hooks ? await hooks.preExecute({ tool, args }) : { tool, args }
+        execArgs = plan.args
+        if (plan.deny) {
+          out = `工具执行被拒绝:${plan.deny}`
+          ok = false
+        } else {
+          try {
+            if (confirmGate && !(await confirmGate(name, execArgs))) {
+              out = '用户拒绝了命令执行'
               ok = false
             } else {
-              const raw = await raceWithTimeout(
-                Promise.resolve(tool.execute(args, { signal })),
-                tool.timeoutMs ?? TOOL_TIMEOUT_MS,
-                name,
-                signal,
-              )
-              if (typeof raw === 'object') {
-                out = raw.text
-                image = raw.image
-                media = raw.media
+              const argError = validateRequiredArgs(tool, execArgs)
+              if (argError) {
+                out = `工具执行失败:${argError}`
+                ok = false
               } else {
-                out = raw
+                const raw = await raceWithTimeout(
+                  Promise.resolve(tool.execute(execArgs, { signal })),
+                  tool.timeoutMs ?? TOOL_TIMEOUT_MS,
+                  name,
+                  signal,
+                )
+                if (typeof raw === 'object') {
+                  out = raw.text
+                  image = raw.image
+                  media = raw.media
+                } else {
+                  out = raw
+                }
+                ok = true
               }
-              ok = true
             }
+          } catch (err) {
+            out = `工具执行失败:${(err as Error).message}`
+            ok = false
           }
-        } catch (err) {
-          out = `工具执行失败:${(err as Error).message}`
-          ok = false
+        }
+        // tools/post-execute:策略插件可改写结果(裁剪/标注/审计)
+        if (hooks) {
+          const after = await hooks.postExecute({ tool, args: execArgs, ok, out, durationMs: Date.now() - started })
+          ok = after.ok
+          out = after.out
         }
       }
       return { id, name, ok, out, media, image, durationMs: Date.now() - started }
@@ -185,7 +200,9 @@ async function runSubAgent(
   getConfig: () => AgentConfig,
   getOutputBudget: () => number,
   getAllTools: () => Promise<AgentTool[]>,
+  stream: (p: LlmStreamParams) => Promise<ProviderOutcome>,
   signal?: AbortSignal,
+  hooks?: ToolExecHooks,
 ): Promise<string> {
   const task = String(params.task ?? '').trim()
   if (!task) throw new Error('delegate 的 task 参数不能为空')
@@ -222,7 +239,7 @@ async function runSubAgent(
     )
     const subMap = new Map(subTools.map((t) => [t.name, t]))
 
-    const result = await streamByConfig({
+    const result = await stream({
       config,
       system,
       history: historyIn,
@@ -242,7 +259,7 @@ async function runSubAgent(
     if (text) msgParts.push({ type: 'text', text })
     if (result.calls.length === 0 && !result.truncated) break
     const batch = result.calls.map((c) => ({ id: c.id, name: c.name, args: parseToolArgs(c.args) }))
-    const results = await executeToolBatch(batch, subMap, subTools, subConfirm, signal)
+    const results = await executeToolBatch(batch, subMap, subTools, subConfirm, signal, hooks)
     for (let i = 0; i < batch.length; i++) {
       const r = results[i]
       msgParts.push({ type: 'tool-call', id: r.id, name: r.name, args: batch[i].args })
@@ -276,6 +293,10 @@ export function createDelegateTool(deps: {
   getConfig: () => AgentConfig
   getOutputBudget: () => number
   getAllTools: () => Promise<AgentTool[]>
+  /** LLM 流式调用(由 ctx.llm 接缝注入,子代理与主循环共用同一接缝) */
+  stream: (params: LlmStreamParams) => Promise<ProviderOutcome>
+  /** 工具执行链钩子(tools/pre-execute + post-execute 瀑布;子代理同享扩展点) */
+  hooks?: ToolExecHooks
 }): AgentTool {
   return {
     name: 'delegate',
@@ -301,7 +322,9 @@ export function createDelegateTool(deps: {
         deps.getConfig,
         deps.getOutputBudget,
         deps.getAllTools,
+        deps.stream,
         ctx?.signal,
+        deps.hooks,
       )
     },
   }

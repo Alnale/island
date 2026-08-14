@@ -5,9 +5,9 @@
  * 本文件自包含所有需要的常量和逻辑,不依赖其他 engine-* 拆分文件。
  */
 
-import { isMimoProvider } from './mimo-constants'
-import { deepseekErrorMessage } from './deepseek-constants'
-import type { AgentTool, EngineDeps, ToolParams } from './types'
+import { isMimoProvider } from '../providers/mimo-constants'
+import { deepseekErrorMessage } from '../providers/deepseek-constants'
+import type { AgentConfig, AgentTool, EvolutionLike, ToolParams } from '../types'
 
 /** 主对话输出预算缺省值(含思维链 token) */
 const MAIN_MAX_OUTPUT_TOKENS = 8_192
@@ -82,11 +82,16 @@ async function fetchDeepseekBalance(config: {
 /**
  * 创建内置专属工具组
  * @param outputBudgetRef 引用引擎的 outputBudget 可变状态
- * @param deps 引擎依赖
+ * @param deps 窄依赖(仅本组工具实际用到的宿主能力;插件化重构后由
+ *   builtinToolsPlugin 从 ctx 服务翻译注入,不再吃整个 EngineDeps)
  */
 export function createBuiltinTools(
   outputBudgetRef: { get value(): number; set value(n: number) },
-  deps: EngineDeps,
+  deps: {
+    getConfig(): AgentConfig
+    getEvolution?(): EvolutionLike | null
+    updateAgentConfig?(patch: Partial<AgentConfig>): void
+  },
 ): AgentTool[] {
   /** 记忆自我进化工具 */
   const evolveTool: AgentTool = {

@@ -14,7 +14,7 @@
  *
  * 运行:npx electron --disable-gpu tests/test-title-live.cjs
  * 结果双写 scripts/title-test-result.log(stdout 管道可能被缓冲吞掉,实测)。
- * 迭代措辞:改 electron/agent/subagents.ts → 重跑本脚本。
+ * 迭代措辞:改 electron/agent/subagents/subagents.ts → 重跑本脚本。
  */
 const { app, safeStorage } = require('electron')
 const fs = require('node:fs')

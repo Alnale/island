@@ -16,10 +16,16 @@ import { promises as fs } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
-import { createSummaryAgent, createAgentEngine } from '../electron/agent/engine'
+import { createSummaryAgent, createAgentEngine } from '../electron/agent/engine/engine'
 import { createEvolution } from '../electron/agent/evolution'
 import { createMemoryStore } from '../electron/agent/memory'
 import type { AgentConfig, AgentMessage } from '../electron/agent/types'
+
+// 进化通知钩子:测试在全局挂收集数组,运行时通知逻辑见 __notifications 即写入
+declare global {
+  // eslint-disable-next-line no-var
+  var __notifications: Array<{ title?: string }> | undefined
+}
 
 let passed = 0
 let failed = 0
@@ -43,6 +49,11 @@ function assert(cond: unknown, msg: string): asserts cond {
 const settingsPath = path.join(process.env.APPDATA || '', 'dynamic-island', 'settings.json')
 const settings = JSON.parse(await fs.readFile(settingsPath, 'utf8'))
 const config: AgentConfig = {
+  activeProvider: 'deepseek',
+  providers: {
+    deepseek: { apiKey: '', baseURL: '', model: '' },
+    mimo: { apiKey: '', baseURL: '', model: '' },
+  },
   apiKey: settings.agent?.apiKey ?? '',
   baseURL: settings.agent?.baseURL ?? 'https://api.deepseek.com',
   model: settings.agent?.model ?? 'deepseek-v4-flash',

@@ -20,5 +20,8 @@
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true
   },
-  "include": ["../electron/**/*.ts", "../scripts/system-media-bridge.ts"]
+  /* tests/ 直接导入 electron/agent 源码,与本 config 同语义检查;
+     不纳入时测试文件落入 IDE 推断项目(默认严格),报一堆假错
+     (2026-08-14 修复:mock config 缺 activeProvider/providers、隐式 any) */
+  "include": ["../electron/**/*.ts", "../scripts/system-media-bridge.ts", "../tests/**/*.ts"]
 }

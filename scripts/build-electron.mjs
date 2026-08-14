@@ -2,7 +2,7 @@
  * Electron 侧构建:
  * 1. esbuild 将 scripts/system-media-bridge.ts 打包为 CJS(electron/bridge.cjs),
  *    Electron 主进程以 utilityProcess 启动它;
- * 2. esbuild 将 electron/agent/engine.ts 打包为 CJS(electron/agent.cjs),
+ * 2. esbuild 将 electron/agent/engine/engine.ts 打包为 CJS(electron/agent.cjs),
  *    主进程直接 require 的 Agent 引擎(DeepSeek Responses provider +
  *    工具系统,零第三方依赖;'electron' 保持外部);
  * 3. 用 Electron 离屏渲染把 public/favicon.svg 转成 PNG 图标(electron/icon.png),
@@ -34,7 +34,7 @@ console.log('[build-electron] bridge.cjs done')
 
 // ---- 1.5 打包 Agent 引擎(主进程内运行,工具系统需 electron API) -----------
 await build({
-  entryPoints: [path.join(electronDir, 'agent', 'engine.ts')],
+  entryPoints: [path.join(electronDir, 'agent', 'engine', 'engine.ts')],
   outfile: path.join(electronDir, 'agent.cjs'),
   bundle: true,
   platform: 'node',

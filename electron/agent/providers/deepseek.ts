@@ -27,7 +27,7 @@
 
 import { parseSse, sanitizeJsonStrings, truncateResult } from './sse'
 import { deepseekErrorMessage } from './deepseek-constants'
-import type { AgentConfig, AgentEvent, AgentMessage, AgentPart, AgentTool, ProviderOutcome } from './types'
+import type { AgentConfig, AgentEvent, AgentMessage, AgentPart, AgentTool, ProviderOutcome } from '../types'
 
 /** 工具调用流式累积器 */
 interface StreamCall {
@@ -374,16 +374,5 @@ export async function streamResponse(params: {
   }
 }
 
-/** 解析工具参数 JSON(容错:非对象/空串 → {}) */
-export function parseToolArgs(raw: string): Record<string, unknown> {
-  const text = raw.trim()
-  if (!text) return {}
-  try {
-    const parsed = JSON.parse(text)
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
-      ? (parsed as Record<string, unknown>)
-      : {}
-  } catch {
-    return { _raw: text }
-  }
-}
+// 解析工具参数 JSON(容错:非对象/空串 → {})——实现已迁至中性模块 tool-args.ts,此处保留兼容 re-export
+export { parseToolArgs } from '../tools/tool-args'

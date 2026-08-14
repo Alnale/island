@@ -23,7 +23,7 @@
 
 import { parseSse, sanitizeJsonStrings, truncateResult } from './sse'
 import { deepseekErrorMessage } from './deepseek-constants'
-import type { AgentConfig, AgentEvent, AgentMessage, AgentPart, AgentTool, ProviderOutcome } from './types'
+import type { AgentConfig, AgentEvent, AgentMessage, AgentPart, AgentTool, ProviderOutcome } from '../types'
 
 /** 历史 → Anthropic messages(工具结果重排 + 相邻同角色合并) */
 export function historyToAnthropic(history: AgentMessage[]): Array<{ role: 'user' | 'assistant'; content: unknown[] }> {
