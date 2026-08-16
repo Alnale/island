@@ -42,12 +42,6 @@ if (!fs.existsSync(path.join(__dirname, 'agent.cjs'))) {
 }
 const agentEngineModule = require('./agent.cjs')
 
-// 卸载模式(2026-08-17):electron.exe --uninstall 启动,进入定制卸载向导
-// (加载 uninstall.html),不初始化挂件/引擎/NapCat。由安装器生成的
-// uninstall.cmd 先 taskkill 掉已运行实例再启动本模式;卸载完成延迟删除
-// 安装目录后退出。见 runUninstaller()
-const IS_UNINSTALL = process.argv.includes('--uninstall')
-
 // **系统通知统一出口(2026-08-13,补丁版 Electron 主进程 Notification
 // 崩溃规避)**:自编译 HEVC 构建的 `new Notification().show()`(Chromium
 // toast)与并发网络活动(NapCat WS/LLM 流式)组合实测必崩(EXCEPTION_
@@ -4191,168 +4185,17 @@ function createTray() {
 }
 
 // ---------------------------------------------------------------------------
-// 卸载模式(electron.exe --uninstall,2026-08-17)
-// ---------------------------------------------------------------------------
-// 定制卸载向导:系统设置 → 应用 → 灵动岛 → 卸载会执行安装器生成的
-// uninstall.cmd(先 taskkill 已运行实例,再 start electron.exe --uninstall);
-// 本模式只创建卸载窗口加载 uninstall.html,不初始化挂件/引擎/NapCat。
-// 卸载完成:主进程延迟删除安装目录(自身 electron.exe 正在运行无法立即
-// 删除,交由后台 cmd 等进程退出后整体清除)再退出。
-
-const UNINS_APP_NAME = '灵动岛'
-let uninstallWin = null
-
-function uninsEmitProgress(p) {
-  if (uninstallWin && !uninstallWin.isDestroyed()) {
-    uninstallWin.webContents.send('unins:progress', p)
-  }
-}
-
-/** 当前安装目录:electron.exe 位于 <installDir>/electron/electron.exe */
-function uninsInstallDir() {
-  return path.dirname(path.dirname(process.execPath))
-}
-
-function runUninstaller() {
-  uninstallWin = new BrowserWindow({
-    width: 940,
-    height: 660,
-    minWidth: 900,
-    minHeight: 620,
-    show: false,
-    frame: false,
-    resizable: false,
-    maximizable: false,
-    fullscreenable: false,
-    backgroundColor: '#0a0c16',
-    icon: iconImage(256),
-    title: `${UNINS_APP_NAME} · 卸载`,
-    webPreferences: {
-      preload: path.join(__dirname, 'uninstall-preload.cjs'),
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: true,
-      webSecurity: true,
-      spellcheck: false,
-    },
-  })
-  uninstallWin.loadFile(path.join(__dirname, 'uninstall.html'))
-  uninstallWin.once('ready-to-show', () => uninstallWin.show())
-  uninstallWin.on('closed', () => { uninstallWin = null })
-
-  // 卸载信息(界面首屏):应用名/版本/安装目录/个人数据路径与存在性
-  ipcMain.handle('unins:info', async () => {
-    const userDataDir = path.join(process.env.APPDATA || '', 'dynamic-island')
-    let dataSizeKB = 0
-    if (fs.existsSync(userDataDir)) {
-      try {
-        const walk = (dir) => {
-          let sum = 0
-          for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
-            const p = path.join(dir, ent.name)
-            if (ent.isDirectory()) sum += walk(p)
-            else if (ent.isFile()) sum += fs.statSync(p).size
-          }
-          return sum
-        }
-        dataSizeKB = Math.round(walk(userDataDir) / 1024)
-      } catch { /* 忽略统计失败 */ }
-    }
-    return {
-      appName: UNINS_APP_NAME,
-      version: app.getVersion() || '3.1.0',
-      installDir: uninsInstallDir(),
-      userDataDir,
-      hasData: fs.existsSync(userDataDir),
-      dataSizeKB,
-    }
-  })
-
-  // 执行卸载:删快捷方式 → 删注册表 → 可选删个人数据 → 100% 完成
-  ipcMain.handle('unins:run', async (_e, opts) => {
-    const deleteData = !!(opts && opts.deleteData)
-    const installDir = uninsInstallDir()
-    const desktopLnk = path.join(process.env.USERPROFILE || '', 'Desktop', `${UNINS_APP_NAME}.lnk`)
-    const startLnk = path.join(
-      process.env.APPDATA || '',
-      'Microsoft', 'Windows', 'Start Menu', 'Programs',
-      `${UNINS_APP_NAME}.lnk`,
-    )
-    const userDataDir = path.join(process.env.APPDATA || '', 'dynamic-island')
-    try {
-      uninsEmitProgress({ percent: 0.1, title: '正在退出灵动岛…', stage: '', file: '' })
-      // 1. 快捷方式(失败降级,不阻断)
-      uninsEmitProgress({ percent: 0.35, title: '移除快捷方式…', stage: '', file: '' })
-      for (const lnk of [desktopLnk, startLnk]) {
-        try { fs.rmSync(lnk, { force: true }) } catch { /* 忽略 */ }
-      }
-      // 2. 注册表卸载项 + 开机自启项(reg.exe,降级忽略)
-      uninsEmitProgress({ percent: 0.55, title: '清除注册表项…', stage: '', file: '' })
-      const uninsKey = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\' + UNINS_APP_NAME
-      const runKey = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run'
-      try {
-        require('node:child_process').spawnSync('reg.exe', ['delete', uninsKey, '/f'], { windowsHide: true })
-      } catch { /* 忽略 */ }
-      try {
-        require('node:child_process').spawnSync('reg.exe', ['delete', runKey, '/v', UNINS_APP_NAME, '/f'], { windowsHide: true })
-      } catch { /* 忽略 */ }
-      // 3. 个人数据(可选)
-      if (deleteData) {
-        uninsEmitProgress({ percent: 0.75, title: '删除个人数据…', stage: '', file: '' })
-        try { fs.rmSync(userDataDir, { recursive: true, force: true }) } catch { /* 忽略 */ }
-      }
-      uninsEmitProgress({ percent: 1, title: '卸载完成', stage: '', file: '' })
-      return { ok: true, installDir }
-    } catch (e) {
-      return { ok: false, error: (e && e.message) || String(e) }
-    }
-  })
-
-  // 完成卸载:延迟删除安装目录(等自身进程退出后整体清除)再退出
-  ipcMain.handle('unins:finish', async () => {
-    const installDir = uninsInstallDir()
-    try {
-      const script = `timeout /t 2 /nobreak >nul & rmdir /s /q "${installDir}"`
-      const child = require('node:child_process').spawn('cmd.exe', ['/c', script], {
-        detached: true,
-        stdio: 'ignore',
-        windowsHide: true,
-      })
-      child.unref()
-    } catch { /* 忽略 */ }
-    app.exit(0)
-    return { ok: true }
-  })
-
-  // 取消卸载:直接退出,不删除安装目录
-  ipcMain.handle('unins:cancel', async () => {
-    app.exit(0)
-    return { ok: true }
-  })
-
-  ipcMain.on('unins:minimize', () => {
-    if (uninstallWin && !uninstallWin.isDestroyed()) uninstallWin.minimize()
-  })
-}
-
-// ---------------------------------------------------------------------------
 // 应用生命周期
 // ---------------------------------------------------------------------------
 
-// 单实例:重复启动时唤起已有挂件;卸载模式跳过锁检查(uninstall.cmd 已
-// taskkill 旧实例,直接进入卸载向导,不与挂件实例抢锁)
-const gotLock = IS_UNINSTALL ? true : app.requestSingleInstanceLock()
+// 单实例:重复启动时唤起已有挂件
+const gotLock = app.requestSingleInstanceLock()
 if (!gotLock) {
   app.quit()
 } else {
   app.on('second-instance', () => showWindow())
 
   app.whenReady().then(() => {
-    // 卸载模式:只跑卸载向导,不初始化挂件/引擎/NapCat
-    if (IS_UNINSTALL) {
-      runUninstaller()
-      return
-    }
     // Windows 通知 AppUserModelID(Bug 修复 2026-08-07):不设置的话
     // new Notification().show() 静默失败——右下角不弹(实测:主动陪伴
     // 心理嘀咕从未出现;evolution/notify 的通知同样受影响)。
@@ -4402,9 +4245,6 @@ if (!gotLock) {
     }
   })
 
-  // 挂件常驻:所有窗口关闭也不退出(托盘退出除外);
-  // 卸载模式窗口关闭即退出(卸载向导不常驻)
-  app.on('window-all-closed', () => {
-    if (IS_UNINSTALL) app.quit()
-  })
+  // 挂件常驻:所有窗口关闭也不退出(托盘退出除外)
+  app.on('window-all-closed', () => {})
 }

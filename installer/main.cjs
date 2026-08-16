@@ -151,25 +151,17 @@ function regSet(rootPath, values) {
   runPowershell(lines.join('; '))
 }
 
-// ---- 生成卸载入口脚本 ----
-// 系统设置 → 应用 → 灵动岛 → 卸载 会执行 UninstallString 指向的
-// uninstall.cmd。它不直接删文件,而是启动定制卸载向导(electron.exe
-// --uninstall,见 electron/main.cjs runUninstaller):图形界面承载
-// 确认/删个人数据/进度/完成,完成后延迟删除安装目录。
-// 必须先 taskkill 已运行实例——卸载向导自身也是 electron.exe,若
-// 旧实例还在,进程占用会导致安装目录删除失败。
-function writeUninstaller(installDir) {
-  const exe = path.join(installDir, 'electron', 'electron.exe')
-  const script = [
-    '@echo off',
-    'title 卸载 灵动岛',
-    'rem ---- 先退出已运行的灵动岛(卸载向导自身也是 electron.exe,必须在此前杀掉) ----',
-    'taskkill /IM electron.exe /F >nul 2>&1',
-    'timeout /t 1 /nobreak >nul',
-    `start "" "${exe}" --uninstall`,
-    'exit /b 0',
-  ].join('\r\n')
-  return fsp.writeFile(path.join(installDir, 'uninstall.cmd'), script, 'utf8')
+// ---- 安装卸载器 ----
+// 把发行包里的独立卸载器 exe(release/灵动岛/灵动岛卸载器.exe,由
+// scripts/build-uninstaller.mjs 产出)复制到安装目录根;系统设置卸载入口
+// (UninstallString)与安装目录双击都指向它。卸载器自包含 electron 运行时,
+// 不依赖主应用(主应用损坏也能卸载)。
+function installUninstaller(installDir) {
+  const src = path.join(releaseDir, '灵动岛卸载器.exe')
+  if (!fs.existsSync(src)) {
+    throw new Error('发行包缺少 灵动岛卸载器.exe(需先运行 node scripts/build-uninstaller.mjs)')
+  }
+  fs.copyFileSync(src, path.join(installDir, '灵动岛卸载器.exe'))
 }
 
 // ---- 执行安装 ----
@@ -286,8 +278,8 @@ async function performInstall(opts) {
       }, 0.97, '设置开机自启')
     }
 
-    // 5. 卸载项 + 卸载脚本(uninstall.cmd 写安装目录,核心;注册表卸载项降级)
-    await writeUninstaller(installDir)
+    // 5. 卸载器 + 卸载项(卸载器 exe 复制到安装目录根,核心;注册表项降级)
+    attempt('卸载器', () => installUninstaller(installDir), 0.98, '安装卸载器')
     attempt('卸载项', () => {
       regSet('HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\' + APP_NAME, [
         ['DisplayName', APP_NAME, 'String'],
@@ -295,7 +287,7 @@ async function performInstall(opts) {
         ['Publisher', '灵动岛', 'String'],
         ['InstallLocation', installDir, 'String'],
         ['DisplayIcon', exe, 'String'],
-        ['UninstallString', `"${path.join(installDir, 'uninstall.cmd')}"`, 'String'],
+        ['UninstallString', `"${path.join(installDir, '灵动岛卸载器.exe')}"`, 'String'],
         ['NoModify', '1', 'DWord'],
         ['NoRepair', '1', 'DWord'],
       ])

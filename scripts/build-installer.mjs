@@ -22,6 +22,28 @@ const dist = path.join(root, 'node_modules', 'electron', 'dist')
 const outDir = path.join(root, 'release', '灵动岛安装器')
 const exeName = '灵动岛安装器.exe'
 
+// 清理旧输出目录:个别文件被杀毒/索引临时锁定时跳过残留,不阻断打包
+// (新文件随后覆盖;锁定释放后下次打包即干净)
+async function rmOutDir() {
+  try {
+    await fsp.rm(outDir, { recursive: true, force: true })
+    return
+  } catch (e) {
+    console.warn(`[installer] 清理旧目录部分文件被占用(可能为杀毒/索引扫描),跳过残留:${e.code || e.message}`)
+  }
+  if (fs.existsSync(outDir)) {
+    const walk = async (dir) => {
+      for (const ent of await fsp.readdir(dir, { withFileTypes: true })) {
+        const p = path.join(dir, ent.name)
+        if (ent.isDirectory()) await walk(p)
+        try { await fsp.unlink(p) } catch { /* 锁定,跳过 */ }
+      }
+      try { await fsp.rmdir(dir) } catch { /* 忽略 */ }
+    }
+    await walk(outDir)
+  }
+}
+
 async function main() {
   if (!fs.existsSync(path.join(dist, 'electron.exe'))) {
     console.error('[installer] 缺少 node_modules/electron/dist/electron.exe,请先安装依赖')
@@ -33,11 +55,16 @@ async function main() {
   }
 
   console.log('[installer] ===== 灵动岛安装器独立打包 =====')
-  await fsp.rm(outDir, { recursive: true, force: true })
+  await rmOutDir()
   await fsp.mkdir(outDir, { recursive: true })
 
   console.log('[installer] 复制 Electron 运行时…')
-  await fsp.cp(dist, outDir, { recursive: true })
+  // default_app.asar 若被杀毒/索引临时锁定(EBUSY),跳过覆盖沿用旧文件——
+  // 其内容固定;安装器走 resources/app 应用,default_app.asar 非必需
+  await fsp.cp(dist, outDir, {
+    recursive: true,
+    filter: (src) => !(src && path.basename(src) === 'default_app.asar'),
+  })
 
   console.log('[installer] 装入安装向导(resources/app)…')
   await fsp.cp(path.join(root, 'installer'), path.join(outDir, 'resources', 'app'), { recursive: true })
@@ -47,6 +74,17 @@ async function main() {
     JSON.stringify({ name: 'lingdong-island-installer', version: '1.0.0', description: '灵动岛 安装向导', main: 'main.cjs', private: true }, null, 2),
     'utf8',
   )
+
+  // 独立卸载器 exe:由 build-uninstaller.mjs 产出,先复制进发行包根——
+  // 之后复制发布目录时随之装入安装器,安装时再复制进安装目录,
+  // 系统设置卸载入口指向它
+  const uninsSrc = path.join(root, 'release', '灵动岛卸载器', '灵动岛卸载器.exe')
+  if (!fs.existsSync(uninsSrc)) {
+    console.error('[installer] 缺少独立卸载器 exe,请先运行: node scripts/build-uninstaller.mjs')
+    process.exit(1)
+  }
+  console.log('[installer] 装入独立卸载器(发行包根 灵动岛卸载器.exe)…')
+  await fsp.copyFile(uninsSrc, path.join(root, 'release', '灵动岛', '灵动岛卸载器.exe'))
 
   console.log('[installer] 装入发布产物(resources/release/灵动岛)…')
   await fsp.cp(
