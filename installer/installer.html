@@ -242,6 +242,15 @@ html, body {
   border-radius: 9px;
   padding: 8px 12px;
 }
+.og-hint {
+  margin-top: 8px;
+  font-size: 12px; line-height: 1.6;
+  color: var(--text-3);
+  background: rgba(255,255,255,.04);
+  border: 1px solid var(--sep);
+  border-radius: 9px;
+  padding: 8px 12px;
+}
 
 .checks { margin-top: 16px; display: flex; flex-direction: column; gap: 10px; }
 .check {
@@ -496,6 +505,12 @@ html, body {
           </label>
         </div>
       </div>
+
+      <div class="opt-group" id="tools-group">
+        <div class="og-title">外部工具(可选 · 源码 + 编译程序一并安装)</div>
+        <div class="checks" id="tools-checks"></div>
+        <div class="og-hint" id="tools-hint" hidden>发布包内未包含外部工具(打包时未选择),可跳过此项。</div>
+      </div>
     </section>
 
     <!-- 3 安装进度 -->
@@ -546,6 +561,11 @@ const $ = (s) => document.querySelector(s)
 const api = window.installer || {
   getInfo: async () => ({ appName: '灵动岛', version: '1.0.0', defaultInstallDir: 'C:\\Users\\demo\\AppData\\Local\\Programs\\灵动岛', hasSource: true }),
   pickDir: async () => null,
+  listTools: async () => [
+    { id: 'bili', name: '哔哩哔哩下载工具', desc: 'B站视频/弹幕/搜索下载(bili-tool.exe + Rust 源码)' },
+    { id: 'docflow', name: '文档流工具', desc: '文档处理:PDF/Docx/Markdown/思维导图/OCR(server.py + Python 运行时)' },
+    { id: 'xxt', name: '小学同步答题工具', desc: 'xx同步答题辅助(auto_answer.py)' },
+  ],
   install: async (o) => ({ ok: true, dir: o.dir }),
   finish: () => Promise.resolve({ ok: true }),
   onProgress: () => () => {},
@@ -559,6 +579,7 @@ const state = {
   dir: '',
   installed: false,
   info: null,
+  tools: [],
 }
 
 const STEPS = ['welcome', 'options', 'install', 'done']
@@ -593,6 +614,43 @@ function log(msg, cls) {
   logEl.scrollTop = logEl.scrollHeight
 }
 
+// 渲染外部工具勾选列表(按需选择;缺省全选)
+function renderTools() {
+  const wrap = $('#tools-checks')
+  if (!state.tools || state.tools.length === 0) {
+    $('#tools-group').hidden = true
+    return
+  }
+  $('#tools-group').hidden = false
+  wrap.innerHTML = ''
+  for (const t of state.tools) {
+    const label = document.createElement('label')
+    label.className = 'check'
+    const input = document.createElement('input')
+    input.type = 'checkbox'
+    input.value = t.id
+    input.checked = true
+    label.appendChild(input)
+    const body = document.createElement('div')
+    body.className = 'ck-body'
+    const tt = document.createElement('div')
+    tt.className = 'ck-t'
+    tt.textContent = t.name
+    const dd = document.createElement('div')
+    dd.className = 'ck-d'
+    dd.textContent = t.desc
+    body.appendChild(tt)
+    body.appendChild(dd)
+    label.appendChild(body)
+    wrap.appendChild(label)
+  }
+}
+
+// 当前勾选的外部工具 id
+function selectedTools() {
+  return Array.from(document.querySelectorAll('#tools-checks input:checked')).map((i) => i.value)
+}
+
 // ---- 初始化 ----
 async function init() {
   state.info = await api.getInfo()
@@ -607,6 +665,9 @@ async function init() {
   if (!state.info.hasSource) {
     log('⚠ 未找到可安装的发布产物(release/灵动岛),请先运行发布打包脚本', 'warn')
   }
+  // 外部工具列表(按需勾选;缺省全选)
+  state.tools = await api.listTools().catch(() => [])
+  renderTools()
 }
 
 $('#btn-next').addEventListener('click', async () => {
@@ -620,6 +681,7 @@ $('#btn-next').addEventListener('click', async () => {
       desktop: $('#opt-desktop').checked,
       startMenu: $('#opt-startmenu').checked,
       autostart: $('#opt-autostart').checked,
+      tools: selectedTools(),
     }
     try {
       const res = await api.install(opts)

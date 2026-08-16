@@ -10,7 +10,7 @@
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { app } from 'electron'
-import { MASTER_QQ } from '../constants'
+import { masterQQ } from '../privacy'
 import type { NapcatContact } from './napcat'
 
 // ---- 存储相关常量(原 napcat.ts 默认配置,仅持久化域使用) ----
@@ -34,7 +34,7 @@ export function buildProfileCard(
   const name = data.contact?.name?.trim()
   const info = data.contact?.info?.trim()
   const persona = data.persona?.trim()
-  const displayName = name || (qq === MASTER_QQ ? '主人' : '(未知)')
+  const displayName = name || (qq === masterQQ() ? '主人' : '(未知)')
   lines.push(`称呼:${displayName}`)
   if (info) lines.push(`已知:${info.slice(0, 300)}`)
   if (persona) lines.push(`会话人格:${persona.slice(0, 200)}`)

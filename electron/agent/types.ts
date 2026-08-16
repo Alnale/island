@@ -264,11 +264,11 @@ export interface AgentConfig {
   napcatWsUrl?: string
   /** NapCat 开关(默认 false;开启后挂件启动即连接) */
   napcatEnabled?: boolean
-  /** 私聊 QQ 号白名单(用户限定:只能和 1178821869 通信;空 = 全部) */
+  /** 私聊扩展信任 QQ 号(主人由 privacy.json 配置;空 = 只信任主人) */
   napcatAllowed?: string[]
-  /** 群白名单(用户限定:只能和群 1045765371 通信;空 = 不处理群消息) */
+  /** 群白名单(由 privacy.json 的 allowedGroups 配置;空 = 不处理群消息) */
   napcatAllowedGroups?: string[]
-  /** 机器人自身 QQ(群消息 @ 检测;默认 108724305) */
+  /** 机器人自身 QQ(群消息 @ 检测;由 privacy.json 的 botQQ 配置) */
   napcatBotQQ?: string
   /**
    * 屏蔽的外部会话键列表(2026-08-13 会话隔离:private:<QQ> / group:<群号>):

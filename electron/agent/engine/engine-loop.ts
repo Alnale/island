@@ -18,7 +18,8 @@
 import { randomUUID } from 'node:crypto'
 import { parseToolArgs } from '../tools/tool-args'
 import { detectProvider } from '../providers/provider'
-import { MASTER_IDENTITY_LINE, REPLY_RESTRAINT_LINE } from '../constants'
+import { masterIdentityLine, REPLY_RESTRAINT_LINE } from '../constants'
+import { masterQQ } from '../privacy'
 import {
   executeToolBatch,
   raceWithTimeout,
@@ -180,7 +181,7 @@ export function createRunTurn(ctx: AgentContext) {
       // 瀑布由各提示段落插件依次追加(记忆/进化/后台任务/工具指南)
       const baseSystem = [
         config.systemPrompt || '你是桌面灵动岛挂件里的个人助手。',
-        MASTER_IDENTITY_LINE,
+        masterIdentityLine(masterQQ()),
         REPLY_RESTRAINT_LINE,
       ]
         .filter(Boolean)

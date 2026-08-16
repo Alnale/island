@@ -12,7 +12,7 @@
 
 import { existsSync } from 'node:fs'
 import type { AgentTool, ToolParams } from '../types'
-import { MASTER_QQ } from '../constants'
+import { masterQQ } from '../privacy'
 
 // ---- 消息解析/持久化域/客户端实现已拆出,barrel 兼容 re-export(既有路径不变) ----
 export * from './napcat-message'
@@ -94,7 +94,7 @@ export function createNapcatTools(deps: NapcatToolDeps): AgentTool[] {
             `NapCat 状态:${s.connected ? '已连接' : s.circuitBroken ? '已熔断(需重启)' : '未连接'}(${s.url})` +
             (s.lastError ? `\n最近错误:${s.lastError}` : '') +
             `\n收到消息 ${s.receivedCount} 条,已回复 ${s.repliedCount} 条` +
-            `\n主人:${MASTER_QQ}(唯一主人,硬编码)` +
+            `\n主人:${masterQQ() || '(未配置,privacy.json)'}(在 privacy.json 配置)` +
             `\n私聊扩展信任:${s.allowed && s.allowed.length > 0 ? s.allowed.join('、') : '(仅主人)'}` +
             `\n监听群:${s.allowedGroups && s.allowedGroups.length > 0 ? s.allowedGroups.join('、') : '(无)'}`
           )
@@ -117,9 +117,9 @@ export function createNapcatTools(deps: NapcatToolDeps): AgentTool[] {
           const qq = String(params.qq ?? '').trim()
           const num = params.num !== undefined ? Math.floor(Number(params.num)) : 10
           if (!Number.isFinite(num) || num < 1 || num > 20) throw new Error('zone 的 num 需要在 1-20 之间')
-          const feeds = await client.getQzoneFeeds(qq || MASTER_QQ, num)
-          if (feeds.length === 0) return `(QQ ${qq || MASTER_QQ} 的动态为空)`
-          return `QQ ${qq || MASTER_QQ} 的最近动态(${feeds.length} 条):\n` +
+          const feeds = await client.getQzoneFeeds(qq || masterQQ(), num)
+          if (feeds.length === 0) return `(QQ ${qq || masterQQ()} 的动态为空)`
+          return `QQ ${qq || masterQQ()} 的最近动态(${feeds.length} 条):\n` +
             feeds.map((f, i) =>
               `${i + 1}. ${new Date(f.createTime * 1000).toLocaleString('zh-CN')} ${(f.content || '(无文字)').slice(0, 100)}` +
               `${f.picnum > 0 ? ` [图片×${f.picnum}]` : ''}${f.likenum > 0 ? ` 👍${f.likenum}` : ''}${f.commentnum > 0 ? ` 💬${f.commentnum}` : ''}`

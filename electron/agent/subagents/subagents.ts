@@ -586,7 +586,7 @@ export function createReplyClassifier(deps: {
   classify(input: {
     /** 回合类型标签(如「主人指示执行轮」「主人日常对话轮」) */
     kindLabel: string
-    /** 回复对象标签(如「QQ 222」「群 1045765371」「主人 QQ」) */
+    /** 回复对象标签(如「QQ 222」「群 12345」「主人 QQ」) */
     targetLabel: string
     /** 触发消息原文(判定关键:主人是否指示了发消息给别人) */
     trigger: string

@@ -26,7 +26,7 @@ import { existsSync, promises as fs } from 'node:fs'
 import { randomInt } from 'node:crypto'
 import path from 'node:path'
 import type { AgentConfig } from '../types'
-import { MASTER_QQ } from '../constants'
+import { masterQQ } from '../privacy'
 import { createWsSocket, type WsConn } from './wsclient'
 import { stripFingerprintMarks } from './napcat-session'
 import {
@@ -243,7 +243,7 @@ export function createNapcatClient(deps: NapcatDeps): NapcatClient {
   void loadSeen()
 
   const cfg = () => deps.getConfig()
-  const botQQ = () => String(cfg().napcatBotQQ ?? '108724305')
+  const botQQ = () => String(cfg().napcatBotQQ ?? '')
   const cacheSize = () => DEFAULT_CACHE_SIZE
   const sentSize = () => DEFAULT_SENT_SIZE
   const chatsSize = () => DEFAULT_CHATS_SIZE
@@ -609,7 +609,7 @@ export function createNapcatClient(deps: NapcatDeps): NapcatClient {
       ws = null
     },
     async sendToQQ(qq: string, text: string, opts?: { image?: string; file?: string }): Promise<string> {
-      const isMaster = qq === MASTER_QQ
+      const isMaster = qq === masterQQ()
       const cleaned = prepareOutgoingText(text, isMaster)
       const paramImage = typeof opts?.image === 'string' && opts.image.trim() ? opts.image.trim() : ''
       const file = typeof opts?.file === 'string' && opts.file.trim() ? opts.file.trim() : ''

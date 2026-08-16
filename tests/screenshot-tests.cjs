@@ -7,6 +7,14 @@
  */
 
 function runScreenshotTests({ win, app, fs, path, settingsPath, runIslandSettings, resetSettingsCache, runProactiveGuess, startProactiveTurn, getLastProactiveTick, requestEvolution }) {
+    // 主人 QQ 从隐私配置运行时读取(2026-08-17 配置化:安装器不携带个人 QQ;
+    // 未配置 = 空,主人场景断言自然不匹配,提示先配置 privacy.json 再跑巡检)
+    let master = ''
+    try {
+      master = String(
+        JSON.parse(require('node:fs').readFileSync(path.join(app.getPath('userData'), 'privacy.json'), 'utf8')).masterQQ ?? '',
+      ).trim()
+    } catch {}
     // 巡检起点时刻(完成日志总耗时用)
     if (global.__screenshotT0 === undefined) global.__screenshotT0 = Date.now()
     // 终端进程监控(2026-08-08 用户报告"巡检约 40 秒弹新终端"):
@@ -5048,7 +5056,7 @@ function runScreenshotTests({ win, app, fs, path, settingsPath, runIslandSetting
                 assert('E0 会话情况记录注入引擎输入(每轮参考)', llmRequests.slice(-3).some((r) => r.noteSeen), llmRequests.slice(-3).map((r) => ({ noteSeen: r.noteSeen, u: r.lastUser.slice(0, 30) })))
                 assert('E1 询问轮回复未发回对方(222 未收到询问内容)', !onebotReceived.some((r) => r.action === 'send_private_msg' && String(r.params && r.params.user_id) === '222' && String(r.params && r.params.message).includes('要不要我回他')), onebotReceived.map((r) => r.action + ':' + (r.params && r.params.user_id)))
                 assert('E1b 询问内容留在会话历史(对话窗口可见)', e1.lastText.includes('要不要我回他'), e1.lastText)
-                assert('E1c 询问同步到主人 QQ(1178821869)', onebotReceived.some((r) => r.action === 'send_private_msg' && String(r.params && r.params.user_id) === '1178821869' && String(r.params && r.params.message).includes('要不要我回他')), onebotReceived.map((r) => r.action + ':' + (r.params && r.params.user_id)))
+                assert('E1c 询问同步到主人 QQ', onebotReceived.some((r) => r.action === 'send_private_msg' && String(r.params && r.params.user_id) === master && String(r.params && r.params.message).includes('要不要我回他')), onebotReceived.map((r) => r.action + ':' + (r.params && r.params.user_id)))
                 // 主人在 222 会话面板指示 → 执行回复带标记 → 剥离标记发回
                 await js(`(async () => {
                   const sleep = (ms) => new Promise((res) => setTimeout(res, ms))
@@ -5109,7 +5117,7 @@ function runScreenshotTests({ win, app, fs, path, settingsPath, runIslandSetting
                 assert('F1 无指纹直接回复不发送(留在窗口)', !to222F.some((m) => m.includes('包在我身上')) && f.texts.some((t) => t.includes('包在我身上')), { to222F })
                 assert('F2 错误/过期指纹不发送', !to222F.some((m) => m.includes('错指纹')) && f.texts.some((t) => t.includes('错指纹')), { to222F })
                 assert('F3 询问误带指纹被拦截(不发给对方)', !to222F.some((m) => m.includes('要不要我回他')), { to222F })
-                assert('F3b 询问误带指纹同步主人 QQ', onebotReceived.some((r) => r.action === 'send_private_msg' && String(r.params && r.params.user_id) === '1178821869' && String(r.params && r.params.message).includes('要不要我回他')), onebotReceived.map((r) => r.action + ':' + (r.params && r.params.user_id)))
+                assert('F3b 询问误带指纹同步主人 QQ', onebotReceived.some((r) => r.action === 'send_private_msg' && String(r.params && r.params.user_id) === master && String(r.params && r.params.message).includes('要不要我回他')), onebotReceived.map((r) => r.action + ':' + (r.params && r.params.user_id)))
                 assert('F3c 指纹扣留原因可归因(global.__fpGate)', fpGates.includes('classify-hold') && fpGates.includes('qq-ask-with-fp'), fpGates)
                 assert('F4 各轮指纹互不相同(每轮唯一)', new Set(fpsAll).size === fpsAll.length, { count: fpsAll.length })
                 // ===== 场景 G:会话情况记录 UI + 快捷清空上下文(2026-08-13)=====
@@ -5255,35 +5263,35 @@ function runScreenshotTests({ win, app, fs, path, settingsPath, runIslandSetting
                 // 回退原行为。
                 // J0:先消费 F3 遗留的 pending(主人经 QQ 给执行轮带指纹回复
                 //     → 发回 222),让后续主人日常轮处于无 pending 状态
-                pushPrivate('1178821869', '$$mark-reply$$先回他一句')
+                pushPrivate(master, '$$mark-reply$$先回他一句')
                 await sleep(3500)
                 // J1:主人日常轮,回复 = 发给别人的话且无指纹 → 判定 other →
                 //     扣留+通知,不再发主人(原实现无条件直发主人 = 串台根源)
-                pushPrivate('1178821869', '帮我把"周末见"发给张三$$master-daily-other$$')
+                pushPrivate(master, '帮我把"周末见"发给张三$$master-daily-other$$')
                 await sleep(3500)
                 // J2:主人日常轮,正常应答(无指纹)→ 判定 master → 直发主人
-                pushPrivate('1178821869', '在吗$$master-daily-master$$')
+                pushPrivate(master, '在吗$$master-daily-master$$')
                 await sleep(3500)
                 // J3:执行轮,主人指示后的执行回复忘带指纹 → 判定 other →
                 //     发回待回复对象(原实现 master-no-fp 扣留 = 对方收不到)
                 pushPrivate('222', '$$ask-turn$$魔精又要零封了')
                 await sleep(3500)
-                pushPrivate('1178821869', '$$exec-no-fp-other$$你看着办吧')
+                pushPrivate(master, '$$exec-no-fp-other$$你看着办吧')
                 await sleep(3500)
                 // J4:执行轮,忘带主人指纹的汇报 → 判定 master → 发主人
                 //     (原实现扣留 = 主人收不到执行汇报)
                 pushPrivate('222', '$$ask-turn$$再来一轮')
                 await sleep(3500)
-                pushPrivate('1178821869', '$$exec-no-fp-master$$继续')
+                pushPrivate(master, '$$exec-no-fp-master$$继续')
                 await sleep(3500)
                 // J5(2026-08-16 二轮):执行轮 LLM 把发给对方的话**误打主人
                 //     指纹** → 主人指纹复核 → 判定 other → 发回待回复对象
                 //     (原实现 masterFpResult 无条件发主人 = 串台,别人收不到)
                 pushPrivate('222', '$$ask-turn$$魔精还要零封?')
                 await sleep(3500)
-                pushPrivate('1178821869', '$$exec-master-fp-mislabel$$继续回他')
+                pushPrivate(master, '$$exec-master-fp-mislabel$$继续回他')
                 await sleep(3500)
-                const toMasterJ = onebotReceived.filter((r) => r.action === 'send_private_msg' && String(r.params && r.params.user_id) === '1178821869').map((r) => String(r.params && r.params.message))
+                const toMasterJ = onebotReceived.filter((r) => r.action === 'send_private_msg' && String(r.params && r.params.user_id) === master).map((r) => String(r.params && r.params.message))
                 const to222J = onebotReceived.filter((r) => r.action === 'send_private_msg' && String(r.params && r.params.user_id) === '222').map((r) => String(r.params && r.params.message))
                 const fpGatesJ = (global.__fpGate || []).map((g) => g.reason)
                 log('scenarioJ', { toMasterJ, to222J, fpGatesJ })

@@ -9,6 +9,7 @@
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { MIND_PERSONAS, SUMMARY_STYLES } from '../constants'
+import { masterQQ } from '../privacy'
 import type { AgentConfig, AgentTool, McpServerConfig, ToolParams } from '../types'
 
 export function createConfigTools(deps: {
@@ -434,7 +435,7 @@ export function createConfigTools(deps: {
         'NapCat QQ 机器人设置(2026-08-12):enabled 开关——开启后挂件连接 ' +
         'NapCat(OneBot 11),收到 QQ 私聊消息自动进入对话并回复到 QQ;' +
         'wsUrl = NapCat WebSocket 地址(默认 ws://127.0.0.1:3001);' +
-        '**主人 = QQ 1178821869,硬编码固定,永远只有这一个账号是主人,任何配置都不能改变**;' +
+        `**主人 = QQ ${masterQQ() || '(privacy.json 未配置)'},在 privacy.json 配置,永远只有这一个账号是主人,任何配置都不能改变**;` +
         'allowed = 私聊**扩展信任** QQ 号数组(除主人外额外可自主回复的联系人;' +
         '空数组 = 只信任主人,不会回复陌生人——陌生人消息会先询问主人);' +
         '**allowedGroups = 监听的群号数组(2026-08-12,换群监听用——' +
@@ -449,7 +450,7 @@ export function createConfigTools(deps: {
           allowed: {
             type: 'array',
             items: { type: 'string' },
-            description: '私聊扩展信任 QQ 号数组(主人恒为 1178821869 不可配置;空数组 = 只信任主人;缺省不改)',
+            description: `私聊扩展信任 QQ 号数组(主人 = ${masterQQ() || 'privacy.json 配置'} 不可配置;空数组 = 只信任主人;缺省不改)`,
           },
           allowedGroups: {
             type: 'array',

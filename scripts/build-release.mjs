@@ -12,7 +12,9 @@
  * 安装后快捷方式指向 <安装目录>/electron/electron.exe;
  * electron.exe 启动时自动加载同目录 resources/app = 主应用。
  *
- * 用法:node scripts/build-release.mjs
+ * 用法:node scripts/build-release.mjs [--tools=bili,docflow,xxt]
+ *   --tools 逗号分隔要打包的外部工具(缺省 = 全部 bili,docflow,xxt);
+ *   每个工具目录整体复制 = **源码 + 编译的 exe 一并打包**(便于后续修改迭代)。
  */
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
@@ -22,6 +24,23 @@ import fsp from 'node:fs/promises'
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 const releaseDir = path.join(root, 'release', '灵动岛')
+
+// 外部工具清单(缺省全部;--tools=bili,xxt 可只打包指定工具)
+const ALL_TOOLS = ['bili', 'docflow', 'xxt']
+const toolArg = process.argv.find((a) => a.startsWith('--tools='))
+const TOOLS = toolArg
+  ? toolArg
+      .slice('--tools='.length)
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean)
+  : ALL_TOOLS
+for (const t of TOOLS) {
+  if (!ALL_TOOLS.includes(t)) {
+    console.error(`[release] 未知工具「${t}」,可选:${ALL_TOOLS.join('、')}`)
+    process.exit(1)
+  }
+}
 
 async function rmrf(p) {
   await fsp.rm(p, { recursive: true, force: true })
@@ -76,9 +95,38 @@ async function main() {
   console.log('[release] 复制渲染端(dist-widget/)…')
   await fsp.cp(path.join(root, 'dist-widget'), path.join(appDir, 'dist-widget'), { recursive: true })
 
-  console.log('[release] 复制 tests/(main.cjs 顶层 require)…')
-  if (fs.existsSync(path.join(root, 'tests'))) {
-    await fsp.cp(path.join(root, 'tests'), path.join(appDir, 'tests'), { recursive: true })
+  console.log('[release] 复制 tests/screenshot-tests.cjs(main.cjs 顶层 require 的截图巡检)…')
+  // 只复制主进程真正 require 的巡检文件,其余测试夹具(含示例 QQ/群号)不随发行,
+  // 避免安装器携带任何个人身份信息
+  if (fs.existsSync(path.join(root, 'tests', 'screenshot-tests.cjs'))) {
+    await fsp.mkdir(path.join(appDir, 'tests'), { recursive: true })
+    await fsp.copyFile(
+      path.join(root, 'tests', 'screenshot-tests.cjs'),
+      path.join(appDir, 'tests', 'screenshot-tests.cjs'),
+    )
+  }
+
+  console.log(`[release] 复制外部工具(--tools=${TOOLS.join(',')} → electron/resources/tools)…`)
+  // Agent 工具经 toolsRoot() 定位:打包后 process.resourcesPath/tools =
+  // electron/resources/tools(bili-tool / docflow / xxt);整体复制 = 源码 +
+  // 编译的 exe 一并打包。bili 排除 config/(本机登录态 cookies/store,
+  // 含敏感凭据,不随发行)
+  const toolsSrc = path.join(root, 'tools')
+  if (fs.existsSync(toolsSrc)) {
+    const toolsDst = path.join(releaseDir, 'electron', 'resources', 'tools')
+    await fsp.mkdir(toolsDst, { recursive: true })
+    for (const t of TOOLS) {
+      const src = path.join(toolsSrc, t)
+      if (!fs.existsSync(src)) {
+        console.warn(`[release]   工具 ${t} 不存在(${src}),跳过`)
+        continue
+      }
+      await fsp.cp(src, path.join(toolsDst, t), {
+        recursive: true,
+        filter: (s) => !(t === 'bili' && s.replace(/\\/g, '/').includes('/config')),
+      })
+      console.log(`[release]   ✓ ${t} → resources/tools/${t}`)
+    }
   }
 
   await fsp.copyFile(path.join(root, 'package.json'), path.join(appDir, 'package.json'))

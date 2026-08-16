@@ -13,7 +13,11 @@ contextBridge.exposeInMainWorld('installer', {
   pickDir() {
     return ipcRenderer.invoke('inst:pick-dir')
   },
-  /** 执行安装(opts: {dir, desktop, startMenu, autostart});返回 {ok, dir?, error?} */
+  /** 列出发布包内可选安装的外部工具:[{id, name, desc}] */
+  listTools() {
+    return ipcRenderer.invoke('inst:tools')
+  },
+  /** 执行安装(opts: {dir, desktop, startMenu, autostart, tools:[]});返回 {ok, dir?, error?} */
   install(opts) {
     return ipcRenderer.invoke('inst:run', opts)
   },

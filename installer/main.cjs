@@ -38,6 +38,13 @@ const APP_NAME = '灵动岛'
 const APP_VERSION = '1.0.0'
 const RELEASE_NAME = '灵动岛'
 
+// 外部工具元信息(安装时按需勾选;源码 + 编译 exe 已随发布目录整体打入)
+const TOOL_META = {
+  bili: { name: '哔哩哔哩下载工具', desc: 'B站视频/弹幕/搜索下载(bili-tool.exe + Rust 源码)' },
+  docflow: { name: '文档流工具', desc: '文档处理:PDF/Docx/Markdown/思维导图/OCR(server.py + Python 运行时)' },
+  xxt: { name: '小学同步答题工具', desc: 'xx同步答题辅助(auto_answer.py)' },
+}
+
 // 源发布目录(相对本文件 ../release/灵动岛)
 const releaseDir = path.join(__dirname, '..', 'release', RELEASE_NAME)
 // 安装器图标(原始图标 installer/icon.png,与界面 logo 保持一致)
@@ -101,19 +108,20 @@ async function collectFiles(root) {
   return out
 }
 
-// ---- 逐文件复制目录(带进度) ----
-async function copyTree(srcRoot, destRoot, onFile) {
+// ---- 逐文件复制目录(带进度;skipRel = (rel) => boolean 跳过匹配文件) ----
+async function copyTree(srcRoot, destRoot, onFile, skipRel) {
   const files = await collectFiles(srcRoot)
-  const totalBytes = files.reduce((s, f) => s + f.size, 0)
+  const list = skipRel ? files.filter((f) => !skipRel(f.rel)) : files
+  const totalBytes = list.reduce((s, f) => s + f.size, 0)
   let done = 0
-  for (const f of files) {
+  for (const f of list) {
     const dest = path.join(destRoot, f.rel)
     await ofsp.mkdir(path.dirname(dest), { recursive: true })
     await ofsp.copyFile(f.abs, dest)
     done += f.size
     if (onFile) onFile({ done, totalBytes, file: f.rel })
   }
-  return files.length
+  return list.length
 }
 
 // ---- 创建 .lnk 快捷方式(PowerShell WScript.Shell) ----
@@ -150,6 +158,9 @@ function regDelete(keyPath, name) {
 }
 
 // ---- 生成卸载脚本 ----
+// 卸载时可选是否删除个人数据(聊天记录/记忆/联系人/配置,位于
+// %APPDATA%\dynamic-island = 已装应用 app.getPath('userData'));删除前
+// 交互询问,选择"N"保留数据、仅移除程序本体
 function writeUninstaller(installDir) {
   const desktopLnk = path.join(process.env.USERPROFILE || '', 'Desktop', `${APP_NAME}.lnk`)
   const startLnk = path.join(
@@ -159,14 +170,25 @@ function writeUninstaller(installDir) {
   )
   const uninstallKey = 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\' + APP_NAME
   const runKey = 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run'
+  // 个人数据目录(与已装应用 userData 一致,见 electron/main.cjs privacy.ts)
+  const userDataDir = '%APPDATA%\\dynamic-island'
   const script = [
     '@echo off',
+    'title 卸载 灵动岛',
     'taskkill /IM electron.exe /F >nul 2>&1',
-    `reg delete "${uninstallKey}" /f >nul 2>&1`,
-    `reg delete "${runKey}" /v "${APP_NAME}" /f >nul 2>&1`,
+    'rem ---- 移除快捷方式与注册表项 ----',
     `del "${desktopLnk}" >nul 2>&1`,
     `del "${startLnk}" >nul 2>&1`,
+    `reg delete "${uninstallKey}" /f >nul 2>&1`,
+    `reg delete "${runKey}" /v "${APP_NAME}" /f >nul 2>&1`,
+    'rem ---- 可选删除个人数据(聊天记录/记忆/联系人/配置) ----',
+    `choice /C YN /N /M "是否同时删除灵动岛的个人数据(聊天记录、记忆、配置)?[Y] 删除 [N] 保留: "`,
+    'if errorlevel 2 goto keep',
+    `if exist "${userDataDir}" rmdir /s /q "${userDataDir}"`,
+    'echo 已删除个人数据。',
+    ':keep',
     'timeout /t 1 /nobreak >nul',
+    'cd /d "%TEMP%"',
     'rmdir /s /q "%~dp0" >nul 2>&1',
     'exit /b 0',
   ].join('\r\n')
@@ -201,26 +223,71 @@ async function performInstall(opts) {
     emitProgress({ percent: 0.02, title: '准备安装…', stage: '校验发布产物', log: `源: ${releaseDir}`, logCls: '' })
 
     // 1. 复制应用文件(核心,失败则整体失败)
+    //    外部工具目录单独按需复制(第 3 步),此处跳过避免带入未选工具
     emitProgress({ percent: 0.05, title: '复制应用文件', stage: '正在写入目标目录…' })
     await fsp.mkdir(installDir, { recursive: true })
     console.log('[inst] 开始复制 →', installDir)
-    await copyTree(releaseDir, installDir, (st) => {
-      const percent = 0.05 + 0.8 * (st.done / (st.totalBytes || 1))
-      emitProgress({
-        percent,
-        title: '复制应用文件',
-        stage: `已复制 ${Math.round(st.done / 1024 / 1024)} / ${Math.round(st.totalBytes / 1024 / 1024)} MB`,
-        file: st.file,
-      })
-    })
+    const toolRoot = path.join(releaseDir, 'electron', 'resources', 'tools')
+    const hasTools = fs.existsSync(toolRoot)
+    const selectedTools = Array.isArray(opts.tools) ? opts.tools.filter((t) => t && typeof t === 'string') : []
+    await copyTree(
+      releaseDir,
+      installDir,
+      (st) => {
+        const percent = 0.05 + 0.75 * (st.done / (st.totalBytes || 1))
+        emitProgress({
+          percent,
+          title: '复制应用文件',
+          stage: `已复制 ${Math.round(st.done / 1024 / 1024)} / ${Math.round(st.totalBytes / 1024 / 1024)} MB`,
+          file: st.file,
+        })
+      },
+      hasTools ? (rel) => rel.startsWith('electron/resources/tools/') : null,
+    )
     console.log('[inst] 复制完成')
 
-    // 2. 校验主程序存在
+    // 2. 按需安装外部工具(整体复制 = 源码 + 编译 exe;未选中的不装)
+    if (hasTools && selectedTools.length > 0) {
+      const toolFiles = []
+      for (const t of selectedTools) {
+        const src = path.join(toolRoot, t)
+        if (!fs.existsSync(src)) {
+          warnings.push(`工具 ${t} 未包含在安装包中,已跳过`)
+          continue
+        }
+        const files = await collectFiles(src)
+        for (const f of files) toolFiles.push({ tool: t, rel: f.rel, abs: f.abs, size: f.size })
+      }
+      const totalToolBytes = toolFiles.reduce((s, f) => s + f.size, 0)
+      let doneTool = 0
+      emitProgress({
+        percent: 0.8,
+        title: '安装外部工具',
+        stage: `共 ${toolFiles.length} 个文件`,
+        log: `安装外部工具:${selectedTools.join('、')}`,
+        logCls: '',
+      })
+      for (const f of toolFiles) {
+        const dest = path.join(installDir, 'electron', 'resources', 'tools', f.tool, f.rel)
+        await ofsp.mkdir(path.dirname(dest), { recursive: true })
+        await ofsp.copyFile(f.abs, dest)
+        doneTool += f.size
+        emitProgress({
+          percent: 0.8 + 0.05 * (totalToolBytes ? doneTool / totalToolBytes : 1),
+          title: '安装外部工具',
+          stage: `正在复制 ${f.tool}…`,
+          file: f.rel,
+        })
+      }
+      console.log('[inst] 外部工具安装完成')
+    }
+
+    // 3. 校验主程序存在
     if (!fs.existsSync(exe)) {
       return { ok: false, error: `未找到主程序 ${exe}\n发布产物结构不完整` }
     }
 
-    // 3. 快捷方式(附加项,失败降级)
+    // 4. 快捷方式(附加项,失败降级)
     if (opts.desktop) {
       emitProgress({ percent: 0.9, title: '创建桌面快捷方式', stage: '', file: '' })
       const desktopLnk = path.join(process.env.USERPROFILE || '', 'Desktop', `${APP_NAME}.lnk`)
@@ -321,6 +388,18 @@ ipcMain.handle('inst:info', async () => {
     defaultDirFallback: fallback,
     hasSource: fs.existsSync(releaseDir),
   }
+})
+
+// 发布包内可选安装的外部工具(由 build-release --tools 决定打包哪些;
+// 每个工具目录 = 源码 + 编译 exe 一并安装,便于后续修改迭代)
+ipcMain.handle('inst:tools', async () => {
+  const root = path.join(releaseDir, 'electron', 'resources', 'tools')
+  if (!fs.existsSync(root)) return []
+  const dirs = (await fsp.readdir(root, { withFileTypes: true })).filter((e) => e.isDirectory())
+  return dirs.map((e) => {
+    const meta = TOOL_META[e.name] || { name: e.name, desc: '外部工具' }
+    return { id: e.name, name: meta.name, desc: meta.desc }
+  })
 })
 
 ipcMain.handle('inst:pick-dir', async () => {

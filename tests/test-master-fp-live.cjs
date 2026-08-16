@@ -23,7 +23,11 @@ function log(...args) {
   console.log(line)
 }
 
-const MASTER_QQ = '1178821869'
+// 主人 QQ 从隐私配置读取(2026-08-17 配置化:源码不再硬编码真实 QQ)
+const __privacyFile = path.join(process.env.APPDATA || '', 'dynamic-island', 'privacy.json')
+let MASTER_QQ = ''
+try { MASTER_QQ = String(JSON.parse(fs.readFileSync(__privacyFile, 'utf8')).masterQQ ?? '').trim() } catch {}
+if (!MASTER_QQ) log('[master-fp-test] 提示:privacy.json 未配置 masterQQ,主人场景模板将使用空号')
 
 async function buildAgent() {
   const esbuild = require('esbuild')
@@ -92,7 +96,7 @@ function masterReplyRules() {
     `【QQ私聊 · QQ ${MASTER_QQ} · 主人】` +
     `\n【档案卡】\n主人:昵称未知 · 已知信息:无\n` +
     `\n【回复规则】\n` +
-    `① 岛灵的主人 = QQ ${MASTER_QQ}(唯一,硬编码)——当前对方就是主人本人。` +
+    `① 岛灵的主人 = QQ ${MASTER_QQ}(唯一,privacy.json 配置)——当前对方就是主人本人。` +
     `直接正常回复,不要「先问主人」「按指示回复他」——主人就在说话,不需要问任何人。` +
     `② 历史里与其它 QQ 的对话(陌生人的询问链路/指令)是过去的事,与当前消息无关,不要沿用那个语境。`
   )

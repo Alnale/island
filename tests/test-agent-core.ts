@@ -74,9 +74,13 @@ import {
   type NapcatToolDeps,
   type NapcatClient,
 } from '../electron/agent/napcat/napcat'
-import { MASTER_IDENTITY_LINE, MASTER_QQ } from '../electron/agent/constants'
+import { masterIdentityLine } from '../electron/agent/constants'
 import { streamResponse } from '../electron/agent/providers/deepseek'
 import { sanitizeUnpairedSurrogates } from '../electron/agent/providers/sse'
+
+// 测试主人 QQ 夹具(2026-08-17 隐私配置化:主人 QQ 由 privacy.json 运行时
+// 提供,测试改用假号,源码不再出现任何真实 QQ)
+const MASTER_QQ = '10000'
 
 // createNapcatTools 现签名收 { client, getSessionKey?, confirmDangerous? } 单参
 // (engine.ts 以 deps.napcat 包成 client 注入);测试直接平铺 mock client 方法,
@@ -1224,19 +1228,20 @@ await test('getLog 从磁盘加载', async () => {
 
 console.log('\n=== 受保护条目(人设/岛灵设定防丢失) ===')
 
-await test('MASTER_IDENTITY_LINE:窗口直发 = 主人,外部 QQ 消息不继承主人权限(2026-08-13 用户要求)', () => {
-  // 主引擎系统提示拼入主人身份(2026-08-13 二轮收紧,用户澄清"不要把
-  // 外部传入的消息也当成主人权限"):逐条按标记判定——① 带 QQ 来源标注
-  // = 外部消息,只有 1178821869 是主人;② 无来源标注的窗口直发 = 主人
-  // 最高权限;③ 系统通知 = 系统事件
-  assert(MASTER_QQ === '1178821869', '主人 QQ 硬编码为 1178821869')
-  assert(MASTER_IDENTITY_LINE.includes('1178821869'), '身份说明应含主人 QQ 号')
-  assert(MASTER_IDENTITY_LINE.includes('逐条消息'), '应按逐条消息判定身份')
-  assert(MASTER_IDENTITY_LINE.includes('外部消息'), '带来源标注的 QQ 消息应声明为外部消息')
-  assert(MASTER_IDENTITY_LINE.includes('不具主人权限'), '外部 QQ 消息不得继承主人权限')
-  assert(MASTER_IDENTITY_LINE.includes('没有来源标注的用户消息') && MASTER_IDENTITY_LINE.includes('最高权限'), '无来源标注的窗口直发 = 主人最高权限')
-  assert(MASTER_IDENTITY_LINE.includes('不要「先问主人」'), '窗口消息不应触发先问主人')
-  assert(MASTER_IDENTITY_LINE.includes('【系统通知】'), '系统通知类消息应单独定性')
+await test('masterIdentityLine:窗口直发 = 主人,外部 QQ 消息不继承主人权限(2026-08-17 配置化)', () => {
+  // 主人身份逐条按标记判定(2026-08-13 二轮收紧,用户澄清"不要把
+  // 外部传入的消息也当成主人权限"):① 带 QQ 来源标注 = 外部消息,只有
+  // 配置的主人 QQ 是主人;② 无来源标注的窗口直发 = 主人最高权限;
+  // ③ 系统通知 = 系统事件。主人 QQ 来自 privacy.json(2026-08-17 配置化)
+  const LINE = masterIdentityLine(MASTER_QQ)
+  assert(LINE.includes(`QQ ${MASTER_QQ}`), '身份说明应含主人 QQ 号(来自隐私配置)')
+  assert(LINE.includes('逐条消息'), '应按逐条消息判定身份')
+  assert(LINE.includes('外部消息'), '带来源标注的 QQ 消息应声明为外部消息')
+  assert(LINE.includes('不具主人权限'), '外部 QQ 消息不得继承主人权限')
+  assert(LINE.includes('没有来源标注的用户消息') && LINE.includes('最高权限'), '无来源标注的窗口直发 = 主人最高权限')
+  assert(LINE.includes('「先问主人」'), '窗口消息不应触发先问主人')
+  assert(LINE.includes('【系统通知】'), '系统通知类消息应单独定性')
+  assert(masterIdentityLine('').includes('未配置'), 'masterQQ 为空应降级为「未配置」')
 })
 
 await test('isProtectedEntry:protected 标记 / 人设标签 / 人设内容 / 普通条目', () => {
@@ -1659,9 +1664,9 @@ await test('parseClassifierJson:意图判定解析(2026-08-16)', () => {
 })
 
 await test('buildClassifierSystem:判定提示词含回合背景与意图定义(2026-08-16)', () => {
-  const sys = buildClassifierSystem('主人日常对话轮', '主人 QQ 1178821869', '帮我把"周末见"发给张三')
+  const sys = buildClassifierSystem('主人日常对话轮', '主人 QQ 10000', '帮我把"周末见"发给张三')
   assert(sys.includes('回复意图判定器'), '系统提示应含判定器身份')
-  assert(sys.includes('主人日常对话轮') && sys.includes('主人 QQ 1178821869'), '应含回合背景(类型/对象)')
+  assert(sys.includes('主人日常对话轮') && sys.includes('主人 QQ 10000'), '应含回合背景(类型/对象)')
   assert(sys.includes('帮我把"周末见"发给张三'), '应含触发消息(判定关键)')
   assert(sys.includes('master') && sys.includes('other') && sys.includes('hold'), '应含三意图定义')
   assert(sys.includes('JSON'), '应含 JSON 字样(json_mode 官方要求)')
@@ -1669,7 +1674,7 @@ await test('buildClassifierSystem:判定提示词含回合背景与意图定义(
 
 await test('createReplyClassifier:无 Key/空回复/垃圾输出回退 null,合法 JSON 采信(2026-08-16)', async () => {
   const base = { ...MOCK_PROVIDERS, apiKey: 'test', baseURL: 'http://mock', model: 'm', systemPrompt: '', reasoningEffort: 'high' as const, mcpServers: [], skillsDirs: [] }
-  const input = { kindLabel: '群聊触发轮', targetLabel: '群 1045765371', trigger: '群友问在吗', reply: '在的' }
+  const input = { kindLabel: '群聊触发轮', targetLabel: '群 20000', trigger: '群友问在吗', reply: '在的' }
   // 无 Key:零 LLM 调用返回 null(调用方回退原行为)
   const noKey = createReplyClassifier({ getConfig: () => ({ ...base, apiKey: '' }) })
   assert((await noKey.classify(input)) === null, '无 Key 返回 null')
@@ -3718,16 +3723,16 @@ await test('napcat 工具:status/recent 格式化,send/send_group 校验与透�
   const send = String(await tool.execute({ action: 'send', user_id: '10001', message: '下载完成' }))
   assert(calls.length === 1 && calls[0].kind === 'qq' && calls[0].target === '10001' && calls[0].text === '下载完成', 'send 应透传 QQ 号与文本')
   assert(send.includes('msg-1'), `send 应回显 message_id,实际:${send}`)
-  const sendGroup = String(await tool.execute({ action: 'send_group', group_id: '1045765371', message: '大家好' }))
+  const sendGroup = String(await tool.execute({ action: 'send_group', group_id: '20000', message: '大家好' }))
   const n: number = calls.length
-  assert(n === 2 && calls[1].kind === 'group' && calls[1].target === '1045765371', 'send_group 应透传群号')
+  assert(n === 2 && calls[1].kind === 'group' && calls[1].target === '20000', 'send_group 应透传群号')
   assert(sendGroup.includes('msg-2'), `send_group 应回显 message_id,实际:${sendGroup}`)
   // send_group 带文件(2026-08-12:下载好的文件直接发群里)
   const sendFile = String(
-    await tool.execute({ action: 'send_group', group_id: '1045765371', message: '关羽之歌下载好了', file: 'D:/music/关羽之歌.mp3' }),
+    await tool.execute({ action: 'send_group', group_id: '20000', message: '关羽之歌下载好了', file: 'D:/music/关羽之歌.mp3' }),
   )
   const n2: number = calls.length
-  assert(n2 === 3 && calls[2].target === '1045765371' && calls[2].text === '关羽之歌下载好了', 'send_group file 应透传群号与文本')
+  assert(n2 === 3 && calls[2].target === '20000' && calls[2].text === '关羽之歌下载好了', 'send_group file 应透传群号与文本')
   assert(sendFile.includes('含文件'), `send_group 带文件应回显,实际:${sendFile}`)
   await assertRejects(() => tool.execute({ action: 'send', message: '缺 QQ 号' }), 'send 需要 user_id')
   await assertRejects(() => tool.execute({ action: 'send', user_id: '1' }), 'send 需要 message')
@@ -3828,7 +3833,7 @@ await test('napcat 工具:send/send_group 带图片与私聊文件透传', async
   assert(n3 === 3 && qqCalls[2].file === filePath, 'send 应透传 file')
   assert(r3.includes('含文件'), `send 带文件应回显,实际:${r3}`)
   // send_group 带图片
-  const r4 = String(await tool.execute({ action: 'send_group', group_id: '1045765371', message: '群图', image: imgPath2 }))
+  const r4 = String(await tool.execute({ action: 'send_group', group_id: '20000', message: '群图', image: imgPath2 }))
   const n4: number = groupCalls.length
   assert(n4 === 1 && groupCalls[0].image === imgPath2, 'send_group 应透传 image')
   assert(r4.includes('含图片'), `send_group 带图应回显,实际:${r4}`)
@@ -3888,7 +3893,7 @@ await test('napcat 工具:recall / members(自动补档案) / friends / profile 
   assert(rRecall.includes('已撤回'), `recall 应回显,实际:${rRecall}`)
   await assertRejects(() => tool.execute({ action: 'recall' }), 'recall 需要 message_id')
   // 群成员 + 自动补档案(群名片优先)
-  const rMembers = String(await tool.execute({ action: 'members', group_id: '1045765371' }))
+  const rMembers = String(await tool.execute({ action: 'members', group_id: '20000' }))
   assert(
     rMembers.includes('20001') && rMembers.includes('阿A') && rMembers.includes('20002') && rMembers.includes('20003'),
     `members 应列成员与昵称,实际:${rMembers}`,
@@ -3903,23 +3908,23 @@ await test('napcat 工具:recall / members(自动补档案) / friends / profile 
   assert(rProfile.includes('40001') && rProfile.includes('神秘人') && rProfile.includes('25'), `profile 应含资料,实际:${rProfile}`)
   await assertRejects(() => tool.execute({ action: 'profile' }), 'profile 需要 user_id')
   // 群信息
-  const rInfo = String(await tool.execute({ action: 'group_info', group_id: '1045765371' }))
+  const rInfo = String(await tool.execute({ action: 'group_info', group_id: '20000' }))
   assert(rInfo.includes('测试群') && rInfo.includes('42'), `group_info 应含群信息,实际:${rInfo}`)
   await assertRejects(() => tool.execute({ action: 'group_info' }), 'group_info 需要 group_id')
   // 群管理:禁言 / 解除(duration 0)/ 踢人 / 全员禁言
-  const rBan = String(await tool.execute({ action: 'group_manage', group_id: '1045765371', op: 'ban', user_id: '20001', duration: 600 }))
+  const rBan = String(await tool.execute({ action: 'group_manage', group_id: '20000', op: 'ban', user_id: '20001', duration: 600 }))
   const banN: number = banned.length
   assert(banN === 1 && banned[0].duration === 600 && rBan.includes('600秒'), `ban 应透传时长,实际:${rBan}`)
-  const rUnban = String(await tool.execute({ action: 'group_manage', group_id: '1045765371', op: 'ban', user_id: '20001', duration: 0 }))
+  const rUnban = String(await tool.execute({ action: 'group_manage', group_id: '20000', op: 'ban', user_id: '20001', duration: 0 }))
   const unbanN: number = banned.length
   assert(unbanN === 2 && banned[1].duration === 0 && rUnban.includes('解除'), `unban(duration 0)应透传,实际:${rUnban}`)
-  const rKick = String(await tool.execute({ action: 'group_manage', group_id: '1045765371', op: 'kick', user_id: '20002' }))
+  const rKick = String(await tool.execute({ action: 'group_manage', group_id: '20000', op: 'kick', user_id: '20002' }))
   const kickN: number = kicked.length
   assert(kickN === 1 && kicked[0].qq === '20002' && rKick.includes('移出'), `kick 应透传,实际:${rKick}`)
-  const rWhole = String(await tool.execute({ action: 'group_manage', group_id: '1045765371', op: 'whole_ban', enable: true }))
+  const rWhole = String(await tool.execute({ action: 'group_manage', group_id: '20000', op: 'whole_ban', enable: true }))
   const wholeN: number = wholeBans.length
   assert(wholeN === 1 && wholeBans[0].enable === true && rWhole.includes('全员禁言'), `whole_ban 应透传,实际:${rWhole}`)
-  const rWholeOff = String(await tool.execute({ action: 'group_manage', group_id: '1045765371', op: 'whole_ban', enable: false }))
+  const rWholeOff = String(await tool.execute({ action: 'group_manage', group_id: '20000', op: 'whole_ban', enable: false }))
   const wholeOffN: number = wholeBans.length
   assert(wholeOffN === 2 && wholeBans[1].enable === false && rWholeOff.includes('解除'), `whole_ban 关闭应透传,实际:${rWholeOff}`)
   // 参数校验
@@ -3953,7 +3958,7 @@ await test('stripNapcat 双通道:显示剥离档案卡/历史保留档案卡(�
     '【QQ私聊 · QQ 1536057397 · 魔精】你好\n' +
     '【图片已下载】1. D:/x.png\n' +
     '【档案卡】\n称呼:魔精\n已知:喜欢王者/KPL\n' +
-    '【回复规则】\n① 岛灵的主人 = QQ 1178821869(唯一,硬编码);当前对方不是主人。\n② 你的回复就是直接发给对方的话…'
+    '【回复规则】\n① 岛灵的主人 = QQ 10000(唯一,privacy.json 配置);当前对方不是主人。\n② 你的回复就是直接发给对方的话…'
   // 显示剥离:档案卡与回复规则都去掉,保留类别行 + 原文 + 图片行
   const shown = stripNapcatInstructions(msg)
   assert(shown.startsWith('【QQ私聊 · QQ 1536057397 · 魔精】你好'), `显示应保留类别行与原文,实际:${shown.slice(0, 40)}`)
@@ -3969,7 +3974,7 @@ await test('stripNapcat 双通道:显示剥离档案卡/历史保留档案卡(�
   assert(stripNapcatHistoryInstructions(old) === '【QQ 123 发来私聊消息】你好', '历史剥离旧私聊指令')
   // 群聊模板:【群聊上下文】与【回复规则】剥,档案卡留(历史)
   const group =
-    '【QQ群聊 · 群 1045765371 · QQ 20001】消息\n【档案卡】\n称呼:群友\n【回复规则】\n① …\n最近群聊记录:\n20001: 你好'
+    '【QQ群聊 · 群 20000 · QQ 20001】消息\n【档案卡】\n称呼:群友\n【回复规则】\n① …\n最近群聊记录:\n20001: 你好'
   assert(stripNapcatHistoryInstructions(group).includes('称呼:群友') && !stripNapcatHistoryInstructions(group).includes('最近群聊记录'), '群聊历史保留档案卡剥规则与群上下文')
   // 空输入
   assert(stripNapcatInstructions('') === '' && stripNapcatHistoryInstructions('  ') === '', '空输入返回空')
@@ -3988,26 +3993,26 @@ await test('extractReplyToStranger:执行回复标记判定(串台根治,2026-08
 })
 
 await test('sessionKeyFor / isValidSessionKey:会话键(会话隔离,2026-08-13)', () => {
-  assert(sessionKeyFor('1178821869') === 'private:1178821869', '私聊键')
-  assert(sessionKeyFor('20001', '1045765371') === 'group:1045765371', '群聊键')
+  assert(sessionKeyFor('10000') === 'private:10000', '私聊键')
+  assert(sessionKeyFor('20001', '20000') === 'group:20000', '群聊键')
   assert(isValidSessionKey('private:1536057397'), '合法私聊键')
-  assert(isValidSessionKey('group:1045765371'), '合法群聊键')
+  assert(isValidSessionKey('group:20000'), '合法群聊键')
   assert(!isValidSessionKey('main'), 'main 不是外部会话键(mutedSessions 校验拒收)')
   assert(!isValidSessionKey('private:abc'), '非法 QQ 号拒收')
   assert(!isValidSessionKey('../etc/passwd'), '路径穿越拒收')
-  assert(!isValidSessionKey('group:1045765371;rm -rf'), '注入拒收')
+  assert(!isValidSessionKey('group:20000;rm -rf'), '注入拒收')
 })
 
 await test('turnAlreadySentToPending:防重发判定(对方收到 2-3 条,2026-08-13 回归)', () => {
   // 本轮开始前快照 before = 0;本轮中 LLM 已用 send 工具发过 1 条 → 跳过路由
   const sent = [
     { type: 'private', target: '1536057397' },
-    { type: 'group', target: '1045765371' },
+    { type: 'group', target: '20000' },
   ]
   assert(turnAlreadySentToPending(sent, 0, '1536057397') === true, '本轮已发过 → 跳过 pending 路由')
   assert(turnAlreadySentToPending(sent, 0, '20002') === false, '未发给该陌生人 → 照常路由')
   assert(turnAlreadySentToPending(sent, 1, '1536057397') === false, '快照已含该条(本轮未新发)→ 照常路由')
-  assert(turnAlreadySentToPending(sent, 1, '1045765371') === false, '群消息不计入私聊防重发')
+  assert(turnAlreadySentToPending(sent, 1, '20000') === false, '群消息不计入私聊防重发')
 })
 
 await test('napcat 工具 sessions/session_mute/session_bind:sessions 直查列表,mute/bind 引导 manage_sessions(2026-08-14)', async () => {
@@ -4040,7 +4045,7 @@ await test('manage_sessions 工具:list/watch/unwatch/mute/bind 直接新建监�
     status: () => ({ connected: false, url: '', lastError: '', receivedCount: 0, repliedCount: 0 }),
     listSessions: () => [
       { key: 'private:1536057397', title: '魔精', kind: 'private' as const, muted: false },
-      { key: 'group:1045765371', title: '群 1045765371', kind: 'group' as const, muted: true },
+      { key: 'group:20000', title: '群 20000', kind: 'group' as const, muted: true },
     ],
     muteSession: (key: string, muted: boolean) => calls.push(['mute', key, muted]),
     bindSession: (key: string) => calls.push(['bind', key]),
@@ -4172,8 +4177,8 @@ await test('napcat 工具:contacts 档案查询与 contact_update 记录', async
 await test('napcat 工具:chats 聊天记录备份查询与过滤', async () => {
   const chats = [
     { id: 'p1', type: 'private' as const, target: '10001', qq: '10001', text: '你好呀', time: 1700000000 },
-    { id: 'g1', type: 'group' as const, target: '1045765371', qq: '20001', text: '今天天气不错', atMe: true, time: 1700000100 },
-    { id: 'g2', type: 'group' as const, target: '1045765371', qq: '20002', text: '哈哈', time: 1700000200 },
+    { id: 'g1', type: 'group' as const, target: '20000', qq: '20001', text: '今天天气不错', atMe: true, time: 1700000100 },
+    { id: 'g2', type: 'group' as const, target: '20000', qq: '20002', text: '哈哈', time: 1700000200 },
   ]
   const tools = napcatTools({
     status: () => ({ connected: false, url: '', lastError: '', receivedCount: 0, repliedCount: 0 }),
@@ -4186,10 +4191,10 @@ await test('napcat 工具:chats 聊天记录备份查询与过滤', async () => 
   })
   const tool = tools.find((t) => t.name === 'napcat')!
   const all = String(await tool.execute({ action: 'chats' }))
-  assert(all.includes('10001') && all.includes('1045765371') && all.includes('你好呀') && all.includes('@鲸鱼娘'), `chats 应列全部记录,实际:${all}`)
+  assert(all.includes('10001') && all.includes('20000') && all.includes('你好呀') && all.includes('@鲸鱼娘'), `chats 应列全部记录,实际:${all}`)
   const byQq = String(await tool.execute({ action: 'chats', user_id: '10001' }))
   assert(byQq.includes('你好呀') && !byQq.includes('今天天气不错'), '按 QQ 过滤应只剩私聊')
-  const byGroup = String(await tool.execute({ action: 'chats', group_id: '1045765371' }))
+  const byGroup = String(await tool.execute({ action: 'chats', group_id: '20000' }))
   assert(byGroup.includes('今天天气不错') && !byGroup.includes('你好呀'), '按群过滤应只剩群聊')
   const none = String(await tool.execute({ action: 'chats', user_id: '999' }))
   assert(none.includes('为空'), '无匹配应提示为空')
@@ -4197,7 +4202,7 @@ await test('napcat 工具:chats 聊天记录备份查询与过滤', async () => 
 
 await test('napcat 工具:persona 会话人格查询与 persona_set 设置/删除', async () => {
   let personas: Record<string, { persona: string; updatedAt: number }> = {
-    'group:1045765371': { persona: '群聊高冷版,话少但偶尔毒舌', updatedAt: 1700000000 },
+    'group:20000': { persona: '群聊高冷版,话少但偶尔毒舌', updatedAt: 1700000000 },
   }
   const writes: string[] = []
   const tools = napcatTools({
@@ -4221,15 +4226,15 @@ await test('napcat 工具:persona 会话人格查询与 persona_set 设置/删�
   })
   const tool = tools.find((t) => t.name === 'napcat')!
   const list = String(await tool.execute({ action: 'persona' }))
-  assert(list.includes('group:1045765371') && list.includes('高冷版'), `persona 应列会话人格,实际:${list}`)
-  const set = String(await tool.execute({ action: 'persona_set', scope: 'private:1178821869', persona: '私聊亲近版,黏人撒娇' }))
-  assert(writes.includes('private:1178821869:私聊亲近版,黏人撒娇'), 'persona_set 应写入')
-  assert(set.includes('private:1178821869') && set.includes('黏人撒娇'), `应回显设置,实际:${set}`)
+  assert(list.includes('group:20000') && list.includes('高冷版'), `persona 应列会话人格,实际:${list}`)
+  const set = String(await tool.execute({ action: 'persona_set', scope: 'private:10000', persona: '私聊亲近版,黏人撒娇' }))
+  assert(writes.includes('private:10000:私聊亲近版,黏人撒娇'), 'persona_set 应写入')
+  assert(set.includes('private:10000') && set.includes('黏人撒娇'), `应回显设置,实际:${set}`)
   // scope 校验
   await assertRejects(() => tool.execute({ action: 'persona_set', scope: 'bad', persona: 'x' }), 'scope 需要是 private:<QQ> 或 group:<群号>')
   // 空 persona = 删除
-  const del = String(await tool.execute({ action: 'persona_set', scope: 'group:1045765371', persona: '' }))
-  assert(writes.includes('group:1045765371:'), '空 persona 应删除')
+  const del = String(await tool.execute({ action: 'persona_set', scope: 'group:20000', persona: '' }))
+  assert(writes.includes('group:20000:'), '空 persona 应删除')
   assert(del.includes('已删除'), `应回显删除,实际:${del}`)
 })
 
@@ -4237,17 +4242,17 @@ await test('napcatMessageText:群消息 @ 与图片/回复段解析', () => {
   assert(
     napcatMessageText(
       [
-        { type: 'at', data: { qq: '108724305' } },
+        { type: 'at', data: { qq: '30000' } },
         { type: 'text', data: { text: ' 在吗' } },
         { type: 'image', data: { file: 'x.png' } },
         { type: 'reply', data: { id: '1' } },
       ],
-      '108724305',
+      '30000',
     ) === '@鲸鱼娘 在吗[图片][回复]',
     '群消息:@ 机器人标注 + 图片/回复段',
   )
   assert(
-    napcatMessageText([{ type: 'at', data: { qq: '123' } }, { type: 'text', data: { text: ' hi' } }], '108724305') === '@123 hi',
+    napcatMessageText([{ type: 'at', data: { qq: '123' } }, { type: 'text', data: { text: ' hi' } }], '30000') === '@123 hi',
     '@ 他人标注 QQ 号',
   )
 })
@@ -4256,7 +4261,7 @@ await test('set_napcat_config:enabled/wsUrl/allowed/allowedGroups 校验与写�
   const { writes, tools } = makeConfigToolsDeps()
   const tool = tools.find((t) => t.name === 'set_napcat_config')!
   const out = String(
-    await tool.execute({ enabled: true, wsUrl: 'ws://127.0.0.1:3001', allowed: ['10001', '10002'], allowedGroups: ['1045765371', '22222222'] }),
+    await tool.execute({ enabled: true, wsUrl: 'ws://127.0.0.1:3001', allowed: ['10001', '10002'], allowedGroups: ['20000', '22222222'] }),
   )
   assert(out.includes('已开启'), `应回显开启,实际:${out}`)
   const patch = writes.at(-1) as { napcatEnabled?: boolean; napcatAllowed?: string[]; napcatAllowedGroups?: string[] }
@@ -4276,7 +4281,7 @@ await test('set_napcat_config:enabled/wsUrl/allowed/allowedGroups 校验与写�
 await test('napcat 工具:sent(机器人发出的消息带 ID 可撤回)与 zone(查看 QQ 空间动态)', async () => {
   const sentList = [
     { messageId: 'm-sent-1', type: 'private' as const, target: '10001', text: '下载好了', time: 1700000000 },
-    { messageId: 'm-sent-2', type: 'group' as const, target: '1045765371', text: '大家好', time: 1700000100 },
+    { messageId: 'm-sent-2', type: 'group' as const, target: '20000', text: '大家好', time: 1700000100 },
   ]
   const zoneCalls: Array<{ qq: string; num: number }> = []
   const tools = napcatTools({
@@ -4299,7 +4304,7 @@ await test('napcat 工具:sent(机器人发出的消息带 ID 可撤回)与 zone
   // sent:列出机器人发出的消息(2026-08-12 撤回修复),带 message_id(撤回用 action=recall + message_id)
   const sent = String(await tool.execute({ action: 'sent' }))
   assert(sent.includes('m-sent-1') && sent.includes('QQ10001') && sent.includes('message_id m-sent-1'), `sent 应列消息与 ID,实际:${sent}`)
-  assert(sent.includes('m-sent-2') && sent.includes('群1045765371'), `sent 应含群消息,实际:${sent}`)
+  assert(sent.includes('m-sent-2') && sent.includes('群20000'), `sent 应含群消息,实际:${sent}`)
   // sent 空列表兜底
   const emptyTools = napcatTools({
     status: () => ({ connected: false, url: '', lastError: '', receivedCount: 0, repliedCount: 0 }),
@@ -4454,7 +4459,7 @@ await test('wsclient:端到端连接假 OneBot 服务器(握手/收发/ping-pong
         // 推送一条文本消息 + 一个 ping(期望客户端回 pong);
         // 帧头长度 = UTF-8 字节数(不能用字符数,中文 3 字节/字)
         const payload = Buffer.from(
-          JSON.stringify({ post_type: 'message', message_type: 'private', user_id: 1178821869, raw_message: '集成测试' }),
+          JSON.stringify({ post_type: 'message', message_type: 'private', user_id: 10000, raw_message: '集成测试' }),
           'utf8',
         )
         sock.write(Buffer.concat([Buffer.from([0x81, payload.length]), payload]))

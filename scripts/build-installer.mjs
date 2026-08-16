@@ -54,6 +54,15 @@ async function main() {
     path.join(outDir, 'resources', 'release', '灵动岛'),
     { recursive: true },
   )
+  // 列出已打包的外部工具(由 build-release --tools 决定;安装器按此呈现
+  // 可选安装的工具,源码 + 编译 exe 已一并打入 release)
+  const toolsDir = path.join(root, 'release', '灵动岛', 'electron', 'resources', 'tools')
+  if (fs.existsSync(toolsDir)) {
+    const names = (await fsp.readdir(toolsDir, { withFileTypes: true }))
+      .filter((e) => e.isDirectory())
+      .map((e) => e.name)
+    console.log(`[installer]   已打包外部工具:${names.length ? names.join('、') : '(无)'}(安装时可选)` )
+  }
 
   console.log('[installer] 重命名入口 →', exeName)
   await fsp.rename(path.join(outDir, 'electron.exe'), path.join(outDir, exeName))
