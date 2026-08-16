@@ -737,6 +737,10 @@ export function AgentView({
   // 跳底锚点(2026-08-17 收敛):消息列表末尾 0 高哨兵,统一跳底用它对齐
   // 滚动容器底边——见 scrollToBottom
   const bottomAnchorRef = useRef<HTMLDivElement>(null)
+  // 自动贴底校正中标志(2026-08-17 修复"发送消息偶现跳到历史中部"):
+  // scrollToBottom 的多帧持续校正循环置 true;用户滚动(handleScroll)
+  // 置 false 取消——防校正循环把用户刚滚到的位置拉回底部
+  const autoScrollRef = useRef(false)
   // 统一跳底(2026-08-17 收敛,替代原 jumpToBottom / scrollMessagesToBottom):
   // 桌面挂件直接 scrollTop = scrollHeight(浏览器标准可靠落底,自动钳制到
   // max;单源 + atBottomRef 守卫不再多源覆盖,不抖动;rAF 校正兜底媒体/
@@ -744,6 +748,11 @@ export function AgentView({
   // GPU 渲染下精确)。**修复"桌面端无法滚动"(2026-08-17):不再用
   // getBoundingClientRect 差值驱动——布局动画/软件渲染下 rect 与
   // scrollTop 时序偏差会把滚动位置钉在错误值,表现为滚动条无法滚动
+  // **持续校正(2026-08-17 修复"发送消息偶现跳到历史中部")**:单次
+  // scrollTop = scrollHeight 若恰在内容渲染完成前执行,scrollTop 停在
+  // 中间(旧底部 = 新内容中部),后续若无修正即卡死——改为连续 rAF
+  // 逼近底部,内容持续增高(媒体/流式/字体重排)期间始终跟随,连续两帧
+  // 距底 < 2px 判定稳定停止;用户滚动(handleScroll)取消校正不打扰
   const scrollToBottom = useCallback((smooth = false) => {
     const el = scrollRef.current
     if (!el) return
@@ -757,10 +766,30 @@ export function AgentView({
       }
       return
     }
+    // 已在自动校正中:复用循环,不重复启动(循环每帧逼近最新底部,
+    // 新内容到达时下一帧自然覆盖)
+    if (autoScrollRef.current) return
+    autoScrollRef.current = true
     el.scrollTop = el.scrollHeight
-    requestAnimationFrame(() => {
-      if (el.isConnected) el.scrollTop = el.scrollHeight
-    })
+    let stable = 0
+    const settle = () => {
+      if (!el.isConnected || !autoScrollRef.current) {
+        autoScrollRef.current = false
+        return
+      }
+      if (el.scrollHeight - el.scrollTop - el.clientHeight < 2) {
+        stable += 1
+        if (stable >= 2) {
+          autoScrollRef.current = false
+          return
+        }
+      } else {
+        stable = 0
+        el.scrollTop = el.scrollHeight
+      }
+      requestAnimationFrame(settle)
+    }
+    requestAnimationFrame(settle)
   }, [])
   // 会话切换/新消息时滚底(2026-08-17 收敛:原"messages/currentSessionKey
   // 即时跳底 effect"与"切会话强制贴底 effect"两处冗余合并为一——任何
@@ -1054,20 +1083,23 @@ export function AgentView({
   // 消息内容高度变化 → 重测岛体 + 贴底跟随(2026-08-17 弃虚拟滚动后恢复
   // 容器级 RO):工具卡片展开/媒体加载/文本重排使单条消息高度变化,消息
   // 窗口容器高度(= 全部消息高 + gap)随之变化 → 岛体高度跟随(原
-  // MessageWindow 的 onLayoutChange 通道;观察窗口容器一个元素即可,
-  // 无需逐条观察);同时若用户贴底,跳底跟随内容增长——流式增量/媒体
-  // 加载期间"持续贴底"的可靠来源,替代原"消息变化 effect + 双 rAF +
-  // 150ms 定时器"反复覆盖绝对 scrollTop 造成的抖动(2026-08-17 用户实测)
+  // MessageWindow 的 onLayoutChange 通道);同时若用户贴底,跳底跟随
+  // 内容增长——流式增量/媒体加载期间"持续贴底"的可靠来源,替代原
+  // "消息变化 effect + 双 rAF + 150ms 定时器"反复覆盖绝对 scrollTop
+  // 造成的抖动(2026-08-17 用户实测)。**观察范围扩大到整个消息区
+  // (2026-08-17 修复"发送消息偶现跳到历史中部")**:原只观察消息窗口,
+  // 流式尾部(tail)的增高无 RO 覆盖、仅靠 streaming 引用变化的 effect
+  // 跟随(时序上偶有漏跳底)——改为观察消息区所有直接子元素,任何内容
+  // 增高都触发贴底跟随;scrollToBottom 内部的持续校正循环再兜底到稳定
   useLayoutEffect(() => {
     if (phase !== 'content') return
     const el = scrollRef.current
-    const win = el ? (el.querySelector('.island-msgs-window') as HTMLElement | null) : null
-    if (!win) return
+    if (!el) return
     const ro = new ResizeObserver(() => {
       measureHeight()
       if (atBottomRef.current && viewRef.current === 'chat') scrollToBottom()
     })
-    ro.observe(win)
+    for (let i = 0; i < el.children.length; i++) ro.observe(el.children[i])
     return () => ro.disconnect()
   }, [phase, measureHeight, scrollToBottom])
 
@@ -1094,9 +1126,14 @@ export function AgentView({
   // 引用,既绑定 React onScroll,又经下方 effect 加原生 scroll 监听——
   // 保证用户滚动(滚轮/拖滚动条)时 atBottomRef 一定置 false,后续
   // effect 才不把滚动拉回底部(否则表现为"滚动条无法滚动/一滚就弹回")
+  // **取消自动贴底校正(2026-08-17)**:任何 scroll 事件都视为用户介入,
+  // 置 autoScrollRef=false 终止 scrollToBottom 的持续校正循环——防止
+  // 校正循环把用户刚滚到的位置拉回底部。程序化 scrollTop 赋值不触发
+  // scroll 事件,故自动校正自身不会误取消
   const handleScroll = useCallback(() => {
     const el = scrollRef.current
     if (!el) return
+    autoScrollRef.current = false
     atBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48
   }, [])
   // atBottomRef 可靠更新:chat 内容态给滚动容器加原生 scroll 监听

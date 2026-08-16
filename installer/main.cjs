@@ -42,7 +42,6 @@ const RELEASE_NAME = '灵动岛'
 const TOOL_META = {
   bili: { name: '哔哩哔哩下载工具', desc: 'B站视频/弹幕/搜索下载(bili-tool.exe + Rust 源码)' },
   docflow: { name: '文档流工具', desc: '文档处理:PDF/Docx/Markdown/思维导图/OCR(server.py + Python 运行时)' },
-  xxt: { name: '小学同步答题工具', desc: 'xx同步答题辅助(auto_answer.py)' },
 }
 
 // 源发布目录(相对本文件 ../release/灵动岛)

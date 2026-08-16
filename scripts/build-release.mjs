@@ -12,8 +12,8 @@
  * 安装后快捷方式指向 <安装目录>/electron/electron.exe;
  * electron.exe 启动时自动加载同目录 resources/app = 主应用。
  *
- * 用法:node scripts/build-release.mjs [--tools=bili,docflow,xxt]
- *   --tools 逗号分隔要打包的外部工具(缺省 = 全部 bili,docflow,xxt);
+ * 用法:node scripts/build-release.mjs [--tools=bili,docflow]
+ *   --tools 逗号分隔要打包的外部工具(缺省 = 全部 bili,docflow);
  *   每个工具目录整体复制 = **源码 + 编译的 exe 一并打包**(便于后续修改迭代)。
  */
 import { spawnSync } from 'node:child_process'
@@ -25,8 +25,8 @@ import fsp from 'node:fs/promises'
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 const releaseDir = path.join(root, 'release', '灵动岛')
 
-// 外部工具清单(缺省全部;--tools=bili,xxt 可只打包指定工具)
-const ALL_TOOLS = ['bili', 'docflow', 'xxt']
+// 外部工具清单(缺省全部;--tools=bili,docflow 可只打包指定工具)
+const ALL_TOOLS = ['bili', 'docflow']
 const toolArg = process.argv.find((a) => a.startsWith('--tools='))
 const TOOLS = toolArg
   ? toolArg
@@ -108,7 +108,7 @@ async function main() {
 
   console.log(`[release] 复制外部工具(--tools=${TOOLS.join(',')} → electron/resources/tools)…`)
   // Agent 工具经 toolsRoot() 定位:打包后 process.resourcesPath/tools =
-  // electron/resources/tools(bili-tool / docflow / xxt);整体复制 = 源码 +
+  // electron/resources/tools(bili-tool / docflow);整体复制 = 源码 +
   // 编译的 exe 一并打包。bili 排除 config/(本机登录态 cookies/store,
   // 含敏感凭据,不随发行)
   const toolsSrc = path.join(root, 'tools')

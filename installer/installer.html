@@ -564,7 +564,6 @@ const api = window.installer || {
   listTools: async () => [
     { id: 'bili', name: '哔哩哔哩下载工具', desc: 'B站视频/弹幕/搜索下载(bili-tool.exe + Rust 源码)' },
     { id: 'docflow', name: '文档流工具', desc: '文档处理:PDF/Docx/Markdown/思维导图/OCR(server.py + Python 运行时)' },
-    { id: 'xxt', name: '小学同步答题工具', desc: 'xx同步答题辅助(auto_answer.py)' },
   ],
   install: async (o) => ({ ok: true, dir: o.dir }),
   finish: () => Promise.resolve({ ok: true }),
