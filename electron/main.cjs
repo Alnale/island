@@ -963,7 +963,9 @@ function buildEngineDeps(route, sessionKey) {
         void runProactiveGuess(event.message)
       }
       if (event.type === 'message' && !event.message?.proactive) {
-        handleEngineMessageForNapcat(event.message, sessionKey)
+        // async 路由(2026-08-16):指纹缺失/歧义的轮次落定后 await 意图
+        // 判定 Sub Agent;路由状态已在函数开头同步消费,不阻塞事件流
+        void handleEngineMessageForNapcat(event.message, sessionKey)
       }
     },
     onSwitchToMusic: (play) => setWidgetMode('music', 'tool', play),
@@ -975,7 +977,7 @@ function buildEngineDeps(route, sessionKey) {
     // 会话级确认门:槽挂在 route 上(主/外部会话并发确认互斥各自独立)
     confirmCommand: (command) => requestUserConfirm({ command }, route),
     confirmAction: (title, detail) => requestUserConfirm({ title, detail }, route),
-    napcat: getNapcatClient().active ? getNapcatClient().client : undefined,
+    napcat: getNapcatClient().client,
     runMusicControl: (op, args) => runMusicControl(op, args),
     // 会话管理工具桥(2026-08-13,LLM 自己生成记录/清空当前会话上下文):
     // IPC 请求/响应读写渲染端 localStorage + 派发清空事件
@@ -1133,6 +1135,17 @@ function newRoute() {
      * 就不发送"):agent:send 生成并注入系统指令,落定路由只发送带本轮
      * 指纹的回复;轮次结束随 lastSendSource 一起清零 */
     turnFingerprint: null,
+    /** 本轮主人指纹(2026-08-15 双指纹机制,用户要求"区分主人指纹和他人
+     * 指纹,不再以没有指纹为主人消息"):【主人指纹:xxx】= 给主人的话,
+     * 落定路由剥指纹发回主人 QQ——主人 QQ 触发轮/询问轮/群触发轮生成
+     * 并注入;无指纹的回复不发送(扣留),杜绝"发给别人的话被当汇报发回
+     * 主人"的串台。轮次结束与 turnFingerprint 同刻清零 */
+    masterFingerprint: null,
+    /** 本轮触发消息原文(2026-08-16 意图判定器):agent:send 记录,落定
+     * 路由指纹缺失时交给意图判定 Sub Agent——判定需要知道主人指示了
+     * 什么("把某句话发给某人" vs 日常聊天),否则无法区分回复的发送意图;
+     * 与 lastSendSource 同刻清零 */
+    lastTriggerText: null,
     pendingQQReply: null,
     pendingTurnSentBefore: 0,
     /** 群面板输入轮防重发快照(2026-08-13):本轮开始前已发给该群的
@@ -1645,26 +1658,78 @@ function turnFingerprintRule(fp) {
   )
 }
 
-/** 指纹注入指令(群触发轮,2026-08-14):回复群友 = 以本轮指纹开头写群友话
- * (落定路由自动发回群、剥指纹)——与"对话回复 = 向主人汇报"程序可区分,
- * 根治"LLM 把回复群友的话直接写在对话里,整段被当汇报私发主人 QQ" */
-function turnFingerprintGroupRule(fp) {
+/** 指纹注入指令(群触发轮,2026-08-14;2026-08-15 双指纹升级):回复群友 =
+ * 以本轮他人指纹开头写群友话(落定路由自动发回群、剥指纹);给主人的汇报
+ * 必须以【主人指纹:xxx】开头(落定私发主人)——无指纹不发送(不再"无指纹
+ * = 汇报私发主人":LLM 忘带群指纹的群友话会整段被当汇报发主人,串台根源) */
+function turnFingerprintGroupRule(fp, masterFp) {
   return (
-    `【本轮指纹 = ${fp}】如果你要回复群友:直接在对话回复里写发给群友的话,` +
+    `【本轮指纹 = ${fp}】【主人指纹 = ${masterFp}】如果你要回复群友:直接在对话回复里写发给群友的话,` +
     `以「【指纹:${fp}】」开头(第一行就是指纹,后面直接写群友话,指纹前面不要加任何话)——` +
     `带指纹的回复会自动发到群里(指纹会自动去掉);` +
-    `向主人汇报的话不要带指纹(不带指纹的回复 = 汇报,会私发主人 QQ,不会发到群里)。` +
-    `历史消息里出现的「【指纹:xxxx】」是旧轮次的,与本轮无关,绝对不要使用。`
+    `向主人汇报的话必须以「【主人指纹:${masterFp}】」开头(后面直接写汇报内容)——带主人指纹的回复会私发主人 QQ;` +
+    `任何回复都必须带其中一个指纹——没有指纹的回复不会发送。` +
+    `历史消息里出现的「【指纹:xxxx】」「【主人指纹:xxxx】」是旧轮次的,与本轮无关,绝对不要使用。`
   )
 }
 
-/** 指纹注入指令(执行轮,2026-08-13):主人指示怎么回复对方 */
+/** 指纹注入指令(执行轮,2026-08-13;2026-08-16 恢复——双指纹重构(九轮)
+ * 误删定义、调用点残留,窗口面板在 pending 存活时输入会命中此分支 →
+ * ReferenceError 炸掉 agent:send IPC(uncaughtException 兜底只记日志),
+ * 引擎从未启动 = 面板执行轮静默无回复,实测)。窗口面板执行轮无发回主人
+ * 通道(回复要么带指纹发对方、要么留在面板):发给对方的话带他人指纹;
+ * 已用 send 工具发过 = 汇报留面板不带指纹 */
 function turnFingerprintExecRule(fp, qq) {
   return (
     `【主人指示 · 回复对象 QQ ${qq}】如果主人这条消息是在指示你怎么回复对方:` +
     `你的执行回复 = 只写发给对方的那一句话,以「【指纹:${fp}】」开头(第一行就是指纹,后面直接写发给对方的话,指纹前面不要加任何话);` +
     `如果本轮已经用 napcat send/send_group 工具把回复发出去了,这条回复就是给主人的汇报,不要带指纹。` +
     `给主人看的话(询问/汇报)永远不要带指纹;历史消息里出现的旧指纹绝对不要使用。`
+  )
+}
+
+/** 指纹注入指令(执行轮,2026-08-13;2026-08-15 双指纹升级,用户要求"区分
+ * 主人指纹和他人指纹,不再以没有指纹为主人消息"):主人 QQ 指示执行轮——
+ * 发给对方的话带他人指纹【指纹:fp】(发回复对象),给主人的话带主人指纹
+ * 【主人指纹:masterFp】(发主人);无指纹 = 不发送。原实现"执行回复带指纹、
+ * 汇报不带指纹"的语义下,LLM 忘带指纹的执行回复(本应发给对方)被当汇报
+ * 发回主人 QQ、对方收不到——双指纹让两条通道都有认证 */
+function turnFingerprintDualRule(fp, masterFp, qq) {
+  return (
+    `【主人指示 · 回复对象 QQ ${qq}】【本轮指纹 = ${fp}】【主人指纹 = ${masterFp}】` +
+    `如果主人这条消息是在指示你怎么回复对方:你的执行回复 = 只写发给对方的那一句话,` +
+    `以「【指纹:${fp}】」开头(第一行就是指纹,后面直接写发给对方的话,指纹前面不要加任何话);` +
+    `如果本轮已经用 napcat send/send_group 工具把回复发出去了,这条回复就是给主人的汇报,` +
+    `必须以「【主人指纹:${masterFp}】」开头(后面直接写给主人的话);` +
+    `任何回复都必须带其中一个指纹——没有指纹的回复不会发送(发给对方的发不出去、给主人的也到不了主人)。` +
+    `历史消息里出现的指纹是旧轮次的,与本轮无关,绝对不要使用。`
+  )
+}
+
+/** 指纹注入指令(主人 QQ 日常轮,2026-08-15 二轮修复"主人QQ发消息没有
+ * 回复"):**非执行轮**的主人对话,回复 = 给主人的话,直接发回主人 QQ,
+ * 不要求指纹——回复没有其它路由目标,"无指纹 = 主人消息"语义天然成立;
+ * 真正保证"别人能收到"的是 send/send_group 工具纪律(九轮根因 = LLM
+ * 把发给对方的话写进对话回复、不调工具)。执行轮(pending 存活,主人
+ * 指示回复陌生人)仍走 turnFingerprintDualRule 双指纹严格门控 */
+function turnMasterDirectRule() {
+  return (
+    `你正在与主人(QQ ${MASTER_QQ})对话:你的回复会直接发送到主人 QQ,直接正常回复即可。` +
+    `要给别人(其它 QQ/群)发消息,必须用 napcat send/send_group 工具真实发送,不要只写在对话回复里` +
+    `(不调工具只在回复里说"已发送" = 对方实际收不到,2026-08-14 用户实测)。`
+  )
+}
+
+/** 指纹注入指令(询问轮,2026-08-15 三轮修复"LLM 询问没发到主人 QQ"):
+ * source='ask' 轮 = LLM 向主人询问怎么回复对方——询问内容 = 给主人的话,
+ * **直发主人 QQ,不要求指纹**。原 turnAskFingerprintRule 要求带主人指纹,
+ * LLM 服从性仅 ~50%(与主人 QQ 日常轮同款,真实 API 实测),忘带指纹被
+ * ask-no-fp 扣留 = 主人收不到任何询问;询问轮无路由歧义(ask 轮回复永不
+ * 发对方,唯一目的地 = 主人),与九轮二轮"无歧义轮次不设指纹门"同款结论 */
+function turnAskDirectRule() {
+  return (
+    `你正在向主人(QQ ${MASTER_QQ})询问怎么回复对方:你的询问会直接发送到主人 QQ,直接写询问主人的话即可。` +
+    `不要写"发给对方的话"——那是等主人指示后的执行回复,本轮不会发送给对方。`
   )
 }
 
@@ -1680,7 +1745,11 @@ function logFpGate(sessionKey, reason, text, notify = true) {
     // 审计 DEF-4(2026-08-14):原空 catch → 记录警告便于排查
     console.warn('[logFpGate] 指纹记录写入失败:', e?.message || e)
   }
-  console.log('[session-debug] FP-GATE ' + JSON.stringify(rec))
+  // 指纹门控记录始终写入 __fpGate 数组(审计用);控制台打印仅调试模式
+  // 开启时输出(2026-08-17:正常使用时每条扣留都刷屏,属非必要调试日志)
+  if (process.env.WIDGET_SCREENSHOT_MODE === 'session-debug') {
+    console.log('[session-debug] FP-GATE ' + JSON.stringify(rec))
+  }
   if (!notify) return // 静默记录(2026-08-14:本轮已用工具发过的汇报轮,不弹误报)
   if (process.env.WIDGET_SCREENSHOT_MODE !== 'session-debug') {
     // 生产环境指纹扣留时弹轻量通知(2026-08-14:让用户知道回复没发出去)
@@ -1689,6 +1758,16 @@ function logFpGate(sessionKey, reason, text, notify = true) {
       'panel-no-fp': '面板回复未带指纹,未发送',
       'group-panel-no-fp': '群回复未带指纹,未发送到群',
       'qq-ask-with-fp': '询问消息误带指纹,已拦截',
+      'master-no-fp': '回复未带主人指纹,未发送到主人 QQ',
+      'master-fp-no-target': '回复带他人指纹但无发送目标,未发送(发给别人请用 send 工具)',
+      // 2026-08-16 意图判定器兜底路由(无指纹回复改由判定器判定,不再
+      // 一律扣留/一律直发):
+      'master-other-no-target': '回复疑似是发给别人的话,未发送(发给别人请用 send 工具)',
+      'classify-hold': '回复被判定为无需发送,未发送',
+      'internal-monologue': '回复疑似内部思考(思维链),未发送',
+      // 2026-08-15 三轮起 ask-no-fp 不再触发(询问轮改直发,见 turnAskDirectRule)
+      'ask-no-fp': '询问未带主人指纹,未发送到主人 QQ',
+      'group-no-master-fp': '汇报未带主人指纹,未私发主人 QQ',
     }
     const title = reasonMap[reason] || '回复被拦截'
     showMainNotify('⚠️ ' + title, rec.text + (rec.text.length >= 60 ? '…' : ''))
@@ -1702,15 +1781,22 @@ function handleNapcatSendError(err, target, type = 'QQ') {
   showMainNotify('⚠️ 发送失败', `${type} ${target}: ${msg}`)
 }
 
-function handleEngineMessageForNapcat(message, sessionKey) {
+async function handleEngineMessageForNapcat(message, sessionKey) {
   // 会话路由(2026-08-13):主对话/外部会话各自的询问轮标记、待回复
-  // 陌生人、防重发快照——并发会话互不串扰
+  // 陌生人、防重发快照——并发会话互不串扰。**2026-08-16 起为 async**:
+  // 指纹缺失/歧义的轮次落定后可能 await 意图判定 Sub Agent(独立 LLM
+  // 调用),路由状态在函数开头已同步消费清零,await 期间不产生重复路由
   const route = routeFor(sessionKey)
   // **轮次指纹(2026-08-13,用户要求"指纹对不上就不发送")**:agent:send
   // 生成并注入系统指令,落定时提取验证——只发送带本轮指纹的回复;无论
   // 是否路由,指纹随轮次立即清零(防陈旧指纹串到下一轮)
   const routeFp = route.turnFingerprint ?? null
   route.turnFingerprint = null
+  // **主人指纹(2026-08-15 双指纹机制)**:给主人的话 = 带【主人指纹:xxx】,
+  // 与"发给对方的话"(【指纹:xxx】)双通道并存——主人 QQ 轮/询问轮/群触
+  // 发轮的回复可能发回主人,须主人指纹认证;同刻清零
+  const routeMasterFp = route.masterFingerprint ?? null
+  route.masterFingerprint = null
   if (process.env.WIDGET_SCREENSHOT_MODE === 'session-debug') {
     console.log('[session-debug] handleEngineMessage key=', sessionKey, 'routeIsMain=', route === mainRoute, 'lastSendSource=', route.lastSendSource, 'lastSendTarget=', route.lastSendTarget, 'mainLastAsk=', mainRoute.lastAskTurn, 'clientActive=', !!napcatClientState?.active)
   }
@@ -1727,10 +1813,45 @@ function handleEngineMessageForNapcat(message, sessionKey) {
   text = agentEngineModule.stripThinkingPreamble(text) || text
   const c = napcatClientState?.client
   if (!c) return
+  // **内部思维链/独白审核(2026-08-17,用户要求由审核 Sub Agent 判定,
+  // 不用正则删——正则只做疑似粗筛,真正判定交给审核器,避免误删正常
+  // 内容)**:LLM 思考模式偶发把思维链写进正文(本应只出现在
+  // reasoning_content),如「话题收尾了。这段聊得挺热络的,他没再提别的
+  // 要求,我就不主动打扰了~」被整段发到对方。粗筛命中疑似才调审核(每次
+  // 回复都调 LLM 太贵),审核判定为内部独白 → 整条扣留不发送;判定失败/
+  // 非独白 → 原样放行(拿不准不拦截)
+  if (agentEngineModule.isSuspectedMonologue(text)) {
+    try {
+      const isInternal = await getReplyClassifier().judgeMonologue(text)
+      if (isInternal === true) {
+        logFpGate(sessionKey, 'internal-monologue', text, false)
+        return
+      }
+    } catch (err) {
+      console.warn('[napcat] 内部独白审核失败,放行:', err?.message || err)
+    }
+  }
+  // **判定器路由补标(2026-08-16 二轮,修复"消息正常发送但指纹 UI 标识
+  // 丢失")**:意图判定器兜底路由成功的回复文本无指纹(指纹缺失才走判定
+  // 器)→ 渲染端 hasTurnMark/hasMasterTurnMark 检测不到标签。路由发送
+  // 成功后补发 message-routed 事件,渲染端按 messageId 给落定消息补打
+  // sentToPeer/sentToMaster(与 message 事件同一 IPC 通道,顺序到达)
+  const notifyRouted = (to) => {
+    try {
+      if (message && typeof message.id === 'string' && message.id) {
+        sendToWidget('agent:event', { type: 'message-routed', messageId: message.id, to, sessionKey })
+      }
+    } catch (e) {
+      console.warn('[napcat] 路由补标失败:', e?.message || e)
+    }
+  }
   // **询问/指纹预提取(2026-08-14 提前)**:群触发轮分支与私聊分支共用——
   // 指纹 = "发给对方的话"与"向主人汇报"的程序分界线
   const isAsk = agentEngineModule.isAskTurnToMaster(text)
   const fpResult = routeFp ? agentEngineModule.extractTurnFingerprint(text, routeFp) : null
+  // **主人指纹预提取(2026-08-15 双指纹机制)**:【主人指纹:xxx】= 给主人
+  // 的话——询问轮/群触发轮/主人 QQ 轮三个发回主人路径共用
+  const masterFpResult = routeMasterFp ? agentEngineModule.extractMasterFingerprint(text, routeMasterFp) : null
   // QQ/群触发轮标记(2026-08-12:summarize 时强制记忆提取——用户发现
   // 长期记忆没有 QQ 聊天记录,提取原来只在 proactiveEnabled 开启时跑)
   if (route.lastAskTurn || route.lastSendSource) lastQQTurnAt = Date.now()
@@ -1742,17 +1863,32 @@ function handleEngineMessageForNapcat(message, sessionKey) {
   // 的会话窗口,路由状态在主对话路由)
   if (mainRoute.lastAskTurn) {
     mainRoute.lastAskTurn = false
-    // 询问轮回复只发主人;防御性剥离误带的执行标记
-    const stripped = agentEngineModule.extractReplyToStranger(text)
-    c.sendToQQ(MASTER_QQ, stripped ?? text).catch((err) => handleNapcatSendError(err, MASTER_QQ))
+    // 询问轮回复 = 给主人的话,直发主人 QQ(2026-08-15 三轮修复"LLM 询问
+    // 没发到主人 QQ"):原实现要求带主人指纹才发主人——LLM 服从性仅 ~50%
+    // (与主人 QQ 日常轮同款),忘带指纹被 ask-no-fp 扣留 = 主人收不到任何
+    // 询问;询问轮无路由歧义(ask 轮回复永不发对方,唯一目的地 = 主人),
+    // 与九轮二轮"无歧义轮次不设指纹门"同款。带主人指纹仍兼容(剥指纹);
+    // 防御性剥离误带的执行标记
+    if (masterFpResult) {
+      const stripped = agentEngineModule.extractReplyToStranger(masterFpResult.content)
+      c.sendToQQ(MASTER_QQ, stripped ?? masterFpResult.content).catch((err) => handleNapcatSendError(err, MASTER_QQ))
+      return
+    }
+    // 无主人指纹:直发主人(发送边界剥除任何残留指纹标记——指纹物理上到
+    // 不了任何聊天对象;原 ask-no-fp 扣留已撤销,扣留 = 询问丢失)
+    const askText = agentEngineModule.stripFingerprintMarks(text)
+    c.sendToQQ(MASTER_QQ, askText).catch((err) => handleNapcatSendError(err, MASTER_QQ))
+    showMainNotify('🐳 已向主人同步询问', askText.length > 60 ? askText.slice(0, 60) + '…' : askText, 'low')
     return
   }
   // 来源触发轮(白名单私聊 / 群消息)
   if (route.lastSendSource && route.lastSendTarget) {
     const source = route.lastSendSource
     const target = route.lastSendTarget
+    const triggerText = route.lastTriggerText
     route.lastSendSource = null
     route.lastSendTarget = null
+    route.lastTriggerText = null
     // **群消息触发轮的对话回复 = 三分流(2026-08-14 修复"回复别人的消息
     // 发到主人QQ"——LLM 偶发把发给群友的话直接写在对话回复里,原实现
     // 整段被当汇报私发主人,连指纹/「不回复」声明都原文发给主人)**:
@@ -1778,8 +1914,42 @@ function handleEngineMessageForNapcat(message, sessionKey) {
         return
       }
       if (fpResult && isAsk) logFpGate(sessionKey, 'qq-ask-with-fp', text)
-      c.sendToQQ(MASTER_QQ, text).catch((err) => handleNapcatSendError(err, MASTER_QQ))
-      showMainNotify('🐳 群聊汇报(已私发主人)', text.length > 60 ? text.slice(0, 60) + '…' : text, 'low')
+      // 汇报 = 给主人的话:带主人指纹才私发主人(2026-08-15 双指纹——无
+      // 指纹扣留,LLM 忘带群指纹的群友话不再被当汇报发主人)
+      if (masterFpResult) {
+        c.sendToQQ(MASTER_QQ, masterFpResult.content).catch((err) => handleNapcatSendError(err, MASTER_QQ))
+        showMainNotify('🐳 群聊汇报(已私发主人)', masterFpResult.content.length > 60 ? masterFpResult.content.slice(0, 60) + '…' : masterFpResult.content, 'low')
+        return
+      }
+      // **意图判定器兜底(2026-08-16,修复"该发给主人的汇报没发出去")**:
+      // 无指纹的群触发轮回复不再一律扣留——由判定器区分:给主人的汇报
+      // 发主人、发给群友的话发回群;询问(误带指纹/无指纹)只发主人;
+      // 判定失败回退扣留(原行为)
+      const groupIntent = await classifyReplyIntent('group', '群聊触发轮', text, triggerText, `群 ${target}`)
+      if (groupIntent === 'master') {
+        notifyRouted('master')
+        c.sendToQQ(MASTER_QQ, agentEngineModule.stripFingerprintMarks(text)).catch((err) => handleNapcatSendError(err, MASTER_QQ))
+        showMainNotify('🐳 群聊汇报(已私发主人)', text.length > 60 ? text.slice(0, 60) + '…' : text, 'low')
+        return
+      }
+      if (groupIntent === 'other' && !isAsk) {
+        if (!turnAlreadySentToTarget('group', target, route)) {
+          notifyRouted('group')
+          c.sendToGroup(target, agentEngineModule.stripFingerprintMarks(text)).catch((err) => handleNapcatSendError(err, target, '群'))
+          showMainNotify('🐳 已回复群友', text.length > 60 ? text.slice(0, 60) + '…' : text, 'low')
+        }
+        return
+      }
+      // **防误报(2026-08-17 用户实测"内容正常也成功发送,却弹无指纹未
+      // 发送")**:群触发轮 LLM 忘带指纹但本轮已用 send_group 工具发过群
+      // 消息(工具消息即回复,回复文本 = 给主人的汇报)——原实现判定器
+      // hold/失败直接扣留弹窗,工具已发的汇报轮被误报"未发送"(对方其实
+      // 已收到)。扣留弹窗前复核:本轮已发过该群 → 静默放行,不弹误报
+      if (turnAlreadySentToTarget('group', target, route)) {
+        logFpGate(sessionKey, 'group-no-master-fp', text, false)
+        return
+      }
+      logFpGate(sessionKey, groupIntent ? 'classify-hold' : 'group-no-master-fp', text)
       return
     }
     // **轮次指纹验证(2026-08-13,用户要求"每个轮都加入特殊指纹,指纹对
@@ -1806,18 +1976,133 @@ function handleEngineMessageForNapcat(message, sessionKey) {
       }
       return
     }
-    // 主人 QQ 轮:回复照常发回主人(无指纹 = 日常聊天/应答,pending 保留;
-    // 执行轮带指纹已被上面拦截;已用 send 工具发过 → pending 完成)
+    // 主人 QQ 轮(2026-08-15 双指纹机制,用户要求"区分主人指纹和他人指纹,
+    // 不再以没有指纹为主人消息"):给主人的话 = 带主人指纹【主人指纹:xxx】
+    // (剥指纹发回主人);带他人指纹 = 发给对方的话(执行轮发回复对象已在
+    // 上面拦截;非执行轮目标不明扣留提示用 send 工具);无指纹 = 不发送——
+    // 原实现无条件发回主人,LLM 把"发给别人的话"写进对话回复时整段被当
+    // 汇报发回主人 QQ、别人收不到(用户实测场景)
     if (target === MASTER_QQ) {
-      if (pendLive && turnAlreadySentToPending(pend.qq, mainRoute)) {
-        mainRoute.pendingQQReply = null
+      const sendToMaster = (content) => {
+        const done = () => {
+          showMainNotify('🐳 已回复 QQ', content.length > 60 ? content.slice(0, 60) + '…' : content, 'low')
+        }
+        const fail = (err) => handleNapcatSendError(err, target)
+        c.sendToQQ(target, content).then(done).catch(fail)
       }
-      const done = () => {
-        showMainNotify('🐳 已回复 QQ', text.length > 60 ? text.slice(0, 60) + '…' : text, 'low')
+      if (masterFpResult) {
+        // 已用 send 工具发过对方 → 汇报 = 执行完成,清 pending
+        if (pendLive && turnAlreadySentToPending(pend.qq, mainRoute)) {
+          mainRoute.pendingQQReply = null
+        }
+        // **执行轮主人指纹复核(2026-08-16 二轮,修复"应该发给别人的消息
+        // 被发到主人QQ、别人没收到"——LLM 把发给对方的话误打主人指纹
+        // 时,原实现无条件发主人)**:pending 存活时,带主人指纹的回复
+        // 可能是误打的"发给对方的话"——经意图判定器复核归属:判定 other
+        // → 发给 pending 对象(别人不再收不到);master/hold/判定失败 →
+        // 按原行为发主人(汇报语义,不丢主人消息)
+        if (pendLive) {
+          const masterFpIntent = await classifyReplyIntent(
+            'exec',
+            '主人指示执行轮',
+            masterFpResult.content,
+            triggerText,
+            `待回复对象 QQ ${pend.qq}`,
+          )
+          const masterFpAction = masterFpIntent ? agentEngineModule.routeForClassifierIntent('exec', masterFpIntent) : 'send-master'
+          if (masterFpAction === 'send-pending') {
+            mainRoute.pendingQQReply = null
+            if (!turnAlreadySentToPending(pend.qq, mainRoute)) {
+              notifyRouted('peer')
+              c.sendToQQ(pend.qq, masterFpResult.content).catch((err) => handleNapcatSendError(err, pend.qq))
+              showMainNotify('🐳 已回复对方(主人指纹复核)', masterFpResult.content.length > 60 ? masterFpResult.content.slice(0, 60) + '…' : masterFpResult.content, 'low')
+            }
+            return
+          }
+        }
+        notifyRouted('master')
+        sendToMaster(masterFpResult.content)
+        return
       }
-      const fail = (err) => handleNapcatSendError(err, target)
-      c.sendToQQ(target, text).then(done).catch(fail)
-      return
+      // **非执行轮 + 他人指纹(2026-08-16 修复"发给别人的消息被发到主人
+      // QQ")**:主人日常轮回复带他人指纹 = LLM 明确在写"发给别人的话",
+      // 但无待回复目标(未用 send 工具)——原实现把草稿剥指纹发给主人
+      // (2026-08-15 二轮行为),用户实测反感"发给别人的话出现在主人 QQ"。
+      // 改为扣留 + 提示用 send 工具(草稿仍在对话窗口可见,主人可指示补发)
+      if (fpResult && !pendLive) {
+        logFpGate(sessionKey, 'master-fp-no-target', text)
+        return
+      }
+      if (fpResult) {
+        // 执行轮带他人指纹(ask 边缘):目标不明,扣留 + 提示
+        // (发给别人必须用 send 工具,对话回复 = 给主人的话)
+        logFpGate(sessionKey, 'master-fp-no-target', text)
+        return
+      }
+      // **执行轮无指纹(2026-08-16 意图判定器兜底,修复"该发给主人的消息
+      // 因忘带主人指纹没发出去")**:pending 存活时的主人指示轮——回复要
+      // 么是发给对方的话(他人指纹)要么是给主人的汇报(主人指纹),无指纹
+      // 无法判定。原实现一律扣留(master-no-fp),LLM 忘带指纹时主人收不
+      // 到任何东西;现由判定器区分:给主人的话发主人、发给对方的话发待
+      // 回复对象;判定失败回退扣留(原行为)
+      if (pendLive) {
+        const execIntent = await classifyReplyIntent('exec', '主人指示执行轮', text, triggerText, `待回复对象 QQ ${pend.qq}`)
+        const execAction = execIntent ? agentEngineModule.routeForClassifierIntent('exec', execIntent) : 'hold'
+        if (execAction === 'send-master') {
+          notifyRouted('master')
+          sendToMaster(agentEngineModule.stripFingerprintMarks(text))
+          return
+        }
+        if (execAction === 'send-pending') {
+          mainRoute.pendingQQReply = null
+          if (!turnAlreadySentToPending(pend.qq, mainRoute)) {
+            notifyRouted('peer')
+            c.sendToQQ(pend.qq, agentEngineModule.stripFingerprintMarks(text)).catch((err) => handleNapcatSendError(err, pend.qq))
+            showMainNotify('🐳 已回复对方(意图判定)', text.length > 60 ? text.slice(0, 60) + '…' : text, 'low')
+          }
+          return
+        }
+        // **防误报(2026-08-17,同群触发轮)**:执行轮 LLM 已用 send 工具发过
+        // 待回复对象(工具消息即回复),回复文本 = 给主人的汇报——判定器
+        // hold/失败时原实现扣留弹窗误报"未发送"。扣留前复核:已发 → 静默
+        if (turnAlreadySentToPending(pend.qq, mainRoute)) {
+          logFpGate(sessionKey, 'master-no-fp', text, false)
+          return
+        }
+        logFpGate(sessionKey, execIntent ? 'classify-hold' : 'master-no-fp', text)
+        return
+      }
+      // **非执行轮无指纹(2026-08-16 意图判定器,修复"发给别人的消息被发
+      // 到主人QQ")**:无 pending 的主人日常对话,回复**默认** = 给主人的
+      // 话直发主人;但 LLM 可能把"替主人发给别人的话"直接写进回复(不调
+      // send 工具)——原实现无条件发主人 = 串台。现由判定器区分:给主人
+      // 的话发主人、发给别人的话扣留(提示用 send 工具);判定失败回退
+      // 直发主人(原行为,不丢主人消息)——**2026-08-16 二轮收紧**:判定
+      // 失败且触发消息含发送/转达指令、回复较短 → 疑似"发给别人的话",
+      // 扣留提示用 send 工具(不再直发主人 = 串台;判定器偶发失败时的
+      // 兜底,启发式误伤面小)
+      {
+        const dailyIntent = await classifyReplyIntent('master-daily', '主人日常对话轮', text, triggerText, `主人 QQ ${MASTER_QQ}`)
+        if (dailyIntent === null) {
+          if (agentEngineModule.looksLikeForwardInstruction(triggerText) && Array.from(text).length <= 60) {
+            logFpGate(sessionKey, 'master-other-no-target', text)
+            return
+          }
+          sendToMaster(text)
+          return
+        }
+        if (dailyIntent === 'master') {
+          notifyRouted('master')
+          sendToMaster(agentEngineModule.stripFingerprintMarks(text))
+          return
+        }
+        if (dailyIntent === 'other') {
+          logFpGate(sessionKey, 'master-other-no-target', text)
+          return
+        }
+        logFpGate(sessionKey, 'classify-hold', text)
+        return
+      }
     }
     // 扩展信任(非主人)轮(**自主回复同样指纹门控,2026-08-13 用户要求
     // "给 LLM 自主回复也加上指纹"**):
@@ -1834,20 +2119,44 @@ function handleEngineMessageForNapcat(message, sessionKey) {
     }
     if (isAsk) {
       // 防御层:LLM 误把询问内容带指纹 → 拦截(不发给对方)+ 同步主人
+      // (发送边界剥指纹——指纹标记物理上不到任何聊天对象,主人窗口同样)
       if (fpResult) logFpGate(sessionKey, 'qq-ask-with-fp', text)
       mainRoute.pendingQQReply = { qq: target, text: text.slice(0, 200), at: Date.now() }
-      c.sendToQQ(MASTER_QQ, text).catch((err) => handleNapcatSendError(err, MASTER_QQ))
+      c.sendToQQ(MASTER_QQ, agentEngineModule.stripFingerprintMarks(text)).catch((err) => handleNapcatSendError(err, MASTER_QQ))
       return
     }
     // 无指纹:① 本轮已用 send 工具发给过对方(发视频/图片/文件走工具,
     // 规则要求此时的汇报不带指纹)→ 静默放行,不弹误报(2026-08-14
     // 用户实测"发送成功但右下角弹没有指纹");② 忘带指纹的自主回复/
-    // 给主人的应答 → 拦截 + 通知
+    // 给主人的应答 → 意图判定器兜底(2026-08-16):发给对方的话发回对方、
+    // 给主人的汇报发主人,判定失败回退扣留(原行为)
     if (turnAlreadySentToTarget('private', target, route)) {
       logFpGate(sessionKey, 'qq-no-fp', text, false)
       return
     }
-    logFpGate(sessionKey, 'qq-no-fp', text)
+    const contactIntent = await classifyReplyIntent('contact', '私聊触发轮(对方消息)', text, triggerText, `QQ ${target}`)
+    if (contactIntent === 'other') {
+      if (!turnAlreadySentToPending(target, route)) {
+        notifyRouted('peer')
+        c.sendToQQ(target, agentEngineModule.stripFingerprintMarks(text)).catch((err) => handleNapcatSendError(err, target))
+        showMainNotify('🐳 已回复对方(意图判定)', text.length > 60 ? text.slice(0, 60) + '…' : text, 'low')
+      }
+      return
+    }
+    if (contactIntent === 'master') {
+      notifyRouted('master')
+      c.sendToQQ(MASTER_QQ, agentEngineModule.stripFingerprintMarks(text)).catch((err) => handleNapcatSendError(err, MASTER_QQ))
+      showMainNotify('🐳 已向主人汇报(意图判定)', text.length > 60 ? text.slice(0, 60) + '…' : text, 'low')
+      return
+    }
+    // **防误报(2026-08-17,同群触发轮)**:私聊轮 LLM 已用 send 工具发过
+    // 对方(工具消息即回复),回复文本 = 给主人的汇报——判定器 hold/失败
+    // 时原实现扣留弹窗误报"未发送"。扣留前二次复核:已发 → 静默
+    if (turnAlreadySentToTarget('private', target, route)) {
+      logFpGate(sessionKey, 'qq-no-fp', text, false)
+      return
+    }
+    logFpGate(sessionKey, contactIntent ? 'classify-hold' : 'qq-no-fp', text)
     return
   }
   // **外部会话面板输入(2026-08-13 用户要求"以主人身份回复"语义):
@@ -1859,7 +2168,9 @@ function handleEngineMessageForNapcat(message, sessionKey) {
   // 汇报/应答)留在面板;**防重发**:本轮已用 send/send_group 工具发过则
   // 跳过路由(工具消息即回复)——此前"发出去了~"这类汇报被整条发给了对方
   if (route.lastSendSource === 'window' && sessionKey && sessionKey !== 'main') {
+    const triggerText = route.lastTriggerText
     route.lastSendSource = null
+    route.lastTriggerText = null
     const priv = /^private:(\d+)$/.exec(sessionKey)
     const grp = /^group:(\d+)$/.exec(sessionKey)
     const fpPanel = routeFp ? agentEngineModule.extractTurnFingerprint(text, routeFp) : null
@@ -1890,8 +2201,19 @@ function handleEngineMessageForNapcat(message, sessionKey) {
         // 的汇报(规则要求不带指纹),静默放行不弹误报(2026-08-14)
         logFpGate(sessionKey, 'panel-no-fp', text, false)
       } else {
-        // 无指纹 → 不发送(忘带指纹的回复留在面板 + 通知)
-        logFpGate(sessionKey, 'panel-no-fp', text)
+        // **意图判定器兜底(2026-08-16)**:无指纹的面板回复不再一律扣留
+        // ——发给对方的话发回对方;给主人的话留在面板(主人正在面板查看);
+        // 判定失败回退扣留(原行为)
+        const panelIntent = await classifyReplyIntent('panel', '会话面板输入轮', text, triggerText, `QQ ${qq}`)
+        if (panelIntent === 'other') {
+          if (!turnAlreadySentToPending(qq, route)) {
+            notifyRouted('peer')
+            c.sendToQQ(qq, agentEngineModule.stripFingerprintMarks(text)).catch((err) => handleNapcatSendError(err, qq))
+            showMainNotify('🐳 已回复对方(意图判定)', text.length > 60 ? text.slice(0, 60) + '…' : text, 'low')
+          }
+          return
+        }
+        logFpGate(sessionKey, panelIntent ? 'classify-hold' : 'panel-no-fp', text)
       }
     } else if (grp) {
       // 群面板:带本轮指纹才发回群(指纹 = 发给群友的话);已用 send_group
@@ -1903,7 +2225,16 @@ function handleEngineMessageForNapcat(message, sessionKey) {
         // 本轮已用 send_group 工具发过 → 给主人的汇报,静默放行(2026-08-14)
         logFpGate(sessionKey, 'group-panel-no-fp', text, false)
       } else if (!fpPanel) {
-        logFpGate(sessionKey, 'group-panel-no-fp', text)
+        // 意图判定器兜底(2026-08-16):无指纹的群面板回复——发给群友的
+        // 话发回群;判定失败回退扣留(原行为)
+        const panelGroupIntent = await classifyReplyIntent('panel', '会话面板输入轮', text, triggerText, `群 ${grp[1]}`)
+        if (panelGroupIntent === 'other' && !turnAlreadySentToTarget('group', grp[1], route)) {
+          notifyRouted('group')
+          c.sendToGroup(grp[1], agentEngineModule.stripFingerprintMarks(text)).catch((err) => handleNapcatSendError(err, grp[1], '群'))
+          showMainNotify('🐳 已发送到群(意图判定)', text.length > 60 ? text.slice(0, 60) + '…' : text, 'low')
+          return
+        }
+        logFpGate(sessionKey, panelGroupIntent ? 'classify-hold' : 'group-panel-no-fp', text)
       }
     }
   }
@@ -1929,6 +2260,7 @@ function handleEngineMessageForNapcat(message, sessionKey) {
   // 无论是否路由,轮次标记清零(防陈旧状态串到下一轮)
   route.lastSendSource = null
   route.lastSendTarget = null
+  route.lastTriggerText = null
 }
 
 // NapCat 开关切换(配置变更时):开启即连接,关闭即断开
@@ -2063,6 +2395,43 @@ function getSummaryAgent() {
     getGroupStatus: () => getGroupStatusBlock(),
   })
   return summaryAgent
+}
+
+// 独立的回复意图判定 Sub Agent(懒加载单例,2026-08-16 兜底路由):
+// QQ 机器人落定路由对**指纹缺失/歧义**的轮次调用它判定回复发送意图
+// (master/other/hold)——主 Agent 边生成边记指纹服从性不稳定(用户实测
+// 两病:该发给主人的消息因忘带主人指纹没发出、发给别人的消息被发到
+// 主人 QQ),判定器只做单一分类任务,比主 Agent 可靠;失败回退原行为
+let replyClassifier = null
+
+function getReplyClassifier() {
+  if (replyClassifier) return replyClassifier
+  replyClassifier = agentEngineModule.createReplyClassifier({
+    getConfig: () => (currentAgentConfig()),
+  })
+  return replyClassifier
+}
+
+/** 意图判定器调用(2026-08-16):判定无指纹回复的发送意图;失败/未配置/
+ * 垃圾输出返回 null(调用方回退原行为——扣留或直发,不引入新错误路径)。
+ * 触发消息截掉【档案卡】起的注入段(只留原始消息,判定不需要指令文本) */
+async function classifyReplyIntent(kind, kindLabel, text, trigger, targetLabel) {
+  try {
+    const cfg = currentAgentConfig()
+    if (!cfg.apiKey.trim()) return null
+    const verdict = await getReplyClassifier().classify({
+      kindLabel,
+      targetLabel,
+      trigger: String(trigger ?? '').split('【档案卡】')[0].slice(0, 500),
+      reply: String(text ?? '').slice(0, 2000),
+    })
+    return verdict && (verdict.intent === 'master' || verdict.intent === 'other' || verdict.intent === 'hold')
+      ? verdict.intent
+      : null
+  } catch (err) {
+    console.warn('[napcat] 意图判定失败,回退原行为:', err?.message || err)
+    return null
+  }
 }
 
 // 群聊活动跟踪(2026-08-13 群聊冒泡):最近一条群消息时间(onGroupMessage
@@ -2206,7 +2575,9 @@ function createWindow() {
     roundedCorners: false,
     thickFrame: false,
     alwaysOnTop: true,
-    skipTaskbar: true,
+    // 底部任务栏显示应用图标(2026-08-17 用户要求):窗口出现在 Windows
+    // 任务栏,可点击呼出/切换;关闭(✕)仍为隐藏常驻托盘,不退出
+    skipTaskbar: false,
     resizable: false,
     movable: true,
     minimizable: false,
@@ -2233,12 +2604,8 @@ function createWindow() {
   // 禁止窗口内新开浏览器窗口(渲染端链接一律走 app:open-external 系统
   // 浏览器,经 http/https 白名单;防 window.open 弹出裸窗口)
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
-  // 2026-08-11 临时诊断:转发渲染 console 到主进程(高度动画排查)
-  win.webContents.on('console-message', (_e, level, message) => {
-    if (typeof message === 'string' && /error|Error|animateAgentH|agentH/i.test(message)) {
-      console.log('[renderer]', message.slice(0, 300))
-    }
-  })
+  // 2026-08-11 临时诊断的 [renderer] console 转发已移除(2026-08-17,
+  // 高度动画排查早已完成;转发日志在正常使用中高频刷屏,属非必要调试日志)
 
   // 灵动岛默认悬浮在所有程序顶部(2026-08-09 用户要求恢复:始终置顶,
   // 不再沉底)——托盘"总在最前"可关
@@ -2272,12 +2639,7 @@ function createWindow() {
       return
     }
     const [x, y] = win.getPosition()
-    console.log(
-      '[widget] fullscreen resize corrected:',
-      w, h,
-      '→',
-      fsLockedSize[0], fsLockedSize[1],
-    )
+    // 纠正日志已移除(2026-08-17 用户要求:全屏拖拽时高频刷屏)
     win.setBounds({ x, y, width: fsLockedSize[0], height: fsLockedSize[1] })
   })
   // 加载完成后广播当前模式(渲染端启动时也走 getMode 兜底)
@@ -2767,6 +3129,10 @@ ipcMain.on('agent:send', (_event, text, history, sessionId, source, target, sess
   // 窗口轮);'system'/缺省 = 系统通知轮(回复永不路由 QQ)
   route.lastSendSource = source === 'qq' || source === 'group' || source === 'window' ? source : null
   route.lastSendTarget = (route.lastSendSource === 'qq' || route.lastSendSource === 'group') && typeof target === 'string' ? target : null
+  // **触发消息原文(2026-08-16 意图判定器)**:指纹缺失时交给判定器判断
+  // 回复的发送意图——判定必须知道触发消息内容("把某句话发给某人" vs
+  // 日常聊天),随 lastSendSource 同刻清零
+  route.lastTriggerText = route.lastSendSource ? text : null
   // **防重发快照(2026-08-13 用户实测"对方收到 2-3 条")**
   route.pendingTurnSentBefore = 0
   route.pendingGroupSentBefore = 0
@@ -2809,6 +3175,13 @@ ipcMain.on('agent:send', (_event, text, history, sessionId, source, target, sess
   // 协议,询问内容/汇报文字被整条路由给对方
   const canRoute = source === 'qq' || source === 'group' || source === 'window' || source === 'ask'
   route.turnFingerprint = canRoute ? agentEngineModule.newTurnFingerprint() : null
+  // **主人指纹(2026-08-15 双指纹机制,用户要求"区分主人指纹和他人指纹,
+  // 不再以没有指纹为主人消息")**:主人 QQ 触发轮 / 询问轮 / 群触发轮的回复
+  // 可能发回主人("给主人的话"通道),生成主人指纹供注入与落定验证;扩展
+  // 信任轮 / 外部会话面板轮回复只发对方或留窗口,不需要
+  const isMasterTurn = source === 'qq' && target === MASTER_QQ
+  const isAskTurn = source === 'ask'
+  route.masterFingerprint = isMasterTurn || isAskTurn || source === 'group' ? agentEngineModule.newTurnFingerprint() : null
   const hist = asArray(history)
   // **会话情况记录注入(2026-08-13,用户要求"给单个会话加上情况记录")**:
   // 主人为单个会话写的上下文备忘(localStorage widget-agent-session-note:<key>,
@@ -2881,14 +3254,31 @@ ipcMain.on('agent:send', (_event, text, history, sessionId, source, target, sess
   // (落定自动发群),汇报不带指纹;没有指纹协议,LLM 把群友话写进对话回复
   // 时程序无法与汇报区分,整段被当汇报私发主人 = 串台根源
   const isGroupTurn = source === 'group' && typeof target === 'string'
-  if (fp && (isExecTurn || isPanelTurn || isContactTurn || isGroupTurn)) {
+  // 主人指纹注入(2026-08-15 双指纹机制):主人 QQ 触发轮(执行轮 = 双指纹
+  // 指令——发给对方带他人指纹、给主人带主人指纹;日常轮 = 主人指纹指令
+  // ——对话回复即给主人的话,必须带主人指纹)+ 询问轮(询问 = 给主人的话)
+  // + 群触发轮(群指令升级:群友话带他人指纹、汇报带主人指纹);扩展信任
+  // 轮/面板轮保持通用指令(回复只发对方或留窗口,无发回主人通道)
+  const fpMaster = route.masterFingerprint
+  if (fp && (isExecTurn || isPanelTurn || isContactTurn || isGroupTurn || isMasterTurn || isAskTurn)) {
     hist.push({
       id: 'sys-' + Date.now(),
       role: 'system',
       parts: [
         {
           type: 'text',
-          text: isExecTurn ? turnFingerprintExecRule(fp, pendNow.qq) : isGroupTurn ? turnFingerprintGroupRule(fp) : turnFingerprintRule(fp),
+          text:
+            isMasterTurn && isExecTurn
+              ? turnFingerprintDualRule(fp, fpMaster, pendNow.qq)
+              : isMasterTurn
+                ? turnMasterDirectRule()
+                : isAskTurn
+                  ? turnAskDirectRule()
+                  : isGroupTurn
+                    ? turnFingerprintGroupRule(fp, fpMaster)
+                    : isExecTurn
+                      ? turnFingerprintExecRule(fp, pendNow.qq)
+                      : turnFingerprintRule(fp),
         },
       ],
     })

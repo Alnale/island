@@ -33,8 +33,11 @@ import {
   parseStyleJson,
   buildMemoryExtractSystem,
   buildUserStyleSystem,
+  buildClassifierSystem,
+  parseClassifierJson,
   createSummaryAgent,
   createMindAgent,
+  createReplyClassifier,
   fetchDeepseekBalance,
   sanitizeTitle,
   looksLikeSentenceTitle,
@@ -49,6 +52,7 @@ import {
   buildProfileCard,
   createNapcatTools,
   extractImageRefs,
+  extractMasterFingerprint,
   extractReplyToStranger,
   extractTurnFingerprint,
   gtkFromCookie,
@@ -59,11 +63,14 @@ import {
   newTurnFingerprint,
   REPLY_TO_STRANGER_MARK,
   sessionKeyFor,
+  stripFingerprintMarks,
   stripMasterNarration,
   stripThinkingPreamble,
   stripToolNarration,
   turnAlreadySentToPending,
   turnAlreadySentToTarget,
+  routeForClassifierIntent,
+  looksLikeForwardInstruction,
   type NapcatToolDeps,
   type NapcatClient,
 } from '../electron/agent/napcat/napcat'
@@ -82,7 +89,7 @@ function napcatTools(mockClient: Partial<NapcatClient>, opts?: Omit<NapcatToolDe
 import { createWsSocket, encodeWsFrame, parseWsUrl, WsFrameParser } from '../electron/agent/napcat/wsclient'
 import { snapshotWatchDirs, restoreUndoSnapshot, releaseUndoRef, type GitExec } from '../electron/agent/undo'
 import { runPluginKernelTests } from './plugin-kernel-tests'
-import { stripNapcatHistoryInstructions, stripNapcatInstructions, stripTurnMarks } from '../src/agent/text'
+import { hasMasterTurnMark, stripNapcatHistoryInstructions, stripNapcatInstructions, stripTurnMarks } from '../src/agent/text'
 import {
   getTasksStatusBlock,
   listTasks,
@@ -90,6 +97,7 @@ import {
   registerTask,
   removeTask,
   setTaskDoneHandler,
+  getTaskDoneHandler,
   updateTask,
   type AgentTask,
 } from '../electron/agent/tasks'
@@ -1601,6 +1609,121 @@ await test('extractMemories / analyzeUserStyle:无 Key 优雅失败(零 LLM 调�
 })
 
 // ---------------------------------------------------------------------------
+// 7.5 回复意图判定器(2026-08-16 兜底路由)——双指纹协议依赖主 Agent 服从性,
+// 忘带指纹 = 扣留(该发给主人的消息到不了主人)/ 误发(发给别人的话被发到
+// 主人 QQ,用户实测两病)。落定路由对指纹缺失/歧义的轮次调用独立意图判定
+// Sub Agent(master/other/hold)决定路由——判定器只做单一分类任务,比主
+// Agent 边生成边记指纹可靠;失败回退原行为(不引入新的错误路径)
+// ---------------------------------------------------------------------------
+
+await test('routeForClassifierIntent:意图判定路由矩阵(2026-08-16)', () => {
+  // 执行轮(pending 待回复对象存活):给主人的话发主人 / 发给对方的话发待
+  // 回复对象 / hold 扣留——修复"该发给主人的消息因忘带主人指纹没发出去"
+  assert(routeForClassifierIntent('exec', 'master') === 'send-master', 'exec+master 应发主人')
+  assert(routeForClassifierIntent('exec', 'other') === 'send-pending', 'exec+other 应发待回复对象')
+  assert(routeForClassifierIntent('exec', 'hold') === 'hold', 'exec+hold 应扣留')
+  // 主人日常轮:给主人的话发主人;发给别人的话没有可发目标(发别人必须用
+  // send 工具)→ 扣留防串台——修复"发给别人的消息被发到主人QQ"
+  assert(routeForClassifierIntent('master-daily', 'master') === 'send-master', 'daily+master 应发主人')
+  assert(routeForClassifierIntent('master-daily', 'other') === 'hold', 'daily+other 应扣留(无发送目标)')
+  assert(routeForClassifierIntent('master-daily', 'hold') === 'hold', 'daily+hold 应扣留')
+  // 群触发轮:汇报发主人 / 群友话发回群
+  assert(routeForClassifierIntent('group', 'master') === 'send-master', 'group+master 应发主人')
+  assert(routeForClassifierIntent('group', 'other') === 'send-group', 'group+other 应发回群')
+  assert(routeForClassifierIntent('group', 'hold') === 'hold', 'group+hold 应扣留')
+  // 扩展信任私聊轮:发给对方的话发回对方 / 汇报发主人
+  assert(routeForClassifierIntent('contact', 'master') === 'send-master', 'contact+master 应发主人')
+  assert(routeForClassifierIntent('contact', 'other') === 'send-target', 'contact+other 应发回对方')
+  assert(routeForClassifierIntent('contact', 'hold') === 'hold', 'contact+hold 应扣留')
+  // 面板轮:发给对方的话发回对方 / 给主人的话留在面板(主人正在面板查看)
+  assert(routeForClassifierIntent('panel', 'master') === 'hold', 'panel+master 应留面板')
+  assert(routeForClassifierIntent('panel', 'other') === 'send-target', 'panel+other 应发回对方')
+  assert(routeForClassifierIntent('panel', 'hold') === 'hold', 'panel+hold 应扣留')
+})
+
+await test('parseClassifierJson:意图判定解析(2026-08-16)', () => {
+  assert(parseClassifierJson('{"intent":"master","reason":"回答主人"}')?.intent === 'master', 'master 采信')
+  assert(parseClassifierJson('{"intent":"other"}')?.intent === 'other', 'other 采信(无 reason)')
+  assert(parseClassifierJson('{"intent":"hold","reason":"不回复"}')?.intent === 'hold', 'hold 采信')
+  assert(parseClassifierJson('{"intent":"master"}')?.reason === undefined, '无 reason 字段不补')
+  const r = parseClassifierJson('{"intent":"other","reason":"' + '长'.repeat(100) + '"}')
+  assert(r !== null && (r.reason?.length ?? 0) <= 40, 'reason 截断 40 字')
+  // 非法/垃圾输出拒绝(调用方回退原行为,安全侧)
+  assert(parseClassifierJson('{"intent":"nope"}') === null, '非法意图拒绝')
+  assert(parseClassifierJson('{"intent":123}') === null, '非字符串意图拒绝')
+  assert(parseClassifierJson('{"intent":"master","reason":123}')?.intent === 'master', 'reason 非字符串可容忍(不采信 reason)')
+  assert(parseClassifierJson('不是JSON') === null, '垃圾输出拒绝')
+  assert(parseClassifierJson('') === null, '空输出拒绝')
+  assert(parseClassifierJson('{"other":1}') === null, '无 intent 字段拒绝')
+  assert(parseClassifierJson("{'intent': 'master'}")?.intent === 'master', 'Python 风格单引号 dict 应解析')
+})
+
+await test('buildClassifierSystem:判定提示词含回合背景与意图定义(2026-08-16)', () => {
+  const sys = buildClassifierSystem('主人日常对话轮', '主人 QQ 1178821869', '帮我把"周末见"发给张三')
+  assert(sys.includes('回复意图判定器'), '系统提示应含判定器身份')
+  assert(sys.includes('主人日常对话轮') && sys.includes('主人 QQ 1178821869'), '应含回合背景(类型/对象)')
+  assert(sys.includes('帮我把"周末见"发给张三'), '应含触发消息(判定关键)')
+  assert(sys.includes('master') && sys.includes('other') && sys.includes('hold'), '应含三意图定义')
+  assert(sys.includes('JSON'), '应含 JSON 字样(json_mode 官方要求)')
+})
+
+await test('createReplyClassifier:无 Key/空回复/垃圾输出回退 null,合法 JSON 采信(2026-08-16)', async () => {
+  const base = { ...MOCK_PROVIDERS, apiKey: 'test', baseURL: 'http://mock', model: 'm', systemPrompt: '', reasoningEffort: 'high' as const, mcpServers: [], skillsDirs: [] }
+  const input = { kindLabel: '群聊触发轮', targetLabel: '群 1045765371', trigger: '群友问在吗', reply: '在的' }
+  // 无 Key:零 LLM 调用返回 null(调用方回退原行为)
+  const noKey = createReplyClassifier({ getConfig: () => ({ ...base, apiKey: '' }) })
+  assert((await noKey.classify(input)) === null, '无 Key 返回 null')
+  // 空 content(json_mode 已知问题)重试后仍 null
+  const empty = createReplyClassifier({
+    getConfig: () => base,
+    stream: async () => ({ text: '', calls: [], usage: null, aborted: false }),
+  })
+  assert((await empty.classify(input)) === null, '空 content 返回 null')
+  // 垃圾输出(非 JSON)返回 null
+  const garbage = createReplyClassifier({
+    getConfig: () => base,
+    stream: async () => ({ text: '我不知道怎么判定', calls: [], usage: null, aborted: false }),
+  })
+  assert((await garbage.classify(input)) === null, '垃圾输出返回 null')
+  // 非法意图值返回 null
+  const badIntent = createReplyClassifier({
+    getConfig: () => base,
+    stream: async () => ({ text: '{"intent":"someone"}', calls: [], usage: null, aborted: false }),
+  })
+  assert((await badIntent.classify(input)) === null, '非法意图返回 null')
+  // 合法 JSON 采信(master/other/hold 各一)
+  for (const intent of ['master', 'other', 'hold'] as const) {
+    const ok = createReplyClassifier({
+      getConfig: () => base,
+      stream: async () => ({ text: JSON.stringify({ intent, reason: '测试' }), calls: [], usage: null, aborted: false }),
+    })
+    const v = await ok.classify(input)
+    assert(v !== null && v.intent === intent, `${intent} 采信`)
+  }
+  // 首次垃圾重试后合法 → 采信(单措辞 + 一次重试)
+  let n = 0
+  const retry = createReplyClassifier({
+    getConfig: () => base,
+    stream: async () => {
+      n += 1
+      return { text: n === 1 ? '空' : '{"intent":"master"}', calls: [], usage: null, aborted: false }
+    },
+  })
+  const v = await retry.classify(input)
+  assert(v !== null && v.intent === 'master' && n === 2, '垃圾后重试采信')
+  // stream 抛异常 → 重试后仍抛 → null
+  let throws = 0
+  const failStream = createReplyClassifier({
+    getConfig: () => base,
+    stream: async () => {
+      throws += 1
+      throw new Error('网络错误')
+    },
+  })
+  assert((await failStream.classify(input)) === null && throws === 2, 'stream 异常两次后返回 null')
+})
+
+// ---------------------------------------------------------------------------
 // 8. 引擎集成(listAllTools / testMCP)
 // ---------------------------------------------------------------------------
 
@@ -1657,6 +1780,106 @@ await test('testMCP:真实 stdio 服务连通', async () => {
     assert(r2.ok === false && (r2.error ?? '').length > 0, `死服务应失败且带错误,实际:${JSON.stringify(r2)}`)
   } finally {
     engine.dispose()
+  }
+})
+
+// ---------------------------------------------------------------------------
+// 8.3 判定器失败回退启发式(2026-08-16 二轮修复"发给别人的消息被发到
+// 主人QQ"):主人日常轮判定器不可用(API 失败/超时)时,原实现回退"直发
+// 主人"——若回复是"替主人发给别人的话"就串台。looksLikeForwardInstruction
+// 命中 + 回复较短 → 扣留提示用 send 工具;未命中 → 按原行为直发主人
+// ---------------------------------------------------------------------------
+
+await test('looksLikeForwardInstruction:发送/转达指令识别(2026-08-16 二轮)', () => {
+  // 正向:显式发送/转达/回复某人
+  assert(looksLikeForwardInstruction('帮我把"周末见"发给张三') === true, '把…发给…应命中')
+  assert(looksLikeForwardInstruction('回复一下张三,说我在忙') === true, '回复一下某人应命中')
+  assert(looksLikeForwardInstruction('告诉小李我明天到') === true, '告诉某人应命中')
+  assert(looksLikeForwardInstruction('跟他说我同意了') === true, '跟他说应命中')
+  assert(looksLikeForwardInstruction('替我给魔精转告一声') === true, '替我给…转告应命中')
+  assert(looksLikeForwardInstruction('帮他回一句:周末见') === true, '帮他回一句应命中')
+  assert(looksLikeForwardInstruction('把这条消息发给他') === true, '把这条消息发给他应命中')
+  assert(looksLikeForwardInstruction('转发给群里的老王') === true, '转发给某人应命中')
+  // 负向:日常聊天不含发送语义
+  assert(looksLikeForwardInstruction('在吗') === false, '日常招呼不命中')
+  assert(looksLikeForwardInstruction('今天天气怎么样') === false, '日常提问不命中')
+  assert(looksLikeForwardInstruction('好的,我看看') === false, '应答不命中')
+  assert(looksLikeForwardInstruction('帮我查一下B站排名') === false, '查询指令不命中(发给对象缺失)')
+  assert(looksLikeForwardInstruction('') === false, '空串不命中')
+})
+
+// ---------------------------------------------------------------------------
+// 8.4 后台任务完成通知会话路由(2026-08-16 修复"bili 下载完成消息没有
+// 传递到发起会话(主对话之外)"):任务终态回调(doneHandler)是 tasks.ts
+// 模块级单例,多会话引擎并存时被最后装配的引擎接管——事件原先带该
+// 引擎的 currentSessionKey = 完成通知串到别的会话。修复:任务注册时
+// 记录**发起会话键**(AgentTask.sessionKey),background-done 事件显式
+// 携带它,引擎 emit 闭包不再用 currentSessionKey 覆盖显式键
+// ---------------------------------------------------------------------------
+
+await test('tasks:任务注册带 sessionKey,终态回调透传(2026-08-16)', () => {
+  const captured: AgentTask[] = []
+  const orig = getTaskDoneHandler()
+  setTaskDoneHandler((t) => captured.push(t))
+  const id1 = 't-sess-' + Date.now()
+  const id2 = 't-nosess-' + Date.now()
+  try {
+    registerTask({ id: id1, title: 'B站下载', detail: '测试', sessionKey: 'private:222' })
+    updateTask(id1, { status: 'done', detail: '已完成' })
+    assert(captured.length === 1 && captured[0].sessionKey === 'private:222', `终态回调应透传 sessionKey,实际 ${JSON.stringify(captured.map((t) => t.sessionKey))}`)
+    assert(captured[0].status === 'done' && captured[0].detail === '已完成', '终态载荷应正确')
+    // 已终态任务再更新不重复回调
+    updateTask(id1, { status: 'failed', detail: 'x' })
+    assert(captured.length === 1, '终态任务不应重复回调')
+    // 无 sessionKey 的任务 → 不携带(主对话语义)
+    registerTask({ id: id2, title: 'B站扫码登录', detail: '等待扫码' })
+    updateTask(id2, { status: 'failed', detail: '二维码过期' })
+    const totalCb: number = captured.length
+    assert(totalCb === 2 && captured[1].sessionKey === undefined, '无 sessionKey 任务不携带')
+  } finally {
+    setTaskDoneHandler(orig)
+    removeTask(id1)
+    removeTask(id2)
+  }
+})
+
+await test('createAgentEngine:任务完成 → background-done 事件带发起会话键(2026-08-16)', async () => {
+  const emitted: Array<Record<string, unknown>> = []
+  const engine = createAgentEngine({
+    getConfig: () => ({ ...MOCK_PROVIDERS, apiKey: '', baseURL: '', model: '', systemPrompt: '', reasoningEffort: 'high', mcpServers: [], skillsDirs: [] }),
+    onEvent: (e) => emitted.push(e as unknown as Record<string, unknown>),
+    onSwitchToMusic: () => {},
+  })
+  const t1 = 'bg-e2e-' + Date.now()
+  const t2 = 'bg-e2e2-' + Date.now()
+  try {
+    // 引擎装配时 coreToolsPlugin → createTools 已把任务终态回调接到
+    // tasks 注册表;直接驱动注册表 = 验证"工具 → events 服务 → engine
+    // emit 闭包 → 宿主"全链路
+    registerTask({ id: t1, title: 'B站下载', detail: '测试下载', sessionKey: 'private:222' })
+    updateTask(t1, { status: 'done', detail: '已完成' })
+    const ev = emitted.find((e) => e.type === 'background-done')
+    assert(ev !== undefined, 'background-done 事件应发出')
+    assert(ev.sessionKey === 'private:222', `事件应带任务发起会话键(private:222),实际 ${JSON.stringify(ev.sessionKey)}`)
+    assert(String(ev.title).includes('B站下载') && String(ev.message).includes('已完成'), `title/message 应来自任务,实际 ${JSON.stringify(ev)}`)
+    // 无 sessionKey 的任务 → 事件无显式键,emit 闭包 fallback 到引擎当前
+    // 会话键(测试引擎刚创建 = main)——与修复前行为一致(主对话任务
+    // 完成通知落在主对话);显式键优先的语义不受影响
+    registerTask({ id: t2, title: 'B站扫码登录', detail: '等待扫码' })
+    updateTask(t2, { status: 'failed', detail: '二维码过期' })
+    const ev2 = emitted.filter((e) => e.type === 'background-done').pop()
+    assert(ev2 !== undefined && ev2.sessionKey === 'main', `无键任务事件应 fallback 引擎当前会话键(main),实际 ${JSON.stringify(ev2?.sessionKey)}`)
+    // 普通事件(引擎当前会话键注入)不受影响:send 一个回合(apiKey 空,
+    // 引擎直接 error 事件),事件应带引擎当前会话键 main
+    emitted.length = 0
+    engine.send('你好', [], 's1')
+    await new Promise((r) => setTimeout(r, 80))
+    const st = emitted.find((e) => e.type === 'error')
+    assert(st !== undefined && st.sessionKey === 'main', `普通事件应带引擎当前会话键(main),实际 ${JSON.stringify(st)}`)
+  } finally {
+    engine.dispose()
+    removeTask(t1)
+    removeTask(t2)
   }
 })
 
@@ -4430,6 +4653,60 @@ await test('stripTurnMarks:轮次标记剥离(2026-08-13,指纹不进历史/显�
   assert(stripTurnMarks('【指纹:0O1IlA】哈哈') === '【指纹:0O1IlA】哈哈', '非安全字母表的指纹不应剥离(不是指纹协议格式)')
   assert(stripTurnMarks('哈哈确实拉胯') === '哈哈确实拉胯', '无标记原样')
   assert(stripTurnMarks('') === '' && stripTurnMarks('  ') === '', '空输入')
+})
+
+await test('extractMasterFingerprint:主人指纹提取与匹配(2026-08-15 双指纹机制,不再以没有指纹为主人消息)', () => {
+  const fp = 'A1B2C3'
+  const ok = extractMasterFingerprint(`【主人指纹:${fp}】好的,已帮他发了`, fp)
+  assert(ok !== null && ok.content === '好的,已帮他发了', '主人指纹开头应提取并剥离')
+  assert(extractMasterFingerprint('好的,已帮他发了', fp) === null, '无主人指纹 = 不发送(不再当主人消息)')
+  assert(extractMasterFingerprint(`【主人指纹:XXXXXX】好的`, fp) === null, '主人指纹对不上本轮 = 不发送')
+  assert(extractMasterFingerprint(`  【主人指纹:${fp}】好的`, fp) !== null, '容忍先导空白')
+  assert(extractMasterFingerprint(`【回复对方】【主人指纹:${fp}】好的`, fp) !== null, '容忍先导旧【回复对方】标记')
+  assert(extractMasterFingerprint(`【主人指纹:${fp}】`, fp)?.content === '', '仅主人指纹返回空正文')
+  assert(extractMasterFingerprint('', fp) === null && extractMasterFingerprint('  ', fp) === null, '空输入')
+  // 语气词前缀容忍(与他人指纹同款,LLM 偶发在指纹前加语气词)
+  assert(extractMasterFingerprint(`好的~【主人指纹:${fp}】好的`, fp)?.content === '好的', '容忍语气词+~')
+  assert(extractMasterFingerprint(`收到 【主人指纹:${fp}】好的`, fp)?.content === '好的', '容忍收到+空格')
+  // 双通道互斥:他人指纹【指纹:xxx】不被主人指纹提取命中,反之亦然——
+  // 同一条回复带哪个指纹由开头标记唯一决定
+  assert(extractMasterFingerprint(`【指纹:${fp}】好的`, fp) === null, '他人指纹不被主人指纹提取命中(双通道互斥)')
+  assert(extractTurnFingerprint(`【主人指纹:${fp}】好的`, fp) === null, '主人指纹不被他人指纹提取命中(双通道互斥)')
+  // 汇报引用主人指纹(白名单词后是"已"非标点)不误提取
+  assert(extractMasterFingerprint(`好的,已按【主人指纹:${fp}】回复他`, fp) === null, '汇报引用主人指纹不误提取')
+  // 主人指纹在中间不匹配(规则明确"指纹前面不要加任何话");
+  // 非白名单语气词不匹配(「好的」是白名单容忍形态,剥后紧跟指纹 = 合法)
+  assert(extractMasterFingerprint(`中间【主人指纹:${fp}】好的`, fp) === null, '主人指纹在中间不应匹配')
+  assert(extractMasterFingerprint(`知道了【主人指纹:${fp}】好的`, fp) === null, '非白名单语气词不匹配')
+})
+
+await test('stripFingerprintMarks:发送边界双剥(2026-08-15 主人指纹+他人指纹,任一标记到不了聊天对象)', () => {
+  assert(stripFingerprintMarks('【指纹:A2B3C4】哈哈') === '哈哈', '他人指纹应剥')
+  assert(stripFingerprintMarks('【主人指纹:A2B3C4】好的') === '好的', '主人指纹应剥')
+  assert(stripFingerprintMarks('哈哈【指纹:A2B3C4】【主人指纹:A2B3C4】') === '哈哈', '正文内两种标记都应剥')
+  assert(stripFingerprintMarks('【指纹:A2B3C4】【主人指纹:A2B3C4】好的') === '好的', '连续两种标记都应剥')
+  assert(stripFingerprintMarks('哈哈') === '哈哈' && stripFingerprintMarks('') === '', '无标记原样')
+})
+
+await test('stripTurnMarks:主人指纹剥离(2026-08-15 双指纹,主人指纹不进历史/显示)', () => {
+  assert(stripTurnMarks('【主人指纹:A2B3C4】好的,已回复他') === '好的,已回复他', '主人指纹前缀应剥离')
+  assert(stripTurnMarks('  【主人指纹:A2B3C4】好的') === '好的', '先导空白+主人指纹应剥离')
+  assert(stripTurnMarks('【主人指纹:A2B3C4】\n好的') === '好的', '主人指纹后换行应剥离')
+  assert(stripTurnMarks('【主人指纹:0O1IlA】好的') === '【主人指纹:0O1IlA】好的', '非安全字母表的主人指纹不剥离(防误伤正文)')
+  assert(stripTurnMarks('好的【主人指纹:A2B3C4】') === '好的【主人指纹:A2B3C4】', '正文中间的主人指纹不剥离')
+})
+
+await test('hasMasterTurnMark:主人指纹 UI 检测(2026-08-15,与 hasTurnMark 双通道互斥)', () => {
+  assert(hasMasterTurnMark('【主人指纹:A2B3C4】好的') === true, '主人指纹开头命中')
+  assert(hasMasterTurnMark('  【主人指纹:A2B3C4】好的') === true, '容忍先导空白')
+  // 双通道互斥:他人指纹/旧标记不是主人指纹
+  assert(hasMasterTurnMark('【指纹:A2B3C4】哈哈') === false, '他人指纹不命中主人检测(互斥)')
+  assert(hasMasterTurnMark('【回复对方】哈哈') === false, '旧【回复对方】标记不命中')
+  // 非安全字母表 / 中间位置 / 普通文本 / 空
+  assert(hasMasterTurnMark('【主人指纹:0O1IlA】好的') === false, '非安全字母表不命中')
+  assert(hasMasterTurnMark('好的【主人指纹:A2B3C4】') === false, '中间位置不命中')
+  assert(hasMasterTurnMark('哈哈确实拉胯') === false, '普通文本不命中')
+  assert(hasMasterTurnMark('') === false && hasMasterTurnMark('  ') === false, '空输入不命中')
 })
 
 await test('会话管理工具:get/set_session_note + clear_session_context(2026-08-13 LLM 自己管理会话)', async () => {

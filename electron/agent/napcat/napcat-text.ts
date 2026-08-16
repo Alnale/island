@@ -91,7 +91,19 @@ export function extractImageRefs(text: string): { text: string; images: string[]
   return { text: cleaned.replace(/\(\)|（）|\[]|【】/g, '').replace(/\s+/g, ' ').trim(), images }
 }
 
-/** 思考腔开头剥离 */
+/** 内部独白/思维链泄漏**疑似**粗筛(2026-08-17):只返回是否疑似,**
+ * 不删除任何内容**——真正判定交给 main.cjs 的审核 Sub Agent
+ * (ReplyIntentClassifier.judgeMonologue,见 subagents.ts)。正则宽召回
+ * (宁可多调一次审核也不误删):疑似命中才调审核,非疑似零成本放行。
+ * 特征 = 内部自我分析标记(话题收尾/这段聊得/我就不主动打扰/他没再提),
+ * 对应 LLM 思考模式把思维链写进正文而非 reasoning_content 的偶发形态 */
+export function isSuspectedMonologue(text: string): boolean {
+  const t = String(text ?? '').trim()
+  if (!t) return false
+  return /话题收尾|这段聊得|这轮聊得|刚才聊得|我就不主动打扰(?![你])|没再提别的要求|没再提其它|没再提其他|对方没再提|看来[他她]|我决定不|打算不再/.test(t)
+}
+
+/*** 思考腔开头剥离 */
 const THINK_LEAD =
   /^(好的|好|嗯|嗯嗯|OK|ok|okay|可以的|可以|没问题|收到|明白了|行|行吧)[,，、\s]*(让我|我先|我|让我来|我来)先?(分析|梳理|思考|想想|整理|回顾|总结|看一下|看看|确认|理一下|查一下|研究)/
 const THINK_START = /^(让我|我先|我(来)?|容我)先?(分析|梳理|思考|想想|整理|回顾|总结|看一下|看看|理一下)/

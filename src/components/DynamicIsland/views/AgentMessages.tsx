@@ -185,6 +185,32 @@ export const PeerTurnTag = memo(function PeerTurnTag() {
   )
 })
 
+/** "发给主人"指纹标签(2026-08-15 双指纹机制 UI,用户要求"区分别人和
+ * 主人指纹"):本轮主人指纹【主人指纹:xx】命中的回复 = 路由发回主人 QQ
+ * 的话,气泡上方挂一行小标签(皇冠图标 + 文案)——与"发给对方"标签
+ * (纸飞机图标)视觉区分:主人 = 强调色高亮,对方 = 弱化透明度 */
+export const MasterTurnTag = memo(function MasterTurnTag() {
+  return (
+    <div className="island-agent-msg-master-tag" title="这条回复带主人指纹,会路由发给主人 QQ">
+      <svg
+        width="10"
+        height="10"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth={2}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        aria-hidden="true"
+      >
+        <path d="M11.562 3.266a.5.5 0 0 1 .876 0L15.39 8.87a1 1 0 0 0 1.516.294L21.183 5.5a.5.5 0 0 1 .798.519l-2.834 10.246a1 1 0 0 1-.956.735H5.81a1 1 0 0 1-.957-.735L2.02 6.02a.5.5 0 0 1 .798-.519l4.276 3.664a1 1 0 0 0 1.516-.294z" />
+        <path d="M5 21h14" />
+      </svg>
+      <span>发给主人</span>
+    </div>
+  )
+})
+
 /** "已停止"标签(2026-08-14 软停止):手动停止落定的部分工作消息,
  * 气泡上方挂一行小标签与正常回复区分(复用 PeerTurnTag 同款结构,
  * 配色跟随全局文字色纯结构区分) */
@@ -371,6 +397,7 @@ export const AssistantBlock = memo(function AssistantBlock({
   parts,
   usage,
   sentToPeer = false,
+  sentToMaster = false,
   interrupted = false,
   mediaAutoPlay = false,
   onMediaAutoPlayed,
@@ -386,6 +413,10 @@ export const AssistantBlock = memo(function AssistantBlock({
    * QQ 对方——气泡换"发给对方"风格(镜像角形/虚线边框/指纹标签),
    * 与给主人的普通回复一眼区分(主题色全局,纯结构区分) */
   sentToPeer?: boolean
+  /** 主人指纹命中(2026-08-15 双指纹 UI):true = 本条回复路由发回主人
+   * QQ——气泡挂"发给主人"标签(皇冠 + 强调色),与"发给对方"/
+   * 普通回复区分;与 sentToPeer 互斥(开头标记唯一) */
+  sentToMaster?: boolean
   /** 软停止落定(2026-08-14):true = 本条是手动停止时保留的部分工作,
    * 气泡上方挂"已停止"标签 */
   interrupted?: boolean
@@ -451,6 +482,7 @@ export const AssistantBlock = memo(function AssistantBlock({
   return (
     <div className={`island-agent-msg-assistant${sentToPeer ? ' qq-peer' : ''}`}>
       {sentToPeer && <PeerTurnTag />}
+      {sentToMaster && <MasterTurnTag />}
       {interrupted && <InterruptedTag />}
       {textParts.map((p, i) => (
         <div key={`t-${i}`} className="island-agent-text">

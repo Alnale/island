@@ -59,8 +59,11 @@ export {
   parseStyleJson,
   buildMemoryExtractSystem,
   buildUserStyleSystem,
+  buildClassifierSystem,
+  parseClassifierJson,
   createSummaryAgent,
   createMindAgent,
+  createReplyClassifier,
   SUMMARY_STYLES,
   MIND_PERSONAS,
   resolveSubAgentStyle,
@@ -69,6 +72,7 @@ export { createConfigTools } from '../tools/configTools'
 export {
   createNapcatClient,
   stripThinkingPreamble,
+  isSuspectedMonologue,
   sessionKeyFor,
   isValidSessionKey,
   extractReplyToStranger,
@@ -78,7 +82,16 @@ export {
   newTurnFingerprint,
   fingerprintMark,
   extractTurnFingerprint,
+  extractMasterFingerprint,
+  stripFingerprintMarks,
+  routeForClassifierIntent,
+  looksLikeForwardInstruction,
   REPLY_TO_STRANGER_MARK,
+} from '../napcat/napcat'
+export type {
+  ReplyIntent,
+  ClassifierTurnKind,
+  ClassifierRouteAction,
 } from '../napcat/napcat'
 
 // 供测试使用的辅助函数(从 engine-loop 重新导出)
@@ -131,7 +144,13 @@ export function createAgentEngine(deps: EngineDeps): AgentEngine {
         : MAIN_MAX_OUTPUT_TOKENS,
   }
 
-  const emit = (event: AgentEvent) => deps.onEvent({ ...event, sessionKey: currentSessionKey })
+  // **2026-08-16 修复"后台任务完成通知串会话"**:事件 sessionKey 注入
+  // 改为"显式键优先"——background-done 事件带任务发起会话键(task.
+  // sessionKey,见 tools.ts onBackgroundDone)时必须透传,不能被本引擎
+  // currentSessionKey 覆盖(多会话引擎并存时,任务终态回调由最后装配的
+  // 引擎发出,其 currentSessionKey 未必是发起下载的会话);普通事件
+  // (message/status 等)不带显式键,沿用引擎当前会话键
+  const emit = (event: AgentEvent) => deps.onEvent({ ...event, sessionKey: event.sessionKey ?? currentSessionKey })
 
   // per-agent 上下文:每引擎一份(主对话与每个外部会话天然隔离)
   const ctx: AgentContext = createContext('agent-engine')

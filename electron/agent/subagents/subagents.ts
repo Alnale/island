@@ -12,10 +12,13 @@
 import { getDefaultLlmRuntime, type LlmStreamParams } from '../plugin/llm'
 import { formatMemoryBlock } from '../memory'
 import { getTasksStatusBlock } from '../tasks'
+import type { ReplyIntent } from '../napcat/napcat-session'
 import {
+  buildClassifierSystem,
   buildJudgeSystem,
   buildMemoryExtractSystem,
   buildMindSystem,
+  buildMonologueJudgeSystem,
   buildUserStyleSystem,
   compressArgs,
   cutMindSentence,
@@ -27,7 +30,9 @@ import {
   MIND_LITERAL_EXAMPLES,
   MIND_MAX_LEN,
   MIND_MAX_RETRIES,
+  parseClassifierJson,
   parseJudgeJson,
+  parseMonologueJson,
   parseMemoriesJson,
   parseStyleJson,
   parseTitleJson,
@@ -557,6 +562,117 @@ export function createMindAgent(deps: {
         return ''
       } catch {
         return ''
+      }
+    },
+  }
+}
+
+/**
+ * 独立的回复意图判定 Sub Agent(2026-08-16 兜底路由):QQ 机器人落定
+ * 路由对**指纹缺失/歧义**的轮次调用它判定回复的发送意图(master/other/
+ * hold)——主 Agent 边生成边记指纹服从性不稳定(用户实测:该发给主人的
+ * 消息因忘带主人指纹没发出、发给别人的消息被发到主人 QQ),判定器只做
+ * 单一分类任务,比主 Agent 可靠;失败/未配置返回 null,调用方回退原行为
+ * (扣留或直发,不引入新的错误路径)。
+ * 与 createSummaryAgent 同构:独立实例、事件静默、单轮完成、每次调用
+ * 独立读取配置、低强度无思考加速(20s 超时——路由等待,不宜过长)
+ */
+export function createReplyClassifier(deps: {
+  getConfig: () => AgentConfig
+  /** LLM 流式调用(可注入;缺省经 LLM 接缝默认运行时) */
+  stream?(params: LlmStreamParams): Promise<ProviderOutcome>
+}): {
+  /** 判定回复发送意图;失败/未配置/垃圾输出返回 null(调用方回退) */
+  classify(input: {
+    /** 回合类型标签(如「主人指示执行轮」「主人日常对话轮」) */
+    kindLabel: string
+    /** 回复对象标签(如「QQ 222」「群 1045765371」「主人 QQ」) */
+    targetLabel: string
+    /** 触发消息原文(判定关键:主人是否指示了发消息给别人) */
+    trigger: string
+    /** 助手落定回复文本 */
+    reply: string
+  }): Promise<{ intent: ReplyIntent; reason?: string } | null>
+  /** 判定一段文本是否为内部思维链/独白泄漏(2026-08-17):true = 拦截不发,
+   * false = 放行, null = 判定失败(调用方按放行处理,避免误删正常内容) */
+  judgeMonologue(reply: string): Promise<boolean | null>
+} {
+  const stream = deps.stream ?? defaultStream
+  return {
+    async classify(input) {
+      const config = deps.getConfig()
+      if (!config.apiKey.trim()) return null
+      try {
+        const system = buildClassifierSystem(input.kindLabel, input.targetLabel, input.trigger)
+        // 单措辞 + 一次重试;20s 超时,noThinking 低强度——路由等待判定,
+        // 快速返回优先;JSON 模式(prompt 含 "JSON" 字样满足官方要求)
+        for (let retry = 0; retry < 2; retry++) {
+          try {
+            const result = await stream({
+              config: { ...config, reasoningEffort: 'low' },
+              system,
+              history: [
+                {
+                  id: 'cls-' + Date.now(),
+                  role: 'user',
+                  parts: [{ type: 'text', text: `【助手回复】\n${input.reply.slice(0, 2000)}` }],
+                },
+              ],
+              tools: [],
+              signal: AbortSignal.timeout(20000),
+              onEvent: () => {},
+              jsonMode: true,
+              noThinking: true,
+            })
+            const verdict = parseClassifierJson(result.text)
+            if (verdict) return verdict
+            // 空 content / 垃圾输出(json_mode 已知问题):重试一次
+          } catch {
+            if (retry === 0) continue
+            break
+          }
+        }
+        return null
+      } catch {
+        return null
+      }
+    },
+    async judgeMonologue(reply) {
+      const config = deps.getConfig()
+      if (!config.apiKey.trim()) return null
+      try {
+        const system = buildMonologueJudgeSystem()
+        // 与 classify 同款:低强度无思考 + JSON + 20s 超时 + 一次重试;
+        // **失败/垃圾输出返回 null → 调用方按放行处理**(审核拿不准不拦截)
+        for (let retry = 0; retry < 2; retry++) {
+          try {
+            const result = await stream({
+              config: { ...config, reasoningEffort: 'low' },
+              system,
+              history: [
+                {
+                  id: 'mono-' + Date.now(),
+                  role: 'user',
+                  parts: [{ type: 'text', text: `【待发送文本】\n${String(reply ?? '').slice(0, 2000)}` }],
+                },
+              ],
+              tools: [],
+              signal: AbortSignal.timeout(20000),
+              onEvent: () => {},
+              jsonMode: true,
+              noThinking: true,
+            })
+            const verdict = parseMonologueJson(result.text)
+            if (verdict) return verdict.isInternal
+            // 空 content / 垃圾输出:重试一次
+          } catch {
+            if (retry === 0) continue
+            break
+          }
+        }
+        return null
+      } catch {
+        return null
       }
     },
   }

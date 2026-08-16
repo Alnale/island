@@ -16,7 +16,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { hasTurnMark, stripNapcatHistoryInstructions, stripTurnMarks } from '../agent/text'
+import { hasMasterTurnMark, hasTurnMark, stripNapcatHistoryInstructions, stripTurnMarks } from '../agent/text'
 import type {
   AgentConfig,
   AgentEvent,
@@ -31,6 +31,16 @@ import type {
 /** 按码元截断(后台标签结果清洗:引擎已截,这里兜底;跨 emoji 安全) */
 function truncateCodepoints(value: string | null | undefined, max: number): string {
   return Array.from((value ?? '').trim()).slice(0, max).join('')
+}
+
+/** 媒体附件 kind 推断(2026-08-17 拖拽上传):media 附件不只图片——
+ * 视频/音频附件也要正确 kind 供 MediaFrame 渲染(与视图层 mediaKindOf
+ * 同款扩展名规则,不跨层 import,保持各模块自包含) */
+function inferMediaKind(p: string): 'img' | 'video' | 'audio' {
+  const ext = p.split('.').pop()?.toLowerCase() ?? ''
+  if (['mp4', 'webm', 'mov', 'mkv', 'avi', 'flv', 'm4v', 'ts', 'mpeg', 'mpg'].includes(ext)) return 'video'
+  if (['mp3', 'wav', 'flac', 'aac', 'ogg', 'm4a', 'opus', 'wma'].includes(ext)) return 'audio'
+  return 'img'
 }
 
 const HISTORY_KEY = 'widget-agent-messages'
@@ -215,8 +225,11 @@ export interface AgentController {
   /** 心理揣测(独立 Sub Agent 每轮回复后静默更新;紧凑态文字区优先展示) */
   mindGuess: string | null
   /** 发送一轮对话。opts.silent = 系统提示静默模式(不进渲染端历史,
-   * 仅作引擎本轮输入——background-done 等系统通知用) */
-  send(text: string, opts?: { silent?: boolean }): void
+   * 仅作引擎本轮输入——background-done 等系统通知用);
+   * opts.media / opts.paths(2026-08-17 拖拽上传):media = 媒体附件路径
+   * (media part 对话窗口展示),paths = 全部附件路径(含媒体,文本标注
+   * 让 LLM 读取分析);text 可为空 = 纯附件上传 */
+  send(text: string, opts?: { silent?: boolean; media?: string[]; paths?: string[] }): void
   /** 软停止(2026-08-14 停止与撤销分离):中止引擎并把已完成的
    * 部分工作保留为上下文(落定 + system 停止说明),不回退 */
   abort(): void
@@ -279,7 +292,10 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
   // 当前对话实时总结标题(每轮回复完成后静默总结;入历史时作为标题)
   const [currentTitle, setCurrentTitle] = useState<string | null>(() => {
     try {
-      return localStorage.getItem(TITLE_KEY)
+      const v = localStorage.getItem(TITLE_KEY)
+      // 老版本残留的超长标题值原样显示会撑破文字区(2026-08-16):
+      // 标题上限 20 码元,读入即按上限兜底截断——与 labelRunner 同款
+      return v ? truncateCodepoints(v, 20) : null
     } catch {
       return null
     }
@@ -288,7 +304,9 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
   // 紧凑态文字区优先展示)
   const [mindGuess, setMindGuess] = useState<string | null>(() => {
     try {
-      return localStorage.getItem(MIND_KEY)
+      const v = localStorage.getItem(MIND_KEY)
+      // 揣测上限 16 码元(2026-08-16):任何来源进文字区都不超过 16 字
+      return v ? truncateCodepoints(v, 16) : null
     } catch {
       return null
     }
@@ -338,6 +356,11 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
   const STREAM_COMMIT_MIN_MS = 50
   const lastStreamCommitRef = useRef(0)
   const streamCommitTimerRef = useRef(0)
+  // message-routed 补标时序兜底缓存(2026-08-17):判定器路由是异步的
+  // (await 意图判定 Sub Agent),message-routed 补标事件可能先于权威
+  // message 落定到达——先缓存,消息落定时应用,保证任何时序下"已发送"
+  // 指纹 UI 都能补上(messageId → 'peer' | 'group' | 'master')
+  const pendingRoutedRef = useRef<Map<string, string>>(new Map())
   const resetStreaming = useCallback(() => {
     if (streamingRafRef.current) cancelAnimationFrame(streamingRafRef.current)
     streamingRafRef.current = 0
@@ -435,20 +458,30 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
           // **轮次标记剥离(2026-08-13 指纹协议)**:【回复对方】/【指纹:xx】
           // 前缀是给主进程路由层验证用的——进历史/显示前剥掉,残留旧指纹
           // 会被下一轮 LLM 从上下文"抄"到,指纹验证对不上 = 回复发不出去
-          // **剥离前检测(2026-08-14 指纹 UI)**:首段命中指纹 = 路由发给
-          // 对方的话 → sentToPeer,气泡用"发给对方"风格与给主人的普通
-          // 回复区分(指纹剥掉后信息就丢了,必须先检测)
+          // **剥离前检测(2026-08-14 指纹 UI;2026-08-15 双指纹扩展)**:
+          // 首段命中他人指纹【指纹:xx】= 路由发给对方的话 → sentToPeer;
+          // 命中主人指纹【主人指纹:xx】= 路由发回主人 → sentToMaster——
+          // 气泡分别挂"发给对方"/"发给主人"标签区分(指纹剥掉后信息
+          // 就丢了,必须先检测;开头标记唯一,两标记互斥)
           const firstTextPart = event.message.parts.find(
             (p): p is Extract<AgentPart, { type: 'text' }> => p.type === 'text',
           )
           const sentToPeer = firstTextPart ? hasTurnMark(firstTextPart.text) : false
+          const sentToMaster = firstTextPart ? hasMasterTurnMark(firstTextPart.text) : false
+          // 2026-08-17:message-routed 补标时序兜底——判定器路由异步,补标
+          // 事件可能先于本消息落定到达;应用缓存的 routed 标记(权威来源优先,
+          // 未命中文本指纹检测时兜底)
+          const cachedRouted = pendingRoutedRef.current.get(event.message.id)
+          if (cachedRouted) pendingRoutedRef.current.delete(event.message.id)
           const landed: AgentMessage = {
             ...event.message,
             parts: event.message.parts.map((p) =>
               p.type === 'text' ? { ...p, text: stripTurnMarks(p.text) } : p,
             ),
             usage: event.usage,
-            sentToPeer: sentToPeer || undefined,
+            sentToPeer:
+              (sentToPeer || cachedRouted === 'peer' || cachedRouted === 'group') || undefined,
+            sentToMaster: (sentToMaster || cachedRouted === 'master') || undefined,
           }
           setMessages((prev) => {
             // **回显对称去重(2026-08-14)**:session-activity 回显可能先于
@@ -468,7 +501,15 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
                   m.parts.some((p) => p.type === 'text' && norm(p.text) === want)
                 ) {
                   const next = [...prev]
-                  next[i] = landed
+                  // **继承回显标记(2026-08-16 二轮)**:判定器路由的回复无
+                  // 指纹,权威落定检测不到 sentToPeer/sentToMaster——回显
+                  // (a-sent-*)固定带 sentToPeer:true,升级替换时继承之
+                  // (message-routed 补标事件是主通道,这里是双保险)
+                  next[i] = {
+                    ...landed,
+                    sentToPeer: landed.sentToPeer ?? prev[i].sentToPeer,
+                    sentToMaster: landed.sentToMaster ?? prev[i].sentToMaster,
+                  }
                   return next
                 }
               }
@@ -522,6 +563,37 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
           send(text, { silent: true })
           break
         }
+        case 'message-routed': {
+          // **判定器路由补标(2026-08-16 二轮,修复"消息正常发送但指纹 UI
+          // 标识丢失")**:意图判定器兜底路由成功的回复文本无指纹,落定时
+          // 检测不到 sentToPeer/sentToMaster——主进程在路由发送成功后补发
+          // 本事件(message 事件之后、同一 IPC 通道顺序到达),按 messageId
+          // 给已落定消息补打标签(流式已结束,落定消息补标即可)
+          const routedMessageId = (event as { messageId?: string }).messageId
+          const routedTo = (event as { to?: string }).to
+          if (!routedMessageId) break
+          setMessages((prev) => {
+            // 消息尚未落定(判定器路由异步,补标先到):缓存标记,消息落定
+            // 时由 message case 应用(2026-08-17 时序兜底)
+            if (!prev.some((m) => m.id === routedMessageId)) {
+              if (routedTo === 'peer' || routedTo === 'group' || routedTo === 'master') {
+                pendingRoutedRef.current.set(routedMessageId, routedTo)
+              }
+              return prev
+            }
+            return prev.map((m) =>
+              m.id === routedMessageId
+                ? {
+                    ...m,
+                    sentToPeer:
+                      (routedTo === 'peer' || routedTo === 'group') ? true : m.sentToPeer,
+                    sentToMaster: routedTo === 'master' ? true : m.sentToMaster,
+                  }
+                : m,
+            )
+          })
+          break
+        }
         case 'mind-proactive': {
           // 主动陪伴:主进程对主动回复的心理揣测(与 Windows 系统通知
           // 同一句)——更新紧凑态文字区,两处一致。messageId 校验:
@@ -529,7 +601,10 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
           const { messageId, guess } = event
           if (!guess) break
           if (!messagesRef.current.some((m) => m.id === messageId)) break
-          setMindGuess(guess)
+          // **按 16 码元兜底截断(2026-08-16)**:本路径原值直入,绕过
+          // mindRunner 的 truncateCodepoints——任何来源的揣测进文字区
+          // 都不超过 16 字(与 labelRunner 双保险一致)
+          setMindGuess(truncateCodepoints(guess, 16))
           break
         }
         default:
@@ -859,9 +934,12 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
   }, [config?.proactiveEnabled, config?.proactiveInterval, config?.proactiveIntervalUnit, opts?.allowProactive, myKey])
 
   const send = useCallback(
-    async (text: string, opts?: { silent?: boolean; source?: 'qq' | 'group' | 'ask'; target?: string; media?: string[]; profileCard?: string }) => {
+    async (text: string, opts?: { silent?: boolean; source?: 'qq' | 'group' | 'ask'; target?: string; media?: string[]; paths?: string[]; profileCard?: string }) => {
     const trimmed = text.trim()
-    if (!trimmed) return
+    // 2026-08-17 拖拽上传:无文字也可发送(纯附件上传——附件路径标注
+    // 就是本轮输入;空文本 + 无附件才拦截)
+    const hasAttach = (opts?.media?.length ?? 0) > 0 || (opts?.paths?.length ?? 0) > 0
+    if (!trimmed && !hasAttach) return
     if (statusRef.current === 'thinking' || statusRef.current === 'running') return
     // 主动陪伴:任何一轮对话 = 有操作(重置 idle 时钟,含 background-done
     // 的系统通知自动轮——有对话在发生就不该主动打扰)
@@ -919,14 +997,21 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
     // **图片附件(2026-08-12 收图链路)**:opts.media = 本地图片路径列表
     // (main.cjs 下载的 QQ/群消息图片)→ 用户消息 parts 追加 media part,
     // 对话窗口展示图片(引擎 historyToItems 只序列化 text part,LLM 侧
-    // 经文本标注【图片已下载】知晓路径)
+    // 经文本标注【图片已下载】知晓路径)。2026-08-17 拖拽上传复用:
+    // 拖入的媒体文件(图片/音视频)同样作 media part 展示
     const mediaParts = (opts?.media ?? [])
       .filter((p) => typeof p === 'string' && p.trim())
-      .map((p, i) => ({ type: 'media' as const, kind: 'img' as const, url: p, name: `QQ图片${i + 1}` }))
+      .map((p, i) => ({ type: 'media' as const, kind: inferMediaKind(p), url: p, name: `附件${i + 1}` }))
+    // **拖拽附件路径标注(2026-08-17 拖拽上传)**:paths = 全部附件路径
+    // (含媒体),text part 让 LLM 读到每个附件路径,用 read_file / 命令
+    // 读取分析——媒体路径同时作 media part 供对话窗口展示
+    const attachParts = (opts?.paths ?? [])
+      .filter((p) => typeof p === 'string' && p.trim())
+      .map((p) => ({ type: 'text' as const, text: `【附件】${p}` }))
     const userMessage: AgentMessage = {
       id: `u-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       role: 'user',
-      parts: [{ type: 'text', text: trimmed }, ...mediaParts],
+      parts: [{ type: 'text', text: trimmed }, ...mediaParts, ...attachParts],
       // NapCat 来源标记(2026-08-12):QQ 私聊('qq',target = QQ 号)/
       // 群聊('group',target = 群号)/ 询问轮('ask',target = 陌生人 QQ,
       // 2026-08-13 起保留字段以显示私聊类别头;回复路由走主进程

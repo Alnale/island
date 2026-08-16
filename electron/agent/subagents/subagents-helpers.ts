@@ -8,6 +8,7 @@
 
 import { MIND_PERSONAS, SUMMARY_STYLES } from '../constants'
 import type { AgentMessage, AgentPart, MemoryEntry } from '../types'
+import type { ReplyIntent } from '../napcat/napcat-session'
 
 /**
  * 工具调用参数压缩(测试用导出):递归截断字符串值(大参数如
@@ -462,4 +463,86 @@ export function sanitizeMind(raw: string): string {
 export function buildMindSystem(context: string[]): string {
   const blocks = [context.filter(Boolean).join('\n\n'), MIND_SYSTEM_PROMPT]
   return blocks.filter(Boolean).join('\n\n')
+}
+
+// ---- 回复意图判定器(2026-08-16 兜底路由)----
+// 双指纹协议依赖主 Agent 的服从性(忘带指纹 = 扣留/误发,用户实测两病:
+// 该发给主人的消息没发出 + 发给别人的消息被发到主人 QQ)。落定路由对
+// 指纹缺失/歧义的轮次调用独立意图判定 Sub Agent——判定器只做单一分类
+// 任务(比主 Agent 边生成边记指纹可靠),JSON 严格解析 + 失败回退原行为。
+const CLASSIFIER_SYSTEM_PROMPT = (kindLabel: string, targetLabel: string, triggerText: string) =>
+  '你是灵动岛 QQ 机器人的「回复意图判定器」。助手(岛灵)刚完成一轮回复,你需要判定这段回复的**发送意图**——' +
+  '这是路由的最终依据,判断必须准确。' +
+  '\n\n【回合背景】' +
+  `\n- 回合类型:${kindLabel}` +
+  `\n- 触发消息(主人/对方发来的):${triggerText.slice(0, 500)}` +
+  `\n- 回复对象:${targetLabel}` +
+  '\n\n【助手回复】\n' +
+  '{reply}' +
+  '\n\n【意图定义】' +
+  '\n- master = 写给主人的话(回答主人、向主人汇报执行情况、询问主人意见)——将发送到主人 QQ' +
+  '\n- other = 写给对方的话(回复触发消息的 QQ 用户/群成员的话)——将发送给对方' +
+  '\n- hold = 不应发送的话(「不回复」声明、纯思考过程、无意义内容)' +
+  '\n\n【判断要点】' +
+  '\n1. 先读触发消息与回合类型:若主人指示「把某句话发给某人」「回复一下某人」「告诉某人…」,而助手回复就是那句转达的话 → other' +
+  '\n2. 回复是执行情况汇报(「已发送/已告诉他了/好的,这就发」)→ master' +
+  '\n3. 回复是直接回答主人/对方问题的内容 → 按对话对象判定(主人问 → master;对方问 → other)' +
+  '\n4. 主人指示后的执行回复(只写给对方的一句话)→ other;向主人的汇报/应答 → master' +
+  '\n5. **倾向(拿不准时,2026-08-16 二轮修复"发给别人的消息被发到主人QQ")**:「发给对方的话被误发到主人 QQ」比「给主人的话被扣留」更糟糕,不要无脑倾向 master——按回合类型:执行轮/群聊轮/私聊轮/面板轮的回复默认就是发给对方的话 → 倾向 other(误判为 other 也只是发给该发的人或扣留,不会串台);只有主人日常对话轮默认给主人 → 倾向 master,但若触发消息指示了发送/转达而回复是简短一句 → other。' +
+  '\n\n只输出 JSON 对象:{"intent": "master|other|hold", "reason": "不超过20字的理由"}。不要解释,不要输出其它内容。'
+
+/** 回复意图判定系统提示拼装(测试用导出):回合背景(类型/触发消息/回复
+ * 对象)+ 判定指令。触发消息是判定关键——没有它,"周末见"无法知道是给
+ * 主人的还是替主人发给张三的 */
+export function buildClassifierSystem(kindLabel: string, targetLabel: string, triggerText: string): string {
+  return CLASSIFIER_SYSTEM_PROMPT(kindLabel, targetLabel, triggerText)
+}
+
+/** 回复意图判定 JSON 解析(测试用导出):必须解析出合法 {intent} 且值在
+ * master/other/hold 枚举内才采信;解析失败/垃圾输出返回 null(调用方
+ * 回退原行为,安全侧) */
+export function parseClassifierJson(raw: string): { intent: ReplyIntent; reason?: string } | null {
+  const obj = extractJsonObject(raw)
+  if (!obj) return null
+  const intent = obj.intent
+  if (intent !== 'master' && intent !== 'other' && intent !== 'hold') return null
+  const reason = typeof obj.reason === 'string' ? obj.reason.trim().slice(0, 40) : undefined
+  return reason ? { intent, reason } : { intent }
+}
+
+// ---- 内部独白/思维链审核(2026-08-17,复用回复意图判定器做第二项判定)----
+// LLM 思考模式偶发把思维链写进正文(本应只出现在 reasoning_content),
+// 变成"对对话的自我分析/总结/决策"整段发出。正则粗筛只标记疑似,
+// 真正判定由本审核 Sub Agent 完成——比正则准,且**倾向放行**(判定
+// 失败/拿不准 → 不拦截,避免误删正常内容)。
+const MONOLOGUE_JUDGE_SYSTEM_PROMPT =
+  '你是灵动岛 QQ 机器人的「发送内容审核判定器」。助手(岛灵)刚生成了一段准备发送给' +
+  'QQ 用户/群成员的文本,你需要判定它是否属于**内部思维链/独白泄漏**——即 LLM 思考模式' +
+  '偶发把思维链写进了正文(本应只出现在 reasoning_content),把对对话的自我分析/总结/决策' +
+  '当成了回复内容。' +
+  '\n\n【内部独白特征】' +
+  '\n- 对刚才对话的自我总结/复盘:如「话题收尾了」「这段聊得挺热络的」「他没再提别的要求」' +
+  '\n- 自我决策/揣测:如「我就不主动打扰了」「看来他/她…」「他可能…」「我决定不…」' +
+  '\n- 整段第三视角描述对话状态与自己的打算,没有直接对对方说话的内容' +
+  '\n\n【正常回复特征】' +
+  '\n- 直接回答对方/主人,或转达、汇报、发消息等真实对外话语' +
+  '\n- 即使提到"话题""不打扰",但明确是对着对方说的(如「那就不打扰你了,回头聊」)→ 正常' +
+  '\n\n【判定规则】' +
+  '\n- 明显是内部独白(整段自我分析/决策,无直接回复对方的内容)→ isInternal: true(拦截不发)' +
+  '\n- 拿不准或含正常回复内容 → isInternal: false(放行——宁可放行也不误删正常内容)' +
+  '\n\n只输出 JSON 对象:{"isInternal": true|false, "reason": "不超过20字的理由"}。不要解释,不要输出其它内容。'
+
+/** 内部独白审核系统提示(测试用导出) */
+export function buildMonologueJudgeSystem(): string {
+  return MONOLOGUE_JUDGE_SYSTEM_PROMPT
+}
+
+/** 内部独白审核 JSON 解析(测试用导出):isInternal 必须是布尔才采信;
+ * 解析失败/垃圾输出返回 null(调用方按放行处理,安全侧) */
+export function parseMonologueJson(raw: string): { isInternal: boolean; reason?: string } | null {
+  const obj = extractJsonObject(raw)
+  if (!obj) return null
+  if (typeof obj.isInternal !== 'boolean') return null
+  const reason = typeof obj.reason === 'string' ? obj.reason.trim().slice(0, 40) : undefined
+  return reason ? { isInternal: obj.isInternal, reason } : { isInternal: obj.isInternal }
 }

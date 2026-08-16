@@ -17,6 +17,7 @@ import { createMemoryTools } from '../memory'
 import { createConfigTools } from '../tools/configTools'
 import { createBuiltinTools } from '../engine/engine-builtins'
 import { createDelegateTool } from '../engine/engine-tool-execution'
+import { getTaskDoneHandler, setTaskDoneHandler } from '../tasks'
 import { toolExecHooksOf } from './tool-events'
 import type { AgentContext, Plugin } from './kernel'
 
@@ -30,14 +31,28 @@ export function coreToolsPlugin(): Plugin {
       tools.registerTools(
         createTools({
           onSwitchToMusic: ctx.get('switchToMusic'),
-          onBackgroundDone: (info) => ctx.get('events').emit({ type: 'background-done', ...info }),
+          // **2026-08-16 修复"完成通知串会话"**:事件带任务发起会话键
+          // (task.sessionKey)——引擎 emit 闭包对显式 sessionKey 透传,
+          // 不再用本引擎 currentSessionKey 覆盖(多引擎并存时本引擎未必
+          // 是发起下载的那个);渲染端按键只让发起会话的实例处理
+          onBackgroundDone: (info) =>
+            ctx.get('events').emit({ type: 'background-done', ...info }),
           confirmAction: ctx.get('confirm').confirmAction,
           getOutputDir: () => ctx.get('config').getConfig().outputDir?.trim() || null,
           getSessionId: () => ctx.get('sessionState').getSessionId(),
+          // 后台任务注册时的发起会话键(2026-08-16)
+          getSessionKey: () => ctx.get('sessionState').getSessionKey(),
         }),
       )
-      // docflow 常驻子进程随引擎销毁回收
-      return () => disposeTools()
+      // docflow 常驻子进程随引擎销毁回收;**doneHandler 恢复链
+      // (2026-08-16)**:任务终态回调是 tasks.ts 模块级单例,本插件装配
+      // 时接管;引擎被 dispose(会话上限淘汰等)时恢复上一个 handler——
+      // 否则回调指向已销毁的 ctx,emit 抛错 = 任务完成通知丢失
+      const prevDoneHandler = getTaskDoneHandler()
+      return () => {
+        disposeTools()
+        setTaskDoneHandler(prevDoneHandler)
+      }
     },
   }
 }

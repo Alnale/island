@@ -95,6 +95,16 @@ export type AgentEvent = { sessionKey?: string } & (
    * 不提问就不知道结果)。主进程只在 Agent 模式转发
    */
   | { type: 'background-done'; title: string; message: string }
+  /**
+   * 判定器路由结果补标(2026-08-16 二轮修复"私聊消息正常发送但指纹 UI
+   * 标识丢失"):意图判定器兜底路由成功的回复**文本没有指纹**(指纹缺失
+   * 才走判定器)——渲染端 hasTurnMark/hasMasterTurnMark 检测不到 →
+   * sentToPeer/sentToMaster 标签丢失。主进程在判定器路由发送成功后补发
+   * 本事件(messageId = 该轮落定的引擎消息 id),渲染端按 id 给已落定
+   * 消息补打标签。to:'master' = 发给主人 / 'peer' = 发给对方(私聊)/
+   * 'group' = 发到群
+   */
+  | { type: 'message-routed'; messageId: string; to: 'master' | 'peer' | 'group' }
   /** 确认门:引擎请求用户确认(主进程转发;渲染端允许/拒绝后经
    * agent:tool-confirm 回传)。title/detail 可选——exec_command 确认只带
    * command(兼容),bili 批量下载等动作确认带 title+detail 展示 */

@@ -143,6 +143,9 @@ function runBiliBackground(args: string[]): string {
       status: 'running',
       // 进行中也带输出目录:LLM 回答"下载到哪"时能给真实绝对路径
       detail: `${biliJobLabel(args)}(进程 ${pid}),输出目录 ${outdir}`,
+      // 发起会话键(2026-08-16):完成通知回到发起下载的会话(主对话外
+      // 的会话不再丢消息——事件带此键,渲染端只让该会话实例处理)
+      sessionKey: currentBiliSessionKey(),
     })
     // 进度轮询:读 bili-tool 写的进度 JSON → 更新任务 detail(可读化)
     const fmtMb = (n: number) => `${(n / 1024 / 1024).toFixed(1)}MB`
@@ -236,6 +239,8 @@ function startBiliLoginPoll(key: string): void {
     title: 'B站扫码登录',
     status: 'waiting',
     detail: '等待用户扫码确认(二维码 2 分钟内有效)',
+    // 发起会话键(2026-08-16):登录结果通知回到发起登录的会话
+    sessionKey: currentBiliSessionKey(),
   })
   const child = spawn(
     BILI_BIN,
@@ -524,4 +529,23 @@ const biliConfirmRef: { current: { confirmAction: (title: string, detail: string
 /** 确认门注入(createTools 时调用;null = 不确认,测试环境) */
 export function setBiliConfirmAction(fn: ((title: string, detail: string) => Promise<boolean>) | null): void {
   biliConfirmRef.current = fn ? { confirmAction: fn } : null
+}
+
+/**
+ * 当前会话键 ref(2026-08-16 修复"bili 下载完成消息没有传递到发起会话"):
+ * biliQuery 是模块级函数,后台任务注册需要**发起时刻**的会话键——
+ * createTools 注入 deps.getSessionKey(引擎 sessionState 服务),任务
+ * 完成时 background-done 事件据此回到发起下载的会话(见 tasks.ts
+ * AgentTask.sessionKey)。与 biliConfirmRef 同款模式
+ */
+const biliSessionRef: { current: (() => string | null) | null } = { current: null }
+
+/** 会话键注入(createTools 时调用;null = 无会话键 → 主对话 main) */
+export function setBiliSessionKey(fn: (() => string | null) | null): void {
+  biliSessionRef.current = fn
+}
+
+/** 发起时刻的会话键(任务注册时固定;null = main) */
+function currentBiliSessionKey(): string | undefined {
+  return biliSessionRef.current?.() || undefined
 }

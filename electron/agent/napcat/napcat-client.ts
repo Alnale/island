@@ -563,6 +563,8 @@ export function createNapcatClient(deps: NapcatDeps): NapcatClient {
   function prepareOutgoingText(text: string, isMaster: boolean): string {
     let t = text
     if (!isMaster) {
+      // 非主人发送边界统一清洗(2026-08-17:内部独白判定不在此用正则——
+      // 交由 main.cjs 的审核 Sub Agent 判断,见 handleEngineMessageForNapcat)
       t = stripThinkingPreamble(stripMasterNarration(stripToolNarration(stripFingerprintMarks(t))))
     } else {
       t = stripFingerprintMarks(t)

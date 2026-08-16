@@ -55,6 +55,10 @@ type IslandAgentConfig = {
 }
 
 interface DesktopApi {
+  /** 拖拽/粘贴文件的绝对路径(2026-08-17 拖拽上传):经 webUtils 解析,
+   * 仅拖拽/粘贴来源可解析(对话框选择的文件返回空串);Web 演示环境
+   * 不存在该方法,渲染端可选链 + 降级用文件名 */
+  getPathForFile(file: File): string
   /** 鼠标进入/离开灵动岛交互区:通知主进程开关"点击穿透"(挂件核心体验) */
   pointer(active: boolean): void
   /** 托盘菜单"设置":订阅回调(渲染端在岛内展开设置视图);返回取消订阅函数 */

@@ -4483,6 +4483,11 @@ function runScreenshotTests({ win, app, fs, path, settingsPath, runIslandSetting
                 const lastItem = items[items.length - 1]
                 const markerTurn = lastItem && lastItem.type === 'message' && lastItem.role === 'user'
                 const jsonMode = !!(parsed && parsed.text && parsed.text.format && parsed.text.format.type === 'json_object')
+                // **意图判定器请求(2026-08-16 兜底路由)**:独立 Sub Agent 判定
+                // 无指纹回复的发送意图——系统提示(instructions)含「回复意图
+                // 判定器」;mock 按触发消息里的场景标记返回意图(缺省 hold =
+                // 老场景保持"扣留"语义,不改变既有断言)
+                const isClassifier = String(JSON.stringify(parsed?.instructions ?? '')).includes('回复意图判定器')
                 // **本轮指纹(2026-08-13 指纹协议,用户要求"指纹对不上就不
                 // 发送")**:从系统指令提取本轮唯一指纹——取**最后一个**匹配
                 // (历史里可能出现旧指纹残留,当轮系统指令在 input 末尾);
@@ -4490,6 +4495,10 @@ function runScreenshotTests({ win, app, fs, path, settingsPath, runIslandSetting
                 // 开头回显(路由层剥指纹发送;询问/汇报不带指纹 = 路由层不发送)
                 const fpMatches = [...String(JSON.stringify(parsed?.input ?? [])).matchAll(/【指纹:([2-9A-HJ-NP-Z]{6})】/g)]
                 const turnFp = fpMatches.length > 0 ? fpMatches[fpMatches.length - 1][1] : ''
+                // **本轮主人指纹(2026-08-16 二轮)**:【主人指纹 = xxx】在系统
+                // 指令里——场景 J5(mock LLM 把发给对方的话误打主人指纹)回显用
+                const masterFpMatches = [...String(JSON.stringify(parsed?.input ?? [])).matchAll(/【主人指纹 = ([2-9A-HJ-NP-Z]{6})】/g)]
+                const masterFp = masterFpMatches.length > 0 ? masterFpMatches[masterFpMatches.length - 1][1] : ''
                 // 会话情况记录(2026-08-13):输入里是否带【本会话情况记录】
                 // 系统项——验证主进程注入链路
                 const noteSeen = String(JSON.stringify(parsed?.input ?? [])).includes('本会话情况记录')
@@ -4503,7 +4512,20 @@ function runScreenshotTests({ win, app, fs, path, settingsPath, runIslandSetting
                   try {
                     frame({ type: 'response.created', response: {} })
                     await sleep(20)
-                    if (jsonMode) {
+                    if (isClassifier) {
+                      // 意图判定器 mock(2026-08-16):按触发消息(在系统提示
+                      // instructions 里)的场景标记返回意图——判定结果驱动
+                      // 落定路由(场景 J 断言);缺省 hold 保持老场景扣留语义
+                      const clsAll = String(JSON.stringify(parsed?.instructions ?? ''))
+                      let intent = 'hold'
+                      let reason = '测试缺省:扣留'
+                      if (clsAll.includes('$$master-daily-other$$')) { intent = 'other'; reason = '发给别人的话' }
+                      else if (clsAll.includes('$$master-daily-master$$')) { intent = 'master'; reason = '给主人的应答' }
+                      else if (clsAll.includes('$$exec-no-fp-other$$')) { intent = 'other'; reason = '执行回复发给对方' }
+                      else if (clsAll.includes('$$exec-no-fp-master$$')) { intent = 'master'; reason = '执行汇报给主人' }
+                      else if (clsAll.includes('$$exec-master-fp-mislabel$$')) { intent = 'other'; reason = '主人指纹复核:发给对方的话' }
+                      frame({ type: 'response.output_text.delta', delta: JSON.stringify({ intent, reason }) })
+                    } else if (jsonMode) {
                       frame({ type: 'response.output_text.delta', delta: '{"title":"测试会话"}' })
                     } else if (msgText.includes('$$napcat-send$$') && markerTurn) {
                       const m = /\$\$napcat-send\$\$\s*([\s\S]*)$/.exec(lastUser)
@@ -4565,6 +4587,31 @@ function runScreenshotTests({ win, app, fs, path, settingsPath, runIslandSetting
                       frame({ type: 'response.function_call_arguments.delta', output_index: 0, item_id: 'item_1', delta: JSON.stringify(args) })
                       await sleep(10)
                       frame({ type: 'response.function_call_arguments.done', output_index: 0, item_id: 'item_1', arguments: JSON.stringify(args) })
+                    } else if (msgText.includes('$$master-daily-other$$')) {
+                      // 场景 J1(2026-08-16):主人日常轮,LLM 把"替主人发给
+                      // 别人的话"直接写进回复(不调 send 工具、不带指纹)→
+                      // 意图判定 other → 扣留+通知,不再发主人(原实现无条件
+                      // 直发主人 = 串台根源)
+                      frame({ type: 'response.output_text.delta', delta: '周末见,你也早点休息~' })
+                    } else if (msgText.includes('$$master-daily-master$$')) {
+                      // 场景 J2:主人日常轮正常应答(无指纹)→ 判定 master →
+                      // 直发主人(原行为不回归)
+                      frame({ type: 'response.output_text.delta', delta: '好的,这就去办' })
+                    } else if (msgText.includes('$$exec-no-fp-other$$')) {
+                      // 场景 J3:执行轮,主人指示后的执行回复但**忘带指纹** →
+                      // 意图判定 other → 发回待回复对象(原实现 master-no-fp
+                      // 扣留 = 该发给对方的消息发不出去)
+                      frame({ type: 'response.output_text.delta', delta: '行,那明天晚上八点见!' })
+                    } else if (msgText.includes('$$exec-no-fp-master$$')) {
+                      // 场景 J4:执行轮,忘带主人指纹的汇报 → 意图判定 master
+                      // → 发主人(原实现扣留 = 主人收不到执行汇报)
+                      frame({ type: 'response.output_text.delta', delta: '已经帮他回复了,他让我谢谢主人' })
+                    } else if (msgText.includes('$$exec-master-fp-mislabel$$')) {
+                      // 场景 J5(2026-08-16 二轮):执行轮 LLM 把**发给对方的话
+                      // 误打主人指纹**(内容 = 发给对方的话)→ 主人指纹复核 →
+                      // 判定 other → 发回待回复对象(原实现无条件发主人 =
+                      // 串台,别人收不到)
+                      frame({ type: 'response.output_text.delta', delta: '【主人指纹:' + masterFp + '】明天中午十二点见!' })
                     } else {
                       // 直接回复:遵守指纹协议——发给对方的话以本轮指纹开头
                       const echo = '【已收到】' + lastUser.replace(/【[^】]*】/g, '').trim().slice(0, 40)
@@ -4701,13 +4748,21 @@ function runScreenshotTests({ win, app, fs, path, settingsPath, runIslandSetting
             })
             await new Promise((r) => wsServer.listen(0, '127.0.0.1', r))
             const wsUrl = `ws://127.0.0.1:${wsServer.address().port}`
+            // **推送 message_id 加运行盐(2026-08-16 修复"重跑巡检推送全部
+            // 被吞")**:客户端的私聊/群聊去重集合**持久化到 userData/
+            // napcat-seen.json(TTL 1 小时)**——假服务器从 1 递增的 message_id
+            // 与上一轮巡检(1 小时内)写入的 id 完全重合,seenHas 命中 →
+            // 本轮所有推送静默丢弃(实测:同一轮次内重跑,场景 A/D/E1/F/J
+            // 的推送全部到不了引擎,只有窗口输入/工具发送正常)。加随机
+            // 10 位运行盐(与真实 QQ 的大 id、前次运行的盐均不冲突)
+            const runSalt = 1000000000 + Math.floor(Math.random() * 9000000000)
             const pushPrivate = (qq, text) => {
               msgSeq += 1
               wsSend({
                 post_type: 'message',
                 message_type: 'private',
                 user_id: Number(qq),
-                message_id: msgSeq,
+                message_id: runSalt + msgSeq,
                 message: [{ type: 'text', data: { text } }],
                 raw_message: text,
                 time: Math.floor(Date.now() / 1000),
@@ -4719,6 +4774,17 @@ function runScreenshotTests({ win, app, fs, path, settingsPath, runIslandSetting
               try { settings = JSON.parse(settingsBackup ?? '{}') } catch {}
               settings.agent = {
                 ...(settings.agent ?? {}),
+                // **多供应商镜像(2026-08-16 修复)**:currentAgentConfig 的顶层
+                // apiKey/baseURL/model 始终从 providers[activeProvider] 读出
+                // (顶层 = 镜像)——巡检此前只改写顶层字段,引擎实际仍用
+                // providers.deepseek 的真实凭据 = 巡检一直在连真实 LLM
+                // (回复是真人风格、mock 的 llmRequests 恒空、场景断言随
+                // 真实 LLM 行为漂移)。必须同步改写 providers.deepseek。
+                activeProvider: 'deepseek',
+                providers: {
+                  ...(settings.agent?.providers ?? {}),
+                  deepseek: { apiKey: 'test-key', baseURL: llmUrl, model: 'deepseek-v4-flash' },
+                },
                 apiKey: 'test-key',
                 baseURL: llmUrl,
                 model: 'deepseek-v4-flash',
@@ -5044,7 +5110,7 @@ function runScreenshotTests({ win, app, fs, path, settingsPath, runIslandSetting
                 assert('F2 错误/过期指纹不发送', !to222F.some((m) => m.includes('错指纹')) && f.texts.some((t) => t.includes('错指纹')), { to222F })
                 assert('F3 询问误带指纹被拦截(不发给对方)', !to222F.some((m) => m.includes('要不要我回他')), { to222F })
                 assert('F3b 询问误带指纹同步主人 QQ', onebotReceived.some((r) => r.action === 'send_private_msg' && String(r.params && r.params.user_id) === '1178821869' && String(r.params && r.params.message).includes('要不要我回他')), onebotReceived.map((r) => r.action + ':' + (r.params && r.params.user_id)))
-                assert('F3c 指纹扣留原因可归因(global.__fpGate)', fpGates.includes('qq-no-fp') && fpGates.includes('qq-ask-with-fp'), fpGates)
+                assert('F3c 指纹扣留原因可归因(global.__fpGate)', fpGates.includes('classify-hold') && fpGates.includes('qq-ask-with-fp'), fpGates)
                 assert('F4 各轮指纹互不相同(每轮唯一)', new Set(fpsAll).size === fpsAll.length, { count: fpsAll.length })
                 // ===== 场景 G:会话情况记录 UI + 快捷清空上下文(2026-08-13)=====
                 // 横幅操作:「记录」→ 编辑态(textarea + 保存/取消)→ 写
@@ -5180,6 +5246,81 @@ function runScreenshotTests({ win, app, fs, path, settingsPath, runIslandSetting
                 const i2Sends = onebotReceived.filter((r) => r.action === 'send_private_msg' && String(r.params && r.params.message).includes('消息直接发给会话对象'))
                 log('scenarioI2', { i2Sends })
                 assert('I2 不带 user_id 的 send → 缺省发给当前会话对象(222)', i2Sends.some((r) => String(r.params && r.params.user_id) === '222'), i2Sends.map((r) => r.params && r.params.user_id))
+                // ===== 场景 J:意图判定器兜底路由(2026-08-16)=====
+                // 用户实测两病:① 该发给主人的消息因忘带主人指纹没发出去
+                // (执行轮/群汇报的 master-no-fp/group-no-master-fp 扣留);
+                // ② 发给别人的消息被发到主人 QQ(主人日常轮无指纹回复
+                // 无条件直发主人)。修复:指纹缺失/歧义的轮次落定后调用独立
+                // 意图判定 Sub Agent(master/other/hold)决定路由,判定失败
+                // 回退原行为。
+                // J0:先消费 F3 遗留的 pending(主人经 QQ 给执行轮带指纹回复
+                //     → 发回 222),让后续主人日常轮处于无 pending 状态
+                pushPrivate('1178821869', '$$mark-reply$$先回他一句')
+                await sleep(3500)
+                // J1:主人日常轮,回复 = 发给别人的话且无指纹 → 判定 other →
+                //     扣留+通知,不再发主人(原实现无条件直发主人 = 串台根源)
+                pushPrivate('1178821869', '帮我把"周末见"发给张三$$master-daily-other$$')
+                await sleep(3500)
+                // J2:主人日常轮,正常应答(无指纹)→ 判定 master → 直发主人
+                pushPrivate('1178821869', '在吗$$master-daily-master$$')
+                await sleep(3500)
+                // J3:执行轮,主人指示后的执行回复忘带指纹 → 判定 other →
+                //     发回待回复对象(原实现 master-no-fp 扣留 = 对方收不到)
+                pushPrivate('222', '$$ask-turn$$魔精又要零封了')
+                await sleep(3500)
+                pushPrivate('1178821869', '$$exec-no-fp-other$$你看着办吧')
+                await sleep(3500)
+                // J4:执行轮,忘带主人指纹的汇报 → 判定 master → 发主人
+                //     (原实现扣留 = 主人收不到执行汇报)
+                pushPrivate('222', '$$ask-turn$$再来一轮')
+                await sleep(3500)
+                pushPrivate('1178821869', '$$exec-no-fp-master$$继续')
+                await sleep(3500)
+                // J5(2026-08-16 二轮):执行轮 LLM 把发给对方的话**误打主人
+                //     指纹** → 主人指纹复核 → 判定 other → 发回待回复对象
+                //     (原实现 masterFpResult 无条件发主人 = 串台,别人收不到)
+                pushPrivate('222', '$$ask-turn$$魔精还要零封?')
+                await sleep(3500)
+                pushPrivate('1178821869', '$$exec-master-fp-mislabel$$继续回他')
+                await sleep(3500)
+                const toMasterJ = onebotReceived.filter((r) => r.action === 'send_private_msg' && String(r.params && r.params.user_id) === '1178821869').map((r) => String(r.params && r.params.message))
+                const to222J = onebotReceived.filter((r) => r.action === 'send_private_msg' && String(r.params && r.params.user_id) === '222').map((r) => String(r.params && r.params.message))
+                const fpGatesJ = (global.__fpGate || []).map((g) => g.reason)
+                log('scenarioJ', { toMasterJ, to222J, fpGatesJ })
+                assert('J0 消费 F3 遗留 pending(执行轮带指纹回复发回 222)', to222J.some((m) => m.includes('哈哈确实拉胯')), to222J)
+                assert('J1 主人日常轮发给别人的话(无指纹)不发主人(判定 other 扣留)', !toMasterJ.some((m) => m.includes('周末见')), toMasterJ)
+                assert('J1b 扣留原因可归因(master-other-no-target)', fpGatesJ.includes('master-other-no-target'), fpGatesJ)
+                assert('J2 主人日常轮正常应答(判定 master)直发主人', toMasterJ.some((m) => m.includes('好的,这就去办')), toMasterJ)
+                assert('J3 执行轮忘带指纹的执行回复(判定 other)发回待回复对象', to222J.some((m) => m.includes('明天晚上八点见')), to222J)
+                assert('J4 执行轮忘带主人指纹的汇报(判定 master)发主人', toMasterJ.some((m) => m.includes('他让我谢谢主人')), toMasterJ)
+                assert('J5 执行轮误打主人指纹的发给对方的话(复核 other)发回待回复对象', to222J.some((m) => m.includes('明天中午十二点见')), to222J)
+                assert('J5b 复核后不再发主人(不串台)', !toMasterJ.some((m) => m.includes('明天中午十二点见')), toMasterJ)
+                // J6(2026-08-16 二轮):判定器路由补标——J5 的回复(判定器
+                // 路由,文本无指纹)气泡应带 qq-peer 类(sentToPeer 经
+                // message-routed 补标,指纹 UI 标识不丢失);J2 的日常应答
+                // (判定 master 发主人)气泡应带 master 标签
+                await js(`(async () => {
+                  const sleep = (ms) => new Promise((res) => setTimeout(res, ms))
+                  const fold = document.querySelector('.island-session-fold')
+                  if (!document.querySelector('.island-session-dock.open')) fold?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+                  await sleep(600)
+                  const item = [...document.querySelectorAll('.island-session-item')].find((el) => (el.textContent || '').indexOf('222') !== -1)
+                  item?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+                  await sleep(1200)
+                  return 'ok'
+                })()`)
+                await sleep(800)
+                const routedResult = await js(`(() => {
+                  const out = {}
+                  const bubbles = [...document.querySelectorAll('.island-msgs-window .island-agent-msg-assistant')]
+                  const hit = bubbles.find((b) => (b.textContent || '').includes('明天中午十二点见'))
+                  out.found = !!hit
+                  out.qqPeer = !!hit && hit.classList.contains('qq-peer')
+                  return JSON.stringify(out)
+                })()`)
+                const routed = JSON.parse(routedResult)
+                log('scenarioJ-routed', routed)
+                assert('J6 判定器路由的回复补标(气泡带"发给对方"标识)', routed.found && routed.qqPeer, routed)
               }
             } catch (err) {
               log('error', String((err && err.stack) || err))

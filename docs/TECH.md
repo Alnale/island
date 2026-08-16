@@ -1,17 +1,19 @@
 # 灵动岛挂件 · 技术文档
 
-> 版本:**V3.0** · 更新:2026-08-14 · 配套代码:dynamic-island(桌面挂件 + Web 演示版双入口)
+> 版本:**V3.1** · 更新:2026-08-17 · 配套代码:dynamic-island(桌面挂件 + Web 演示版双入口)
 >
 > 本文档是灵动岛桌面挂件(Windows)的完整技术说明——架构设计、模块实现、
 > 交互细节、踩坑记录、测试体系与调试工具。同时作为 Agent 模式的功能引导
 > 知识库:LLM 对话中可调用 `get_feature_guide` 工具按话题读取本文档章节,
 > 向用户介绍灵动岛有什么功能、怎么用(见「第 11 章 功能清单与使用引导」)。
 >
-> **V3.0 工程重点**(本版文档新增专章):
-> [第 42 章 插件化架构重构(V3.0 重点)](#第-42-章-插件化架构重构v30-重点)——
-> Agent 引擎"一切皆插件"改造(插件内核 / 能力接缝 / 类型化事件 / 会话日志
-> 约束 / 声明式组合层)与六域目录化整合。
+> **V3.1 工程重点**(本版文档新增专章):
+> [第 43 章 安装器与发行(V3.1 重点)](#第-43-章-安装器与发行v31-重点)——
+> 自绘安装向导(Apple 设计语言重绘) + 绿色发布打包 + 独立安装器 exe,
+> 以及 asar 复制 / 可写性兜底 / 权限降级三个关键踩坑。
 >
+> V3.0 工程重点保留专章:
+> [第 42 章 插件化架构重构(V3.0 重点)](#第-42-章-插件化架构重构v30-重点)。
 > V2.0 两大工程重点仍保留专章:
 > [第 15 章 HEVC 补丁工程](#第-15-章-hevc-补丁工程v20-重点)与
 > [第 16 章 提示词约束工程](#第-16-章-提示词约束工程v20-重点)。
@@ -63,6 +65,7 @@
 - [第 40 章 版本历史与演进时间线](#第-40-章-版本历史与演进时间线)
 - [第 41 章 新开发者 30 分钟上手](#第-41-章-新开发者-30-分钟上手)
 - [第 42 章 插件化架构重构(V3.0 重点)](#第-42-章-插件化架构重构v30-重点)
+- [第 43 章 安装器与发行(V3.1 重点)](#第-43-章-安装器与发行v31-重点)
 - [结语](#结语)
 - [附录 A:Agent 事件一览](#附录-aagent-事件一览)
 - [附录 B:常量与阈值表](#附录-b常量与阈值表)
@@ -2738,6 +2741,105 @@ global.__fpGate 可归因;F4 各轮指纹互不相同(7 轮全唯一)。mock 标
   回复/汇报/应答)→ 不发送(logFpGate qq-no-fp 可归因);询问误带指纹
   isAsk 拦截;约束侧模板②强化"**没有指纹的回复不会发送给对方**(会留在
   对话窗口)——发给对方的话必须带本轮指纹"。
+- **意图判定器兜底路由(2026-08-16,用户实测两病:"该发给主人的消息因忘带
+  主人指纹没发出去"+"发给别人的消息被发到主人QQ")**:双指纹协议(2026-08-15
+  九轮)把路由正确性押在主 Agent 对指纹协议的服从性上,真实 API 实测服从
+  性不稳定——忘带主人指纹 = master-no-fp/group-no-master-fp 扣留(该发给
+  主人的消息到不了主人);主人日常轮无指纹回复**无条件直发主人**(发给别人
+  的话被当回复发到主人 QQ)。修复 = **指纹优先 + 意图判定器兜底**:① **独立
+  意图判定 Sub Agent**(subagents.ts `createReplyClassifier`,与总结/揣测
+  同构:零共享、单轮、20s 超时、noThinking 低强度、JSON 严格解析
+  `parseClassifierJson`,失败返回 null):落定路由对**指纹缺失/歧义**的轮次
+  调用它判定回复发送意图(master=给主人的话 / other=发给对方的话 / hold=
+  不应发送),按判定路由——**判定失败一律回退原行为**(不引入新错误路径);
+  ② **纯函数路由矩阵**(napcat-session.ts `routeForClassifierIntent`,测试
+  15 格全矩阵):exec = master→发主人、other→发待回复对象、hold→扣留;
+  master-daily = master→发主人、other→扣留(master-other-no-target,提示
+  用 send 工具;原实现发主人 = 串台根源)、hold→扣留;group = master→发
+  主人、other→发回群、hold→扣留;contact = master→发主人、other→发回
+  对方、hold→扣留;panel = master→留面板(主人正在看)、other→发回对方、
+  hold→扣留;③ **触发消息进判定上下文**(route 增 `lastTriggerText`,
+  agent:send 记录、落定同刻清零;判定器 prompt `buildClassifierSystem` 含
+  回合类型/触发消息/回复对象——没有它,"周末见"无法知道是给主人的还是替
+  主人发给张三的);④ **主人日常轮他人指纹无目标路径改扣留**(原 2026-08-15
+  二轮"草稿发主人"行为撤销:用户实测反感发给别人的话出现在主人 QQ;草稿
+  仍在对话窗口可见,主人可指示用 send 工具补发);⑤ **落定门控接线**
+  (handleEngineMessageForNapcat 改 async——路由状态函数开头同步消费清零,
+  await 判定期间不产生重复路由):master-no-fp/group-no-master-fp/qq-no-fp/
+  panel-no-fp/group-panel-no-fp 五个扣留点 + 主人日常轮直发点全部接判定
+  器;⑥ **测试**:单测 +4 组(路由矩阵/解析/提示词内容/工厂全失败路径);
+  session-debug 巡检新增场景 J(mock 判定器按触发消息标记回意图):J0 消费
+  遗留 pending、J1 主人日常轮发给别人的话不发主人(master-other-no-target
+  可归因)、J2 日常应答直发主人不回归、J3 执行轮忘带指纹的执行回复发回待
+  回复对象、J4 执行轮忘带主人指纹的汇报发主人;F3c 断言同步 qq-no-fp →
+  classify-hold。**巡检暴露的三个既有 bug 一并修复**:① **turnFingerprintExecRule
+  定义丢失**(2026-08-15 双指纹重构误删定义、调用点残留——窗口面板在
+  pending 存活时输入(执行轮)命中此分支 → ReferenceError 炸掉 agent:send
+  IPC,主进程 uncaughtException 兜底只记 stderr,引擎从未启动 = 面板执行轮
+  静默无回复;巡检 stderr 实测,从 git 历史恢复原定义);② **巡检 settings
+  改写漏 providers.deepseek**(多供应商重构后 currentAgentConfig 顶层
+  apiKey/baseURL/model 从 providers[activeProvider] 读出,巡检只改写顶层
+  字段 → 引擎一直连真实 LLM,mock 的 llmRequests 恒空、断言随真实 LLM 行为
+  漂移——同步改写 providers.deepseek);③ **推送 message_id 与持久化去重
+  集合冲突**(客户端私聊/群聊去重持久化 userData/napcat-seen.json,TTL 1
+  小时;假服务器从 1 递增的 message_id 与 1 小时内上一轮巡检写入的完全
+  重合 → 本轮所有推送被 seenHas 静默丢弃,只有窗口输入/工具发送正常——
+  pushPrivate 加随机 10 位运行盐)。验证:230/230 单测 + tsc + lint +
+  build:electron + session-debug 巡检全绿(asserts-summary 空)。
+- **后台任务完成通知会话路由(2026-08-16,用户实测"bili 工具下载完成的
+  消息没有传递到其它会话消息里(主对话之外)")**:根因——任务终态回调
+  (doneHandler)是 tasks.ts **模块级单例**,每个引擎装配时(coreToolsPlugin
+  → createTools)接管、最后装配的引擎持有;background-done 事件经该引擎
+  emit 闭包注入 **currentSessionKey** = 完成通知落到"最后装配的引擎"的
+  会话,发起下载的会话(主对话之外)收不到。修复 = **任务记录发起会话键 +
+  事件显式携带**:① tasks.ts `AgentTask.sessionKey`(注册时固定——detached
+  子进程完成时引擎 currentSessionKey 可能已变,发起时刻的会话才对)+
+  `getTaskDoneHandler` 导出;② tools-bili.ts `setBiliSessionKey` 模块级 ref
+  (与 biliConfirmRef 同款),runBiliBackground(下载/批量/convert)与
+  startBiliLoginPoll(扫码登录)注册任务带 `sessionKey: currentBiliSessionKey()`;
+  ③ tools.ts createTools deps 加 `getSessionKey`(引擎 sessionState 服务)接线,
+  onBackgroundDone 载荷带 task.sessionKey;④ tool-plugins.ts coreToolsPlugin
+  传 getSessionKey + 事件 `{type:'background-done', ...info}` + **dispose
+  恢复旧 doneHandler**(会话引擎被淘汰后回调不再指向已销毁 ctx,emit 抛错
+  = 完成通知丢失);⑤ engine.ts emit 闭包改 `event.sessionKey ??
+  currentSessionKey`——**显式键不被覆盖**(普通事件仍带引擎当前键;渲染端
+  useAgent 按 event.sessionKey 过滤,只让发起会话实例处理,silent 轮落定
+  在该会话)。测试 +2(任务注册 sessionKey 透传/终态不重复回调/无键不携带;
+  createAgentEngine 集成:registerTask+updateTask → onEvent 收到
+  background-done 带 'private:222'、无键任务 fallback 引擎当前键('main')、
+  普通 error 事件仍带 'main')。验证:232/232 单测 + tsc + lint +
+  build:electron + 实机启动。
+- **判定器兜底路由盲区二修(2026-08-16 二轮,用户实测两病:"经过几轮对话
+  后偶现私聊消息正常发送但指纹 UI 标识丢失"+"应该发送给别人的消息路由
+  发送到主人QQ、别人没收到")**:两病同源于十轮判定器兜底路由的盲区——
+  ① **指纹 UI 标识丢失**:判定器路由成功的回复**文本无指纹**(指纹缺失才
+  走判定器)→ 渲染端 hasTurnMark/hasMasterTurnMark 检测不到 →
+  sentToPeer/sentToMaster 标签丢失。修复 = **message-routed 补标事件**:
+  types.ts AgentEvent 新增 `{type:'message-routed', messageId, to:
+  'master'|'peer'|'group'}`;main.cjs 判定器各路由分支(群 master/other、
+  exec master/pending、daily master、contact other/master、panel 私聊/群)
+  发送成功后补发(与 message 事件同一 IPC 通道、顺序到达);useAgent 新增
+  case 按 messageId 给已落定消息补 sentToPeer/sentToMaster,升级替换回显
+  (a-sent-*)时继承其标记(双保险)。② **串台三来源**:a) 判定器 prompt 第
+  5 条"拿不准时倾向 master"(十轮安全侧设计,用户实测方向相反)——模糊时
+  把"发给对方的话"判成 master 发主人;b) 执行轮回复**误打主人指纹**
+  (LLM 把发给对方的话标成【主人指纹:xxx】)→ masterFpResult 分支无条件
+  发主人、别人收不到;c) 日常轮判定器失败(API 超时/空响应)回退"直发
+  主人"——回复若是发给别人的话即串台。修复 = ① 判定器 prompt 倾向**按
+  回合类型分设**(执行轮/群轮/私聊轮/面板轮回复默认发给对方 → 倾向 other;
+  仅主人日常轮默认给主人 → 倾向 master,但触发消息含发送/转达指令且回复
+  简短 → other),强化"主人指示转达 vs 回复 = 转达内容"判据;② **执行轮
+  主人指纹复核**:pendLive + masterFpResult 时经判定器复核归属(判定 other
+  → 发 pending 对象、清 pending;master/hold/判定失败 → 按原行为发主人,
+  复核失败不丢主人消息);③ **日常轮判定失败启发式收紧**:
+  `looksLikeForwardInstruction`(napcat-session.ts 纯函数,单测正向
+  把/帮/替…发给/回复一下张三/告诉小李/转发给老王/跟他说,负向日常聊天/
+  查询/空串)命中且回复 ≤60 码元 → 扣留 master-other-no-target(不再直发
+  主人)。测试 +1;session-debug 巡检场景 J5/J6(mock 判定器按标记回意图):
+  J5 执行轮误打主人指纹的发给对方的话 → 复核 other → 发回 222、主人未
+  收到;J6 该回复气泡带 qq-peer 类(scenarioJ-routed {found:true,
+  qqPeer:true},message-routed 补标端到端)。验证:233/233 单测 + tsc +
+  lint + build:electron + session-debug 巡检全绿(asserts-summary 空)。
 - **群消息链路修复 + 防骚扰 + 启动群名(2026-08-13 四修,用户要求"不要
   测试"):**① **群消息到不了 LLM 根治**:`resolveGroupName` 此前在
   onGroupMessage 被调用但**全仓库从未定义**(悬空引用)——每次群消息到达
@@ -3947,6 +4049,87 @@ oxlint 无告警。
 | 换掉某个实现 | builtinPlugins 传 opts.patch:按 id 换行(或整体替换 profile) |
 | 看真实启动树 | dumpComposition |
 
+
+---
+
+## 第 43 章 安装器与发行(V3.1 重点)
+
+V3.1 让项目从"源码运行"走向"可安装发行":自绘安装向导(零 UI 框架) +
+绿色发布打包 + 独立安装器 exe 打包。涉及四个文件域:`installer/`(向导
+主进程/界面/preload)、`scripts/build-release.mjs`(绿色发布)、
+`scripts/build-installer.mjs`(独立安装器)、以及 `release/`(产物目录)。
+
+### 43.1 定位与产物
+
+| 产物 | 路径 | 结构 | 用途 |
+| --- | --- | --- | --- |
+| 绿色发布目录 | `release/灵动岛/` | `electron/`(运行时) + `electron/resources/app/`(应用) | 绿色版,拷走即用 |
+| 独立安装器 | `release/灵动岛安装器/` | `灵动岛安装器.exe` + `resources/app/`(向导) + `resources/release/灵动岛/`(安装源) | 双击启动向导,可分发 |
+
+两级打包依赖关系:`build-installer.mjs` 把 `build-release.mjs` 的产物
+`release/灵动岛/` 作为安装源打进安装器。开发期可直接 `npx electron
+installer/main.cjs` 预览向导(不打包)。
+
+### 43.2 安装向导结构与流程
+
+`installer/` 是独立的 Electron 应用:
+
+- **main.cjs** 主进程:`BrowserWindow`(无边框,940×660)加载 `installer.html`;
+  安装逻辑 `performInstall` 四步——逐文件复制发布产物到安装目录(`copyTree`
+  带实时进度) → 校验 `electron/electron.exe` → 创建桌面/开始菜单快捷方式
+  (PowerShell `WScript.Shell`) → 可选开机自启(HKCU Run) + 写卸载项并生成
+  `uninstall.cmd`;
+- **installer.html** 渲染端:四步向导(欢迎/安装选项/安装中/完成),零框架
+  手写 JS(`window.installer` preload API 提供 getInfo/pickDir/install/
+  finish/onProgress 等;纯浏览器打开时自动用 mock,便于不安装预览界面);
+- **preload.cjs**:contextBridge 暴露最小 API,渲染端零 Node 依赖。
+
+### 43.3 三个关键踩坑(必须记住)
+
+1. **复制 .asar 必须用 `original-fs`**(2026-08-17):Electron 主进程的 fs 会把
+   `.asar` 当归档自动解包,导致复制发布产物里 `electron/resources/default_app.asar`
+   时报 `ENOENT: not found in <path>`,整个安装静默失败。纯 Node 复现不出
+   (无 asar 增强),只在 Electron 主进程内出现。修复:`const ofsp =
+   require('original-fs').promises`,`copyTree`/`collectFiles` 的
+   `copyFile`/`stat`/`mkdir` 全走 `ofsp`。
+2. **可写性预检与自动回退**(2026-08-17):受限/企业环境可能禁止写入默认安装
+   目录(`%LOCALAPPDATA%\Programs\灵动岛`)与默认 userData。`inst:info` 启动时
+   探测默认目录可写性,不可写则自动回退到 `%TEMP%\灵动岛` 并置
+   `defaultDirFallback` 提示渲染端;main.cjs 顶部对 `app.getPath('userData')`
+   做同样探测,不可写回退到 `os.tmpdir()` 下固定位置(否则打包模式主进程
+   启动即退出)。
+3. **附加项失败降级为警告**(2026-08-17):核心 = 复制 + 校验主程序,失败则
+   整体失败;附加项(桌面/开始菜单快捷方式、开机自启、注册表卸载项)失败只
+   记 `warnings` 数组 + 日志 `⚠`,不阻断——`return { ok:true, dir, warnings }`,
+   完成页展示警告。真实环境常见:桌面被组策略锁定、注册表被管控。
+
+配套 UI 细节:安装失败**留在安装页直接显示错误**(不闪回第 2 步,避免
+"点了没反应"假象);失败时「上一步」可从第 3 步回退到第 2 步修改目录。
+
+### 43.4 安装向导 UI(Apple 设计语言)
+
+界面按 Apple 设计规范重绘(`installer.html` 全部 CSS):单一收敛强调色
+`#6e63ff`(弃用霓虹发光/紫蓝渐变)、内容卡毛玻璃
+`backdrop-filter: blur(36px) saturate(1.7)` + 18px 圆角 + 顶部亮边、
+系统字体层级(大标题负字距 / secondary-tertiary 三级文字)、克制的 pane
+切换(0.38s `cubic-bezier(.25,1,.5,1)` 位移+淡入)、按钮 `:active` 即时
+`scale(.98)` 反馈、复选框 6px 圆角 accent 填充白勾、完成页 systemGreen
+圆盘(无 glow)。背景与图标用原始资源 `installer/bg.png` / `installer/icon.png`
+(根目录 `bg.png` / `icon.png` 的副本,保证安装器自包含)。
+支持 `prefers-reduced-motion` / `prefers-reduced-transparency` 兜底。
+
+### 43.5 打包命令与分发
+
+```bash
+node scripts/build-release.mjs     # ① 绿色发布 → release/灵动岛
+node scripts/build-installer.mjs   # ② 独立安装器 → release/灵动岛安装器
+npx electron installer/main.cjs    # 开发期直接跑向导
+```
+
+分发:把整个 `release/灵动岛安装器/` 目录压缩发给别人,解压后双击
+「灵动岛安装器.exe」(由 `electron.exe` 重命名)即启动向导,对方无需 Node
+环境。注意:独立安装器自动加载 `resources/app` 依赖其 `package.json` 的
+`main` 字段(指向 `main.cjs`),打包脚本会生成该文件。
 
 ---
 

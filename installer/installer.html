@@ -1,0 +1,685 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data: file:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'" />
+<title>灵动岛 · 安装向导</title>
+<style>
+/* ===== 灵动岛 安装向导 · Apple 设计语言重绘 =====
+   克制的排版 / 毛玻璃材质 / 柔和的动效 / 单一强调色(去霓虹与渐变游戏感)
+   背景图 installer/bg.png + 原始图标 installer/icon.png
+   强调色 #6e63ff(收敛的品牌紫) */
+
+:root {
+  --accent: #6e63ff;
+  --accent-hover: #7f76ff;
+  --ok: #30d158;
+  --danger: #ff453a;
+  --text: rgba(255,255,255,.95);
+  --text-2: rgba(235,235,245,.62);
+  --text-3: rgba(235,235,245,.34);
+  --sep: rgba(255,255,255,.09);
+  --glass: rgba(28,28,32,.55);
+  --card-brd: rgba(255,255,255,.11);
+  --radius: 18px;
+  --titlebar-h: 46px;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html, body {
+  height: 100%;
+  overflow: hidden;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, sans-serif;
+  color: var(--text);
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* 背景:原始背景图 + 极淡暗渐变保证文字对比(不叠加霓虹光晕) */
+.bg {
+  position: fixed;
+  inset: 0;
+  z-index: -2;
+  background: url("./bg.png") center / cover no-repeat;
+  filter: saturate(1.05);
+}
+.bg::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(180deg, rgba(10,12,16,.34) 0%, rgba(10,12,16,.55) 100%);
+}
+
+/* 顶栏:透明拖拽区 */
+.titlebar {
+  height: var(--titlebar-h);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 14px 0 20px;
+  -webkit-app-region: drag;
+}
+.titlebar .tb-dot {
+  width: 9px; height: 9px; border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 3px rgba(110,99,255,.16);
+  flex: none;
+}
+.titlebar .tb-title {
+  font-size: 12px;
+  letter-spacing: .02em;
+  color: var(--text-3);
+  font-weight: 500;
+}
+.titlebar .tb-spacer { flex: 1; }
+.titlebar .tb-btn {
+  width: 34px; height: 28px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: none; border-radius: 8px;
+  background: transparent; color: var(--text-3);
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+  transition: background-color .15s ease, color .15s ease;
+}
+.titlebar .tb-btn:hover { background: rgba(255,255,255,.08); color: var(--text); }
+.titlebar .tb-btn.close:hover { background: rgba(255,69,58,.18); color: #ff9a94; }
+
+/* 主体 */
+.wrap {
+  position: relative;
+  height: calc(100% - var(--titlebar-h));
+  display: flex;
+  flex-direction: column;
+  padding: 4px 26px 22px;
+}
+
+/* 品牌横幅 */
+.brand {
+  display: flex; align-items: center; gap: 14px;
+  padding: 10px 4px 16px;
+}
+.brand .logo {
+  width: 48px; height: 48px; border-radius: 12px;
+  overflow: hidden; flex: none;
+  background: rgba(255,255,255,.06);
+  box-shadow: 0 6px 18px rgba(0,0,0,.25), inset 0 0 0 1px rgba(255,255,255,.1);
+}
+.brand .logo img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.brand .name { font-size: 19px; font-weight: 650; letter-spacing: -.01em; }
+.brand .ver {
+  font-size: 11px; font-weight: 500; color: var(--text-2);
+  padding: 2px 9px; border-radius: 999px;
+  border: 1px solid var(--sep);
+  background: rgba(255,255,255,.05);
+}
+.brand .desc { font-size: 12.5px; color: var(--text-2); margin-top: 3px; }
+
+/* 步骤指示器 */
+.steps {
+  display: flex; align-items: center; gap: 8px;
+  margin-bottom: 16px;
+}
+.steps .step { display: inline-flex; align-items: center; gap: 8px; }
+.steps .step .idx {
+  width: 23px; height: 23px; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 11.5px; font-weight: 600;
+  color: var(--text-3);
+  background: rgba(255,255,255,.06);
+  border: 1px solid var(--sep);
+  transition: all .25s ease;
+}
+.steps .step.active .idx {
+  background: var(--accent);
+  border-color: transparent;
+  color: #fff;
+}
+.steps .step.done .idx {
+  background: rgba(110,99,255,.14);
+  border-color: rgba(110,99,255,.35);
+  color: var(--accent-hover);
+}
+.steps .step .label { font-size: 12px; color: var(--text-3); transition: color .25s ease; }
+.steps .step.active .label { color: var(--text); font-weight: 500; }
+.steps .step.done .label { color: var(--text-2); }
+.steps .line { width: 30px; height: 1.5px; background: rgba(255,255,255,.12); transition: background .25s ease; }
+.steps .line.done { background: rgba(110,99,255,.55); }
+
+/* 内容卡(毛玻璃) */
+.content {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  background: var(--glass);
+  border: 1px solid var(--card-brd);
+  border-radius: var(--radius);
+  backdrop-filter: blur(36px) saturate(1.7);
+  -webkit-backdrop-filter: blur(36px) saturate(1.7);
+  box-shadow: 0 20px 60px rgba(0,0,0,.45), inset 0 1px 0 rgba(255,255,255,.07);
+  overflow: hidden;
+}
+.content > .pane {
+  position: absolute;
+  inset: 0;
+  padding: 30px 36px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255,255,255,.18) transparent;
+  opacity: 0;
+  transform: translateX(18px);
+  pointer-events: none;
+  transition: opacity .38s ease, transform .38s cubic-bezier(.25,1,.5,1);
+}
+.content > .pane.active { opacity: 1; transform: none; pointer-events: auto; }
+.content > .pane.back { transform: translateX(-18px); }
+
+.pane h2 { font-size: 20px; font-weight: 650; letter-spacing: -.01em; margin-bottom: 8px; }
+.pane .lead { font-size: 13px; line-height: 1.65; color: var(--text-2); max-width: 520px; }
+.pane .lead b { color: var(--text); font-weight: 600; }
+
+/* 欢迎页特性卡 */
+.features {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 12px;
+  margin-top: 22px;
+}
+.feature {
+  padding: 14px 16px;
+  border: 1px solid var(--sep);
+  border-radius: 14px;
+  background: rgba(255,255,255,.04);
+  display: flex; gap: 12px; align-items: flex-start;
+  transition: border-color .2s ease, background-color .2s ease;
+}
+.feature:hover { border-color: rgba(110,99,255,.35); background: rgba(110,99,255,.06); }
+.feature .ic {
+  width: 34px; height: 34px; border-radius: 9px; flex: none;
+  background: rgba(110,99,255,.14);
+  display: flex; align-items: center; justify-content: center;
+  color: var(--accent-hover);
+}
+.feature .ic svg { width: 18px; height: 18px; }
+.feature .t { font-size: 13.5px; font-weight: 600; margin-bottom: 3px; }
+.feature .d { font-size: 12px; color: var(--text-3); line-height: 1.55; }
+
+/* 选项页 */
+.opt-group { margin-top: 20px; }
+.opt-group .og-title {
+  font-size: 12px; font-weight: 500; letter-spacing: .02em;
+  color: var(--text-3); margin-bottom: 10px;
+}
+.dir-row { display: flex; gap: 10px; align-items: center; }
+.dir-field {
+  flex: 1; min-width: 0;
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--sep);
+  border-radius: 11px;
+  background: rgba(0,0,0,.22);
+}
+.dir-field svg { width: 16px; height: 16px; color: var(--text-3); flex: none; }
+.dir-field span {
+  font-size: 13px; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.dir-btn {
+  padding: 0 18px; height: 42px;
+  border: 1px solid var(--sep);
+  border-radius: 11px;
+  background: rgba(255,255,255,.07);
+  color: var(--text); font-size: 13px; font-weight: 500;
+  cursor: pointer; flex: none;
+  transition: background-color .15s ease, border-color .15s ease;
+}
+.dir-btn:hover { background: rgba(255,255,255,.12); border-color: rgba(255,255,255,.2); }
+.dir-btn:active { transform: scale(.98); }
+.dir-hint {
+  margin-top: 8px;
+  font-size: 12px; line-height: 1.6;
+  color: #ffd60a;
+  background: rgba(255,214,10,.08);
+  border: 1px solid rgba(255,214,10,.25);
+  border-radius: 9px;
+  padding: 8px 12px;
+}
+
+.checks { margin-top: 16px; display: flex; flex-direction: column; gap: 10px; }
+.check {
+  display: flex; align-items: center; gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--sep);
+  border-radius: 12px;
+  background: rgba(255,255,255,.035);
+  cursor: pointer;
+  transition: border-color .15s ease, background-color .15s ease;
+}
+.check:hover { background: rgba(255,255,255,.06); }
+.check input {
+  appearance: none; -webkit-appearance: none;
+  width: 18px; height: 18px; border-radius: 6px; flex: none;
+  border: 1.5px solid rgba(255,255,255,.28);
+  background: transparent;
+  cursor: pointer;
+  position: relative;
+  transition: background-color .15s ease, border-color .15s ease;
+}
+.check input:hover { border-color: rgba(255,255,255,.45); }
+.check input:checked {
+  background-color: var(--accent);
+  border-color: transparent;
+}
+.check input:checked::after {
+  content: "";
+  position: absolute; left: 5px; top: 2.5px;
+  width: 4.5px; height: 8px;
+  border: solid #fff; border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+.check .ck-t { font-size: 13.5px; font-weight: 500; }
+.check .ck-d { font-size: 12px; color: var(--text-3); margin-top: 2px; }
+.check input:disabled + .ck-body { opacity: .45; }
+
+/* 进度页 */
+.progress-wrap { margin-top: 28px; }
+.progress-meta {
+  display: flex; justify-content: space-between; align-items: baseline;
+  margin-bottom: 10px;
+}
+.progress-meta .pm-title { font-size: 13.5px; font-weight: 600; }
+.progress-meta .pm-pct { font-size: 24px; font-weight: 650; color: var(--text); font-variant-numeric: tabular-nums; letter-spacing: -.01em; }
+.progress-bar {
+  height: 6px; border-radius: 999px;
+  background: rgba(255,255,255,.08);
+  overflow: hidden;
+}
+.progress-bar .fill {
+  height: 100%; width: 0%;
+  background: var(--accent);
+  border-radius: 999px;
+  transition: width .2s ease;
+}
+.progress-file {
+  margin-top: 12px;
+  font-size: 12px; color: var(--text-3);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: "SF Mono", "Cascadia Mono", Consolas, monospace;
+}
+.progress-stage { margin-top: 6px; font-size: 12.5px; color: var(--text-2); }
+.install-log {
+  margin-top: 18px;
+  max-height: 132px; overflow-y: auto;
+  font-size: 12px; line-height: 1.9;
+  color: var(--text-3);
+  font-family: "SF Mono", "Cascadia Mono", Consolas, monospace;
+  scrollbar-width: thin;
+  border-top: 1px solid var(--sep);
+  padding-top: 10px;
+}
+.install-log .ok { color: var(--ok); }
+.install-log .warn { color: #ffd60a; }
+
+/* 完成页 */
+.done-icon {
+  width: 76px; height: 76px; border-radius: 50%;
+  background: rgba(48,209,88,.13);
+  border: 1px solid rgba(48,209,88,.4);
+  display: flex; align-items: center; justify-content: center;
+  margin: 6px 0 18px;
+}
+.done-icon svg { width: 36px; height: 36px; color: var(--ok); }
+.done-warn {
+  margin-top: 14px;
+  max-width: 520px;
+  font-size: 12px; line-height: 1.6;
+  color: #ffd60a;
+  background: rgba(255,214,10,.08);
+  border: 1px solid rgba(255,214,10,.25);
+  border-radius: 10px;
+  padding: 10px 14px;
+}
+.done-actions { display: flex; gap: 12px; margin-top: 26px; }
+
+/* 按钮 */
+.actions {
+  display: flex; align-items: center; gap: 10px;
+  padding-top: 18px;
+}
+.actions .spacer { flex: 1; }
+.btn {
+  height: 42px; padding: 0 24px;
+  border-radius: 11px;
+  font-size: 13.5px; font-weight: 500;
+  cursor: pointer;
+  border: 1px solid var(--sep);
+  background: rgba(255,255,255,.07);
+  color: var(--text);
+  transition: background-color .15s ease, border-color .15s ease, transform .1s ease;
+}
+.btn:hover { background: rgba(255,255,255,.12); border-color: rgba(255,255,255,.2); }
+.btn:active { transform: scale(.98); }
+.btn:disabled { opacity: .4; cursor: default; transform: none; }
+.btn.primary {
+  background: var(--accent);
+  border-color: transparent;
+  color: #fff;
+  box-shadow: 0 4px 16px rgba(0,0,0,.28);
+}
+.btn.primary:hover { background: var(--accent-hover); }
+.btn.ghost { background: transparent; }
+.btn.ghost:hover { background: rgba(255,255,255,.06); }
+.btn.danger { color: var(--danger); border-color: rgba(255,69,58,.35); }
+.btn.danger:hover { background: rgba(255,69,58,.12); }
+.btn.launch { height: 46px; padding: 0 30px; font-size: 14px; }
+
+/* 可选中文本 */
+.dir-field span, .progress-file, .install-log { user-select: text; -webkit-user-select: text; }
+
+/* 减少动效 / 降低透明度 */
+@media (prefers-reduced-motion: reduce) {
+  .content > .pane { transition: opacity .2s ease; transform: none !important; }
+  .btn, .check input, .feature, .steps .idx, .steps .line { transition: opacity .2s ease, background-color .2s ease; }
+  .btn:active, .dir-btn:active { transform: none; }
+}
+@media (prefers-reduced-transparency: reduce) {
+  .content { background: rgba(28,28,32,.92); backdrop-filter: none; -webkit-backdrop-filter: none; }
+}
+</style>
+</head>
+<body>
+<div class="bg"></div>
+
+<!-- 顶栏 -->
+<header class="titlebar">
+  <span class="tb-dot"></span>
+  <span class="tb-title">灵动岛 · 安装向导</span>
+  <span class="tb-spacer"></span>
+  <button class="tb-btn" id="btn-min" title="最小化">
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M5 12h14"/></svg>
+  </button>
+  <button class="tb-btn close" id="btn-close" title="关闭">
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+  </button>
+</header>
+
+<div class="wrap">
+  <!-- 品牌横幅 -->
+  <div class="brand">
+    <div class="logo">
+      <img src="./icon.png" alt="灵动岛" />
+    </div>
+    <div>
+      <div style="display:flex;align-items:center;gap:10px;">
+        <span class="name">灵动岛</span>
+        <span class="ver" id="app-version">v1.0.0</span>
+      </div>
+      <div class="desc">设备交互的微型舞台 — 桌面灵动岛,图标、文字与宽度的三重视觉编排</div>
+    </div>
+  </div>
+
+  <!-- 步骤指示器 -->
+  <div class="steps">
+    <div class="step active" data-step="1"><span class="idx">1</span><span class="label">欢迎</span></div>
+    <div class="line"></div>
+    <div class="step" data-step="2"><span class="idx">2</span><span class="label">安装选项</span></div>
+    <div class="line"></div>
+    <div class="step" data-step="3"><span class="idx">3</span><span class="label">安装中</span></div>
+    <div class="line"></div>
+    <div class="step" data-step="4"><span class="idx">4</span><span class="label">完成</span></div>
+  </div>
+
+  <!-- 内容卡 -->
+  <div class="content">
+    <!-- 1 欢迎 -->
+    <section class="pane active" id="pane-welcome">
+      <h2>欢迎使用灵动岛</h2>
+      <div class="lead">灵动岛是一个常驻桌面的微型交互舞台 —— 音乐媒体控制、QQ 智能会话、系统工具调用,全部收纳在一枚悬浮的"岛"里。向导将带你完成安装,整个过程只需几十秒。</div>
+      <div class="features">
+        <div class="feature">
+          <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 18v-6a9 9 0 0 1 18 0v6"/><path d="M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3zM3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3z"/></svg></div>
+          <div><div class="t">系统媒体联动</div><div class="d">自动识别 QQ 音乐 / 网易云等系统媒体会话,进度与控制直达</div></div>
+        </div>
+        <div class="feature">
+          <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></div>
+          <div><div class="t">QQ 智能会话</div><div class="d">NapCat 接入,私聊 / 群聊自动应答,会话隔离互不干扰</div></div>
+        </div>
+        <div class="feature">
+          <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg></div>
+          <div><div class="t">智能工具调用</div><div class="d">本地命令执行、文件读写、媒体下载,一条指令直达</div></div>
+        </div>
+        <div class="feature">
+          <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="4"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg></div>
+          <div><div class="t">深度视觉定制</div><div class="d">背景图 / 字体 / 主题色全自定,透明窗口零抖动</div></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 2 安装选项 -->
+    <section class="pane" id="pane-options">
+      <h2>安装选项</h2>
+      <div class="lead">选择灵动岛的安装位置与需要创建的快捷方式。</div>
+
+      <div class="opt-group">
+        <div class="og-title">安装位置</div>
+        <div class="dir-row">
+          <div class="dir-field">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+            <span id="dir-path">正在读取…</span>
+          </div>
+          <button class="dir-btn" id="btn-pickdir">浏览…</button>
+        </div>
+        <div class="dir-hint" id="dir-hint" hidden></div>
+      </div>
+
+      <div class="opt-group">
+        <div class="og-title">附加选项</div>
+        <div class="checks">
+          <label class="check">
+            <input type="checkbox" id="opt-desktop" checked />
+            <div class="ck-body">
+              <div class="ck-t">创建桌面快捷方式</div>
+              <div class="ck-d">在桌面生成"灵动岛"快捷方式,一键启动</div>
+            </div>
+          </label>
+          <label class="check">
+            <input type="checkbox" id="opt-startmenu" checked />
+            <div class="ck-body">
+              <div class="ck-t">添加到开始菜单</div>
+              <div class="ck-d">在开始菜单创建程序入口与卸载入口</div>
+            </div>
+          </label>
+          <label class="check">
+            <input type="checkbox" id="opt-autostart" />
+            <div class="ck-body">
+              <div class="ck-t">开机自动启动</div>
+              <div class="ck-d">登录 Windows 后自动运行灵动岛(可在托盘随时关闭)</div>
+            </div>
+          </label>
+        </div>
+      </div>
+    </section>
+
+    <!-- 3 安装进度 -->
+    <section class="pane" id="pane-install">
+      <h2>正在安装</h2>
+      <div class="lead">正在将灵动岛复制到目标目录并创建快捷方式…</div>
+      <div class="progress-wrap">
+        <div class="progress-meta">
+          <span class="pm-title" id="prog-title">准备安装…</span>
+          <span class="pm-pct" id="prog-pct">0%</span>
+        </div>
+        <div class="progress-bar"><div class="fill" id="prog-fill"></div></div>
+        <div class="progress-file" id="prog-file"></div>
+        <div class="progress-stage" id="prog-stage"></div>
+        <div class="install-log" id="prog-log"></div>
+      </div>
+    </section>
+
+    <!-- 4 完成 -->
+    <section class="pane" id="pane-done">
+      <div class="done-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+      </div>
+      <h2>安装完成</h2>
+      <div class="lead">灵动岛已成功安装到你的电脑。<b id="done-dir"></b>。感谢使用,愿你与你的"岛"相处愉快。</div>
+      <div class="done-warn" id="done-warn" hidden></div>
+      <div class="done-actions">
+        <button class="btn primary launch" id="btn-launch">立即启动</button>
+        <button class="btn" id="btn-close2">完成</button>
+      </div>
+    </section>
+  </div>
+
+  <!-- 底部导航 -->
+  <div class="actions">
+    <button class="btn ghost" id="btn-cancel">取消</button>
+    <span class="spacer"></span>
+    <button class="btn" id="btn-back">上一步</button>
+    <button class="btn primary" id="btn-next">下一步</button>
+  </div>
+</div>
+
+<script>
+// ===== 安装向导渲染逻辑(零框架) =====
+const $ = (s) => document.querySelector(s)
+// 浏览器预览 fallback(Electron 内 window.installer 为真实 preload API;
+// 纯浏览器打开时用 mock,便于不安装直接预览界面)
+const api = window.installer || {
+  getInfo: async () => ({ appName: '灵动岛', version: '1.0.0', defaultInstallDir: 'C:\\Users\\demo\\AppData\\Local\\Programs\\灵动岛', hasSource: true }),
+  pickDir: async () => null,
+  install: async (o) => ({ ok: true, dir: o.dir }),
+  finish: () => Promise.resolve({ ok: true }),
+  onProgress: () => () => {},
+  minimize: () => {},
+  close: () => {},
+}
+
+const state = {
+  step: 1,
+  installing: false,
+  dir: '',
+  installed: false,
+  info: null,
+}
+
+const STEPS = ['welcome', 'options', 'install', 'done']
+
+function showStep(n) {
+  state.step = n
+  STEPS.forEach((name, i) => {
+    const pane = $('#pane-' + name)
+    const stepNum = i + 1
+    pane.classList.toggle('active', stepNum === n)
+    pane.classList.toggle('back', stepNum < n)
+    const stepEl = document.querySelector('.steps .step[data-step="' + stepNum + '"]')
+    stepEl && stepEl.classList.toggle('active', stepNum === n)
+    stepEl && stepEl.classList.toggle('done', stepNum < n)
+    document.querySelector('.steps .line:nth-of-type(' + stepNum + ')')?.classList.toggle('done', stepNum < n)
+  })
+  // 导航按钮可见性
+  $('#btn-back').style.visibility = n === 1 || n >= 4 ? 'hidden' : 'visible'
+  $('#btn-next').textContent = n === 2 ? '安装' : '下一步'
+  $('#btn-next').disabled = n === 3 || state.installing
+  $('#btn-cancel').style.display = n === 3 || n === 4 ? 'none' : ''
+  if (n === 1) $('#btn-back').style.visibility = 'hidden'
+}
+
+function log(msg, cls) {
+  const logEl = $('#prog-log')
+  if (!logEl) return
+  const div = document.createElement('div')
+  if (cls) div.className = cls
+  div.textContent = msg
+  logEl.appendChild(div)
+  logEl.scrollTop = logEl.scrollHeight
+}
+
+// ---- 初始化 ----
+async function init() {
+  state.info = await api.getInfo()
+  $('#app-version').textContent = 'v' + (state.info.version || '1.0.0')
+  state.dir = state.info.defaultInstallDir
+  $('#dir-path').textContent = state.dir
+  if (state.info.defaultDirFallback) {
+    const hint = $('#dir-hint')
+    hint.hidden = false
+    hint.textContent = '默认安装目录无写入权限,已自动改用系统临时目录(重启电脑后可能被清理,建议之后换到常用位置)。'
+  }
+  if (!state.info.hasSource) {
+    log('⚠ 未找到可安装的发布产物(release/灵动岛),请先运行发布打包脚本', 'warn')
+  }
+}
+
+$('#btn-next').addEventListener('click', async () => {
+  if (state.step === 1) { showStep(2); return }
+  if (state.step === 2) {
+    // 开始安装
+    state.installing = true
+    showStep(3)
+    const opts = {
+      dir: state.dir,
+      desktop: $('#opt-desktop').checked,
+      startMenu: $('#opt-startmenu').checked,
+      autostart: $('#opt-autostart').checked,
+    }
+    try {
+      const res = await api.install(opts)
+      if (res && res.ok) {
+        $('#done-dir').textContent = '安装目录:' + res.dir
+        if (res.warnings && res.warnings.length) {
+          const w = $('#done-warn')
+          w.hidden = false
+          w.textContent = '部分附加项未能完成(可能权限不足):' + res.warnings.join('; ')
+        }
+        setTimeout(() => { state.installing = false; showStep(4) }, 300)
+      } else {
+        state.installing = false
+        const msg = (res && res.error) || '未知错误'
+        log('✗ 安装失败:' + msg, 'warn')
+        $('#prog-title').textContent = '安装失败'
+        $('#prog-stage').textContent = msg
+        $('#btn-back').style.visibility = 'visible'
+      }
+    } catch (e) {
+      state.installing = false
+      const msg = (e && e.message) || String(e)
+      log('✗ 安装异常:' + msg, 'warn')
+      $('#prog-title').textContent = '安装异常'
+      $('#prog-stage').textContent = msg
+      $('#btn-back').style.visibility = 'visible'
+    }
+  }
+})
+
+$('#btn-back').addEventListener('click', () => {
+  if (state.step === 2) showStep(1)
+  else if (state.step === 3 && !state.installing) showStep(2)
+})
+
+$('#btn-cancel').addEventListener('click', () => api.close())
+
+$('#btn-pickdir').addEventListener('click', async () => {
+  const d = await api.pickDir()
+  if (d) { state.dir = d; $('#dir-path').textContent = d }
+})
+
+$('#btn-min').addEventListener('click', () => api.minimize())
+$('#btn-close').addEventListener('click', () => api.close())
+
+$('#btn-launch').addEventListener('click', () => api.finish(true))
+$('#btn-close2').addEventListener('click', () => api.finish(false))
+
+// ---- 进度订阅 ----
+api.onProgress((p) => {
+  const pct = Math.round((p.percent || 0) * 100)
+  $('#prog-fill').style.width = pct + '%'
+  $('#prog-pct').textContent = pct + '%'
+  if (p.title) $('#prog-title').textContent = p.title
+  if (p.file) $('#prog-file').textContent = p.file
+  if (p.stage) $('#prog-stage').textContent = p.stage
+  if (p.log) log(p.log, p.logCls)
+})
+
+init()
+</script>
+</body>
+</html>

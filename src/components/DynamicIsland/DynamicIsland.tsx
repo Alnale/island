@@ -347,6 +347,15 @@ const SETTINGS_VIEWS: readonly PanelView[] = [
 ]
 const isSettingsView = (view: string) => SETTINGS_VIEWS.includes(view as PanelView)
 
+/** 按码元截断(2026-08-16,紧凑态文字区标签兜底):UTF-16 按代码单元
+ * 切片会劈开 emoji 代理对(显示 �)。超限截断尾部补省略号——超长文本
+ * (如回复预览)被截断时用户需要"还有内容"的提示,不是静默丢掉 */
+function cutLabel(text: string, max: number): string {
+  const chars = Array.from(text)
+  if (chars.length <= max) return text
+  return chars.slice(0, max).join('') + '…'
+}
+
 /**
  * Agent 模式紧凑态文案:监听 LLM 回复的完整流程。
  * - 深度思考中:thinking + 仅有 reasoning 流(无文本输出);
@@ -354,8 +363,12 @@ const isSettingsView = (view: string) => SETTINGS_VIEWS.includes(view as PanelVi
  * - 正在执行:工具循环阶段(带当前工具名);
  * - 回复已完成:优先显示独立 Sub Agent 对 LLM 回复的心理揣测
  *   (每轮回复后静默更新,如「表面淡定,内心在慌」,替代标题更有人味),
- *   其次当前对话实时总结标题,再回退最近一条助手文本预览(岛内自动截断);
+ *   其次当前对话实时总结标题,再回退最近一条助手文本预览;
  * - 出错 → 提示展开查看;无回复 → 待命
+ * 2026-08-16 用户实测"出现非常长的文本句子,右侧被截断":三条路径全部
+ * 按码元设上限——揣测 16 / 标题 20 / 回复预览 20+省略号(预览是超长
+ * 文本的主要来源,原实现整段回复全文直入文字区,岛宽 500px 封顶后
+ * 右侧被静默裁剪、无省略号)
  */
 function agentCompactLabel(agent: AgentPanelProps): string {
   if (agent.lastError) return 'Agent 出错,展开查看'
@@ -370,15 +383,17 @@ function agentCompactLabel(agent: AgentPanelProps): string {
     return last ? `正在执行:${last.name}` : 'Agent 正在执行…'
   }
   // 回复已完成:心理揣测(独立 Sub Agent 根据当前对话揣测 LLM 回复时的
-  // 心态,俏皮话 10 字左右、上限 15 字)→ 实时总结标题 → 最近一条助手文本预览
-  if (agent.mindGuess) return agent.mindGuess
-  if (agent.currentTitle) return agent.currentTitle
+  // 心态,俏皮话 10 字左右、上限 16 字)→ 实时总结标题(≤20)→
+  // 最近一条助手文本预览(截 20 + 省略号)。展示层再兜一次码元上限:
+  // 引擎/runner 的截断不是唯一来源,localStorage 残留/事件注入都可能超长
+  if (agent.mindGuess) return cutLabel(agent.mindGuess, 16)
+  if (agent.currentTitle) return cutLabel(agent.currentTitle, 20)
   // 回退:最近一条含文本的助手消息(空格分隔,紧凑显示等价原实现)
   for (let i = agent.messages.length - 1; i >= 0; i--) {
     const m = agent.messages[i]
     if (m.role !== 'assistant') continue
     const text = textFromMessage(m, ' ').trim()
-    if (text) return text
+    if (text) return cutLabel(text, 20)
   }
   return 'Agent 待命'
 }
@@ -762,13 +777,19 @@ export const DynamicIsland = memo(function DynamicIsland({
 
     // 第一轮:非悬停时的字符截断(用 canvas 测量完整文字,不依赖 DOM 渲染状态)。
     // Agent 模式(2026-08-07):紧凑态文字(揣测 ≤16 码元/标题/回复)已按码元
-    // 截断,且无进度条——**不按像素截断,岛宽随文字长度自适应扩展**
-    // (用户要求:文字区随对应字数扩展岛宽;16 字约 340px < MAX_WIDTH_PX)
+    // 截断,且无进度条——岛宽随文字长度自适应扩展,正常不按像素截断
+    // (用户要求:文字区随对应字数扩展岛宽;16 字约 340px < MAX_WIDTH_PX)。
+    // **像素兜底(2026-08-16)**:码元上限挡不住自定义宽字体/中西混排
+    // (如 16 个全角+半角混排字符可超 400px),岛宽 500px 封顶后文字
+    // 溢出被岛体静默裁剪、无省略号(用户实测"长句右侧截断")——超限
+    // 时走与音乐模式同款像素截断 + 省略号,不再静默裁剪
     if (agentActiveRef.current) {
-      if (visibleTextRef.current !== displayText) {
-        visibleTextRef.current = displayText
-        setVisibleText(displayText)
-        setTextTruncated(false)
+      const available = MAX_WIDTH_PX - ISLAND_BASE_PX - ELLIPSIS_SLOT_PX
+      const { visible, truncated } = truncateText(displayText, available, font)
+      if (visible !== visibleTextRef.current) {
+        visibleTextRef.current = visible
+        setVisibleText(visible)
+        setTextTruncated(truncated)
         return
       }
     } else {

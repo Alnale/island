@@ -27,6 +27,16 @@ export interface AgentTask {
   detail: string
   /** 最近一次状态更新的时刻 */
   updatedAt: number
+  /**
+   * 发起任务的会话键(2026-08-16 修复"bili 下载完成消息没有传递到发起
+   * 会话"):任务进入终态时 done 回调把它带进 background-done 事件——
+   * 完成通知回到**发起下载的那个会话**,而不是"最后装配的引擎"的会话
+   * (多会话引擎并存时 doneHandler 是模块级单例,被最后装配的引擎接管,
+   * 事件原先带该引擎的 currentSessionKey = 串会话)。注册时固定
+   * (detached 子进程完成时引擎的 currentSessionKey 可能已变,发起时刻
+   * 的会话才是正确的);无键 = 主对话(main)
+   */
+  sessionKey?: string
 }
 
 /** 终态:进入后不再变更、只触发一次 done 回调 */
@@ -45,6 +55,14 @@ export function setTaskDoneHandler(handler: ((task: AgentTask) => void) | undefi
   doneHandler = handler
 }
 
+/** 当前终态回调(2026-08-16 引擎 dispose 恢复链用:装配时保存旧 handler,
+ * 卸载时恢复——多引擎并存时 doneHandler 是模块级单例,最后装配的引擎
+ * 接管;若该引擎被 dispose(会话上限淘汰)而不恢复,任务完成时回调指向
+ * 已销毁的 ctx,emit 会抛错 = 完成通知丢失) */
+export function getTaskDoneHandler(): ((task: AgentTask) => void) | undefined {
+  return doneHandler
+}
+
 /** 注册任务(同一 id 覆盖;缺省 status = running)。
  * at:更新时刻(测试注入用;缺省当前时间) */
 export function registerTask(input: {
@@ -53,6 +71,7 @@ export function registerTask(input: {
   status?: TaskStatus
   detail?: string
   at?: number
+  sessionKey?: string
 }): void {
   tasks.set(input.id, {
     id: input.id,
@@ -60,6 +79,7 @@ export function registerTask(input: {
     status: input.status ?? 'running',
     detail: input.detail ?? '',
     updatedAt: input.at ?? Date.now(),
+    sessionKey: input.sessionKey,
   })
 }
 

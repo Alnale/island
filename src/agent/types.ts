@@ -45,6 +45,10 @@ export interface AgentMessage extends EngineAgentMessage {
    * 检测);气泡用"发给对方"风格(虚线边框 + 指纹标签),无标记 =
    * 给主人的普通回复 */
   sentToPeer?: boolean
+  /** 主人指纹命中(2026-08-15 双指纹机制 UI):回复开头带【主人指纹:xx】
+   * = 会被路由层发回主人 QQ(useAgent 剥离标记前检测,与 sentToPeer
+   * 互斥——开头标记唯一);气泡挂"发给主人"标签区分 */
+  sentToMaster?: boolean
   /** 软停止落定标记(2026-08-14 停止与撤销分离):用户手动停止时把
    * 已累积的部分工作落定为 assistant 消息,打此标记——气泡挂"已停止"
    * 标签;后续跟一条 system 停止说明(下一轮 LLM 不重复已完成工作) */
@@ -103,7 +107,10 @@ export interface AgentPanelProps {
   currentTitle: string | null
   /** 心理揣测(独立 Sub Agent 每轮回复后静默更新;紧凑态文字区优先展示) */
   mindGuess: string | null
-  onSend(text: string): void
+  /** 发送一轮对话(2026-08-17 拖拽上传:opts.media = 媒体附件路径列表,
+   * 作 media part 对话窗口展示;opts.paths = 全部附件路径(含媒体),
+   * LLM 侧文本标注可读取分析;text 可为空 = 纯附件上传) */
+  onSend(text: string, opts?: { media?: string[]; paths?: string[] }): void
   onAbort(): void
   /** 撤销(2026-08-14 停止与撤销分离):回滚指定用户消息之前的上下文
    * 与文件(git 快照);原"停止"的回滚语义归入此功能。busy 时先软停止 */

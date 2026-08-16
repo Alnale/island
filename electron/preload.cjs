@@ -2,9 +2,20 @@
  * 灵动岛桌面挂件 —— 预加载脚本
  * 以 contextBridge 向挂件页面暴露最小桌面 API。
  */
-const { contextBridge, ipcRenderer } = require('electron')
+const { contextBridge, ipcRenderer, webUtils } = require('electron')
 
 contextBridge.exposeInMainWorld('desktop', {
+  /** 拖拽/粘贴文件的绝对路径(2026-08-17 拖拽上传):浏览器 File 无绝对
+   * 路径,必须经 webUtils 解析——仅拖拽/粘贴来源可解析,对话框选择的
+   * 文件返回空字符串(官方约束) */
+  getPathForFile(file) {
+    if (!file || typeof file.name !== 'string') return ''
+    try {
+      return webUtils.getPathForFile(file) || ''
+    } catch {
+      return ''
+    }
+  },
   /** 鼠标进入/离开灵动岛交互区:切换窗口点击穿透 */
   pointer(active) {
     ipcRenderer.send('widget:pointer', Boolean(active))

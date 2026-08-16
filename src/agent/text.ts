@@ -51,13 +51,16 @@ export function stripNapcatHistoryInstructions(text: string): string {
  * 标记,兼容)与【指纹:xxxxxx】(每轮随机指纹)——这两个前缀是给路由层
  * 验证用的(指纹对不上就不发送),**进历史/显示前必须剥掉**:残留的旧
  * 指纹会出现在 LLM 上下文里,下一轮可能被"抄"到过期指纹,指纹验证
- * 对不上 = 回复发不出去(实测);显示层一并使用,气泡不露标记
+ * 对不上 = 回复发不出去(实测);显示层一并使用,气泡不露标记。
+ * 2026-08-15 双指纹机制:主人指纹【主人指纹:xxxxxx】同剥(主人 QQ 轮
+ * 回复 = 给主人的话带主人指纹,历史/显示同样不能残留——LLM 从上下文
+ * "抄"到旧主人指纹,验证对不上 = 回复发不回主人)
  */
 export function stripTurnMarks(text: string): string {
   return String(text ?? '')
     .replace(/^\s*/, '')
     .replace(/^【回复对方】\s*/, '')
-    .replace(/^【指纹:[2-9A-HJ-NP-Z]{6}】\s*/, '')
+    .replace(/^【(?:指纹|主人指纹):[2-9A-HJ-NP-Z]{6}】\s*/, '')
 }
 
 /**
@@ -68,4 +71,14 @@ export function stripTurnMarks(text: string): string {
  */
 export function hasTurnMark(text: string): boolean {
   return /^\s*(?:【回复对方】|【指纹:[2-9A-HJ-NP-Z]{6}】)/.test(String(text ?? ''))
+}
+
+/**
+ * 文本开头是否命中**主人指纹**(2026-08-15 双指纹机制 UI):【主人指纹:xx】
+ * = 该回复会路由发回主人 QQ(与【指纹:xx】= 发给对方的双通道并存,开头
+ * 标记互斥——一条回复不可能同时命中两者)。显示层据此打 sentToMaster
+ * 标记,气泡挂"发给主人"标签与"发给对方"/普通回复区分
+ */
+export function hasMasterTurnMark(text: string): boolean {
+  return /^\s*【主人指纹:[2-9A-HJ-NP-Z]{6}】/.test(String(text ?? ''))
 }

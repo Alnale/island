@@ -20,6 +20,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type DragEvent,
   type KeyboardEvent,
   type MouseEvent,
   type ReactNode,
@@ -32,10 +33,9 @@ import { useLeavingList } from '../../../hooks/useLeavingList'
 import { getSessionNote, setSessionNote } from '../../../hooks/useAgent'
 import { QuickMenu } from './QuickMenu'
 import { Markdown, type AgentMediaReport } from './Markdown'
-import { AssistantBlock, PeerTurnTag, ToolSummary, UserBubble } from './AgentMessages'
-import { MessageWindow } from './MessageWindow'
+import { AssistantBlock, MasterTurnTag, PeerTurnTag, ToolSummary, UserBubble } from './AgentMessages'
 import type { AgentMessage } from '../../../agent/types'
-import { hasTurnMark, stripTurnMarks, textFromParts } from '../../../agent/text'
+import { hasMasterTurnMark, hasTurnMark, stripTurnMarks, textFromParts } from '../../../agent/text'
 import {
   AGENT_PANEL_FIXED_H,
   AGENT_PANEL_HEIGHT_SLACK,
@@ -195,11 +195,55 @@ const VIEW_LEAVE_MS = 200
  * 恢复未发送的输入;发送成功即清除(已消费) */
 const AGENT_DRAFT_KEY = 'widget-agent-draft'
 
-/** 消息分批挂载每帧批大小(2026-08-08 起:对话多时展开不卡——每帧挂载
- * 一批消息(从最新往旧),React commit + Markdown 解析分散到多帧;
- * 2026-08-12 起仅作骨架阈值:消息多(>一批)先进骨架再挂载真实内容,
- * 实际挂载由 MessageWindow 虚拟滚动按可视区窗口化接管) */
+/** 骨架阈值(2026-08-17 弃虚拟滚动后):消息多(>一批)时展开先渲染轻量
+ * 骨架(形变动画期间 DOM 极小),延迟后再一次全量挂载真实消息并测量长高;
+ * 消息少(≤一批)直接渲染内容。不再做逐帧分批挂载(全量渲染下无意义) */
 const BATCH_RENDER = 12
+
+/** 拖拽上传的附件(2026-08-17):path = 绝对路径(Web 演示降级为文件名),
+ * kind = 媒体分类(media part 对话窗口展示)/ 文件(仅路径标注让 LLM 读取) */
+type DropAttachment = {
+  path: string
+  name: string
+  size: number
+  kind: 'img' | 'video' | 'audio' | 'file'
+}
+
+/** 附件类型图标(stroke 风格,与 island-ctl-svg 一致) */
+function AttachIcon({ kind }: { kind: DropAttachment['kind'] }) {
+  if (kind === 'img') {
+    return (
+      <svg className="island-attach-ic" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+        <rect x="3" y="3" width="18" height="18" rx="2" />
+        <circle cx="8.5" cy="8.5" r="1.5" />
+        <polyline points="21 15 16 10 5 21" />
+      </svg>
+    )
+  }
+  if (kind === 'video') {
+    return (
+      <svg className="island-attach-ic" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+        <rect x="2" y="5" width="14" height="14" rx="2" />
+        <polygon points="16 10 22 7 22 17 16 14" />
+      </svg>
+    )
+  }
+  if (kind === 'audio') {
+    return (
+      <svg className="island-attach-ic" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+        <path d="M9 18V5l12-2v13" />
+        <circle cx="6" cy="18" r="3" />
+        <circle cx="18" cy="16" r="3" />
+      </svg>
+    )
+  }
+  return (
+    <svg className="island-attach-ic" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+      <polyline points="14 2 14 8 20 8" />
+    </svg>
+  )
+}
 
 /**
  * 平滑滚动到目标位置(自绘 rAF 插值,非线性):
@@ -252,33 +296,6 @@ function smoothScrollTo(el: HTMLElement, target: number, durationMs = 800, blur 
     else el.style.filter = ''
   }
   requestAnimationFrame(step)
-}
-
-/** 跳底(桌面挂件):content-visibility 下 scrollHeight 首帧按估算尺寸,
- * 双 rAF 后用真实布局尺寸校正一次(底部队列消息渲染完成)——不校正
- * 长历史首屏会停在估算位置,最后几条不可见(2026-08-08) */
-function jumpToBottom(el: HTMLElement) {
-  el.scrollTop = el.scrollHeight
-  requestAnimationFrame(() => {
-    requestAnimationFrame(() => {
-      if (el.isConnected) el.scrollTop = el.scrollHeight
-    })
-  })
-}
-
-/** 滚动消息列表到底部:桌面挂件直接跳底(软件渲染逐帧 scrollTop + 全幅
- * 重绘 ≈5-15ms/帧,动画太贵),Web 演示版保留平滑滚动(GPU);
- * blur = 启用动态高斯模糊(长列表滚动动画的性能优化,对话中跳转的
- * 短列表不需要,实测观感不佳);审计 P2 #9 收敛两处重复 */
-function scrollMessagesToBottom(
-  el: HTMLElement,
-  opts: { durationMs?: number; blur?: boolean } = {},
-) {
-  if (window.desktop) {
-    jumpToBottom(el)
-  } else {
-    smoothScrollTo(el, el.scrollHeight, opts.durationMs ?? 800, opts.blur ?? false)
-  }
 }
 
 /** 文本中**最后一个** markdown 媒体链接的媒体快照(2026-08-10,媒体岛
@@ -439,31 +456,54 @@ export function AgentView({
   const [sessionNoteText, setSessionNoteText] = useState('')
   const [clearArmed, setClearArmed] = useState(false)
   const clearArmTimerRef = useRef<number | null>(null)
-  // 切会话:重读该会话的记录、复位编辑与确认态
+  // 记录框收起动画(2026-08-17 用户要求"呼出记录框和保存记录的动画"):
+  // 保存/取消先播放收起(淡出 + 上移),动画结束后才真正关闭编辑框——
+  // 直接条件切换瞬间卸载无过渡,生硬
+  const [noteClosing, setNoteClosing] = useState(false)
+  const noteCloseTimerRef = useRef(0)
+  // 切会话:重读该会话的记录、复位编辑与确认态(并清收起定时器)
   useEffect(() => {
+    window.clearTimeout(noteCloseTimerRef.current)
     setSessionNoteText(currentSessionKey ? getSessionNote(currentSessionKey) : '')
     setSessionNoteEdit(false)
+    setNoteClosing(false)
     setClearArmed(false)
   }, [currentSessionKey])
-  // 卸载清理确认复位定时器
+  // 卸载清理确认复位定时器 + 记录框收起定时器
   useEffect(
     () => () => {
       if (clearArmTimerRef.current !== null) clearTimeout(clearArmTimerRef.current)
+      window.clearTimeout(noteCloseTimerRef.current)
     },
     [],
   )
+  const beginNoteClose = useCallback(() => {
+    if (noteClosing) return
+    setNoteClosing(true)
+    window.clearTimeout(noteCloseTimerRef.current)
+    noteCloseTimerRef.current = window.setTimeout(() => {
+      setNoteClosing(false)
+      setSessionNoteEdit(false)
+    }, 200)
+  }, [noteClosing])
   const startEditNote = useCallback(() => {
+    // 收起动画中途再次呼出:复位(取消定时器,直接打开)
+    if (noteClosing) {
+      window.clearTimeout(noteCloseTimerRef.current)
+      setNoteClosing(false)
+    }
     setSessionNoteDraft(sessionNoteText)
     setSessionNoteEdit(true)
-  }, [sessionNoteText])
+  }, [sessionNoteText, noteClosing])
   const saveSessionNote = useCallback(() => {
     if (currentSessionKey) {
       setSessionNote(currentSessionKey, sessionNoteDraft)
       setSessionNoteText(getSessionNote(currentSessionKey))
     }
-    setSessionNoteEdit(false)
-  }, [currentSessionKey, sessionNoteDraft])
-  const cancelSessionNote = useCallback(() => setSessionNoteEdit(false), [])
+    // 保存后播放收起动画再关闭(记录已写入,动画期间横幅停留片刻)
+    beginNoteClose()
+  }, [currentSessionKey, sessionNoteDraft, beginNoteClose])
+  const cancelSessionNote = useCallback(() => beginNoteClose(), [beginNoteClose])
   // 快捷清空该会话上下文:两段式确认(与清除数据同款:首次点击进入
   // 确认态 3.5s 自动复位,再次点击执行)——清空 = onClear(当前会话
   // 控制器,中止运行中的回合 + 擦除消息历史 + 新会话 ID;外部会话
@@ -492,9 +532,8 @@ export function AgentView({
     (id: string) => onUndo?.(id),
     [onUndo],
   )
-  // 单条消息渲染(2026-08-12,MessageWindow 窗口化渲染用):useCallback
-  // 稳定引用——滚动中 MessageWindow 重渲染(范围变化)时消息组件靠
-  // memo 跳过;mediaAutoPlayIds 变化(新消息落定)才重建(此时范围内
+  // 单条消息渲染:useCallback 稳定引用——全量渲染下消息组件靠 memo
+  // 跳过未变化消息;mediaAutoPlayIds 变化(新消息落定)才重建(此时
   // 消息数据本就该刷新)
   const renderMessage = useCallback(
     (m: AgentMessage) =>
@@ -512,6 +551,7 @@ export function AgentView({
           parts={m.parts}
           usage={m.usage}
           sentToPeer={m.sentToPeer}
+          sentToMaster={m.sentToMaster}
           interrupted={m.interrupted}
           mediaAutoPlay={mediaAutoPlayIds?.has(m.id) ?? false}
           onMediaAutoPlayed={onMediaAutoPlayedStable}
@@ -571,6 +611,63 @@ export function AgentView({
       // 存储失败忽略(隐私模式等)
     }
   }, [input])
+  // 拖拽上传附件(2026-08-17 用户要求"本地拖拽文件到对话窗口,快捷上传
+  // 并做成标签 UI"):拖入的文件生成标签(输入区上方),随文字发送一起
+  // 交给 LLM(媒体作 media part 展示,全部附件路径标注让 LLM 读取)。
+  // 标签 = 待发送附件,可单独移除;发送成功后清空。
+  // dragActive(2026-08-17):拖拽经过消息区时显示"松开上传"高亮蒙版
+  const [attachments, setAttachments] = useState<DropAttachment[]>([])
+  const [dragActive, setDragActive] = useState(false)
+  // 附件行展开动画(2026-08-17 用户要求"拖入后整体位移布局的更改动画,
+  // 当前没有,非常生硬"):attachments 从空 → 非空先渲染折叠态,下一帧
+  // 再展开(grid-template-rows 0fr → 1fr 平滑长高)——输入区高度渐进
+  // 增长,消息列表/输入框随 flex 布局渐进压缩,不再瞬间跳变。
+  // 移除到空时回落折叠态;添加第二个附件不重开(保持展开)
+  const [attachOpen, setAttachOpen] = useState(false)
+  useEffect(() => {
+    if (attachments.length === 0) {
+      setAttachOpen(false)
+      return
+    }
+    const raf = requestAnimationFrame(() => setAttachOpen(true))
+    return () => cancelAnimationFrame(raf)
+  }, [attachments.length])
+  const removeAttachment = useCallback((index: number) => {
+    setAttachments((prev) => prev.filter((_, i) => i !== index))
+  }, [])
+  // dragActive 经 ref 访问(拖拽事件高频触发,避免重复 setState 触发渲染)
+  const dragActiveRef = useRef(dragActive)
+  dragActiveRef.current = dragActive
+  // 拖拽事件(绑定消息列表容器;preventDefault 是放行的前提,不阻止会
+  // 被浏览器默认行为接管——打开文件/导航离开)。拖入文件夹时
+  // dataTransfer.files 为空(需 webkitGetAsEntry 递归),暂不处理
+  const handleDrop = useCallback((event: DragEvent<HTMLDivElement>) => {
+    event.preventDefault()
+    event.stopPropagation()
+    setDragActive(false)
+    const files = Array.from(event.dataTransfer?.files ?? [])
+    if (files.length === 0) return
+    const items = files.map((f) => {
+      // 绝对路径经 preload webUtils 解析(仅拖拽/粘贴来源);Web 演示
+      // 无 desktop → 降级用文件名作 path(仅展示,无真实读取)
+      const path = window.desktop?.getPathForFile?.(f) || f.name
+      return { path, name: f.name, size: f.size, kind: (mediaKindOf(path) ?? 'file') as DropAttachment['kind'] }
+    })
+    setAttachments((prev) => [...prev, ...items])
+  }, [])
+  const handleDragOver = useCallback((event: DragEvent<HTMLDivElement>) => {
+    event.preventDefault()
+    event.stopPropagation()
+    if (!dragActiveRef.current) setDragActive(true)
+  }, [])
+  const handleDragLeave = useCallback((event: DragEvent<HTMLDivElement>) => {
+    event.preventDefault()
+    event.stopPropagation()
+    // 子元素间拖移会冒泡 dragleave,用 relatedTarget 判断是否真的离开
+    // 容器(relatedTarget 在容器外才收起高亮)
+    const rt = event.relatedTarget as Node | null
+    if (!(event.currentTarget as Node).contains(rt)) setDragActive(false)
+  }, [])
   // / 与 @ 手动调用的候选列表(输入前缀时列出技能/MCP 工具)
   const [suggestions, setSuggestions] = useState<AgentToolInfo[]>([])
   const [suggestionIndex, setSuggestionIndex] = useState(0)
@@ -637,11 +734,54 @@ export function AgentView({
   // 输入框引用:LLM 回复完成后自动聚焦,直接可输入
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
-  // 会话切换/新消息时滚底(2026-08-13 七轮:主窗口显示当前会话上下文)
-  useEffect(() => {
+  // 跳底锚点(2026-08-17 收敛):消息列表末尾 0 高哨兵,统一跳底用它对齐
+  // 滚动容器底边——见 scrollToBottom
+  const bottomAnchorRef = useRef<HTMLDivElement>(null)
+  // 统一跳底(2026-08-17 收敛,替代原 jumpToBottom / scrollMessagesToBottom):
+  // 桌面挂件直接 scrollTop = scrollHeight(浏览器标准可靠落底,自动钳制到
+  // max;单源 + atBottomRef 守卫不再多源覆盖,不抖动;rAF 校正兜底媒体/
+  // 图片异步加载后的高度增长);Web 演示保留平滑滚动(锚点 rect 差值,
+  // GPU 渲染下精确)。**修复"桌面端无法滚动"(2026-08-17):不再用
+  // getBoundingClientRect 差值驱动——布局动画/软件渲染下 rect 与
+  // scrollTop 时序偏差会把滚动位置钉在错误值,表现为滚动条无法滚动
+  const scrollToBottom = useCallback((smooth = false) => {
     const el = scrollRef.current
-    if (el) el.scrollTop = el.scrollHeight
-  }, [messages.length, currentSessionKey, sessionOpen, scrollRef])
+    if (!el) return
+    if (smooth && !window.desktop) {
+      const a = bottomAnchorRef.current
+      if (a) {
+        const crect = el.getBoundingClientRect()
+        const arect = a.getBoundingClientRect()
+        const delta = arect.bottom - crect.bottom
+        if (delta > 0.5) smoothScrollTo(el, el.scrollTop + delta, 650, false)
+      }
+      return
+    }
+    el.scrollTop = el.scrollHeight
+    requestAnimationFrame(() => {
+      if (el.isConnected) el.scrollTop = el.scrollHeight
+    })
+  }, [])
+  // 会话切换/新消息时滚底(2026-08-17 收敛:原"messages/currentSessionKey
+  // 即时跳底 effect"与"切会话强制贴底 effect"两处冗余合并为一——任何
+  // 触发路径都统一跳到底部):
+  // - 切会话(currentSessionKey 变化):无论旧会话是否上翻过,一律复位
+  //   贴底标志(atBottomRef)+ 跳底(切换语义 = 看新上下文最新进展,
+  //   2026-08-14 用户反馈"切会话不滚到底");
+  // - 同会话新消息落定 / 会话面板开合:贴底时才跳(用户上翻不打扰),
+  //   由统一 scrollToBottom 锚点对齐精确落底(2026-08-17 替代原
+  //   jumpToBottom 双 rAF + 150ms 定时器——高度动画中反复设置绝对
+  //   scrollTop 是滚动条上下抖动、不落底的根因)
+  const prevSessionKeyRef = useRef(currentSessionKey)
+  useEffect(() => {
+    if (prevSessionKeyRef.current !== currentSessionKey) {
+      prevSessionKeyRef.current = currentSessionKey
+      atBottomRef.current = true
+    }
+    if (atBottomRef.current && view === 'chat' && phase === 'content') {
+      scrollToBottom()
+    }
+  }, [messages, currentSessionKey, sessionOpen, view, phase, scrollToBottom])
   const atBottomRef = useRef(true)
   const busy = status === 'thinking' || status === 'running'
   // 快捷菜单项(2026-08-07 重构:通用 QuickMenu 取代 ⋯ 弹出菜单):
@@ -904,65 +1044,70 @@ export function AgentView({
   }
 
   // 内容变化(消息/流式/状态)时重测(rAF 延迟一帧:面板首帧挂载不阻塞
-  // 展开动画布局,测量结果下一帧生效,展开更顺)。消息内部高度变化
-  // (工具卡片展开/媒体 aspect)由 MessageWindow 的 ResizeObserver 驱动
-  // onLayoutChange → 本函数重测(2026-08-12 起,原 MutationObserver/
-  // 容器 ResizeObserver 兜底已并入虚拟滚动)。**view 入 deps**(2026-08-14):
+  // 展开动画布局,测量结果下一帧生效,展开更顺)。**view 入 deps**(2026-08-14):
   // 视图切换当帧即重测(~16ms),不等旧视图离场 200ms 后的定时器
   useLayoutEffect(() => {
     const raf = requestAnimationFrame(measureHeight)
     return () => cancelAnimationFrame(raf)
   }, [measureHeight, view, messages, streaming, status, lastError, phase])
 
+  // 消息内容高度变化 → 重测岛体 + 贴底跟随(2026-08-17 弃虚拟滚动后恢复
+  // 容器级 RO):工具卡片展开/媒体加载/文本重排使单条消息高度变化,消息
+  // 窗口容器高度(= 全部消息高 + gap)随之变化 → 岛体高度跟随(原
+  // MessageWindow 的 onLayoutChange 通道;观察窗口容器一个元素即可,
+  // 无需逐条观察);同时若用户贴底,跳底跟随内容增长——流式增量/媒体
+  // 加载期间"持续贴底"的可靠来源,替代原"消息变化 effect + 双 rAF +
+  // 150ms 定时器"反复覆盖绝对 scrollTop 造成的抖动(2026-08-17 用户实测)
+  useLayoutEffect(() => {
+    if (phase !== 'content') return
+    const el = scrollRef.current
+    const win = el ? (el.querySelector('.island-msgs-window') as HTMLElement | null) : null
+    if (!win) return
+    const ro = new ResizeObserver(() => {
+      measureHeight()
+      if (atBottomRef.current && viewRef.current === 'chat') scrollToBottom()
+    })
+    ro.observe(win)
+    return () => ro.disconnect()
+  }, [phase, measureHeight, scrollToBottom])
+
   // 卸载时清理测量节流计时器
   useEffect(() => () => window.clearTimeout(measureTimerRef.current), [])
 
   // 消息/流式变化时自动滚到底(用户上翻查看历史时不打扰)。
-  // 虚拟滚动(2026-08-12):scrollHeight = 虚拟总高(spacer 撑起),跳底
-  // 双 rAF 校正一次(消息挂载测量后总高真实化);150ms 再校正一次
-  // (2026-08-11 修复"发送内容时偶现突然跳转到中间的对话"——估算与
-  // 真实高度差异的兜底)。**测量后贴底保持由 MessageWindow 负责**
-  // (高度缓存真实化 → 推高内容 → atBottom 时同步滚到新底部)
+  // 2026-08-17 收敛:统一走 scrollToBottom 锚点对齐精确落底(替代原
+  // jumpToBottom 双 rAF + 150ms 定时器);内容高度持续增长(流式增量/
+  // 媒体异步加载)由上方 ResizeObserver 跟随,这里覆盖 messages/
+  // streaming 引用变化的主路径(新消息落定 / 流式起止)
   useEffect(() => {
-    const el = scrollRef.current
-    if (el && atBottomRef.current) {
-      jumpToBottom(el)
-      const t = window.setTimeout(() => {
-        if (el.isConnected && atBottomRef.current) jumpToBottom(el)
-      }, 150)
-      return () => window.clearTimeout(t)
+    if (atBottomRef.current && view === 'chat' && phase === 'content') {
+      scrollToBottom()
     }
-  }, [messages, streaming, status, lastError])
+  }, [messages, streaming, status, lastError, view, phase, scrollToBottom])
 
-  // 会话切换强制贴底(2026-08-14 用户反馈"切会话不滚到底"):上面的
-  // 贴底 effect 以 atBottomRef 为条件——上一会话若上翻过(标志 false),
-  // 新会话列表整体替换后停在旧滚动位置。切换语义 = 查看新上下文的
-  // 最新进展,无论旧位置如何:先置贴底标志(后续 MessageWindow 高度
-  // 真实化推高内容时跟随保持),再跳底 + 150ms 校正(虚拟列表估算
-  // 高度真实化兜底,与上方同款)。首挂载不触发([view, phase] 的进入
-  // 滚动已覆盖)
-  const prevSessionKeyRef = useRef(currentSessionKey)
-  useEffect(() => {
-    if (prevSessionKeyRef.current === currentSessionKey) return
-    prevSessionKeyRef.current = currentSessionKey
-    atBottomRef.current = true
-    const el = scrollRef.current
-    if (el) {
-      jumpToBottom(el)
-      const t = window.setTimeout(() => {
-        if (el.isConnected && atBottomRef.current) jumpToBottom(el)
-      }, 150)
-      return () => window.clearTimeout(t)
-    }
-  }, [currentSessionKey])
+  // 会话切换强制贴底已合并进上方统一滚底 effect(2026-08-17 收敛,
+  // 见 scrollRef 处注释——避免两处独立 effect 触发路径不一致)
 
-  // 对话历史/工具列表视图的滚动(聊天视图滚动由 MessageWindow 接管:
-  // 它同时更新贴底标志与可视范围,见 MessageWindow 内部 scroll 监听)
-  const handleScroll = () => {
+  // 聊天/历史/工具视图共用滚动处理(2026-08-17 弃虚拟滚动后,chat 视图
+  // 滚动容器也挂 onScroll):按距底 48px 更新贴底标志(供新消息跳底判定)。
+  // **原生监听兜底(2026-08-17 修复"桌面端无法滚动")**:useCallback 稳定
+  // 引用,既绑定 React onScroll,又经下方 effect 加原生 scroll 监听——
+  // 保证用户滚动(滚轮/拖滚动条)时 atBottomRef 一定置 false,后续
+  // effect 才不把滚动拉回底部(否则表现为"滚动条无法滚动/一滚就弹回")
+  const handleScroll = useCallback(() => {
     const el = scrollRef.current
     if (!el) return
     atBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48
-  }
+  }, [])
+  // atBottomRef 可靠更新:chat 内容态给滚动容器加原生 scroll 监听
+  // (React onScroll 合成事件在个别环境不触发,兜底确保贴底标志准确)
+  useEffect(() => {
+    if (phase !== 'content' || view !== 'chat') return
+    const el = scrollRef.current
+    if (!el) return
+    el.addEventListener('scroll', handleScroll, { passive: true })
+    return () => el.removeEventListener('scroll', handleScroll)
+  }, [phase, view, handleScroll])
 
   // 进入对话面板(chat 视图内容挂载后)自动滚动到最近信息:
   // 恢复历史/展开面板时用户期望看到最新消息,而不是停留在旧位置。
@@ -971,12 +1116,7 @@ export function AgentView({
   // 消息时不模糊**(紧凑态进入新对话的滚动动画干净无模糊)。
   // messages 长度经 ref 读取:不入依赖(消息到达时发送路径已平滑滚动,
   // 这里只在视图/骨架切换时滚动一次)
-  // 虚拟滚动(2026-08-12):MessageWindow 挂载即初始贴底(预估高度),
-  // 这里在宽度动画结束后再校正一次——此时可视区消息已挂载测量,
-  // scrollHeight 接近真实,双 rAF 校正兜底(原分批追平等待已删,
-  // 虚拟化不再分批)
-  const messagesLenRef = useRef(messages.length)
-  messagesLenRef.current = messages.length
+  // 全量渲染(2026-08-17):scrollHeight 为真实值,滚动即准确到底
   useEffect(() => {
     if (view !== 'chat' || phase !== 'content') return
     const el = scrollRef.current
@@ -987,20 +1127,25 @@ export function AgentView({
       // 与 useAgentPanelLayout 的 agentHReady 同拍,2026-08-09 由
       // MORPH_ANIMATE_MS 400ms 同步——原滚动比高度动画晚 100ms,
       // 展开收尾滞涩)——宽度动画期间岛体还是 56 高宽条,滚动无意义
-      // 且浪费;高度展开时伴随滚动到底(桌面挂件直接跳底零动画成本;
-      // Web 演示版保留平滑滚动)
+      // 且浪费;高度展开时伴随滚动到底(统一 scrollToBottom 锚点对齐,
+      // 2026-08-17:Web 演示保留平滑滚动,桌面挂件瞬时跳底)
       const t = window.setTimeout(() => {
-        const el2 = scrollRef.current
-        if (el2) scrollMessagesToBottom(el2, { blur: messagesLenRef.current > 0 })
+        scrollToBottom()
       }, AGENT_WIDTH_ANIMATE_MS)
       return () => window.clearTimeout(t)
     }
-  }, [view, phase])
+  }, [view, phase, scrollToBottom])
 
   const submit = () => {
     const text = input.trim()
-    if (!text || busy) return
-    onSend(text)
+    // 2026-08-17 拖拽上传:纯附件(无文字)也可发送;空文字且无附件才拦截
+    if ((!text && attachments.length === 0) || busy) return
+    // 附件拆分(2026-08-17):媒体附件 → media(对话窗口展示 + LLM 侧标注);
+    // 全部附件路径 → paths(文本标注让 LLM 用 read_file/命令读取分析)
+    const media = attachments.filter((a) => a.kind !== 'file').map((a) => a.path)
+    const paths = attachments.map((a) => a.path)
+    onSend(text, { media, paths })
+    setAttachments([])
     setInput('')
     // 已发送 = 草稿已消费,清除持久化(防重挂载后旧草稿复活)
     try {
@@ -1011,14 +1156,11 @@ export function AgentView({
     // 发送后自绘非线性滚动到底(输入框高度可能变化;先加速再减速,
     // 平滑停止)。**不模糊**:对话中跳转最新消息的消息列表往往很短,
     // 模糊只服务于长列表滚动动画的性能优化,这里不需要(实测对话中
-    // 每次发送都会触发模糊,观感不佳)
+    // 每次发送都会触发模糊,观感不佳)。2026-08-17 统一走 scrollToBottom
+    // 锚点对齐(桌面挂件瞬时落底,Web 演示平滑滚动)
     requestAnimationFrame(() => {
-      const el = scrollRef.current
-      if (el) {
-        atBottomRef.current = true
-        // 桌面挂件:直接跳底(同上);Web 演示版保留平滑滚动
-        scrollMessagesToBottom(el, { durationMs: 650 })
-      }
+      atBottomRef.current = true
+      scrollToBottom()
     })
   }
 
@@ -1391,7 +1533,7 @@ export function AgentView({
         {currentSessionKey && currentSessionKey !== 'main' && (
           <div ref={bannerRef} className="island-session-current">
             {sessionNoteEdit ? (
-              <div className="island-session-note-editor">
+              <div className={`island-session-note-editor${noteClosing ? ' closing' : ''}`}>
                 <textarea
                   className="island-session-note-input"
                   value={sessionNoteDraft}
@@ -1413,7 +1555,31 @@ export function AgentView({
                 <span className="island-session-current-title">
                   {(() => {
                     const it = (sessionList ?? []).find((x) => x.key === currentSessionKey)
-                    return it ? it.title : currentSessionKey
+                    const kind = it?.kind
+                    return (
+                      <>
+                        {/* 会话类型徽标(2026-08-17 横幅美化):私聊 = 人形,
+                            群聊 = 群组图标,一眼区分当前会话类型 */}
+                        <span className={`island-session-current-badge${kind === 'group' ? ' group' : ''}`}>
+                          {kind === 'group' ? (
+                            <svg className="island-ctl-svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+                              <circle cx="9" cy="8" r="3.5" />
+                              <path d="M2.5 20c0-3 3-4.5 6.5-4.5s6.5 1.5 6.5 4.5" />
+                              <circle cx="17" cy="9" r="2.5" />
+                              <path d="M17 11.5c2.4 0 4.5 1.2 4.5 3.6" />
+                            </svg>
+                          ) : (
+                            <svg className="island-ctl-svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+                              <circle cx="12" cy="8" r="4" />
+                              <path d="M4 21c0-4 4-6 8-6s8 2 8 6" />
+                            </svg>
+                          )}
+                        </span>
+                        <span className="island-session-current-name">
+                          {it ? it.title : currentSessionKey}
+                        </span>
+                      </>
+                    )
                   })()}
                 </span>
                 <span className="island-session-current-actions">
@@ -1423,7 +1589,13 @@ export function AgentView({
                     title={sessionNoteText ? `情况记录:${sessionNoteText.slice(0, 30)}${sessionNoteText.length > 30 ? '…' : ''}` : '写情况记录(该会话上下文备忘,每轮回复参考)'}
                     onClick={startEditNote}
                   >
-                    {sessionNoteText ? '记录' : '记录'}
+                    {/* 记录:铅笔图标 + 文字;有记录时右侧加强调色小圆点徽标 */}
+                    <svg className="island-ctl-svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M12 20h9" />
+                      <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z" />
+                    </svg>
+                    <span>记录</span>
+                    {sessionNoteText && <span className="island-session-ctl-dot" aria-hidden="true" />}
                   </button>
                   <button
                     type="button"
@@ -1431,7 +1603,14 @@ export function AgentView({
                     title="清空该会话上下文(消息历史,记录保留)"
                     onClick={handleClearSession}
                   >
-                    {clearArmed ? '确认清空' : '清空'}
+                    {/* 清空:垃圾桶图标 + 文字;armed 时红底确认 */}
+                    <svg className="island-ctl-svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+                      <polyline points="3 6 5 6 21 6" />
+                      <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+                      <path d="M10 11v6M14 11v6" />
+                      <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
+                    </svg>
+                    <span>{clearArmed ? '确认清空' : '清空'}</span>
                   </button>
                 </span>
               </>
@@ -1476,11 +1655,15 @@ export function AgentView({
 
         {/* 消息列表:展开首帧先渲染骨架占位(形变动画期间 DOM 轻量),
             延迟后挂载真实内容淡入并测量长高。
-            2026-08-12 虚拟滚动:消息区 = 虚拟滚动窗口(MessageWindow,
-            只挂载可视区消息)+ 尾部(流式/思考/错误)——数百条历史
-            消息的 DOM 与滚动中绘制成本与可视区解耦,不再抽搐;
-            滚动容器自身不挂 onScroll(chat 视图滚动由 MessageWindow
-            内部监听,同时更新贴底标志与可视范围) */}
+            2026-08-17 弃虚拟滚动:MessageWindow 虚拟滚动在会话切换/贴底
+            时估算高度漂移、滚动条上下抖动且不落底(用户实测)——改回
+            全量渲染,scrollHeight 始终为真实值,跳底 = scrollTop 直赋,
+            简单可靠;消息组件(UserBubble/AssistantBlock)已 memo,追加
+            时未变消息跳过重渲染。滚动容器挂 onScroll 更新贴底标志
+            (chat 视图与历史/工具视图共用 handleScroll)。
+            **拖拽上传(2026-08-17)**:同一容器绑定 dragover/drop,文件
+            拖入对话窗口即生成附件标签(输入区上方);拖拽经过时显示
+            "松开添加"高亮蒙版 */}
         {phase === 'skeleton' ? (
           <div className="island-agent-skeleton" aria-hidden="true">
             <div className="island-agent-skeleton-item assistant" />
@@ -1488,7 +1671,20 @@ export function AgentView({
             <div className="island-agent-skeleton-item assistant short" />
           </div>
         ) : (
-          <div className="island-agent-messages" ref={listRef}>
+          <div
+            className={`island-agent-messages${dragActive ? ' drag' : ''}`}
+            ref={listRef}
+            onScroll={handleScroll}
+            onDragOver={handleDragOver}
+            onDragLeave={handleDragLeave}
+            onDrop={handleDrop}
+          >
+            {dragActive && (
+              <div className="island-agent-drop-mask">
+                <span className="island-agent-drop-mask-title">松开以添加文件</span>
+                <span className="island-agent-drop-mask-sub">将生成附件标签,随消息发送给 Agent</span>
+              </div>
+            )}
             {messages.length === 0 && !streaming && !lastError && (
               <div className="island-agent-welcome">
                 我是岛灵,可以帮你执行本机操作。
@@ -1496,16 +1692,14 @@ export function AgentView({
                 试试:「打开计算器」「查一下最近的新闻」「列出下载目录」
               </div>
             )}
-            <MessageWindow
-              messages={messages}
-              scrollRef={listRef}
-              atBottomRef={atBottomRef}
-              onLayoutChange={measureHeight}
-              renderItem={renderMessage}
-            />
-            {/* 尾部(流式/思考/错误):独立 flex 段,消息落定后进
-                MessageWindow;其高度经 AgentView 的 streaming effect
-                驱动重测(不参与虚拟滚动数学) */}
+            <div className="island-msgs-window">
+              {messages.map((m) => (
+                <div key={m.id} className="island-msgs-item">
+                  {renderMessage(m)}
+                </div>
+              ))}
+            </div>
+            {/* 尾部(流式/思考/错误):独立 flex 段,消息落定后并入列表 */}
             {(streaming && (streaming.text || streaming.tools.length > 0)) ||
             (status === 'thinking' && !streaming?.text) ||
             lastError ? (
@@ -1516,6 +1710,7 @@ export function AgentView({
                 {streaming && (streaming.text || streaming.tools.length > 0) && (
                   <div className={`island-agent-msg-assistant${hasTurnMark(streaming.text) ? ' qq-peer' : ''}`}>
                     {hasTurnMark(streaming.text) && <PeerTurnTag />}
+                    {hasMasterTurnMark(streaming.text) && <MasterTurnTag />}
                     {streaming.text && (
                       <div className="island-agent-text">
                         {/* 流式前缀可能先到指纹标记(未凑齐时 strip 不命中,
@@ -1552,6 +1747,9 @@ export function AgentView({
                 {lastError && <div className="island-agent-error">{lastError}</div>}
               </div>
             ) : null}
+            {/* 跳底锚点(2026-08-17):列表末尾 0 高哨兵,统一跳底
+                scrollToBottom 按实时布局对齐容器底边,精确落底 */}
+            <div ref={bottomAnchorRef} className="island-msgs-anchor" aria-hidden="true" />
           </div>
         )}
 
@@ -1630,6 +1828,38 @@ export function AgentView({
               ))}
             </div>
           )}
+          {/* 附件标签行(2026-08-17 拖拽上传):待发送附件标签(chip)——类型
+              图标 + 文件名 + × 移除;悬停 title 显示完整路径。媒体附件
+              (图片/音视频)图标带 media 强调色,发送时作 media part 展示,
+              全部附件路径随消息标注交给 LLM 读取分析 */}
+          {attachments.length > 0 && (
+            <div className={`island-agent-attach-slot${attachOpen ? ' open' : ''}`}>
+              <div className="island-agent-attach-inner">
+                {attachments.map((a, i) => (
+                  <span key={`${a.path}-${i}`} className={`island-agent-attach${a.kind !== 'file' ? ' media' : ''}`} title={a.path}>
+                    <span className="island-agent-attach-icwrap">
+                      <AttachIcon kind={a.kind} />
+                    </span>
+                    <span className="island-agent-attach-name">{a.name}</span>
+                    <button
+                      type="button"
+                      className="island-agent-attach-remove"
+                      aria-label={`移除附件 ${a.name}`}
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        removeAttachment(i)
+                      }}
+                    >
+                      <svg className="island-ctl-svg" width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round">
+                        <path d="M6 6l12 12M18 6L6 18" />
+                      </svg>
+                    </button>
+                  </span>
+                ))}
+                <span className="island-agent-attach-hint">将随消息发送给 Agent</span>
+              </div>
+            </div>
+          )}
           <textarea
             ref={inputRef}
             value={input}
@@ -1656,7 +1886,7 @@ export function AgentView({
             <button
               type="button"
               className="island-agent-send"
-              disabled={!input.trim()}
+              disabled={!input.trim() && attachments.length === 0}
               onClick={(event) => {
                 event.stopPropagation()
                 submit()

@@ -33,7 +33,7 @@ import type { AgentTool, ToolParams } from '../types'
 import { webSearch } from './tools-search'
 import { extractMediaPathFromStart, mediaKindForPath } from './tools-media'
 import { toolsRoot, userDataDir, toolOutputDir, setOutputEnv } from './tools-env'
-import { biliQuery, BILI_CWD, setBiliConfirmAction } from './tools-bili'
+import { biliQuery, BILI_CWD, setBiliConfirmAction, setBiliSessionKey } from './tools-bili'
 import { docConvert, disposeDocflow } from './tools-docflow'
 
 // ---- 已拆出簇 barrel 兼容 re-export(engine.ts/测试既有路径不变) ----
@@ -294,7 +294,7 @@ export function createTools(deps: {
    * 主动告知用户结果(用户无需主动提问——完成/失败都有对话反馈,
    * 不依赖"发完通知就结束")
    */
-  onBackgroundDone?(info: { title: string; message: string }): void
+  onBackgroundDone?(info: { title: string; message: string; sessionKey?: string }): void
   /**
    * 通用动作确认门(2026-08-10):bili 批量下载启动前征求用户同意;
    * 未注入 = 不确认(测试环境)
@@ -307,6 +307,14 @@ export function createTools(deps: {
    */
   getOutputDir?(): string | null
   getSessionId?(): string | null
+  /**
+   * 当前会话键(2026-08-16):后台任务(bili 下载/扫码登录)注册时记录
+   * **发起时刻**的会话键——完成通知(background-done)据此回到发起下载
+   * 的会话,而不是"最后装配的引擎"的会话(多会话引擎并存时 doneHandler
+   * 是模块级单例,不记录键 = 通知串会话,用户实测"bili 下载完成消息
+   * 没有传递到其它会话");null = 主对话 main
+   */
+  getSessionKey?(): string | null
 }): AgentTool[] {
   // 工具输出目录环境注入(tools-env 模块级,工具执行时读取)
   setOutputEnv({
@@ -315,11 +323,17 @@ export function createTools(deps: {
   })
   // bili 批量下载确认门注入(tools-bili 模块级 ref,biliQuery 同步读取)
   setBiliConfirmAction(deps.confirmAction ?? null)
+  // bili 后台任务发起会话键注入(2026-08-16,模块级 ref,任务注册时读取)
+  setBiliSessionKey(deps.getSessionKey ?? null)
   // 通用任务注册表接线(替代原 bili 专用 bgDone 模块级回调):任何工具
   // 注册的任务进入终态(完成/失败/取消)都走这里 → background-done
+  // **2026-08-16 修复"完成通知串会话"**:doneHandler 是模块级单例,最后
+  // 装配的引擎接管它——事件必须带任务发起会话键(task.sessionKey),由
+  // 引擎 emit 闭包透传(显式键不被 currentSessionKey 覆盖),渲染端按键
+  // 只让发起会话的实例处理
   setTaskDoneHandler((task) => {
     const suffix = task.status === 'done' ? '完成' : task.status === 'failed' ? '失败' : '已取消'
-    deps.onBackgroundDone?.({ title: `${task.title}${suffix}`, message: task.detail })
+    deps.onBackgroundDone?.({ title: `${task.title}${suffix}`, message: task.detail, sessionKey: task.sessionKey })
   })
   return [
     {

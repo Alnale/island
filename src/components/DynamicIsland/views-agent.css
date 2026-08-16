@@ -369,9 +369,11 @@
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  /* 消息间距(2026-08-12 起经 CSS 变量下发:MessageWindow 虚拟滚动的
-     spacer 数学读取本容器 rowGap,窗口内部 gap 必须与之一致——
-     两处引用同一变量,改间距不会漂移) */
+  /* position: relative(2026-08-17 拖拽上传):拖拽蒙版 inset:0 绝对定位
+     覆盖可视区 */
+  position: relative;
+  /* 消息间距(2026-08-17 弃虚拟滚动后仍经此变量:消息窗口容器内部
+     gap 与列表容器一致,全量渲染下为真实间距) */
   --agent-msg-gap: 10px;
   gap: var(--agent-msg-gap);
   padding-right: 4px;
@@ -389,20 +391,16 @@
   animation: agent-content-in 0.26s ease both;
 }
 
-/* 消息窗口(虚拟滚动,2026-08-12)与尾部(流式/思考/错误)= 消息区的
-   两个 flex 段:
-   - .island-msgs-window:MessageWindow 渲染的虚拟滚动窗口,内部
-     spacer + 可视消息同款 gap(--agent-msg-gap,spacer 数学按此计算,
-     MessageWindow 挂载时从 .island-agent-messages 读 rowGap);
-     flex-shrink: 0 保证窗口高度恒等于内容高(不被容器拉伸压缩,
-     AgentView 岛体高度测量量它)。
-   - .island-msgs-item:单条消息的测量挂载点(ResizeObserver 观察其
-     高度写入虚拟滚动高度缓存)。
-   - .island-agent-tail:流式/思考/错误尾部,不参与虚拟滚动数学
-     (自然排在 spacer 之后,消息落定后进窗口)。
-   原 content-visibility 方案(--msg-h 估算/阈值 .cv 类)已整体删除:
-   CV 在滚动中整段真实化 scrollHeight = 滚动条抽搐无解(实测),
-   JS 窗口化逐条真实化修正平滑,且滚动中绘制成本与内容全长解耦 */
+/* 消息窗口与尾部(流式/思考/错误)= 消息区的两个 flex 段(2026-08-17
+   弃虚拟滚动后恢复全量渲染):
+   - .island-msgs-window:全部消息的真实容器,高度 = 内容总高(消息和 +
+     gap),scrollHeight 恒为真实值 → 跳底(scrollTop = scrollHeight)
+     简单可靠,无估算漂移。
+   - .island-msgs-item:单条消息包裹(同方向 column flex,让气泡
+     align-self 生效——用户气泡靠右)。
+   - .island-agent-tail:流式/思考/错误尾部,自然排在消息之后。
+   (原 MessageWindow 虚拟滚动已删除:估算高度在会话切换/贴底时漂移,
+   滚动条上下抖动且不落底,用户实测;全量渲染牺牲大列表性能换可靠性) */
 .island-msgs-window {
   display: flex;
   flex-direction: column;
@@ -413,14 +411,57 @@
   flex-shrink: 0;
   /* 2026-08-12 修复"用户气泡跑左侧":原消息组件直接挂在
      .island-agent-messages(flex column)下,用户气泡靠右靠
-     align-self: flex-end;虚拟滚动后每条消息被包进本 item(普通
-     块),align-self 失去 flex 上下文失效 → 气泡回落到左。改回
-     同方向 column flex,子项(气泡)的 align-self 重新生效 */
+     align-self: flex-end;消息被包进本 item(普通块)后 align-self
+     失去 flex 上下文失效 → 气泡回落到左。改回同方向 column flex,
+     子项(气泡)的 align-self 重新生效 */
   display: flex;
   flex-direction: column;
 }
 .island-agent-tail {
   flex-shrink: 0;
+}
+/* 跳底锚点(2026-08-17):消息列表末尾 0 高哨兵,scrollToBottom 按实时
+   rect 差值把它对齐滚动容器底边,实现可靠落底(替代原"绝对 scrollTop
+   = scrollHeight + 多 effect 双 rAF 覆盖"——高度动画中反复设置绝对
+   scrollTop 导致滚动条上下抖动、不落底) */
+.island-msgs-anchor {
+  flex-shrink: 0;
+  width: 100%;
+  height: 0;
+  pointer-events: none;
+}
+
+/* 拖拽上传高亮(2026-08-17):文件拖入消息区时显示"松开添加"蒙版——
+   虚线强调边框 + 淡色蒙层 + 提示文案;拖拽态容器轻微强调 */
+.island-agent-messages.drag {
+  border-radius: 10px;
+  box-shadow: inset 0 0 0 1px var(--state-color, #4d6bfe);
+}
+.island-agent-drop-mask {
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  border: 1.5px dashed color-mix(in srgb, var(--state-color, #4d6bfe) 70%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--state-color, #4d6bfe) 12%, rgba(10, 12, 18, 0.86));
+  backdrop-filter: blur(2px);
+  pointer-events: none;
+  animation: island-ui-in 0.18s ease both;
+}
+.island-agent-drop-mask-title {
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  color: var(--state-color, #4d6bfe);
+}
+.island-agent-drop-mask-sub {
+  font-size: 0.55rem;
+  color: var(--text-dim, rgba(255, 255, 255, 0.6));
 }
 
 @keyframes agent-content-in {
@@ -620,16 +661,41 @@
 .island-session-current-title {
   flex: 1;
   min-width: 0;
-  text-align: center;
+  /* 2026-08-17 美化:类型徽标 + 会话名 inline-flex 居中 */
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
   font-size: 0.58rem;
   font-weight: 600;
   color: var(--text-dim, rgba(255, 255, 255, 0.6));
   letter-spacing: 0.5px;
   overflow: hidden;
+}
+/* 会话类型徽标(2026-08-17):私聊 = 中性小方块 + 人形图标,群聊 =
+   强调色 + 群组图标 */
+.island-session-current-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 15px;
+  height: 15px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.1);
+  color: rgba(255, 255, 255, 0.62);
+  flex: none;
+}
+.island-session-current-badge.group {
+  background: color-mix(in srgb, var(--state-color, #4d6bfe) 22%, transparent);
+  color: var(--state-color, #4d6bfe);
+}
+.island-session-current-name {
+  overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* 横幅操作按钮(情况记录/快捷清空):中性胶囊,与蒙版控件同款 */
+/* 横幅操作按钮(情况记录/快捷清空):中性胶囊,与蒙版控件同款;
+   2026-08-17 美化:图标 + 文字 inline-flex 对齐 */
 .island-session-current-actions {
   flex: none;
   display: flex;
@@ -637,10 +703,15 @@
 }
 .island-session-ctl {
   flex: none;
-  font-size: 0.52rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  /* 2026-08-17 放大(用户反馈"记录/清除按钮有点小"):字号 0.52 → 0.6rem,
+     内边距 3×6 → 5×10,图标随按钮同步放大(见 JSX svg 10 → 12) */
+  font-size: 0.6rem;
   line-height: 1;
-  padding: 3px 6px;
-  border-radius: 8px;
+  padding: 5px 10px;
+  border-radius: 9px;
   border: 1px solid rgba(255, 255, 255, 0.24);
   background: rgba(255, 255, 255, 0.09);
   color: var(--text-color, #fff);
@@ -653,6 +724,14 @@
 .island-session-ctl.has-note {
   border-color: var(--state-color, #4d6bfe);
   color: var(--state-color, #4d6bfe);
+}
+/* 记录徽标(2026-08-17):该会话已有情况记录时,按钮右侧强调色小圆点 */
+.island-session-ctl-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--state-color, #4d6bfe);
+  flex: none;
 }
 .island-session-ctl.danger {
   color: #ff9b9b;
@@ -670,6 +749,34 @@
   display: flex;
   flex-direction: column;
   gap: 4px;
+  /* 呼出动画(2026-08-17 用户要求"点击记录按钮呼出记录框的动画"):淡入
+     + 上移 + 轻微缩放,弹性曲线收尾;条件渲染挂载时播放 */
+  animation: note-editor-in 0.26s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+/* 保存/取消收起动画(2026-08-17 用户要求"保存记录的动画"):closing 期间
+   播放反向动画,播完才卸载(见 AgentView beginNoteClose 200ms 定时器) */
+.island-session-note-editor.closing {
+  animation: note-editor-out 0.2s ease both;
+}
+@keyframes note-editor-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes note-editor-out {
+  from {
+    opacity: 1;
+    transform: none;
+  }
+  to {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.96);
+  }
 }
 .island-session-note-input {
   width: 100%;
@@ -1106,6 +1213,20 @@
   line-height: 1;
   color: var(--text-color, #fff);
   opacity: 0.55;
+}
+
+/* "发给主人"指纹标签(2026-08-15 双指纹 UI):与"发给对方"标签区分——
+   主人指纹 = 发回主人 QQ 的话,皇冠图标 + 强调色高亮(对方标签弱化
+   透明度、主人标签醒目,一眼分清两条指纹通道) */
+.island-agent-msg-master-tag {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.62rem;
+  line-height: 1;
+  color: var(--state-color, #4d6bfe);
+  opacity: 0.85;
 }
 
 /* "已停止"标签(2026-08-14 软停止):指纹标签同款结构,手动停止
@@ -2782,8 +2903,105 @@
   flex: none;
   position: relative;
   display: flex;
+  /* flex-wrap(2026-08-17 附件标签):附件标签行(flex-basis 100%)独占
+     一行,textarea 与发送按钮排在下一行——确认卡/附件行不受挤压 */
+  flex-wrap: wrap;
   align-items: flex-end;
   gap: 8px;
+}
+
+/* 附件标签行(2026-08-17 拖拽上传):待发送附件 chip 列表——类型图标 +
+   文件名 + 移除,媒体附件(图片/音视频)强调色描边;悬停 title 显示
+   完整路径(标签名截断防溢出)。
+   2026-08-17 布局动画(用户要求"拖入后整体位移布局的更改动画,当前
+   没有,非常生硬"):slot 用 grid-template-rows 0fr → 1fr 平滑展开,
+   输入区高度渐进增长,消息列表/输入框随 flex 布局渐进压缩——不再
+   瞬间跳变;inner 承载标签(flex wrap),0fr 收缩时 overflow hidden
+   压到 0(子项 min-height: 0 是收缩到 0fr 的前提) */
+.island-agent-attach-slot {
+  flex: 1 1 100%;
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  transition:
+    grid-template-rows 0.34s cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 0.26s ease;
+}
+.island-agent-attach-slot.open {
+  grid-template-rows: 1fr;
+  opacity: 1;
+}
+.island-agent-attach-inner {
+  overflow: hidden;
+  min-height: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.island-agent-attach {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  padding: 3px 5px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--text-dim, rgba(255, 255, 255, 0.85));
+  animation: island-ui-in 0.24s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+.island-agent-attach.media {
+  border-color: color-mix(in srgb, var(--state-color, #4d6bfe) 55%, transparent);
+  background: color-mix(in srgb, var(--state-color, #4d6bfe) 12%, transparent);
+  color: var(--text-color, #fff);
+}
+.island-agent-attach-icwrap {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.1);
+  color: rgba(255, 255, 255, 0.75);
+  flex: none;
+}
+.island-agent-attach.media .island-agent-attach-icwrap {
+  background: color-mix(in srgb, var(--state-color, #4d6bfe) 28%, transparent);
+  color: var(--state-color, #4d6bfe);
+}
+.island-agent-attach-name {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.56rem;
+  line-height: 1;
+  user-select: text;
+}
+.island-agent-attach-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.5);
+  cursor: pointer;
+  flex: none;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.island-agent-attach-remove:hover {
+  background: rgba(255, 255, 255, 0.14);
+  color: #fff;
+}
+.island-agent-attach-hint {
+  font-size: 0.52rem;
+  color: var(--text-dim, rgba(255, 255, 255, 0.4));
 }
 
 /* / 与 @ 手动调用候选列表:与输入框一体(紧贴其上,同底色描边),

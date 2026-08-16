@@ -13,7 +13,15 @@ rem  The chcp below switches the console to UTF-8 so Node's
 rem  Chinese output (and the app's own logs) render correctly.
 rem ============================================================
 chcp 65001 >nul
+title Dynamic Island - Dev Launcher
+color 0B
 cd /d "%~dp0"
+cls
+echo.
+echo   ==============================================
+echo    Dynamic Island  -  Desktop Dev Launcher
+echo   ==============================================
+echo.
 node scripts/dev.mjs
 if errorlevel 1 goto :fail
 echo.
@@ -21,6 +29,7 @@ pause
 exit /b 0
 :fail
 echo.
-echo Build/launch failed - see messages above.
+echo   Build/launch failed - see messages above.
+echo.
 pause
 exit /b 1
