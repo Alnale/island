@@ -34,21 +34,19 @@ html, body {
   -webkit-user-select: none;
 }
 
-/* 背景:暗色玻璃渐变(不依赖外部图片,随主应用打包即用) */
+/* 背景:与安装向导同一张背景图(installer/bg.png 复制到本目录,打包随向导) */
 .bg {
   position: fixed;
   inset: 0;
   z-index: -2;
-  background:
-    radial-gradient(1200px 600px at 85% -10%, rgba(110,99,255,.16), transparent 60%),
-    radial-gradient(900px 500px at -10% 110%, rgba(48,209,88,.08), transparent 60%),
-    linear-gradient(160deg, #14161f 0%, #0a0c16 100%);
+  background: url("./bg.png") center / cover no-repeat;
+  filter: saturate(1.05);
 }
 .bg::after {
   content: "";
   position: absolute;
   inset: 0;
-  background: linear-gradient(180deg, rgba(10,12,16,.2) 0%, rgba(10,12,16,.5) 100%);
+  background: linear-gradient(180deg, rgba(10,12,16,.34) 0%, rgba(10,12,16,.55) 100%);
 }
 
 /* 顶栏:透明拖拽区 */
@@ -401,14 +399,14 @@ html, body {
     <button class="btn ghost" id="btn-cancel">取消</button>
     <span class="spacer"></span>
     <button class="btn" id="btn-back">上一步</button>
-    <button class="btn danger" id="btn-next">开始卸载</button>
+    <button class="btn danger" id="btn-next">下一步</button>
   </div>
 
 <script>
 // ===== 卸载向导渲染逻辑(零框架) =====
 const $ = (s) => document.querySelector(s)
 const api = window.uninstaller || {
-  getInfo: async () => ({ appName: '灵动岛', version: '1.0.0', installDir: 'C:\\Users\\demo\\Programs\\灵动岛', userDataDir: 'C:\\Users\\demo\\AppData\\Roaming\\dynamic-island', hasData: true }),
+  getInfo: async () => ({ appName: '灵动岛', version: '3.1.0', installDir: 'C:\\Users\\demo\\Programs\\灵动岛', userDataDir: 'C:\\Users\\demo\\AppData\\Roaming\\dynamic-island', hasData: true }),
   run: async () => ({ ok: true }),
   finish: async () => ({ ok: true }),
   cancel: async () => ({ ok: true }),
@@ -434,6 +432,9 @@ function showStep(n) {
   $('#btn-back').style.visibility = n === 1 || n >= 3 ? 'hidden' : 'visible'
   $('#btn-next').textContent = n === 2 ? '开始卸载' : '下一步'
   $('#btn-next').disabled = n === 3 || state.running
+  // 卸载中/完成页:底部导航"下一步"隐藏(卸载中无下一步可言;完成页自带
+  // "完成"按钮,避免出现无效的"下一步"死按钮)
+  $('#btn-next').style.display = n === 3 || n === 4 ? 'none' : ''
   $('#btn-cancel').style.display = n === 3 || n === 4 ? 'none' : ''
   $('#btn-close').style.display = n === 3 ? 'none' : ''
   if (n === 1) $('#btn-back').style.visibility = 'hidden'
@@ -476,6 +477,8 @@ async function startUninstall() {
     $('#btn-cancel').style.display = ''
     $('#btn-cancel').textContent = '关闭'
     state.running = false
+    // 失败后可返回上一步重新选择/重试(与安装器失败时行为一致)
+    $('#btn-back').style.visibility = 'visible'
   }
 }
 

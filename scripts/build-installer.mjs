@@ -33,7 +33,11 @@ async function rmOutDir() {
   }
   if (fs.existsSync(outDir)) {
     const walk = async (dir) => {
-      for (const ent of await fsp.readdir(dir, { withFileTypes: true })) {
+      let ents
+      try {
+        ents = await fsp.readdir(dir, { withFileTypes: true })
+      } catch { return /* 目录可能已被删/不存在,跳过 */ }
+      for (const ent of ents) {
         const p = path.join(dir, ent.name)
         if (ent.isDirectory()) await walk(p)
         try { await fsp.unlink(p) } catch { /* 锁定,跳过 */ }
@@ -71,20 +75,23 @@ async function main() {
   // 独立 exe 自动加载 resources/app 时依赖 package.json 的 main 字段定位入口
   await fsp.writeFile(
     path.join(outDir, 'resources', 'app', 'package.json'),
-    JSON.stringify({ name: 'lingdong-island-installer', version: '1.0.0', description: '灵动岛 安装向导', main: 'main.cjs', private: true }, null, 2),
+    JSON.stringify({ name: 'lingdong-island-installer', version: '3.1.0', description: '灵动岛 安装向导', main: 'main.cjs', private: true }, null, 2),
     'utf8',
   )
 
-  // 独立卸载器 exe:由 build-uninstaller.mjs 产出,先复制进发行包根——
-  // 之后复制发布目录时随之装入安装器,安装时再复制进安装目录,
-  // 系统设置卸载入口指向它
-  const uninsSrc = path.join(root, 'release', '灵动岛卸载器', '灵动岛卸载器.exe')
-  if (!fs.existsSync(uninsSrc)) {
-    console.error('[installer] 缺少独立卸载器 exe,请先运行: node scripts/build-uninstaller.mjs')
+  // 独立卸载器:由 build-uninstaller.mjs 产出完整自包含目录(exe + resources/app
+  // + locales + 运行时文件),整体复制进发行包根——卸载器是独立 Electron 应用,
+  // 仅复制 exe 会导致缺少 resources/app(uninstall.html)而无法正常加载界面。
+  // 之后复制发布目录时随之装入安装器,安装时再复制进安装目录,系统设置卸载
+  // 入口指向它。
+  const uninsDir = path.join(root, 'release', '灵动岛卸载器')
+  const uninsExe = path.join(uninsDir, '灵动岛卸载器.exe')
+  if (!fs.existsSync(uninsExe)) {
+    console.error('[installer] 缺少独立卸载器,请先运行: node scripts/build-uninstaller.mjs')
     process.exit(1)
   }
-  console.log('[installer] 装入独立卸载器(发行包根 灵动岛卸载器.exe)…')
-  await fsp.copyFile(uninsSrc, path.join(root, 'release', '灵动岛', '灵动岛卸载器.exe'))
+  console.log('[installer] 装入独立卸载器(发行包根 完整目录)…')
+  await fsp.cp(uninsDir, path.join(root, 'release', '灵动岛'), { recursive: true })
 
   console.log('[installer] 装入发布产物(resources/release/灵动岛)…')
   await fsp.cp(

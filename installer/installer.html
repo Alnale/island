@@ -419,7 +419,7 @@ html, body {
     <div>
       <div style="display:flex;align-items:center;gap:10px;">
         <span class="name">灵动岛</span>
-        <span class="ver" id="app-version">v1.0.0</span>
+        <span class="ver" id="app-version">v3.1.0</span>
       </div>
       <div class="desc">设备交互的微型舞台 — 桌面灵动岛,图标、文字与宽度的三重视觉编排</div>
     </div>
@@ -559,7 +559,7 @@ const $ = (s) => document.querySelector(s)
 // 浏览器预览 fallback(Electron 内 window.installer 为真实 preload API;
 // 纯浏览器打开时用 mock,便于不安装直接预览界面)
 const api = window.installer || {
-  getInfo: async () => ({ appName: '灵动岛', version: '1.0.0', defaultInstallDir: 'C:\\Users\\demo\\AppData\\Local\\Programs\\灵动岛', hasSource: true }),
+  getInfo: async () => ({ appName: '灵动岛', version: '3.1.0', defaultInstallDir: 'C:\\Users\\demo\\AppData\\Local\\Programs\\灵动岛', hasSource: true }),
   pickDir: async () => null,
   listTools: async () => [
     { id: 'bili', name: '哔哩哔哩下载工具', desc: 'B站视频/弹幕/搜索下载(bili-tool.exe + Rust 源码)' },
@@ -596,9 +596,13 @@ function showStep(n) {
     document.querySelector('.steps .line:nth-of-type(' + stepNum + ')')?.classList.toggle('done', stepNum < n)
   })
   // 导航按钮可见性
-  $('#btn-back').style.visibility = n === 1 || n >= 4 ? 'hidden' : 'visible'
+  const busyInstalling = n === 3 && state.installing
+  $('#btn-back').style.visibility = n === 1 || n >= 4 || busyInstalling ? 'hidden' : 'visible'
   $('#btn-next').textContent = n === 2 ? '安装' : '下一步'
   $('#btn-next').disabled = n === 3 || state.installing
+  // 安装中/完成页:底部导航"下一步"隐藏(安装中无下一步可言;完成页自带
+  // "立即启动/完成"按钮,避免出现无效的"下一步"死按钮)
+  $('#btn-next').style.display = n === 4 || busyInstalling ? 'none' : ''
   $('#btn-cancel').style.display = n === 3 || n === 4 ? 'none' : ''
   if (n === 1) $('#btn-back').style.visibility = 'hidden'
 }
@@ -652,8 +656,10 @@ function selectedTools() {
 
 // ---- 初始化 ----
 async function init() {
+  // 初始化导航状态(步骤 1:下一步文本/上一步隐藏/取消可见)
+  showStep(1)
   state.info = await api.getInfo()
-  $('#app-version').textContent = 'v' + (state.info.version || '1.0.0')
+  $('#app-version').textContent = 'v' + (state.info.version || '3.1.0')
   state.dir = state.info.defaultInstallDir
   $('#dir-path').textContent = state.dir
   if (state.info.defaultDirFallback) {

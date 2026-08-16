@@ -35,7 +35,7 @@ try {
 }
 
 const APP_NAME = '灵动岛'
-const APP_VERSION = '1.0.0'
+const APP_VERSION = '3.1.0'
 const RELEASE_NAME = '灵动岛'
 
 // 外部工具元信息(安装时按需勾选;源码 + 编译 exe 已随发布目录整体打入)
