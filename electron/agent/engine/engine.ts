@@ -260,6 +260,7 @@ export function createAgentEngine(deps: EngineDeps): AgentEngine {
 
 // 自我进化 harness 与记忆存储(独立模块,main.cjs 从同一打包产物取)
 export { createEvolution } from '../evolution'
+export { invalidatePrivacyCache } from '../privacy'
 export { setNotificationShower, showNotify } from '../notify'
 export { buildProfileCard } from '../napcat/napcat'
 export { createMemoryStore } from '../memory'

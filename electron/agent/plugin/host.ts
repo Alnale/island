@@ -36,6 +36,14 @@ export interface SessionBridgeService {
   clearContext(key: string): Promise<unknown>
 }
 
+/** 主人 QQ 配置桥(set_owner_qq 工具) */
+export interface OwnerConfigService {
+  /** 当前轮次来源:'window' = 主人对话窗口直发;'qq'/'group' = QQ 外部;null = 询问/系统/主动轮 */
+  getTurnSource(): string | null
+  /** 写入 privacy.json masterQQ 并刷新双端缓存 */
+  setOwnerQQ(qq: string): { ok: boolean; error?: string }
+}
+
 declare module './kernel' {
   interface ContextServices {
     /** Agent 配置(每步实时读,配置变更即时生效) */
@@ -66,6 +74,8 @@ declare module './kernel' {
     musicControl: ((op: string, args: unknown[]) => Promise<unknown>) | undefined
     /** 会话管理桥(未注入 = 不注册会话工具) */
     sessionBridge: SessionBridgeService | undefined
+    /** 主人 QQ 配置桥(未注入 = 不注册 set_owner_qq 工具) */
+    ownerConfig: OwnerConfigService | undefined
     /** NapCat QQ 客户端(未注入 = 不注册 napcat 工具) */
     napcatClient: NapcatClient | undefined
     /** 记忆存储(null = 记忆工具/记忆提示块不可用) */

@@ -23,6 +23,11 @@ export function createConfigTools(deps: {
   /** 当前完整工具清单(禁用校验:确认要禁用的工具确实存在;engine 注入
    * 闭包引用 tools 数组,工具实际执行时已初始化) */
   listAllTools?(): AgentTool[]
+  /** 主人 QQ 配置桥(2026-08-17,set_owner_qq 工具):未注入则不注册 */
+  ownerConfig?: {
+    getTurnSource(): string | null
+    setOwnerQQ(qq: string): { ok: boolean; error?: string }
+  }
 }): AgentTool[] {
   return [
     {
@@ -494,6 +499,36 @@ export function createConfigTools(deps: {
           parts.push(patch.napcatAllowedGroups.length > 0 ? `监听群 = ${patch.napcatAllowedGroups.join('、')}` : '监听群 = 空(监听所有群)')
         }
         return `已保存 NapCat 配置:${parts.join(';')}(立即生效,收到 QQ 消息自动进入对话并回复)`
+      },
+    },
+    {
+      name: 'set_owner_qq',
+      description:
+        '设置主人 QQ(2026-08-17):把 privacy.json 的 masterQQ 写入指定 QQ 号,' +
+        '之后该账号 = 岛灵唯一主人(最高权限,所有"主人"判定与私发主人通知走它)。' +
+        '**仅主人在对话窗口直接输入时可用**(对话窗口 = 主人权限;QQ 私聊/群聊/' +
+        '询问轮触发的会话无权设置主人身份)。写入后立即生效,后续轮次按新主人身份判定。' +
+        '如主人说"把主人QQ设为 123456"。',
+      parameters: {
+        type: 'object',
+        properties: { qq: { type: 'string', description: '主人 QQ 号(纯数字)' } },
+        required: ['qq'],
+      },
+      async execute(params: ToolParams) {
+        const qq = String(params.qq ?? '').trim()
+        if (!/^\d{5,12}$/.test(qq)) throw new Error('qq 需要是纯数字 QQ 号')
+        const oc = deps.ownerConfig
+        if (!oc || !oc.setOwnerQQ) throw new Error('主人 QQ 设置不可用(未注入 ownerConfig)')
+        // 安全守卫:仅主人对话窗口直发轮可设置主人身份——QQ 外部/询问/系统
+        // 轮次即使提示词被诱导也不得把任何账号设为主人
+        if (oc.getTurnSource() !== 'window') {
+          throw new Error(
+            '仅主人可在对话窗口直接设置主人 QQ(当前轮次非对话窗口直发,无权设置主人身份;请主人在对话窗口直接说出要设置的主人 QQ)',
+          )
+        }
+        const r = oc.setOwnerQQ(qq)
+        if (!r.ok) throw new Error(r.error || '主人 QQ 写入失败')
+        return `已将主人 QQ 设为 ${qq}(写入 privacy.json 的 masterQQ),后续轮次以该账号为唯一主人。`
       },
     },
   ]

@@ -49,6 +49,17 @@ export function hostBridgePlugin(
             }
           : undefined,
       )
+      ctx.register(
+        'ownerConfig',
+        deps.getTurnSource
+          ? {
+              getTurnSource: deps.getTurnSource,
+              setOwnerQQ:
+                deps.setOwnerQQ ??
+                (() => ({ ok: false, error: '未注入 setOwnerQQ(宿主未提供)' })),
+            }
+          : undefined,
+      )
       ctx.register('napcatClient', deps.napcat as never)
       ctx.register('memoryStore', deps.getMemoryStore?.() ?? null)
       ctx.register('evolution', deps.getEvolution?.() ?? null)

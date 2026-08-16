@@ -56,3 +56,9 @@ export function privacyConfig(): PrivacyConfig {
 export function masterQQ(): string {
   return privacyConfig().masterQQ
 }
+
+/** 失效隐私配置缓存(2026-08-17:set_owner_qq 工具写入 privacy.json 后
+ * 调用,下一轮读取即新值;main.cjs 侧同款清 __privacyCfg) */
+export function invalidatePrivacyCache(): void {
+  cache = null
+}

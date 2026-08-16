@@ -398,6 +398,32 @@ function privacyCfg() {
 function masterQQ() {
   return privacyCfg().masterQQ
 }
+/** privacy.json 绝对路径(与 loadPrivacyConfig 同源解析) */
+function privacyFilePath() {
+  try {
+    return path.join(app.getPath('userData'), 'privacy.json')
+  } catch {
+    return path.join(process.env.APPDATA || '', 'dynamic-island', 'privacy.json')
+  }
+}
+/** 设置主人 QQ(set_owner_qq 工具桥,2026-08-17):写 privacy.json masterQQ
+ * + 清 main 侧缓存 + 失效引擎侧缓存(下一轮身份判定即新值) */
+function setOwnerQQ(qq) {
+  try {
+    const cfg = { ...loadPrivacyConfig(), masterQQ: String(qq).trim() }
+    const file = privacyFilePath()
+    const tmp = file + '.tmp'
+    fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2), 'utf8')
+    fs.renameSync(tmp, file)
+    __privacyCfg = null // main 侧缓存失效
+    if (agentEngineModule && typeof agentEngineModule.invalidatePrivacyCache === 'function') {
+      agentEngineModule.invalidatePrivacyCache() // 引擎侧缓存失效
+    }
+    return { ok: true }
+  } catch (e) {
+    return { ok: false, error: (e && e.message) || String(e) }
+  }
+}
 
 // MiMo 默认配置(2026-08-14 多供应商独立存储)
 const MIMO_DEFAULTS = {
@@ -1024,6 +1050,11 @@ function buildEngineDeps(route, sessionKey) {
     clearSessionContext: (key) => clearSessionContextByKey(key),
     // 共享外部工具源(多会话引擎共用 MCP/技能连接)
     externalTools: sharedExternalTools,
+    // 主人 QQ 配置桥(set_owner_qq 工具,2026-08-17):getTurnSource = 当前
+    // 轮次来源('window' = 主人对话窗口直发;qq/group = QQ 外部;null = 询问/
+    // 系统/主动轮)——仅窗口直发轮允许设置主人身份;setOwnerQQ 写 privacy.json
+    getTurnSource: () => route.lastSendSource,
+    setOwnerQQ,
   }
 }
 

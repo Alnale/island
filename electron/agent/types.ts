@@ -411,6 +411,14 @@ export interface EngineDeps {
   setSessionNote?(key: string, note: string): Promise<unknown>
   clearSessionContext?(key: string): Promise<unknown>
   /**
+   * 主人 QQ 配置桥(2026-08-17,set_owner_qq 工具):getTurnSource 返回当前
+   * 轮次来源('window' = 主人对话窗口直发,最高权限;'qq'/'group' = QQ
+   * 外部;null = 询问/系统/主动轮);setOwnerQQ 写入 privacy.json masterQQ
+   * 并刷新双端缓存。未注入则不注册工具
+   */
+  getTurnSource?(): string | null
+  setOwnerQQ?(qq: string): { ok: boolean; error?: string }
+  /**
    * NapCat QQ 机器人客户端(2026-08-12,main.cjs 创建注入):
    * 未注入则不注册 napcat 工具。收到的 QQ 消息经 main.cjs 转发渲染端
    * 进入对话;回复由 main.cjs 的 message 事件链路发回 QQ

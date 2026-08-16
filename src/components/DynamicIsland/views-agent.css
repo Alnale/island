@@ -37,6 +37,17 @@
   animation: maskPanelIn 0.3s ease backwards;
 }
 
+/* 对话窗口(Agent 视图)背景:采用原图清晰度,不用毛玻璃模糊
+   (2026-08-17 用户要求"对话窗口背景清晰度,采用原图清晰度,不用模糊"):
+   ① 关掉岛体 backdrop-filter 毛玻璃(桌面/背景原样清晰透出);
+   ② 蒙版从 0.55 调淡到 0.16,让自定义背景图以原图清晰度可见 */
+.island-demo.expanded.island-agent-view .island-bg {
+  backdrop-filter: none;
+}
+.island-demo.expanded.island-agent-view .island-panel-mask {
+  background: rgba(8, 10, 14, 0.16);
+}
+
 /* 视图根:覆盖面板,自带内边距(与 island-panel-list 同款布局)。
    缩放只放大岛体/窗口尺寸(JS 设置宽度 ×s),视图本身不缩放,
    UI 元素(文字/按钮/气泡)保持原尺寸 */

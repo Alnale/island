@@ -154,11 +154,11 @@ export function memoryToolsPlugin(): Plugin {
   }
 }
 
-/** LLM 自我配置工具(mcp_config / skills_config 等) */
+/** LLM 自我配置工具(mcp_config / skills_config / set_owner_qq 等) */
 export function configToolsPlugin(): Plugin {
   return {
     name: 'tools-config',
-    inject: ['tools', 'config', 'mcpManager', 'skillLoader'],
+    inject: ['tools', 'config', 'mcpManager', 'skillLoader', 'ownerConfig'],
     apply(ctx: AgentContext) {
       ctx.get('tools').registerTools(
         createConfigTools({
@@ -169,6 +169,7 @@ export function configToolsPlugin(): Plugin {
             ctx.get('skillLoader').listTools(dirs, excluded, [ctx.get('skillDir')?.() ?? '']),
           getSkillDir: ctx.get('skillDir') ?? undefined,
           listAllTools: () => ctx.get('tools').builtin(),
+          ownerConfig: ctx.get('ownerConfig'),
         }),
       )
     },
