@@ -151,44 +151,22 @@ function regSet(rootPath, values) {
   runPowershell(lines.join('; '))
 }
 
-function regDelete(keyPath, name) {
-  const script = `Remove-Item -Path '${psQuote(keyPath)}' -Recurse -ErrorAction SilentlyContinue; Remove-ItemProperty -Path '${psQuote(path.dirname(keyPath))}' -Name '${psQuote(name)}' -ErrorAction SilentlyContinue`
-  try { runPowershell(script) } catch { /* 忽略 */ }
-}
-
-// ---- 生成卸载脚本 ----
-// 卸载时可选是否删除个人数据(聊天记录/记忆/联系人/配置,位于
-// %APPDATA%\dynamic-island = 已装应用 app.getPath('userData'));删除前
-// 交互询问,选择"N"保留数据、仅移除程序本体
+// ---- 生成卸载入口脚本 ----
+// 系统设置 → 应用 → 灵动岛 → 卸载 会执行 UninstallString 指向的
+// uninstall.cmd。它不直接删文件,而是启动定制卸载向导(electron.exe
+// --uninstall,见 electron/main.cjs runUninstaller):图形界面承载
+// 确认/删个人数据/进度/完成,完成后延迟删除安装目录。
+// 必须先 taskkill 已运行实例——卸载向导自身也是 electron.exe,若
+// 旧实例还在,进程占用会导致安装目录删除失败。
 function writeUninstaller(installDir) {
-  const desktopLnk = path.join(process.env.USERPROFILE || '', 'Desktop', `${APP_NAME}.lnk`)
-  const startLnk = path.join(
-    process.env.APPDATA || '',
-    'Microsoft', 'Windows', 'Start Menu', 'Programs',
-    `${APP_NAME}.lnk`,
-  )
-  const uninstallKey = 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\' + APP_NAME
-  const runKey = 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run'
-  // 个人数据目录(与已装应用 userData 一致,见 electron/main.cjs privacy.ts)
-  const userDataDir = '%APPDATA%\\dynamic-island'
+  const exe = path.join(installDir, 'electron', 'electron.exe')
   const script = [
     '@echo off',
     'title 卸载 灵动岛',
+    'rem ---- 先退出已运行的灵动岛(卸载向导自身也是 electron.exe,必须在此前杀掉) ----',
     'taskkill /IM electron.exe /F >nul 2>&1',
-    'rem ---- 移除快捷方式与注册表项 ----',
-    `del "${desktopLnk}" >nul 2>&1`,
-    `del "${startLnk}" >nul 2>&1`,
-    `reg delete "${uninstallKey}" /f >nul 2>&1`,
-    `reg delete "${runKey}" /v "${APP_NAME}" /f >nul 2>&1`,
-    'rem ---- 可选删除个人数据(聊天记录/记忆/联系人/配置) ----',
-    `choice /C YN /N /M "是否同时删除灵动岛的个人数据(聊天记录、记忆、配置)?[Y] 删除 [N] 保留: "`,
-    'if errorlevel 2 goto keep',
-    `if exist "${userDataDir}" rmdir /s /q "${userDataDir}"`,
-    'echo 已删除个人数据。',
-    ':keep',
     'timeout /t 1 /nobreak >nul',
-    'cd /d "%TEMP%"',
-    'rmdir /s /q "%~dp0" >nul 2>&1',
+    `start "" "${exe}" --uninstall`,
     'exit /b 0',
   ].join('\r\n')
   return fsp.writeFile(path.join(installDir, 'uninstall.cmd'), script, 'utf8')

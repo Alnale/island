@@ -1,0 +1,523 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data: file:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'" />
+<title>灵动岛 · 卸载</title>
+<style>
+/* ===== 灵动岛 卸载向导 · 与安装向导同一套 Apple 设计语言 =====
+   暗色玻璃 / 克制的排版 / 柔和动效 / 品牌紫 #6e63ff
+   卸载界面以 electron.exe --uninstall 启动,加载本文件(随主应用打包) */
+
+:root {
+  --accent: #6e63ff;
+  --accent-hover: #7f76ff;
+  --danger: #ff453a;
+  --text: rgba(255,255,255,.95);
+  --text-2: rgba(235,235,245,.62);
+  --text-3: rgba(235,235,245,.34);
+  --sep: rgba(255,255,255,.09);
+  --glass: rgba(28,28,32,.55);
+  --card-brd: rgba(255,255,255,.11);
+  --radius: 18px;
+  --titlebar-h: 46px;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html, body {
+  height: 100%;
+  overflow: hidden;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, sans-serif;
+  color: var(--text);
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* 背景:暗色玻璃渐变(不依赖外部图片,随主应用打包即用) */
+.bg {
+  position: fixed;
+  inset: 0;
+  z-index: -2;
+  background:
+    radial-gradient(1200px 600px at 85% -10%, rgba(110,99,255,.16), transparent 60%),
+    radial-gradient(900px 500px at -10% 110%, rgba(48,209,88,.08), transparent 60%),
+    linear-gradient(160deg, #14161f 0%, #0a0c16 100%);
+}
+.bg::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(180deg, rgba(10,12,16,.2) 0%, rgba(10,12,16,.5) 100%);
+}
+
+/* 顶栏:透明拖拽区 */
+.titlebar {
+  height: var(--titlebar-h);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 14px 0 20px;
+  -webkit-app-region: drag;
+}
+.titlebar .tb-dot {
+  width: 9px; height: 9px; border-radius: 50%;
+  background: var(--danger);
+  box-shadow: 0 0 0 3px rgba(255,69,58,.18);
+  flex: none;
+}
+.titlebar .tb-title {
+  font-size: 12px;
+  letter-spacing: .02em;
+  color: var(--text-3);
+  font-weight: 500;
+}
+.titlebar .tb-spacer { flex: 1; }
+.titlebar .tb-btn {
+  width: 34px; height: 28px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: none; border-radius: 8px;
+  background: transparent; color: var(--text-3);
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+  transition: background-color .15s ease, color .15s ease;
+}
+.titlebar .tb-btn:hover { background: rgba(255,255,255,.08); color: var(--text); }
+.titlebar .tb-btn.close:hover { background: rgba(255,69,58,.18); color: #ff9a94; }
+
+/* 主体 */
+.wrap {
+  position: relative;
+  height: calc(100% - var(--titlebar-h));
+  display: flex;
+  flex-direction: column;
+  padding: 4px 26px 22px;
+}
+
+/* 品牌横幅 */
+.brand {
+  display: flex; align-items: center; gap: 14px;
+  padding: 10px 4px 16px;
+}
+.brand .logo {
+  width: 48px; height: 48px; border-radius: 12px;
+  overflow: hidden; flex: none;
+  background: rgba(255,255,255,.06);
+  box-shadow: 0 6px 18px rgba(0,0,0,.25), inset 0 0 0 1px rgba(255,255,255,.1);
+}
+.brand .logo img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.brand .name { font-size: 19px; font-weight: 650; letter-spacing: -.01em; }
+.brand .ver {
+  font-size: 11px; font-weight: 500; color: var(--text-2);
+  padding: 2px 9px; border-radius: 999px;
+  border: 1px solid var(--sep);
+  background: rgba(255,255,255,.05);
+}
+.brand .desc { font-size: 12.5px; color: var(--text-2); margin-top: 3px; }
+
+/* 步骤指示器 */
+.steps {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 4px 18px;
+}
+.steps .step {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 11px; color: var(--text-3);
+  padding: 5px 11px; border-radius: 999px;
+  border: 1px solid transparent;
+  transition: color .2s ease;
+}
+.steps .step .dot {
+  width: 16px; height: 16px; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 9.5px; font-weight: 600;
+  background: rgba(255,255,255,.06);
+  color: var(--text-3);
+  transition: all .2s ease;
+}
+.steps .step.active { color: var(--text); }
+.steps .step.active .dot { background: var(--accent); color: #fff; box-shadow: 0 0 0 3px rgba(110,99,255,.2); }
+.steps .step.done { color: var(--text-2); }
+.steps .step.done .dot { background: rgba(48,209,88,.16); color: var(--ok, #30d158); }
+.steps .line { width: 26px; height: 1px; background: var(--sep); }
+.steps .line.done { background: rgba(110,99,255,.45); }
+
+/* 步骤面板 */
+.pane {
+  display: none;
+  flex: 1;
+  flex-direction: column;
+  justify-content: center;
+  animation: paneIn .28s ease both;
+}
+.pane.active { display: flex; }
+.pane.back { animation-direction: reverse; }
+.pane h2 { font-size: 22px; font-weight: 650; letter-spacing: -.01em; margin-bottom: 8px; }
+.pane .lead { font-size: 13px; color: var(--text-2); line-height: 1.65; }
+.pane .lead b { color: var(--text); font-weight: 600; }
+@keyframes paneIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* 信息卡 */
+.info-card {
+  margin-top: 18px;
+  border: 1px solid var(--card-brd);
+  border-radius: var(--radius);
+  background: var(--glass);
+  padding: 14px 18px;
+  backdrop-filter: blur(18px) saturate(1.4);
+  -webkit-backdrop-filter: blur(18px) saturate(1.4);
+}
+.info-card .ic-row {
+  display: flex; align-items: baseline; gap: 10px;
+  padding: 7px 0;
+  font-size: 12.5px;
+}
+.info-card .ic-row + .ic-row { border-top: 1px solid var(--sep); }
+.info-card .ic-k { color: var(--text-3); flex: none; width: 84px; }
+.info-card .ic-v { color: var(--text-2); word-break: break-all; line-height: 1.5; }
+.info-card .ic-v.mono { font-family: "SF Mono", Consolas, monospace; font-size: 11.5px; }
+
+/* 卸载确认强调 */
+.warn-banner {
+  margin-top: 18px;
+  display: flex; gap: 10px; align-items: flex-start;
+  border: 1px solid rgba(255,69,58,.28);
+  background: rgba(255,69,58,.08);
+  border-radius: 14px;
+  padding: 12px 14px;
+  font-size: 12.5px; color: var(--text-2); line-height: 1.6;
+}
+.warn-banner svg { flex: none; margin-top: 1px; color: var(--danger); }
+
+/* 选项卡片 */
+.opt-card {
+  margin-top: 18px;
+  border: 1px solid var(--card-brd);
+  border-radius: var(--radius);
+  background: var(--glass);
+  overflow: hidden;
+  backdrop-filter: blur(18px) saturate(1.4);
+  -webkit-backdrop-filter: blur(18px) saturate(1.4);
+}
+.opt-card label {
+  display: flex; align-items: flex-start; gap: 12px;
+  padding: 16px 18px;
+  cursor: pointer;
+  transition: background-color .15s ease;
+}
+.opt-card label:hover { background: rgba(255,255,255,.04); }
+.opt-card label + label { border-top: 1px solid var(--sep); }
+.opt-card input[type="checkbox"] {
+  width: 17px; height: 17px; flex: none; margin-top: 1px;
+  accent-color: var(--danger);
+  cursor: pointer;
+}
+.opt-card .oc-t { font-size: 13.5px; font-weight: 600; }
+.opt-card .oc-d { font-size: 12px; color: var(--text-2); margin-top: 3px; line-height: 1.55; }
+.opt-card .oc-d.danger { color: rgba(255,69,58,.85); }
+
+/* 进度 */
+.progress-wrap { margin-top: 22px; }
+.progress-meta {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 9px;
+}
+.progress-meta .pm-title { font-size: 13px; color: var(--text-2); }
+.progress-meta .pm-pct { font-size: 13px; font-weight: 650; color: var(--text); }
+.progress-bar {
+  height: 6px; border-radius: 999px;
+  background: rgba(255,255,255,.08);
+  overflow: hidden;
+}
+.progress-bar .fill {
+  height: 100%; width: 0%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--accent), #8b7dff);
+  transition: width .25s ease;
+}
+.progress-stage { margin-top: 10px; font-size: 12px; color: var(--text-3); }
+.progress-file {
+  margin-top: 4px; font-size: 11px; color: var(--text-3);
+  font-family: "SF Mono", Consolas, monospace;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+/* 完成 */
+.done-icon {
+  width: 64px; height: 64px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  margin: 6px auto 16px;
+  background: rgba(48,209,88,.14);
+  color: #30d158;
+  box-shadow: 0 0 0 6px rgba(48,209,88,.08);
+}
+.done-icon svg { width: 30px; height: 30px; }
+.done-actions { margin-top: 22px; display: flex; gap: 10px; justify-content: flex-end; }
+.done-actions .btn { min-width: 118px; }
+
+/* 底部导航 */
+.actions {
+  display: flex; align-items: center; gap: 10px;
+  padding-top: 18px;
+}
+.actions .spacer { flex: 1; }
+
+/* 按钮 */
+.btn {
+  height: 38px; min-width: 92px;
+  border: none; border-radius: 11px;
+  padding: 0 18px;
+  font-size: 13px; font-weight: 600;
+  color: var(--text);
+  background: rgba(255,255,255,.08);
+  cursor: pointer;
+  transition: background-color .15s ease, transform .1s ease, opacity .15s ease;
+}
+.btn:hover { background: rgba(255,255,255,.14); }
+.btn:active { transform: scale(.97); }
+.btn:disabled { opacity: .4; cursor: not-allowed; }
+.btn.primary { background: var(--accent); color: #fff; }
+.btn.primary:hover { background: var(--accent-hover); }
+.btn.ghost { background: transparent; color: var(--text-3); }
+.btn.ghost:hover { background: rgba(255,255,255,.06); color: var(--text-2); }
+.btn.danger { background: var(--danger); color: #fff; }
+.btn.danger:hover { background: #ff5c52; }
+</style>
+</head>
+<body>
+  <div class="bg"></div>
+
+  <!-- 顶栏 -->
+  <div class="titlebar">
+    <div class="tb-dot"></div>
+    <span class="tb-title">灵动岛 · 卸载向导</span>
+    <span class="tb-spacer"></span>
+    <button class="tb-btn" id="btn-min" title="最小化">
+      <svg width="12" height="12" viewBox="0 0 12 12"><path d="M2 6h8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+    </button>
+    <button class="tb-btn close" id="btn-close" title="关闭">
+      <svg width="12" height="12" viewBox="0 0 12 12"><path d="M2.5 2.5l7 7m0-7l-7 7" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+    </button>
+  </div>
+
+  <div class="wrap">
+    <!-- 品牌 -->
+    <div class="brand">
+      <div class="logo"><img src="./icon.png" alt="灵动岛" /></div>
+      <div>
+        <div class="name">灵动岛</div>
+        <div style="display:flex;align-items:center;gap:10px;margin-top:2px;">
+          <span class="ver" id="ver-tag">v—</span>
+        </div>
+        <div class="desc">卸载向导 · 将移除灵动岛及其系统配置</div>
+      </div>
+    </div>
+
+    <!-- 步骤指示器 -->
+    <div class="steps">
+      <div class="step active" data-step="1"><span class="dot">1</span>确认卸载</div>
+      <div class="line"></div>
+      <div class="step" data-step="2"><span class="dot">2</span>数据选项</div>
+      <div class="line"></div>
+      <div class="step" data-step="3"><span class="dot">3</span>卸载中</div>
+      <div class="line"></div>
+      <div class="step" data-step="4"><span class="dot">4</span>完成</div>
+    </div>
+
+    <!-- 1 确认卸载 -->
+    <section class="pane active" id="pane-welcome">
+      <h2>确认卸载灵动岛</h2>
+      <div class="lead">灵动岛将从你的电脑中移除。<b id="welcome-install-dir"></b> 将被删除(程序文件与运行时)。</div>
+
+      <div class="info-card">
+        <div class="ic-row"><span class="ic-k">应用名称</span><span class="ic-v" id="info-name">灵动岛</span></div>
+        <div class="ic-row"><span class="ic-k">版本</span><span class="ic-v" id="info-version">—</span></div>
+        <div class="ic-row"><span class="ic-k">安装位置</span><span class="ic-v mono" id="info-dir">—</span></div>
+        <div class="ic-row"><span class="ic-k">个人数据</span><span class="ic-v mono" id="info-data">—</span></div>
+      </div>
+
+      <div class="warn-banner">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>
+        <span>继续前请确认已备份重要数据。卸载只移除灵动岛本体,不会影响系统其他文件。</span>
+      </div>
+    </section>
+
+    <!-- 2 数据选项 -->
+    <section class="pane" id="pane-options">
+      <h2>数据处理方式</h2>
+      <div class="lead">选择卸载时如何处理灵动岛的个人数据。</div>
+
+      <div class="opt-card">
+        <label>
+          <input type="checkbox" id="opt-keep" checked />
+          <div>
+            <div class="oc-t">保留个人数据</div>
+            <div class="oc-d">聊天记录、记忆、联系人档案、配置与隐私设置将完整保留在电脑上,随时可重新安装继续使用。</div>
+          </div>
+        </label>
+        <label>
+          <input type="checkbox" id="opt-delete" />
+          <div>
+            <div class="oc-t">同时删除个人数据</div>
+            <div class="oc-d danger">删除 <b id="opt-data-dir"></b> 下的聊天记录、记忆、联系人档案与全部配置(含主人 QQ、隐私设置)。此操作不可恢复。</div>
+          </div>
+        </label>
+      </div>
+    </section>
+
+    <!-- 3 卸载进度 -->
+    <section class="pane" id="pane-install">
+      <h2>正在卸载</h2>
+      <div class="lead">正在移除灵动岛程序与系统配置…</div>
+      <div class="progress-wrap">
+        <div class="progress-meta">
+          <span class="pm-title" id="prog-title">准备卸载…</span>
+          <span class="pm-pct" id="prog-pct">0%</span>
+        </div>
+        <div class="progress-bar"><div class="fill" id="prog-fill"></div></div>
+        <div class="progress-stage" id="prog-stage"></div>
+        <div class="progress-file" id="prog-file"></div>
+      </div>
+    </section>
+
+    <!-- 4 完成 -->
+    <section class="pane" id="pane-done">
+      <div class="done-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+      </div>
+      <h2 style="text-align:center;">卸载完成</h2>
+      <div class="lead" style="text-align:center;">灵动岛已从你的电脑中移除。感谢你的使用,期待再次相遇。</div>
+      <div class="done-actions">
+        <button class="btn primary" id="btn-done">完成</button>
+      </div>
+    </section>
+  </div>
+
+  <!-- 底部导航 -->
+  <div class="actions">
+    <button class="btn ghost" id="btn-cancel">取消</button>
+    <span class="spacer"></span>
+    <button class="btn" id="btn-back">上一步</button>
+    <button class="btn danger" id="btn-next">开始卸载</button>
+  </div>
+
+<script>
+// ===== 卸载向导渲染逻辑(零框架) =====
+const $ = (s) => document.querySelector(s)
+const api = window.uninstaller || {
+  getInfo: async () => ({ appName: '灵动岛', version: '1.0.0', installDir: 'C:\\Users\\demo\\Programs\\灵动岛', userDataDir: 'C:\\Users\\demo\\AppData\\Roaming\\dynamic-island', hasData: true }),
+  run: async () => ({ ok: true }),
+  finish: async () => ({ ok: true }),
+  cancel: async () => ({ ok: true }),
+  onProgress: () => () => {},
+  minimize: () => {},
+}
+
+const state = { step: 1, running: false, info: null, deleteData: false }
+const STEPS = ['welcome', 'options', 'install', 'done']
+
+function showStep(n) {
+  state.step = n
+  STEPS.forEach((name, i) => {
+    const pane = $('#pane-' + name)
+    const stepNum = i + 1
+    pane.classList.toggle('active', stepNum === n)
+    pane.classList.toggle('back', stepNum < n)
+    const stepEl = document.querySelector('.steps .step[data-step="' + stepNum + '"]')
+    stepEl && stepEl.classList.toggle('active', stepNum === n)
+    stepEl && stepEl.classList.toggle('done', stepNum < n)
+    document.querySelectorAll('.steps .line')[i] && document.querySelectorAll('.steps .line')[i].classList.toggle('done', stepNum > i + 1)
+  })
+  $('#btn-back').style.visibility = n === 1 || n >= 3 ? 'hidden' : 'visible'
+  $('#btn-next').textContent = n === 2 ? '开始卸载' : '下一步'
+  $('#btn-next').disabled = n === 3 || state.running
+  $('#btn-cancel').style.display = n === 3 || n === 4 ? 'none' : ''
+  $('#btn-close').style.display = n === 3 ? 'none' : ''
+  if (n === 1) $('#btn-back').style.visibility = 'hidden'
+}
+
+// 选项互斥:保留/删除个人数据二选一
+function bindDataOpts() {
+  const keep = $('#opt-keep')
+  const del = $('#opt-delete')
+  const sync = (from, to) => {
+    to.checked = !from.checked
+    state.deleteData = del.checked
+  }
+  keep.addEventListener('change', () => sync(keep, del))
+  del.addEventListener('change', () => sync(del, keep))
+}
+
+function setProgress(p) {
+  const percent = Math.round((p.percent ?? 0) * 100)
+  $('#prog-pct').textContent = percent + '%'
+  $('#prog-fill').style.width = percent + '%'
+  if (p.title) $('#prog-title').textContent = p.title
+  if (p.stage) $('#prog-stage').textContent = p.stage
+  if (p.file) $('#prog-file').textContent = p.file
+}
+
+async function startUninstall() {
+  state.running = true
+  showStep(3)
+  $('#btn-next').disabled = true
+  try {
+    const res = await api.run({ deleteData: state.deleteData })
+    if (!res || !res.ok) {
+      throw new Error((res && res.error) || '卸载失败')
+    }
+    showStep(4)
+  } catch (err) {
+    $('#prog-stage').textContent = '卸载失败:' + (err && err.message ? err.message : String(err))
+    $('#prog-title').textContent = '出错'
+    $('#btn-cancel').style.display = ''
+    $('#btn-cancel').textContent = '关闭'
+    state.running = false
+  }
+}
+
+function init() {
+  bindDataOpts()
+  // 初始化导航状态(步骤 1:下一步文本/上一步隐藏/取消可见)
+  showStep(1)
+  $('#btn-min').addEventListener('click', () => api.minimize())
+  $('#btn-close').addEventListener('click', () => api.cancel())
+  $('#btn-cancel').addEventListener('click', () => (state.running ? null : api.cancel()))
+  $('#btn-back').addEventListener('click', () => showStep(state.step - 1))
+  $('#btn-next').addEventListener('click', () => {
+    if (state.step === 1) { showStep(2); return }
+    if (state.step === 2) { startUninstall(); return }
+  })
+  $('#btn-done').addEventListener('click', () => api.finish())
+
+  api.onProgress(setProgress)
+  api.getInfo().then((info) => {
+    if (!info) return
+    state.info = info
+    $('#ver-tag').textContent = 'v' + (info.version || '—')
+    $('#info-name').textContent = info.appName || '灵动岛'
+    $('#info-version').textContent = info.version || '—'
+    $('#info-dir').textContent = info.installDir || '—'
+    // 数据量>0 才显示"(约 N KB)",避免"dynamic-island(约 )"
+    const sizeText = info.dataSizeKB ? '(约 ' + info.dataSizeKB + ' KB)' : ''
+    $('#info-data').textContent = info.hasData
+      ? (info.userDataDir || '—') + (sizeText ? ' ' + sizeText : '')
+      : '无(未发现个人数据)'
+    $('#welcome-install-dir').textContent = info.installDir || ''
+    $('#opt-data-dir').textContent = info.userDataDir || ''
+    // 有个人数据才显示删除选项(无数据时自动保留,删除项置灰)
+    if (!info.hasData) {
+      $('#opt-delete').disabled = true
+      $('#opt-keep').checked = true
+      $('#opt-delete').checked = false
+    }
+  }).catch(() => {})
+}
+
+init()
+</script>
+</body>
+</html>
