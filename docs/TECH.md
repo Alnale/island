@@ -110,7 +110,7 @@ B站查询与下载、文档转换、超星答题等),并挂载 MCP 服务、技
 | 渲染 | React 19 + TypeScript + Vite | 双入口共享一个岛体组件 |
 | 构建 | esbuild | Electron 侧 agent.cjs / bridge.cjs 打包(零第三方依赖) |
 | 系统媒体 | Windows SMTC | PowerShell 读取 + C# WinRT 桥接 |
-| LLM | DeepSeek / Anthropic API | Responses(默认)/ Chat / Anthropic Messages 三 provider |
+| LLM | DeepSeek / Anthropic / MiMo API | 五适配器:DeepSeek Responses(默认)/ DeepSeek Chat / Anthropic Messages / MiMo Responses / MiMo Chat |
 | 存储 | localStorage + IndexedDB + settings.json | 参数 / 媒体数据 / 引擎配置 |
 | 测试 | node 直测 + esbuild 打包 | 引擎核心测试 / Markdown 解析器测试 / UI 巡检 |
 
@@ -568,8 +568,9 @@ send(text, history)
 
 ### 5.3 Provider 详解
 
-三个 provider 同构返回 `ProviderOutcome {calls, text, usage, aborted}`,
-引擎循环共用;工具结果截断 8000 字符回填上下文(三 provider 一致)。
+五个 provider(DeepSeek Responses / DeepSeek Chat / Anthropic Messages /
+MiMo Responses / MiMo Chat)同构返回 `ProviderOutcome {calls, text, usage, aborted}`,
+引擎循环共用;工具结果截断 8000 字符回填上下文(各 provider 一致)。
 
 #### 5.3.1 DeepSeek Responses API(默认)
 
@@ -620,7 +621,8 @@ send(text, history)
 #### 5.3.4 公共层
 
 - `parseSse`(electron/agent/providers/sse.ts)单一实现(yield SseFrame {type, data}),
-  deepseek/chat/anthropic 三处共用;8000 截断 ×3 → `truncateResult`。
+  deepseek/chat/anthropic/mimo-responses/mimo-chat 五处共用;8000 截断 ×5 →
+  `truncateResult`。
 - **上下文硬盘缓存(DeepSeek 自动开启)**:请求前缀**完整匹配缓存前缀单元**
   才命中;多轮对话天然命中(完整历史回传 = 前缀递增);**前缀必须稳定**——
   instructions 与历史序列化幂等、tools 顺序固定、reasoning item 固定回传,
@@ -646,6 +648,24 @@ send(text, history)
   reasoning part 存入助手消息 parts,历史序列化按 provider 输出——Responses
   = 独立 reasoning item;Chat = assistant 消息 reasoning_content 字段;
   Anthropic 路径 thinking 块需 signature 不可回放,已丢弃。
+
+#### 5.3.5 MiMo 大模型(小米,第三供应商)
+
+- **判定**:`isMimoProvider`(地址含 xiaomimimo / mimo.mi.com / mimo,且非
+  deepseek);默认端点 `https://api.xiaomimimo.com`,默认模型 `mimo-v2.5-pro`
+  (备选 `mimo-v2.5`);平台/充值页 https://mimo.mi.com。
+- **协议细分**(`detectMimoProtocol`):地址含 "chat" → MiMo Chat Completions;
+  含 "anthropic" → Anthropic Messages 兼容(走 anthropic.ts);否则 → MiMo
+  Responses API(`/v1/responses`,推荐)。
+- **实现**:`mimo-responses.ts`(mimoStreamResponse)与 `mimo-chat.ts`
+  (mimoStreamChatCompletion)各自独立(零互相 import,也不引用
+  deepseek/anthropic 业务代码),共用 sse.ts 公共层(parseSse /
+  sanitizeJsonStrings / truncateResult),同构返回 `ProviderOutcome`;
+  `mimo-constants.ts` 提供 MiMo 错误码映射(403 地区/风控、404 资源未找到、
+  421 内容拦截等)与展示名。
+- **接入**:五适配器注册进 ctx.llm 接缝(`plugin/llm.ts` 的 ALL_LLM_ADAPTERS:
+  mimoResponsesAdapter / mimoChatAdapter),执行时按 Base URL 经 `protocolOf`
+  解析分发;设置界面协议提示行走 `mimoProviderLabel`。
 
 ### 5.4 内置工具系统
 
@@ -4030,7 +4050,7 @@ Profile 加一行——不改 loop、不改其他插件;装配清单在 defaultP
 tools/pre-execute 能力事件 → 生命周期事件(turn-end finally 全出口)→
 会话日志约束 → 声明式组合层(dsh 差距清零)→ 十四期目录化整合收官。
 
-**验证基线(收官态)**:`tsc -b` 0 错、核心测试 **221/221 通过**
+**验证基线(收官态)**:`tsc -b` 0 错、核心测试 **233/233 通过**
 (tests/plugin-kernel-tests.ts 并入 test-agent-core 入口:内核注册/大声
 失败/逆序 dispose/inject 校验/waterfall 短路/serial 钩子、接缝解析错误码、
 pre-step 拼装顺序、能力事件 deny/改写、生命周期全出口覆盖与顺序、组合层
@@ -4337,6 +4357,69 @@ provider/工具/任务/总结/揣测/主动陪伴/记忆/进化/MCP/技能/预�
 
 ## 附录 I:全部工具一览
 
+引擎注册的全部工具(**68 个** `name:` 定义,按域分组;`createSettingsTools` 注入设置桥后注册
+**31 个**设置工具 + `music_control` 走独立音乐控制桥 `createMusicControlTools`,测试断言见
+tests/test-agent-core.ts「注入后 31 个工具齐」)。
+
+### 基础工具族(tools/tools.ts,16)
+
+| 工具 | 一句话 |
+| --- | --- |
+| exec_command | 执行本机命令(无沙箱;`start` 打开媒体被拦截为对话内附件) |
+| read_file / write_file / list_dir | 文件读写与目录列举 |
+| open_url | 打开 URL |
+| open_file | 打开文件(媒体扩展名拦截为对话内播放附件) |
+| web_search | 网络搜索(Bing 主用 / DDG 回退) |
+| get_feature_guide | 读取 docs/TECH.md 按话题引导功能 |
+| set_system_volume | 系统主音量读写(winmm waveOut) |
+| get_time / system_info | 时间与系统信息 |
+| notify | 系统通知 |
+| switch_to_music | 切回音乐模式(play 参数) |
+| doc_convert | 文档转换(DocFlow 服务) |
+| xxt | 超星学习通自动答题 |
+| bili | B站查询/下载(内置 bili-tool,HEVC 自动转码/convert) |
+
+### 配置工具族(tools/configTools.ts,7)
+
+| 工具 | 一句话 |
+| --- | --- |
+| mcp_config | MCP 服务增删改/测试 |
+| skills_config | 技能管理(create/exclude/include/list) |
+| set_sub_agent_config | 总结文风 / 揣测人格(预设或自定义) |
+| set_proactive_config | 主动陪伴开关/间隔/单位 |
+| tools_config | 工具启用/排除 |
+| set_output_dir | 工具输出目录 |
+| set_napcat_config | QQ 机器人开关/端口/群白名单 |
+
+### 会话工具族(tools/sessionTools.ts,3)
+
+get_session_note / set_session_note / clear_session_context
+
+### 引擎内置工具(engine/,4)
+
+- engine-builtins.ts(3):evolve_memory(记忆进化) / set_output_budget(输出预算动态调整) /
+  get_deepseek_balance(DeepSeek 余额查询)
+- engine-tool-execution.ts(1):delegate(子代理,嵌套 agent 循环)
+
+### 记忆与 QQ 通道
+
+- memory.ts(4):remember / forget / list_memory / update_memory
+- napcat.ts(2):napcat(发消息/发图/发文件/撤回/查成员/群管理等) / manage_sessions(会话绑定/静音)
+
+### 灵动岛设置工具族(31 + 1)
+
+- **createSettingsTools**(注入设置桥后 31,`get_island_settings` + 外观 11 + 媒体库 16 + 媒体查看 3):
+  get_island_settings / list_conversation_media / list_library_images / rename_library_image /
+  set_theme_color / set_agent_scale / import_font / list_fonts / rename_font / import_background /
+  set_font_color / set_font_weight / set_background_opacity / set_background_crop / set_lyric_provider /
+  set_media_window_size / list_playlist / remove_playlist_item / list_audio_library /
+  import_audio_library / add_audio_to_playlist / remove_background / rename_audio_library /
+  remove_audio_library / list_video_library / import_video_library / rename_video_library /
+  remove_video_library / play_library_video / set_video_config / set_audio_config
+- **createMusicControlTools**(独立音乐控制桥,1):music_control(播放/暂停/切歌/进度/音量)
+
+合计:16 + 7 + 3 + 4 + 4 + 2 + 31 + 1 = **68 个工具定义**。
+
 ---
 
 ## 附录 J:全部面板视图一览
@@ -4344,7 +4427,7 @@ provider/工具/任务/总结/揣测/主动陪伴/记忆/进化/MCP/技能/预�
 | PanelView | 岛体高 | 窗口高 | 返回语义 |
 | --- | --- | --- | --- |
 | control | 244 | 280 | 收起 |
-| agent | 内容驱动(200-600) | 岛体+40 | ⋯ 菜单收起 |
+| agent | 内容驱动(176-700) | 岛体+40 | ⋯ 菜单收起 |
 | settings | 440 | 480 | 收起(设置类) |
 | background | 440(compact 288) | 480(280) | 返回设置/多媒体库 |
 | theme | 352 | 364 | 返回设置(设置类) |

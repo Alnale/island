@@ -1,11 +1,15 @@
-# 灵动岛桌面挂件 V3.0 — 部署与调试说明
+# 灵动岛桌面挂件 V3.1 — 部署与调试说明
 
 本文档是**桌面挂件版**(widget/ 入口 + Electron 主进程)的运行、开发与
-调试说明,面向维护者。V3.0 重点:**插件化架构重构概览**(第 1 章,完整
-设计见 TECH.md 第 42 章);V2.0 重点保留:**HEVC 补丁操作手册**(第 2 章)
-与**提示词约束工程概览**(第 3 章)。用户使用指南见 [README.md](README.md);
-完整技术文档见 [docs/TECH.md](docs/TECH.md)(V3.0,第 42 章为插件化架构
-重构专章);引擎级操作手册见 [CLAUDE.md](CLAUDE.md)。
+调试说明,面向维护者。V3.1 重点:**安装器与发行**——自绘安装向导
+`installer/` + 绿色发布打包 `scripts/build-release.mjs` + 独立安装器打包
+`scripts/build-installer.mjs`(完整设计见 TECH.md 第 43 章,命令见下文
+「开发调试」)。V3.0 重点:**插件化架构重构概览**(第 1 章,完整设计见
+TECH.md 第 42 章);V2.0 重点保留:**HEVC 补丁操作手册**(第 2 章)与
+**提示词约束工程概览**(第 3 章)。用户使用指南见 [README.md](README.md);
+完整技术文档见 [docs/TECH.md](docs/TECH.md)(V3.1,第 43 章为安装器与
+发行专章、第 42 章为插件化架构重构专章);引擎级操作手册见
+[CLAUDE.md](CLAUDE.md)。
 
 ---
 
@@ -28,9 +32,9 @@
 
 | 文档 | 面向 | 内容 |
 | --- | --- | --- |
-| README.md | 用户 | 功能/使用指南/FAQ(V3.0 插件化架构导读) |
-| **本文档** | 挂件维护者 | 运行、调试、巡检、HEVC 补丁操作 |
-| docs/TECH.md | 工程师 | 完整技术文档(V3.0;第 42 章插件化架构重构、第 15/16 章 V2.0 工程专章) |
+| README.md | 用户 | 功能/使用指南/FAQ(V3.1 安装器与发行、V3.0 插件化架构导读) |
+| **本文档** | 挂件维护者 | 运行、调试、巡检、HEVC 补丁、安装器与发行 |
+| docs/TECH.md | 工程师 | 完整技术文档(V3.1;第 43 章安装器与发行、第 42 章插件化架构重构、第 15/16 章 V2.0 工程专章) |
 | CLAUDE.md | Claude Code | 引擎级操作手册(踩坑实录/测试断言/约束) |
 
 ---
@@ -112,7 +116,7 @@ node scripts/brand-electron-icon.mjs --check
 
 **验证基线**:补丁版 + 真实 QQ 流量 + 气泡通知 3×3 轮 90s 全稳定;
 155 用例单测;hevc-frame 巡检(补丁应用断言持续出帧、缺失断言错误文案)。
-(V3.0 收官后核心测试升至 221 用例,含插件内核/接缝/事件套件。)
+(V3.0 收官后核心测试升至 221 用例,V3.1 实测 233 用例,含插件内核/接缝/事件套件。)
 
 ### 日常检查清单
 
@@ -189,8 +193,13 @@ dev.bat                # 一键构建 + 启动(自动应用 HEVC 补丁)
 pnpm dev:widget        # 构建挂件页 + 启动 Electron(日常调试主入口,已前置 build:electron)
 pnpm watch:electron    # 热重建 Agent 引擎/桥(改 electron/agent/ 下源码用)
 pnpm bridge            # 独立运行 SMTC 桥
-node tests/test-agent-core.mjs   # 引擎核心测试(221 用例,含插件内核套件)
+node tests/test-agent-core.mjs   # 引擎核心测试(233 用例,含插件内核套件)
 npx electron --disable-gpu tests/test-title-live.cjs  # 标题/揣测真实 API 测试
+
+# V3.1 安装器与发行
+node scripts/build-release.mjs     # ① 生成绿色发布目录 release/灵动岛
+node scripts/build-installer.mjs   # ② 生成独立安装器 release/灵动岛安装器(需先跑 ①)
+npx electron installer/main.cjs    # 开发期直接运行安装向导(不打包,便于预览)
 ```
 
 ## UI 巡检(WIDGET_SCREENSHOT)
@@ -198,7 +207,9 @@ npx electron --disable-gpu tests/test-title-live.cjs  # 标题/揣测真实 API 
 `WIDGET_SCREENSHOT=<path>` 加载后自动截图;`WIDGET_SCREENSHOT_MODE` 支持
 `expanded` / `layout` / `theme` / `stress` / `test` / `hevc-frame` /
 `skill-delete-check` / `agent` / `chat-media` / `mini`(视频岛,含小窗截图 +
-DOM 几何诊断)/ `media-lib` / `probe-clear` 等;`WIDGET_SCREENSHOT_QUIT=1`
+DOM 几何诊断)/ `media-lib` / `probe-clear` / `probe-tools-height` /
+`probe-evolve` / `clear-data` / `session-cleanup` / `video-resume-check` /
+`session-debug`(会话隔离全链路)等;`WIDGET_SCREENSHOT_QUIT=1`
 巡检完成后优雅退出(必带,否则托盘常驻不退出)。**重建后不自动巡检**
 (用户约定,2026-08-07):默认完成标准 = 构建 + dev:widget 启动 + tsc +
 lint + 单测。

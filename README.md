@@ -181,7 +181,7 @@ electron/agent/
 ```
 
 配套的十四期重构节奏(一期内核 → 各接缝 → 各事件 → 会话日志 → 组合层 →
-目录化收官)全程测试驱动:**tsc 0 错、核心测试 221/221 通过、build 与
+目录化收官)全程测试驱动:**tsc 0 错、核心测试 233/233 通过、build 与
 smoke 全绿**,re-export 与装配顺序保证行为零变化。
 
 ---
@@ -333,12 +333,12 @@ pnpm build             # 类型检查 + Web 版构建
 pnpm build:electron    # esbuild 打包 Agent 引擎(入口 engine/engine.ts)/SMTC 桥/图标
 pnpm lint              # oxlint
 pnpm test:markdown     # Markdown 解析器测试
-node tests/test-agent-core.mjs   # 引擎核心测试(221 用例,含插件内核/接缝/事件套件)
+node tests/test-agent-core.mjs   # 引擎核心测试(233 用例,含插件内核/接缝/事件套件)
 node scripts/build-release.mjs   # ① 打包绿色发布目录 release/灵动岛
 node scripts/build-installer.mjs # ② 打包独立安装器 release/灵动岛安装器(需先跑 ①)
 ```
 
-验证基线(V3.0 收官):`tsc -b` 0 错、核心测试 221/221 通过、
+验证基线(V3.1 实测):`tsc -b` 0 错、核心测试 233/233 通过、
 `pnpm build:electron` 与冒烟会话全绿、oxlint 无告警。
 
 架构与踩坑记录见 [docs/TECH.md](docs/TECH.md)(第 42 章 插件化架构重构);
@@ -370,7 +370,7 @@ node scripts/build-installer.mjs # ② 打包独立安装器 release/灵动岛�
   Patch/dump,18 工厂,缺省装配与既往硬编码逐位一致);
 - **域目录化整合**:electron/agent 扁平文件收编为 engine/plugin/providers/
   tools/napcat/subagents 六域目录,构建入口改 engine/engine.ts;
-- **测试**:plugin-kernel-tests.ts 并入核心测试(221 用例),覆盖内核、
+- **测试**:plugin-kernel-tests.ts 并入核心测试(233 用例),覆盖内核、
   接缝、事件、组合层全链路。
 
 ### V2.0(2026-08-13)
