@@ -135,9 +135,13 @@ async function main() {
 
   console.log(`[release] 复制外部工具(--tools=${TOOLS.join(',')} → electron/resources/tools)…`)
   // Agent 工具经 toolsRoot() 定位:打包后 process.resourcesPath/tools =
-  // electron/resources/tools(bili-tool / docflow);整体复制 = 源码 +
-  // 编译的 exe 一并打包。bili 排除 config/(本机登录态 cookies/store,
-  // 含敏感凭据,不随发行)
+  // electron/resources/tools(bili-tool / docflow);整体复制 = **源码 +
+  // 编译的 exe 一并打包**(便于后续修改迭代)。同时排除运行时垃圾/敏感
+  // 数据(2026-08-18 清洗):
+  // - bili:  config/(本机登录态 cookies/store,含敏感凭据,不随发行);
+  // - docflow: output/(转换产物,可能含用户文档)/temp/uploads/__pycache__
+  //   (运行时目录,server.py 启动时 os.makedirs 自建)/docflow.db/
+  //   ocr_detail.json(运行时数据,启动重建)
   const toolsSrc = path.join(root, 'tools')
   if (fs.existsSync(toolsSrc)) {
     const toolsDst = path.join(releaseDir, 'electron', 'resources', 'tools')
@@ -148,9 +152,24 @@ async function main() {
         console.warn(`[release]   工具 ${t} 不存在(${src}),跳过`)
         continue
       }
+      const skipRel =
+        t === 'bili'
+          ? (rel) => rel === 'config' || rel.startsWith('config/')
+          : t === 'docflow'
+            ? (rel) =>
+                rel.startsWith('output/') ||
+                rel.startsWith('temp/') ||
+                rel.startsWith('uploads/') ||
+                rel.includes('/__pycache__/') ||
+                rel === 'docflow.db' ||
+                rel === 'ocr_detail.json'
+            : () => false
       await fsp.cp(src, path.join(toolsDst, t), {
         recursive: true,
-        filter: (s) => !(t === 'bili' && s.replace(/\\/g, '/').includes('/config')),
+        filter: (s) => {
+          const rel = path.relative(src, s).replace(/\\/g, '/')
+          return !skipRel(rel)
+        },
       })
       console.log(`[release]   ✓ ${t} → resources/tools/${t}`)
     }

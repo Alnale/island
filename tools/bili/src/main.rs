@@ -198,6 +198,10 @@ enum Cmd {
         /// 仅生成二维码不等待(扫码后另跑 bili-tool whoami 确认)
         #[arg(long)]
         no_wait: bool,
+        /// 复用 `login --no-wait` 打印的二维码 key 后台轮询(扫码确认后写登录态;
+        /// 2026-08-18 修复"扫码后失效/登录不上"——此前调用方依赖此参数但未实现)
+        #[arg(long)]
+        resume: Option<String>,
     },
     /// 退出登录
     Logout,
@@ -1166,8 +1170,8 @@ async fn main() {
         Cmd::Fav { uid, list, download, audio, outdir, dry_run } => {
             cmd_fav(&api, uid, *list, download.as_deref(), audio.as_deref(), outdir.as_deref(), *dry_run).await
         }
-        Cmd::Login { timeout, qrcode_img, no_wait } => {
-            match login::login(&api, *timeout, qrcode_img.as_deref(), *no_wait).await {
+        Cmd::Login { timeout, qrcode_img, no_wait, resume } => {
+            match login::login(&api, *timeout, qrcode_img.as_deref(), *no_wait, resume.as_deref()).await {
                 Ok(Some(_)) => Ok(()),
                 // no_wait 模式:仅生成二维码,生成即完成(登录确认另跑 whoami)
                 Ok(None) if *no_wait => Ok(()),

@@ -61,14 +61,23 @@ async fn poll(api: &BiliApi, key: &str) -> (i64, String, HashMap<String, String>
     (0, url, cookies)
 }
 
-/// 二维码 → PNG 图片(对话内扫码登录用):8 倍放大,黑白像素
+/// 二维码 → PNG 图片(对话内扫码登录用):放大 + 黑白像素。
+/// **静区修复(2026-08-18 "扫码后 B 站显示无效")**:原实现无静区(QR 规范
+/// 要求四周 ≥4 模块白边)且版本 8 高密度、196px 偏小——手机相机扫描密集
+/// 二维码时缺静区常识别失败/误判无效。补 4 模块静区 + 放大到 6 倍,可靠
+/// 性显著提升;PNG 仍仅 ~5-8KB,base64 几十 KB,消息图片展示无压力
 fn render_qrcode_png(url: &str, path: &str) -> Result<(), String> {
     let qr = qrcode::QrCode::new(url.as_bytes()).map_err(|e| e.to_string())?;
     let colors = qr.to_colors();
     let n = qr.width() as u32;
-    let scale = 4u32;  // 132px:PNG ~2-3KB,base64 ~4KB,LLM 复述不超 8000 截断
-    let img = image::RgbImage::from_fn(n * scale, n * scale, |x, y| {
-        let (px, py) = (x / scale, y / scale);
+    let scale = 6u32; // 6px/模块:版本 8 二维码放大更清晰,利于手机扫描
+    let quiet = 4u32 * scale; // 静区 = 4 模块 × 缩放,四边白色
+    let size = n * scale + 2 * quiet;
+    let img = image::RgbImage::from_fn(size, size, |x, y| {
+        if x < quiet || y < quiet || x >= quiet + n * scale || y >= quiet + n * scale {
+            return image::Rgb([255u8, 255u8, 255u8]);
+        }
+        let (px, py) = ((x - quiet) / scale, (y - quiet) / scale);
         if colors[(py * n + px) as usize] == qrcode::Color::Dark {
             image::Rgb([0u8, 0u8, 0u8])
         } else {
@@ -113,9 +122,20 @@ pub async fn login(
     timeout: i64,
     qrcode_img: Option<&str>,
     no_wait: bool,
+    resume: Option<&str>,
 ) -> Result<Option<String>, ApiError> {
-    let (url, key) = generate(api).await?;
-    show_qrcode(&url, qrcode_img);
+    // resume 模式(2026-08-18 修复"扫码后全是失效/登录不上"):复用
+    // `login --no-wait` 已生成的二维码 key 后台轮询——**不重新生成二维码、
+    // 不展示**。此前调用方靠 `--resume` 轮询但 CLI 未实现该参数(clap 拒绝
+    // 未知参数直接退出码 2)→ 轮询进程秒退,扫码后无人 poll,登录态永不落盘,
+    // 表现为"扫码后失效"。普通模式照旧生成新二维码
+    let (url, key) = match resume {
+        Some(rk) if !rk.trim().is_empty() => (String::new(), rk.trim().to_string()),
+        _ => generate(api).await?,
+    };
+    if resume.is_none() {
+        show_qrcode(&url, qrcode_img);
+    }
     if no_wait {
         // 仅生成二维码(对话内扫码登录:Agent 把图片发给用户,扫码后
         // 引擎据此 key 后台轮询写登录态——**必须打印 二维码key: <key>,
