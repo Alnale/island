@@ -25,9 +25,13 @@
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
-html, body {
+html { height: 100%; }
+body {
   height: 100%;
   overflow: hidden;
+  /* 纵向 flex:让底部导航(.actions)始终占据窗口底部,不被 .wrap 顶出视口 */
+  display: flex;
+  flex-direction: column;
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, sans-serif;
   color: var(--text);
   user-select: none;
@@ -86,7 +90,9 @@ html, body {
 /* 主体 */
 .wrap {
   position: relative;
-  height: calc(100% - var(--titlebar-h));
+  /* 由 flex 撑满 titlebar 与底部导航之间的空间,避免把导航顶出窗口 */
+  flex: 1;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   padding: 4px 26px 22px;
@@ -256,10 +262,11 @@ html, body {
 .done-actions { margin-top: 22px; display: flex; gap: 10px; justify-content: flex-end; }
 .done-actions .btn { min-width: 118px; }
 
-/* 底部导航 */
+/* 底部导航:取消靠左下角,上一步/下一步靠右下角,留白与 .wrap 内容区对齐 */
 .actions {
   display: flex; align-items: center; gap: 10px;
-  padding-top: 18px;
+  flex: none;
+  padding: 18px 26px 22px;
 }
 .actions .spacer { flex: 1; }
 

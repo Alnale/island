@@ -91,7 +91,12 @@ async function main() {
     process.exit(1)
   }
   console.log('[installer] 装入独立卸载器(发行包根 完整目录)…')
-  await fsp.cp(uninsDir, path.join(root, 'release', '灵动岛'), { recursive: true })
+  // default_app.asar 对卸载器非必需(build-uninstaller 已跳过),且其残留文件
+  // 可能被占用/被复制到目标触发 EBUSY,过滤掉避免覆盖已有被锁文件
+  await fsp.cp(uninsDir, path.join(root, 'release', '灵动岛'), {
+    recursive: true,
+    filter: (src) => !(src && path.basename(src) === 'default_app.asar'),
+  })
 
   console.log('[installer] 装入发布产物(resources/release/灵动岛)…')
   await fsp.cp(

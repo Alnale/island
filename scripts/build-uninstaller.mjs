@@ -63,6 +63,10 @@ async function main() {
     recursive: true,
     filter: (src) => !(src && path.basename(src) === 'default_app.asar'),
   })
+  // 清理目标目录残留的 default_app.asar(卸载器不依赖它;被占用时跳过不阻断)
+  try {
+    await fsp.rm(path.join(outDir, 'resources', 'default_app.asar'), { force: true })
+  } catch { /* 被占用,跳过残留 */ }
 
   console.log('[uninstaller] 装入卸载向导(resources/app)…')
   await fsp.cp(path.join(root, 'uninstaller'), path.join(outDir, 'resources', 'app'), { recursive: true })
