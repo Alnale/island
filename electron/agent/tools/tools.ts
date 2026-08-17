@@ -96,6 +96,9 @@ export function buildToolsGuideBlock(): string {
     `- 系统音量脚本:${path.resolve(process.cwd(), 'electron', 'system-volume.ps1')}(引擎 set_system_volume 工具的后端)`,
     `- 长期记忆文件:${path.join(userDataDir(), 'memory.json')}(引擎 remember/list_memory 工具操作它)`,
     `- 功能引导文档:${path.resolve(process.cwd(), 'docs', 'TECH.md')}(第 11 章 = 功能清单,get_feature_guide 工具读取)`,
+    `- NapCat 配置文件(QQ 机器人引擎,位于 NapCat 安装目录的 config/napcat.json):监听群/信任人管理一律用 manage_sessions / set_napcat_config 工具,` +
+      `**禁止用 write_file / exec_command 直接修改它**——手改易写坏配置导致 NapCat 无法启动、QQ 消息全部失联;` +
+      `监听某群前先调 napcat 工具 action=groups 拿机器人已加入的真实群号,再 manage_sessions watch,不要凭群名猜/编造群号。`,
   ]
   return lines.join('\n')
 }

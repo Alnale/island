@@ -168,6 +168,7 @@ export interface NapcatClient {
   getFriendList(): Promise<Array<{ user_id: string; nickname?: string; remark?: string }>>
   getStrangerInfo(qq: string): Promise<{ nickname?: string; age?: number; sex?: string }>
   getGroupInfo(groupId: string): Promise<{ groupName?: string; memberCount?: number }>
+  getGroupList(): Promise<Array<{ group_id: string; group_name?: string; member_count?: number }>>
   setGroupBan(groupId: string, qq: string, durationSec: number): Promise<void>
   setGroupKick(groupId: string, qq: string): Promise<void>
   setGroupWholeBan(groupId: string, enable: boolean): Promise<void>
@@ -806,6 +807,17 @@ export function createNapcatClient(deps: NapcatDeps): NapcatClient {
         groupName: d.group_name !== undefined ? String(d.group_name) : undefined,
         memberCount: typeof d.member_count === 'number' ? d.member_count : undefined,
       }
+    },
+    async getGroupList(): Promise<Array<{ group_id: string; group_name?: string; member_count?: number }>> {
+      const res = await callAction<{ data?: Array<Record<string, unknown>> }>('get_group_list', {}) as {
+        status?: string; retcode?: number; data?: Array<Record<string, unknown>>
+      }
+      if (res?.status !== 'ok' && res?.retcode !== 0) throw new Error(`群列表获取失败(${res?.retcode ?? '未知'})`)
+      return (res?.data ?? []).map((g) => ({
+        group_id: String(g.group_id ?? ''),
+        group_name: g.group_name !== undefined ? String(g.group_name) : undefined,
+        member_count: typeof g.member_count === 'number' ? g.member_count : undefined,
+      }))
     },
     async getQzoneFeeds(
       qq: string,

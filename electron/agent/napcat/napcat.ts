@@ -47,6 +47,7 @@ export function createNapcatTools(deps: NapcatToolDeps): AgentTool[] {
         'action=contacts/contact_update/chats/persona/persona_set 档案与人格管理;' +
         'action=send/send_group 发消息(image 发图;file 发文件/视频,大视频上传可达 3 分钟);action=recall 撤回;' +
         'action=zone QQ空间动态;action=members/friends/profile/group_info 查询;' +
+        'action=groups 列出机器人已加入的所有群(群号+群名)——**监听/接入某群前先调它拿真实群号**,不要凭群名猜群号;' +
         'action=group_manage 群管理(踢人/禁言/全员禁言,需要主人确认);' +
         'action=sessions/session_mute/session_bind 会话管理。',
       parameters: {
@@ -57,7 +58,7 @@ export function createNapcatTools(deps: NapcatToolDeps): AgentTool[] {
             enum: [
               'status', 'recent', 'sent', 'contacts', 'contact_update', 'chats', 'persona', 'persona_set', 'send',
               'send_group', 'recall', 'zone', 'members', 'friends', 'profile', 'group_info', 'group_manage',
-              'sessions', 'session_mute', 'session_bind',
+              'sessions', 'session_mute', 'session_bind', 'groups',
             ],
             description: '操作类型',
           },
@@ -247,6 +248,16 @@ export function createNapcatTools(deps: NapcatToolDeps): AgentTool[] {
           const g = await client.getGroupInfo(groupId)
           return `群 ${groupId}:${g.groupName ? `群名「${g.groupName}」` : '群名未知'}${g.memberCount !== undefined ? `,成员${g.memberCount}人` : ''}`
         }
+        if (action === 'groups') {
+          // 列出机器人已加入的所有群(2026-08-17 修复"监听群凭空捏造群号"):
+          // 让 LLM 有真实群号可查,监听/接入前先调它
+          const list = await client.getGroupList()
+          if (list.length === 0) return '(机器人尚未加入任何群)'
+          return list
+            .slice(0, 200)
+            .map((g) => `- ${g.group_id}${g.group_name ? `(${g.group_name})` : ''}${g.member_count !== undefined ? `[${g.member_count}人]` : ''}`)
+            .join('\n')
+        }
         if (action === 'group_manage') {
           const groupId = String(params.group_id ?? '').trim()
           if (!groupId) throw new Error('group_manage 需要 group_id')
@@ -305,9 +316,13 @@ export function createNapcatTools(deps: NapcatToolDeps): AgentTool[] {
         'action=list 列出已知会话(键/名称/类型/是否屏蔽);' +
         'action=watch **把某个 QQ 或群加入监听名单**——对方消息将自动回复,且会话面板立即出现该会话条目' +
         '(用户说"监听某某/接入某群/给他建个会话/盯着这个群"时用;kind=private私聊/group群聊,id=QQ号或群号);' +
+        '**监听群必须用真实群号**:先调 napcat 工具 action=groups 列出机器人已加入的群,取其中的群号再 watch,' +
+        'watch 会校验群号必须是机器人已加入的真实群,凭群名猜/编造的群号会被拒绝;' +
         'action=unwatch 移出监听名单(不再自动回复);' +
         'action=mute/unmute 屏蔽/解除屏蔽会话(消息仍记录但不自动回复);' +
-        'action=bind 在挂件会话面板中打开指定会话。',
+        'action=bind 在挂件会话面板中打开指定会话。' +
+        '**监听/信任管理一律走本工具或 set_napcat_config,禁止用 write_file/exec_command 直接修改 NapCat 配置文件' +
+        '(napcat.json/config 目录)——手改会写坏配置导致 NapCat 无法启动、QQ 消息全部失联。**',
       parameters: {
         type: 'object',
         properties: {
@@ -330,11 +345,32 @@ export function createNapcatTools(deps: NapcatToolDeps): AgentTool[] {
           if (!kind) throw new Error(`${action} 需要 kind(private=QQ私聊 / group=群聊)`)
           const id = String(params.id ?? '').trim()
           if (!/^\d+$/.test(id)) throw new Error(`${action} 需要 id(纯数字的 QQ 号或群号)`)
+          // 群号真实性校验(2026-08-17 修复"凭空捏造群号"):只允许监听
+          // 机器人**已加入**的真实群,防止 LLM 凭群名猜/编造群号落盘
+          let hitGroupName = ''
+          if (kind === 'group') {
+            let realGroups: Array<{ group_id: string; group_name?: string }> = []
+            try {
+              realGroups = await client.getGroupList()
+            } catch { realGroups = [] }
+            const hit = realGroups.find((g) => g.group_id === id)
+            if (!hit) {
+              throw new Error(
+                `群 ${id} 不在机器人已加入的群列表中,无法监听(机器人未加入该群或群号有误)。` +
+                `请先调用 napcat 工具 action=groups 查看机器人已加入的真实群号,再用其中的群号 watch;` +
+                `不要凭群名猜测或编造群号。`
+              )
+            }
+            hitGroupName = hit.group_name || ''
+          }
           if (action === 'watch') {
             client.watchSession?.(kind, id)
-            return kind === 'group'
-              ? `已将群 ${id} 加入监听名单——群消息将自动回复,会话面板已出现该会话条目`
-              : `已将 QQ ${id} 加入监听名单(扩展信任)——其私聊消息将自动回复,会话面板已出现该会话条目`
+            if (kind === 'group') {
+              return hitGroupName
+                ? `已将群 ${id}(${hitGroupName})加入监听名单——群消息将自动回复,会话面板已出现该会话条目`
+                : `已将群 ${id} 加入监听名单——群消息将自动回复,会话面板已出现该会话条目`
+            }
+            return `已将 QQ ${id} 加入监听名单(扩展信任)——其私聊消息将自动回复,会话面板已出现该会话条目`
           }
           client.unwatchSession?.(kind, id)
           return kind === 'group' ? `已将群 ${id} 移出监听名单(不再自动回复)` : `已将 QQ ${id} 移出监听名单(不再自动回复)`
