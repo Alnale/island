@@ -163,6 +163,11 @@ export default function WidgetApp() {
   const extControllersRef = useRef<Map<string, AgentController>>(new Map())
   // 实例挂载前的暂存消息(2026-08-13 三轮:首条消息不丢,挂载后补投)
   const pendingSessionMsgsRef = useRef<Map<string, unknown[]>>(new Map())
+  // 会话删除抑制(2026-08-18 修复"删除后还在列表中"):删除会话后短暂窗口
+  // 内忽略自动重建——删除动作会触发主进程 broadcast/在途 session-activity
+  // /群名异步解析等,若不抑制,条目会被立即 reg 加回。窗口过后新消息仍可
+  // 正常重建(删除语义 = 不再关心旧条目,不影响未来真实消息)
+  const pendingDeleteKeysRef = useRef<Set<string>>(new Set())
   const [, bumpExt] = useState(0)
   // 会话消息变化 → 面板刷新(2026-08-13):**必须稳定引用**(内联箭头
   // 每渲染新闭包 → SessionHost 的 onTick effect 每渲染触发 → bump →
@@ -195,6 +200,10 @@ export default function WidgetApp() {
   // effect 之前,供其 deps 引用
   const applySessionDelete = useCallback((key: string) => {
     if (!key || key === 'main') return
+    // 抑制窗口:删除后 12s 内忽略该 key 的自动重建(seed/活动/在途异步),
+    // 防条目刚删又被加回;窗口过后允许新消息正常重建
+    pendingDeleteKeysRef.current.add(key)
+    window.setTimeout(() => pendingDeleteKeysRef.current.delete(key), 12000)
     setExtSessions((prev) => prev.filter((it) => it.key !== key))
     setUnread((prev) => {
       if (!(key in prev)) return prev
@@ -218,9 +227,13 @@ export default function WidgetApp() {
   const deleteExternalSession = useCallback(
     async (key: string) => {
       if (!key || key === 'main') return
-      const res = await window.desktop?.napcatDeleteSession?.(key)
-      if (res && typeof res === 'object' && typeof res.error === 'string') return
-      applySessionDelete(key)
+      try {
+        const res = await window.desktop?.napcatDeleteSession?.(key)
+        if (res && typeof res === 'object' && typeof res.error === 'string') return
+        applySessionDelete(key)
+      } catch (e) {
+        console.error('[session] 删除会话失败:', e)
+      }
     },
     [applySessionDelete],
   )
@@ -229,6 +242,10 @@ export default function WidgetApp() {
   useEffect(() => {
     const offs: Array<() => void> = []
     const reg = (key: string, title: string, kind: 'private' | 'group', caption?: string, noUnread = false) => {
+      // 删除抑制(2026-08-18 修复"删除后还在列表中"):该 key 处于删除抑制
+      // 窗口时忽略一切自动注册,避免在途 seed/活动/群名异步把刚删的会话
+      // 立即加回
+      if (pendingDeleteKeysRef.current.has(key)) return
       // **标题精化(2026-08-13 二轮)**:种子注册用占位标题(QQ 号/群号),
       // 消息到达/种子带真实称呼时更新覆盖(占位 → 主人/魔精/真实群名)
       setExtSessions((prev) =>
