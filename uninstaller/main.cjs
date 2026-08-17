@@ -155,16 +155,29 @@ ipcMain.handle('unins:run', async (_e, opts) => {
   }
 })
 
-// 完成卸载:延迟删除安装目录(等卸载器自身进程退出后整体清除)再退出
+// 完成卸载:延迟删除安装目录(等卸载器自身进程退出后整体清除)再退出。
+// **隐藏窗口(2026-08-18 修复"卸载完成后弹出黑窗口")**:原 cmd.exe + 
+// windowsHide 对 detached 子进程不生效(Windows 上 detached = 新控制台,
+// 窗口必现,闪 ~2s)。改用 powershell -WindowStyle Hidden——即使 detached
+// 独立进程也隐藏窗口,静默完成删除
 ipcMain.handle('unins:finish', async () => {
   const dir = installDir()
   try {
-    const script = `timeout /t 2 /nobreak >nul & rmdir /s /q "${dir}"`
-    const child = spawn('cmd.exe', ['/c', script], {
-      detached: true,
-      stdio: 'ignore',
-      windowsHide: true,
-    })
+    // 单引号转义(PowerShell 单引号内重复单引号 = 字面单引号);安装路径
+    // 通常不含引号,兜底防注入
+    const safeDir = String(dir).replace(/'/g, "''")
+    const script =
+      `Start-Sleep -Milliseconds 2000; ` +
+      `Remove-Item -LiteralPath '${safeDir}' -Recurse -Force -ErrorAction SilentlyContinue`
+    const child = spawn(
+      'powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command', script],
+      {
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: true,
+      },
+    )
     child.unref()
   } catch { /* 忽略 */ }
   app.exit(0)
