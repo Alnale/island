@@ -212,13 +212,18 @@ export default function WidgetApp() {
   // 会话删除后本地同步清理(2026-08-18):条目/未读/localStorage 历史 +
   // 控制器实例 + 暂存;若正在查看被删除会话则切回主对话。幂等(重复
   // 调用无副作用),供删除回传与 onSessionDeleted 广播共用。定义在订阅
-  // effect 之前,供其 deps 引用
-  const applySessionDelete = useCallback((key: string) => {
+  // effect 之前,供其 deps 引用。
+  // opts.persistent(2026-08-18 清空 vs 删除区分):默认 true = 写持久删除
+  // 标记(根治自动重建,重启后仍生效);false = 仅本地移除(清空语义——
+  // 后续该会话新消息可正常重建会话)
+  const applySessionDelete = useCallback((key: string, opts?: { persistent?: boolean }) => {
     if (!key || key === 'main') return
     // 持久删除标记(根治):写入后该 key 不再被 seed/活动/新消息自动重建,
     // 重启后仍生效;重新 watch 接入(seed 带来)时清除
-    deletedKeysRef.current.add(key)
-    persistDeletedKeys()
+    if (opts?.persistent !== false) {
+      deletedKeysRef.current.add(key)
+      persistDeletedKeys()
+    }
     // 抑制窗口:删除后 12s 内忽略该 key 的自动重建(seed/活动/在途异步),
     // 防条目刚删又被加回;窗口过后允许新消息正常重建
     pendingDeleteKeysRef.current.add(key)
@@ -240,18 +245,23 @@ export default function WidgetApp() {
     pendingSessionMsgsRef.current.delete(key)
     setPanelKey((prev) => (prev === key ? null : prev))
   }, [persistDeletedKeys])
-  // 删除外部会话(2026-08-18 用户要求"增加会话删除功能,除主对话"):
-  // 调主进程删除引擎与 NapCat 数据,成功或广播到达都由 applySessionDelete
-  // 完成本窗口清理;失败(文件占用等)由主进程返回 error,不做本地改动
+  // 删除外部会话(2026-08-18 用户要求"增加会话删除功能,除主对话";后改
+  // 乐观删除 2026-08-18 修复"删除功能无效/删除后会话还在"):**先本地清理**
+  // (applySessionDelete 幂等:条目/未读/localStorage 历史 + 控制器),保证
+  // 会话**立即从列表消失**;再调主进程删引擎/NapCat 数据(尽力而为——主
+  // 进程 handler 未注册/返回 error/文件占用等都不阻断本地删除,会话不会
+  // 因为远端失败而"删不掉")
   const deleteExternalSession = useCallback(
     async (key: string) => {
       if (!key || key === 'main') return
+      applySessionDelete(key)
       try {
         const res = await window.desktop?.napcatDeleteSession?.(key)
-        if (res && typeof res === 'object' && typeof res.error === 'string') return
-        applySessionDelete(key)
+        if (res && typeof res === 'object' && typeof res.error === 'string') {
+          console.error('[session] 删除会话数据失败(列表已移除):', res.error)
+        }
       } catch (e) {
-        console.error('[session] 删除会话失败:', e)
+        console.error('[session] 删除会话失败(列表已移除):', e)
       }
     },
     [applySessionDelete],
@@ -369,9 +379,12 @@ export default function WidgetApp() {
         for (const g of payload.groups) {
           const id = typeof g === 'string' ? g : (g as { id?: string }).id
           if (id) {
-            // watch 接入(seed 带来)+清理删除标记 → 允许再次出现该会话
+            // watch 接入(seed 带来)+清理删除标记 → 允许再次出现该会话。
+            // **抑制窗口内不清理(2026-08-18 修复"删除后又回列表")**:删除
+            // 自身的配置变更会触发主进程 broadcastSessionSeed——配置保存前
+            // 旧快照仍含被删会话,seed 会把标记清掉;12s 抑制窗口内跳过
             const key = `group:${id}`
-            if (deletedKeysRef.current.delete(key)) persistDeletedKeys()
+            if (!pendingDeleteKeysRef.current.has(key) && deletedKeysRef.current.delete(key)) persistDeletedKeys()
             const name = typeof g === 'string' ? undefined : (g as { name?: string }).name
             reg(key, name || `群 ${id}`, 'group', `群号 ${id}`, true)
           }
@@ -381,8 +394,9 @@ export default function WidgetApp() {
         for (const p of payload.privates) {
           const id = typeof p === 'string' ? p : (p as { id?: string }).id
           if (id) {
+            // 同群:抑制窗口内不清理删除标记(删除自身旧快照 seed 的竞态)
             const key = `private:${id}`
-            if (deletedKeysRef.current.delete(key)) persistDeletedKeys()
+            if (!pendingDeleteKeysRef.current.has(key) && deletedKeysRef.current.delete(key)) persistDeletedKeys()
             const name = typeof p === 'string' ? undefined : (p as { name?: string }).name
             reg(key, name || `QQ ${id}`, 'private', `QQ ${id}`, true)
           }
@@ -807,6 +821,17 @@ export default function WidgetApp() {
     }),
     [currentAgent.config, currentAgent.saveConfig, currentAgent.refreshConfig],
   )
+  // 清空会话(2026-08-18 修复"清除数据后会话还在"):主对话清空 = 存档到
+  // 历史(useAgent clear 语义);外部会话清空 = 清空消息 + **从会话面板移除**
+  // (空会话不该留在列表)——用 applySessionDelete(persistent:false):只本地
+  // 移除 + 12s 抑制窗口,不写持久删除标记,该会话后续新消息可正常重建
+  const clearSession = useCallback(() => {
+    const key = panelKeyRef.current
+    agentClear()
+    if (key && key !== 'main') {
+      applySessionDelete(key, { persistent: false })
+    }
+  }, [agentClear, applySessionDelete])
   // 媒体窗口默认宽(2026-08-08):对话图片/视频窗口初始宽;localStorage
   // 即时生效(设置界面 QuickMenu / LLM set_media_window_size 工具写入,
   // MediaFrame 挂载时读取同一键)
@@ -947,7 +972,9 @@ export default function WidgetApp() {
             // 撤销(2026-08-14 停止与撤销分离):用户气泡左侧按钮 →
             // 回滚该消息之前的上下文与文件(git 快照)
             onUndo: agentUndo,
-            onClear: agentClear,
+            // 清空(2026-08-18):主对话存档到历史;外部会话清空消息 + 移除
+            // 会话条目(清除数据后会话不应还留在面板)
+            onClear: clearSession,
             // 工具列表视图禁用/恢复(持久化 settings.json agent 段;
             // 引擎每轮实时读配置,下一轮生效)
             excludedTools: agentConfig?.excludedTools ?? [],
@@ -982,7 +1009,7 @@ export default function WidgetApp() {
       agentSend,
       agentAbort,
       agentUndo,
-      agentClear,
+      clearSession,
       agentConfig?.excludedTools,
       agentSaveConfig,
       agentConfirmTool,
