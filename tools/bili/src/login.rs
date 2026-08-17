@@ -118,8 +118,11 @@ pub async fn login(
     show_qrcode(&url, qrcode_img);
     if no_wait {
         // 仅生成二维码(对话内扫码登录:Agent 把图片发给用户,扫码后
-        // 另跑 whoami 确认登录态)
-        println!("(未等待扫码,请扫码后用 bili-tool whoami 确认)");
+        // 引擎据此 key 后台轮询写登录态——**必须打印 二维码key: <key>,
+        // 否则调用方解析不到 key,扫码后无人轮询、登录态永不落盘,
+        // whoami 永远未登录(2026-08-18 修复"登录半天登录不上")**)
+        println!("二维码key: {key}");
+        println!("(仅生成二维码,扫码确认由引擎后台轮询完成)");
         return Ok(None);
     }
     let start = crate::utils::now_ts();

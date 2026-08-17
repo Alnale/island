@@ -189,6 +189,41 @@ export default function WidgetApp() {
       extControllersRef.current.delete(key)
     }
   }, [])
+  // 会话删除后本地同步清理(2026-08-18):条目/未读/localStorage 历史 +
+  // 控制器实例 + 暂存;若正在查看被删除会话则切回主对话。幂等(重复
+  // 调用无副作用),供删除回传与 onSessionDeleted 广播共用。定义在订阅
+  // effect 之前,供其 deps 引用
+  const applySessionDelete = useCallback((key: string) => {
+    if (!key || key === 'main') return
+    setExtSessions((prev) => prev.filter((it) => it.key !== key))
+    setUnread((prev) => {
+      if (!(key in prev)) return prev
+      const next = { ...prev }
+      delete next[key]
+      return next
+    })
+    try {
+      localStorage.removeItem('widget-agent-session:' + key)
+      localStorage.removeItem('widget-agent-session-note:' + key)
+    } catch {
+      // 忽略存储失败
+    }
+    extControllersRef.current.delete(key)
+    pendingSessionMsgsRef.current.delete(key)
+    setPanelKey((prev) => (prev === key ? null : prev))
+  }, [])
+  // 删除外部会话(2026-08-18 用户要求"增加会话删除功能,除主对话"):
+  // 调主进程删除引擎与 NapCat 数据,成功或广播到达都由 applySessionDelete
+  // 完成本窗口清理;失败(文件占用等)由主进程返回 error,不做本地改动
+  const deleteExternalSession = useCallback(
+    async (key: string) => {
+      if (!key || key === 'main') return
+      const res = await window.desktop?.napcatDeleteSession?.(key)
+      if (res && typeof res === 'object' && typeof res.error === 'string') return
+      applySessionDelete(key)
+    },
+    [applySessionDelete],
+  )
   // 外部会话登记 + 未读计数(消息到达即创建会话条目;不自动切换,
   // 用户经折叠面板点击绑定,QQ 风格)
   useEffect(() => {
@@ -319,6 +354,14 @@ export default function WidgetApp() {
       }
     })
     if (typeof off6 === 'function') offs.push(off6)
+    // 会话被删除(2026-08-18):主进程已清理该外部会话(引擎/聊天记录/
+    // 人格/监听名单),广播后本窗口同步移除条目/未读/localStorage 历史
+    const off7 = window.desktop?.onSessionDeleted?.((payload) => {
+      if (payload && typeof payload.key === 'string' && payload.key !== 'main') {
+        applySessionDelete(payload.key)
+      }
+    })
+    if (typeof off7 === 'function') offs.push(off7)
     // 启动时拉一次配置(监听会话立即入面板;LLM 此前已配置过)——群聊 +
     // 私聊(2026-08-13 二轮:用户要求"只要是监听的,自动加入",原只预注册
     // 群,私聊要等消息到达才建会话;标题随后被主进程种子/消息的档案称呼
@@ -343,7 +386,9 @@ export default function WidgetApp() {
     return () => {
       for (const off of offs) off()
     }
-  }, [])
+    // applySessionDelete 稳定(useCallback([])),effect 仍只运行一次;
+    // 声明依赖以让 lint 知悉订阅回调引用它
+  }, [applySessionDelete])
   // 当前查看会话的控制器(2026-08-13 七轮:面板纯化为切换器——
   // 主对话窗口显示 panelKey 对应上下文;外部实例未就绪回退主对话;
   // 切回 main 即恢复主对话快照——主控制器从未销毁)
@@ -862,6 +907,7 @@ export default function WidgetApp() {
             currentSessionKey: panelKey ?? 'main',
             unreadCounts: unread,
             onSwitchSession: selectPanelSession,
+            onDeleteExternalSession: deleteExternalSession,
             onMediaAutoPlayed: agentConsumeMediaAutoPlay,
           }
         : undefined,
@@ -891,6 +937,7 @@ export default function WidgetApp() {
       panelKey,
       unread,
       selectPanelSession,
+      deleteExternalSession,
     ],
   )
 

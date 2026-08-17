@@ -922,6 +922,36 @@
   text-align: center;
 }
 
+/* 会话删除按钮(2026-08-18 会话删除):悬浮显示,armed 红色确认态 */
+.island-session-del {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 6px;
+  color: var(--text-dim, rgba(255, 255, 255, 0.5));
+  cursor: pointer;
+  opacity: 0;
+  transition:
+    opacity 0.15s ease,
+    background 0.15s ease,
+    color 0.15s ease;
+}
+.island-session-item:hover .island-session-del {
+  opacity: 0.7;
+}
+.island-session-del:hover {
+  opacity: 1 !important;
+  color: #ff6b6b;
+  background: rgba(229, 72, 77, 0.16);
+}
+.island-session-del.armed {
+  opacity: 1 !important;
+  color: #fff;
+  background: #e5484d;
+}
+
 /* 右列:对话框 */
 .island-session-right {
   flex: 1;

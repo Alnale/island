@@ -291,6 +291,46 @@ export async function loadNapcatPersonas(): Promise<Record<string, NapcatPersona
     return {}
   }
 }
+// ---- 会话删除 / 存储重置(2026-08-18 会话删除 + 清除数据补全) ----
+/**
+ * 删除某个外部会话的全部聊天记录({type, target} 匹配的记录通通移除并
+ * 原子重写)。挂到 chatWriteChain 串行队列,与 appendNapcatChat 不竞态;
+ * 改动内存缓存后先落盘再 resolve,调用方(主进程)删除后立即可看到一致状态。
+ */
+export function deleteNapcatChatsFor(type: 'private' | 'group', target: string): Promise<void> {
+  return new Promise((resolve) => {
+    chatWriteChain = chatWriteChain
+      .then(async () => {
+        if (!chatsCacheLoaded) await loadNapcatChats()
+        const chats = chatsCache ?? []
+        const filtered = chats.filter((c) => !(c.type === type && c.target === target))
+        if (filtered.length === chats.length) return
+        chatsCache = filtered
+        const p = napcatChatsPath()
+        await fs.mkdir(path.dirname(p), { recursive: true })
+        const tmp = p + '.tmp'
+        await fs.writeFile(tmp, JSON.stringify(filtered, null, 1), 'utf8')
+        await fs.rename(tmp, p)
+      })
+      .catch((err) => console.warn('[napcat] delete chats for session failed:', err?.message))
+      .finally(resolve)
+  })
+}
+
+/**
+ * 重置本存储域全部模块级缓存(清除数据后调用,防止旧缓存把已删除的
+ * 文件内容"复活"——与 memoryStore/evolutionHandle 的重建同款思路)。
+ * 不清写队列:删除后重建的文件经既有队列继续写入。
+ */
+export function resetNapcatStore(): void {
+  seenData = { ids: {} }
+  seenLoaded = false
+  contactsCache = null
+  contactsCacheLoaded = false
+  chatsCache = null
+  chatsCacheLoaded = false
+}
+
 export async function saveNapcatPersona(scope: string, persona: string): Promise<NapcatPersona | null> {
   return new Promise((resolve) => {
     personaWriteChain = personaWriteChain.then(async () => {

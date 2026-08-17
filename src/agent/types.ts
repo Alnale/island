@@ -147,6 +147,10 @@ export interface AgentPanelProps {
   currentSessionKey?: string
   /** 切换查看的会话(悬停左侧会话即切换主窗口上下文) */
   onSwitchSession?(key: string): void
+  /** 删除外部会话(2026-08-18 会话删除,主对话 'main' 除外):key =
+   * 'private:<QQ>' / 'group:<群号>'。宿主清理会话条目/未读/localStorage
+   * 历史并调主进程删除对应引擎与NapCat数据 */
+  onDeleteExternalSession?(key: string): void | Promise<unknown>
 }
 
 /** MCP 服务端配置(与引擎同构,re-export) */

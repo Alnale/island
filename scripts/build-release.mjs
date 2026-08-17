@@ -43,7 +43,29 @@ for (const t of TOOLS) {
 }
 
 async function rmrf(p) {
-  await fsp.rm(p, { recursive: true, force: true })
+  try {
+    await fsp.rm(p, { recursive: true, force: true })
+    return
+  } catch (e) {
+    // 个别文件被杀毒/索引/运行中的 Electron 实例锁定(EBUSY):逐文件删除,
+    // 跳过锁定项,不中断打包——新文件随后覆盖,锁定释放后下次即干净
+    if (e && e.code !== 'EBUSY') throw e
+  }
+  if (fs.existsSync(p)) {
+    const walk = async (dir) => {
+      let ents
+      try {
+        ents = await fsp.readdir(dir, { withFileTypes: true })
+      } catch { return /* 目录可能已被删/不存在,跳过 */ }
+      for (const ent of ents) {
+        const q = path.join(dir, ent.name)
+        if (ent.isDirectory()) await walk(q)
+        try { await fsp.unlink(q) } catch { /* 锁定/占用,跳过 */ }
+      }
+      try { await fsp.rmdir(dir) } catch { /* 忽略 */ }
+    }
+    await walk(p)
+  }
 }
 
 async function ensureWidgetBuild() {
@@ -83,7 +105,12 @@ async function main() {
 
   // 1. electron 运行时
   console.log('[release] 复制 electron 运行时…')
-  await fsp.cp(electronDist, path.join(releaseDir, 'electron'), { recursive: true })
+  // default_app.asar 非必需(应用加载同目录 resources/app),若被运行中的
+  // 实例/杀毒锁定(EBUSY)跳过覆盖沿用旧文件,避免阻断打包
+  await fsp.cp(electronDist, path.join(releaseDir, 'electron'), {
+    recursive: true,
+    filter: (src) => !(src && path.basename(src) === 'default_app.asar'),
+  })
 
   // 2. 应用文件 → electron/resources/app
   const appDir = path.join(releaseDir, 'electron', 'resources', 'app')

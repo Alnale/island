@@ -1601,6 +1601,9 @@ function getNapcatClient() {
       void (async () => {
         const media = await imgChain
         const contacts = await getNapcatClient().client.getContacts().catch(() => ({}))
+        // 真实群名(2026-08-18 修复"LLM 捏造虚假群名"):get_group_info
+        // 取真实群名,失败兜底群号;注入下方文本,LLM 用系统标注的群名
+        const groupName = await resolveGroupName(msg.groupId).catch(() => `群 ${msg.groupId}`)
         // 称呼:档案名字优先;主人在群里发言兜底「主人」(2026-08-13
         // 用户实测"我是主人但称呼未知")
         const cname = (contacts[msg.qq]?.name || (msg.qq === masterQQ() ? '主人' : '')).trim()
@@ -1621,11 +1624,13 @@ function getNapcatClient() {
           qq: msg.qq,
           messageId: msg.messageId,
           text:
-          `【QQ群聊 · 群 ${msg.groupId} · ${who}】${msg.text}` +
+          `【QQ群聊 · 群名${groupName} · 群号 ${msg.groupId} · ${who}】${msg.text}` +
           (media.length > 0 ? `\n【图片已下载】${media.map((p, i) => `${i + 1}. ${p}`).join(' ')}` : '') +
           `\n【档案卡】\n${card}` +
           `\n【回复规则】\n` +
           `① 岛灵的主人 = QQ ${masterQQ()}(唯一,硬编码);` +
+          `本群真实群名「${groupName}」以本条标注为准——在群里称呼本群必须用这个真实群名;` +
+          `群名未知/查询失败就用「群${msg.groupId}」称呼,严禁编造或猜测群名。` +
           (msg.qq === masterQQ()
             ? `当前发言人就是主人本人——**你的对话回复会自动私发给主人 QQ,像私聊一样回复主人**;` +
               `不要 send_group 回复群(除非主人明确要求在群里回),也不要用【不回复群消息】标记。`
@@ -3731,9 +3736,23 @@ safeHandle('agent:clear-data', async (scope) => {
     rm(path.join(ud, 'evolution.json'))
     rm(path.join(ud, 'memory-snapshots'))
     rm(path.join(ud, 'settings.json'))
+    // 2026-08-18 补全"清除所有数据不全面":QQ 会话记录(napcat 聊天记录/
+    // 联系人档案/会话人格/去重 ID/媒体附件)+ 撤销快照一并清理——
+    // 此前只清记忆/进化/settings,会话记录与联系人残留
+    rm(path.join(ud, 'napcat-contacts.json'))
+    rm(path.join(ud, 'napcat-chats.json'))
+    rm(path.join(ud, 'napcat-personas.json'))
+    rm(path.join(ud, 'napcat-seen.json'))
+    rm(path.join(ud, 'napcat-media'))
+    rm(path.join(ud, 'undo-snapshots.json'))
     memoryStore = null
     evolutionHandle = null
     resetSettingsCache()
+    // NapCat 存储域模块级缓存(contacts/chats/seen)已随文件删除,须一并
+    // 重置,否则旧缓存会在下次保存时把已删内容"复活"(与引擎 dispose 同类)
+    if (typeof agentEngineModule.resetNapcatStore === 'function') {
+      agentEngineModule.resetNapcatStore()
+    }
     // 引擎随数据重建(2026-08-10 修复"LLM 列出记忆 id 但设置视图长期
     // 记忆为空"):引擎 tools 创建时持有 store 引用,不清除则旧引用继续
     // 操作已删除的旧记忆、与渲染端读的新实例永久不一致;dispose 清理
@@ -3756,6 +3775,47 @@ safeHandle('agent:clear-data', async (scope) => {
     return { ok: true }
   }
   return { error: `未知的清除范围:${String(scope)}` }
+})
+// 删除单个外部会话(2026-08-18 用户要求"增加会话删除功能,除主对话");
+// key = 'private:<QQ>' / 'group:<群号>',主对话 'main' 禁止删除。清理:
+// 会话引擎实例(LRU 缓存 dispose)+ 会话登记(列表/未读源)+ 监听名单 +
+// 屏蔽名单 + NapCat 聊天记录 + 会话人格;完成后广播通知所有窗口同步移除
+safeHandle('napcat:session-delete', async (key) => {
+  if (!key || key === 'main') return { error: '主对话不可删除' }
+  const m = /^(private|group):(\d+)$/.exec(String(key))
+  if (!m) return { error: '非法会话键' }
+  const kind = m[1]
+  const id = m[2]
+  // 1. 会话引擎实例(LRU 缓存)dispose 并移除(引擎在忙则中断其回合)
+  const entry = sessionEngines.get(key)
+  if (entry && entry.engine && typeof entry.engine.dispose === 'function') {
+    try { entry.engine.dispose() } catch { /* already gone */ }
+  }
+  sessionEngines.delete(key)
+  // 2. 会话登记(渲染端列表/未读源)
+  knownSessions.delete(key)
+  // 3. 监听名单 + 屏蔽名单移除(settings.json 持久化)
+  const cfg = currentAgentConfig()
+  const patch = {}
+  if (kind === 'group') {
+    const set = new Set(cfg.napcatAllowedGroups ?? [])
+    set.delete(id)
+    patch.napcatAllowedGroups = [...set]
+  } else {
+    const set = new Set(cfg.napcatAllowed ?? [])
+    set.delete(id)
+    patch.napcatAllowed = [...set]
+  }
+  const mutes = new Set(cfg.mutedSessions ?? [])
+  mutes.delete(key)
+  patch.mutedSessions = [...mutes]
+  applyAgentConfigPatch(patch)
+  // 4. NapCat 数据:聊天记录(按会话) + 会话人格(scope 记录)
+  await agentEngineModule.deleteNapcatChatsFor(kind, id).catch(() => {})
+  await agentEngineModule.saveNapcatPersona(key, '').catch(() => {})
+  // 5. 广播通知所有窗口(移除条目/未读/localStorage 历史)
+  sendToWidget('napcat:session-deleted', { key })
+  return { ok: true, key }
 })
 
 /** 媒体扩展名 → MIME(island-media 协议推断 Content-Type;与渲染端

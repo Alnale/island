@@ -93,6 +93,8 @@ export type {
   ClassifierTurnKind,
   ClassifierRouteAction,
 } from '../napcat/napcat'
+// NapCat 持久化域工具(2026-08-18 会话删除 / 清除数据补全,供主进程调用)
+export { deleteNapcatChatsFor, resetNapcatStore } from '../napcat/napcat'
 
 // 供测试使用的辅助函数(从 engine-loop 重新导出)
 export {

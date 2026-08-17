@@ -123,6 +123,12 @@ interface DesktopApi {
    * text/images(2026-08-13 已发消息回显):发送成功的消息正文/图片,
    * 渲染端注入对应会话窗口(主对话让 LLM 发的消息,切会话能看到) */
   onSessionActivity(callback: (payload: { key: string; kind: 'private' | 'group'; title: string; caption: string; text?: string; images?: string[] }) => void): () => void
+  /** 会话被删除(2026-08-18):外部会话被删除,渲染端移除条目/未读与
+   * localStorage 历史 */
+  onSessionDeleted(callback: (payload: { key: string }) => void): () => void
+  /** 删除单个外部会话(2026-08-18,主对话 'main' 除外):key =
+   * 'private:<QQ>' / 'group:<群号>';主进程清理引擎/NapCat 数据后广播 */
+  napcatDeleteSession(key: string): Promise<{ ok?: boolean; error?: string }>
   /** Agent:中止当前轮(sessionKey = 会话隔离键,缺省主对话) */
   agentAbort(sessionKey?: string): void
   /** Agent:撤销拍快照(2026-08-14):主人输入轮 send 前调;监控目录未

@@ -132,6 +132,19 @@ contextBridge.exposeInMainWorld('desktop', {
     ipcRenderer.on('napcat:session-activity', listener)
     return () => ipcRenderer.removeListener('napcat:session-activity', listener)
   },
+  /** 会话被删除(2026-08-18):主进程已清理该外部会话(引擎/聊天记录/
+   * 人格/监听名单),渲染端据此移除条目、未读与 localStorage 历史 */
+  onSessionDeleted(callback) {
+    const listener = (_event, payload) => callback(payload)
+    ipcRenderer.on('napcat:session-deleted', listener)
+    return () => ipcRenderer.removeListener('napcat:session-deleted', listener)
+  },
+  /** 删除单个外部会话(2026-08-18 用户要求"增加会话删除功能,除主对话"):
+   * key = 'private:<QQ>' / 'group:<群号>',主对话 'main' 不可删除。
+   * 主进程清理引擎/聊天记录/人格/监听名单后广播,这里返回等待结果 */
+  napcatDeleteSession(key) {
+    return ipcRenderer.invoke('napcat:session-delete', String(key))
+  },
   /** Agent:中止当前轮(sessionKey = 会话隔离键,缺省主对话——外部会话
    * 面板的停止按钮必须中止对应会话引擎,2026-08-13 与 agentSend 同款
    * 漏传修复) */
