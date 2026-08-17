@@ -52,6 +52,10 @@ const MODE_SWITCH_ANIMATE_MS = 420
 const MODE_STORAGE_KEY = 'widget-mode'
 /** 外部会话登记表持久化键(2026-08-14:重启后群名/备注/会话不丢) */
 const EXT_SESSIONS_STORAGE_KEY = 'widget-agent-ext-sessions'
+/** 已删除外部会话标记持久化键(2026-08-18 根治"删除后还在列表"):删除会话
+ * 后写此标记,后续该会话的 seed/活动/甚至新消息都不再自动重建列表条目,
+ * 直到用户重新通过 manage_sessions watch 接入(seed 到来时清除标记) */
+const DELETED_SESSIONS_KEY = 'widget-deleted-sessions'
 
 // THEME_STORAGE_KEY 从 src/settingsBridge 导入(设置桥与 UI 共用同一键)
 /** 挂件窗口常规宽度(与 electron/main.cjs 的 WINDOW_W 一致) */
@@ -168,6 +172,17 @@ export default function WidgetApp() {
   // /群名异步解析等,若不抑制,条目会被立即 reg 加回。窗口过后新消息仍可
   // 正常重建(删除语义 = 不再关心旧条目,不影响未来真实消息)
   const pendingDeleteKeysRef = useRef<Set<string>>(new Set())
+  // 已删除会话标记(2026-08-18 根治重建):持久 localStorage,挂载 effect 里
+  // 加载;删除写入,reg 据此跳过该 key 的一切自动注册;watch 接入(seed 带
+  // 来)时清除
+  const deletedKeysRef = useRef<Set<string>>(new Set())
+  const persistDeletedKeys = useCallback(() => {
+    try {
+      localStorage.setItem(DELETED_SESSIONS_KEY, JSON.stringify([...deletedKeysRef.current]))
+    } catch {
+      // 忽略存储失败
+    }
+  }, [])
   const [, bumpExt] = useState(0)
   // 会话消息变化 → 面板刷新(2026-08-13):**必须稳定引用**(内联箭头
   // 每渲染新闭包 → SessionHost 的 onTick effect 每渲染触发 → bump →
@@ -200,6 +215,10 @@ export default function WidgetApp() {
   // effect 之前,供其 deps 引用
   const applySessionDelete = useCallback((key: string) => {
     if (!key || key === 'main') return
+    // 持久删除标记(根治):写入后该 key 不再被 seed/活动/新消息自动重建,
+    // 重启后仍生效;重新 watch 接入(seed 带来)时清除
+    deletedKeysRef.current.add(key)
+    persistDeletedKeys()
     // 抑制窗口:删除后 12s 内忽略该 key 的自动重建(seed/活动/在途异步),
     // 防条目刚删又被加回;窗口过后允许新消息正常重建
     pendingDeleteKeysRef.current.add(key)
@@ -220,7 +239,7 @@ export default function WidgetApp() {
     extControllersRef.current.delete(key)
     pendingSessionMsgsRef.current.delete(key)
     setPanelKey((prev) => (prev === key ? null : prev))
-  }, [])
+  }, [persistDeletedKeys])
   // 删除外部会话(2026-08-18 用户要求"增加会话删除功能,除主对话"):
   // 调主进程删除引擎与 NapCat 数据,成功或广播到达都由 applySessionDelete
   // 完成本窗口清理;失败(文件占用等)由主进程返回 error,不做本地改动
@@ -240,12 +259,27 @@ export default function WidgetApp() {
   // 外部会话登记 + 未读计数(消息到达即创建会话条目;不自动切换,
   // 用户经折叠面板点击绑定,QQ 风格)
   useEffect(() => {
+    // 挂载即加载已删除会话标记(持久,重启后仍生效)
+    try {
+      const raw = localStorage.getItem(DELETED_SESSIONS_KEY)
+      if (raw) {
+        const arr = JSON.parse(raw)
+        if (Array.isArray(arr)) {
+          for (const k of arr) if (typeof k === 'string') deletedKeysRef.current.add(k)
+        }
+      }
+    } catch {
+      // 忽略损坏
+    }
     const offs: Array<() => void> = []
     const reg = (key: string, title: string, kind: 'private' | 'group', caption?: string, noUnread = false) => {
       // 删除抑制(2026-08-18 修复"删除后还在列表中"):该 key 处于删除抑制
       // 窗口时忽略一切自动注册,避免在途 seed/活动/群名异步把刚删的会话
       // 立即加回
       if (pendingDeleteKeysRef.current.has(key)) return
+      // 持久删除标记(根治 2026-08-18):用户已删除该会话,此后任何自动来源
+      // (seed/活动/新消息)都不再重建列表条目,直到重新 watch 接入时清除
+      if (deletedKeysRef.current.has(key)) return
       // **标题精化(2026-08-13 二轮)**:种子注册用占位标题(QQ 号/群号),
       // 消息到达/种子带真实称呼时更新覆盖(占位 → 主人/魔精/真实群名)
       setExtSessions((prev) =>
@@ -335,8 +369,11 @@ export default function WidgetApp() {
         for (const g of payload.groups) {
           const id = typeof g === 'string' ? g : (g as { id?: string }).id
           if (id) {
+            // watch 接入(seed 带来)+清理删除标记 → 允许再次出现该会话
+            const key = `group:${id}`
+            if (deletedKeysRef.current.delete(key)) persistDeletedKeys()
             const name = typeof g === 'string' ? undefined : (g as { name?: string }).name
-            reg(`group:${id}`, name || `群 ${id}`, 'group', `群号 ${id}`, true)
+            reg(key, name || `群 ${id}`, 'group', `群号 ${id}`, true)
           }
         }
       }
@@ -344,8 +381,10 @@ export default function WidgetApp() {
         for (const p of payload.privates) {
           const id = typeof p === 'string' ? p : (p as { id?: string }).id
           if (id) {
+            const key = `private:${id}`
+            if (deletedKeysRef.current.delete(key)) persistDeletedKeys()
             const name = typeof p === 'string' ? undefined : (p as { name?: string }).name
-            reg(`private:${id}`, name || `QQ ${id}`, 'private', `QQ ${id}`, true)
+            reg(key, name || `QQ ${id}`, 'private', `QQ ${id}`, true)
           }
         }
       }
@@ -403,9 +442,9 @@ export default function WidgetApp() {
     return () => {
       for (const off of offs) off()
     }
-    // applySessionDelete 稳定(useCallback([])),effect 仍只运行一次;
-    // 声明依赖以让 lint 知悉订阅回调引用它
-  }, [applySessionDelete])
+    // applySessionDelete/persistDeletedKeys 均稳定(useCallback([])),
+    // effect 仍只运行一次;声明依赖让 lint 知悉订阅回调引用它们
+  }, [applySessionDelete, persistDeletedKeys])
   // 当前查看会话的控制器(2026-08-13 七轮:面板纯化为切换器——
   // 主对话窗口显示 panelKey 对应上下文;外部实例未就绪回退主对话;
   // 切回 main 即恢复主对话快照——主控制器从未销毁)

@@ -457,42 +457,16 @@ export function AgentView({
   const [sessionNoteText, setSessionNoteText] = useState('')
   const [clearArmed, setClearArmed] = useState(false)
   const clearArmTimerRef = useRef<number | null>(null)
-  // 会话删除(2026-08-18 用户要求"增加会话删除功能,除主对话"):外部会话
-  // 列表每行可删除(主对话 main 除外)。两段式确认(与清空同款):首次点击
-  // 进入确认态 3.5s 自动复位,再次点击执行——调 onDeleteExternalSession
-  // (宿主清 localStorage/条目 + 主进程删引擎与 NapCat 数据)
-  const [sessionDelArmed, setSessionDelArmed] = useState<Record<string, boolean>>({})
-  const sessionDelTimerRef = useRef<Record<string, number>>({})
+  // 会话删除(2026-08-18 用户要求"增加会话删除功能,除主对话";后改单击
+  // 即删:原两段式确认需二次点击,用户第一击变红误以为已删 → "删除后还在
+  // 列表"。删除会话属低风险(聊天/列表,可重建),改单击直接执行并进抑制
+  // 窗口,交互更直观不会"看起来没删")
   const handleDeleteExternalSession = useCallback(
-    (key: string) => {
-      if (sessionDelArmed[key]) {
-        // 确认删除:取消该行确认态并执行
-        setSessionDelArmed((prev) => ({ ...prev, [key]: false }))
-        if (sessionDelTimerRef.current[key] !== undefined) {
-          window.clearTimeout(sessionDelTimerRef.current[key])
-          delete sessionDelTimerRef.current[key]
-        }
-        void onDeleteExternalSession?.(key)
-        return
-      }
-      // 首次点击进入确认态
-      setSessionDelArmed((prev) => ({ ...prev, [key]: true }))
-      if (sessionDelTimerRef.current[key] !== undefined) {
-        window.clearTimeout(sessionDelTimerRef.current[key])
-      }
-      sessionDelTimerRef.current[key] = window.setTimeout(() => {
-        setSessionDelArmed((prev) => ({ ...prev, [key]: false }))
-        delete sessionDelTimerRef.current[key]
-      }, 3500)
+    (event: MouseEvent<HTMLSpanElement>, key: string) => {
+      event.stopPropagation()
+      void onDeleteExternalSession?.(key)
     },
-    [sessionDelArmed, onDeleteExternalSession],
-  )
-  // 卸载时清理会话删除确认定时器
-  useEffect(
-    () => () => {
-      for (const t of Object.values(sessionDelTimerRef.current)) window.clearTimeout(t)
-    },
-    [],
+    [onDeleteExternalSession],
   )
   // 记录框收起动画(2026-08-17 用户要求"呼出记录框和保存记录的动画"):
   // 保存/取消先播放收起(淡出 + 上移),动画结束后才真正关闭编辑框——
@@ -1596,18 +1570,15 @@ export function AgentView({
                     {(unreadCounts?.[it.key] ?? 0) > 0 && (
                       <span className="island-session-unread">{unreadCounts![it.key]}</span>
                     )}
-                    {/* 删除外部会话(2026-08-18):两段式确认;主对话 'main'
-                        不在此列表,天然不可删 */}
+                    {/* 删除外部会话(2026-08-18 会话删除):单击即删(主对话
+                        'main' 不在列表,天然不可删) */}
                     {onDeleteExternalSession && (
                       <span
                         role="button"
-                        aria-label={sessionDelArmed[it.key] ? '再次点击确认删除该会话' : '删除该会话(聊天记录一并清除)'}
-                        className={`island-session-del${sessionDelArmed[it.key] ? ' armed' : ''}`}
-                        title={sessionDelArmed[it.key] ? '再次点击确认删除该会话' : '删除该会话(聊天记录一并清除)'}
-                        onClick={(event) => {
-                          event.stopPropagation()
-                          handleDeleteExternalSession(it.key)
-                        }}
+                        aria-label="删除该会话(聊天记录一并清除)"
+                        className="island-session-del"
+                        title="删除该会话(聊天记录一并清除)"
+                        onClick={(event) => handleDeleteExternalSession(event, it.key)}
                       >
                         <svg className="island-ctl-svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.4} strokeLinecap="round" strokeLinejoin="round">
                           <polyline points="3 6 5 6 21 6" />
