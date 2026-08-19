@@ -221,7 +221,7 @@ export interface IslandSettingsBridge {
    * ——LLM 据此回答"对话里有什么媒体、哪个在播放、音量多大" */
   getConversationMedia(): Promise<
     Array<
-      | { kind: 'img'; name?: string }
+      | { kind: 'img'; name?: string; path?: string }
       | {
           kind: 'audio'
           name?: string
@@ -880,7 +880,7 @@ export function registerIslandSettingsBridge(): void {
     // 播放器不在这些容器里,不列入——语义 = 对话窗口内的附件)
     async getConversationMedia() {
       const items: Array<
-        | { kind: 'img'; name?: string }
+        | { kind: 'img'; name?: string; path?: string }
         | {
             kind: 'audio'
             name?: string
@@ -922,7 +922,8 @@ export function registerIslandSettingsBridge(): void {
             duration: Number.isFinite(video.duration) ? Math.round(video.duration) : null,
           })
         } else if (img) {
-          items.push({ kind: 'img', name })
+          // path:本地图片绝对路径(2026-08-19,data-media-src 仅本地暴露)
+          items.push({ kind: 'img', name, path: frame.getAttribute('data-media-src') || undefined })
         }
       }
       for (const voice of document.querySelectorAll<HTMLElement>('.island-agent-voice')) {

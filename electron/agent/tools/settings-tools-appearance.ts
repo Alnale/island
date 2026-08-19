@@ -133,8 +133,10 @@ export function buildAppearanceTools(run: (op: IslandSettingsOp, args: unknown[]
       name: 'import_background',
       description:
         '导入图片作为灵动岛自定义背景(展开态与紧凑态同时应用,立即生效),' +
-        '并加入图片库。支持 png/jpg/jpeg/gif/webp/bmp。适合:用户给图片路径' +
-        '要求设为背景。',
+        '并加入图片库。支持 png/jpg/jpeg/gif/webp/bmp。' +
+        '适合:用户给图片路径要求设为背景;把**对话窗口里已展示的图片**设为' +
+        '背景时,先调 list_conversation_media 拿到该图片的 path,再传入本工具' +
+        '(不要凭空猜路径)。',
       parameters: {
         type: 'object',
         properties: {

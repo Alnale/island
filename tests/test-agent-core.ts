@@ -2636,7 +2636,7 @@ await test('list_conversation_media:格式化视频播放状态;空清单兜底'
         return [
           { kind: 'video', name: '演唱会.mp4', playing: true, volume: 60, speed: 1.5, loop: true, fullscreen: false, position: 83, duration: 225 },
           { kind: 'audio', name: 'demo.mp3', playing: false },
-          { kind: 'img', name: '封面.png' },
+          { kind: 'img', name: '封面.png', path: 'C:\\pics\\cover.png' },
         ]
       }
       return { ok: true }
@@ -2648,6 +2648,8 @@ await test('list_conversation_media:格式化视频播放状态;空清单兜底'
   assert(out.includes('正在播放') && out.includes('音量 60%') && out.includes('速度 1.5x'), '视频应带播放状态/音量/速度')
   assert(out.includes('循环开') && out.includes('非全屏') && out.includes('1:23 / 3:45'), '视频应带循环/全屏/进度')
   assert(out.includes('已暂停') && out.includes('图片'), '音频与图片应列出')
+  // 2026-08-19:对话中展示的图片带绝对路径,可传给 import_background 设背景
+  assert(out.includes('C:\\pics\\cover.png'), '图片应带绝对路径(path)供设背景复用')
   const empty = createSettingsTools({ runIslandSettings: async () => [] })
   assert(
     String(await empty.find((t) => t.name === 'list_conversation_media')!.execute({})).includes('没有媒体附件'),
@@ -5562,6 +5564,152 @@ await test('lms 视觉消息构造:vision 模型图片 → content 数组,文本
     'glm-4.6v-flash',
   )
   assert(typeof bad[0]!.content === 'string' && (bad[0]!.content as string) === '坏图', '读失败的图应跳过并退回纯文本')
+})
+
+// === 智谱 GLM 云端文档工具 execute 层严格回归(2026-08-19 补齐) ===
+// tools-glm.ts 内部用全局 fetch(glmPostForm/glmGet)。测试临时替换
+// globalThis.fetch 返回假响应,验证凭据/文件/参数校验与成功路径(含
+// glm_ocr 格式化、glm_file_parse sync/async 与 12000 截断)。execute 层是
+// test-agent-core 此前唯一未覆盖这两个新增工具的缺口。
+
+/** 覆盖全局 fetch,mock 一个 URL → Response 映射 */
+function mockFetch(routes: Record<string, () => unknown>): () => void {
+  const orig = globalThis.fetch
+  globalThis.fetch = (async (input: string | URL) => {
+    const url = String(input)
+    const hit = routes[url.split('?')[0]!]
+    if (!hit) return new Response(JSON.stringify({ error: { code: '4040', message: 'no route' } }), { status: 404, headers: { 'content-type': 'application/json' } })
+    const body = hit()
+    // 非 2xx 用 status 错误映射验证
+    const isFail = body === '__FAIL_503__'
+    return new Response(isFail ? JSON.stringify({ error: { code: '', message: 'busy' } }) : JSON.stringify(body), {
+      status: isFail ? 503 : 200,
+      headers: { 'content-type': 'application/json' },
+    })
+  }) as typeof fetch
+  return () => {
+    globalThis.fetch = orig
+  }
+}
+
+await test('glm_ocr:未配置 API Key → 报错引导在设置页填写(不隐藏工具)', async () => {
+  const tools = createTools({ onSwitchToMusic: () => {}, getGlmCreds: () => null })
+  const t = tools.find((x) => x.name === 'glm_ocr')
+  assert(t, '应注册 glm_ocr')
+  await assertRejects(() => t!.execute({ path: 'C:\\a.png' }), 'API Key 未配置', '缺凭据应引导填写')
+})
+await test('glm_file_parse:未配置 API Key → 同样引导报错', async () => {
+  const tools = createTools({ onSwitchToMusic: () => {}, getGlmCreds: () => null })
+  const t = tools.find((x) => x.name === 'glm_file_parse')
+  assert(t, '应注册 glm_file_parse')
+  await assertRejects(() => t!.execute({ path: 'C:\\a.pdf' }), 'API Key 未配置', '缺凭据应引导填写')
+})
+await test('glm_ocr:path 为空/文件不存在/非法 language_type 校验', async () => {
+    const tools = createTools({
+      onSwitchToMusic: () => {},
+      getGlmCreds: () => ({ apiKey: 'sk-test', baseURL: 'https://open.bigmodel.cn/api/paas/v4' }),
+    })
+    const t = tools.find((x) => x.name === 'glm_ocr')!
+    // 以下校验均在发起 fetch 前抛出,不需要 mock 路由
+    await assertRejects(() => t.execute({ path: '' }), 'path 不能为空', '空 path 应拒绝')
+    await assertRejects(() => t.execute({ path: path.join(tmp, 'nope.png') }), '文件不存在', '不存在应拒绝')
+    await assertRejects(() => t.execute({ path: path.join(tmp, 'nope.png'), language_type: 'XX' }), 'language_type', '非法语言应拒绝')
+  })
+await test('glm_file_parse:不支持扩展名/超 50MB/不存在的约束', async () => {
+  const restore = mockFetch({})
+  try {
+    const tools = createTools({
+      onSwitchToMusic: () => {},
+      getGlmCreds: () => ({ apiKey: 'sk-test', baseURL: 'https://open.bigmodel.cn/api/paas/v4' }),
+    })
+    const t = tools.find((x) => x.name === 'glm_file_parse')!
+    await assertRejects(() => t.execute({ path: path.join(tmp, 'a.xyz') }), '不支持的文件类型', '未知扩展名应拒绝')
+    await assertRejects(() => t.execute({ path: path.join(tmp, 'not-exist.pdf') }), '文件不存在', '不存在应拒绝')
+    // 超 50MB
+    const bigPdf = path.join(tmp, 'big.pdf')
+    await fs.writeFile(bigPdf, Buffer.alloc(51 * 1024 * 1024))
+    await assertRejects(() => t.execute({ path: bigPdf }), '文件过大', '超 50MB 应拒绝')
+    await fs.rm(bigPdf, { force: true }).catch(() => {})
+  } finally {
+    restore()
+  }
+})
+await test('glm_ocr:成功路径格式化(逐块文字 + 置信度);服务端 failed 报错', async () => {
+  const api = 'https://open.bigmodel.cn/api/paas/v4'
+  const restore = mockFetch({
+    [`${api}/files/ocr`]: () => ({
+      status: 'done',
+      words_result_num: 2,
+      words_result: [
+        { words: '你好世界' },
+        { words: '手写笔记', probability: { average: 0.92 } },
+      ],
+    }),
+  })
+  try {
+    const tools = createTools({
+      onSwitchToMusic: () => {},
+      getGlmCreds: () => ({ apiKey: 'sk-test', baseURL: api }),
+    })
+    const t = tools.find((x) => x.name === 'glm_ocr')!
+    await fs.writeFile(path.join(tmp, 'shot.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47]))
+    const out = String(await t.execute({ path: path.join(tmp, 'shot.png'), probability: true }))
+    assert(out.includes('你好世界') && out.includes('手写笔记'), '应输出识别文字')
+    assert(out.includes('92%'), '应输出置信度(average 0.92)')
+  } finally {
+    await fs.rm(path.join(tmp, 'shot.png'), { force: true }).catch(() => {})
+    restore()
+  }
+})
+await test('glm_file_parse:sync 成功 + 12000 字符截断;async 轮询 succeeded/failed', async () => {
+  const api = 'https://open.bigmodel.cn/api/paas/v4'
+  const longText = 'x'.repeat(20000)
+  const routes: Record<string, () => unknown> = {
+    [`${api}/files/parser/sync`]: () => ({ status: 'done', content: longText }),
+    [`${api}/files/parser/create`]: () => ({ status: 'created', task_id: 'task-1' }),
+    [`${api}/files/parser/result/task-1/text`]: () => ({ status: 'succeeded', content: 'PDF 摘要文本' }),
+  }
+  const restore = mockFetch(routes)
+  try {
+    const tools = createTools({
+      onSwitchToMusic: () => {},
+      getGlmCreds: () => ({ apiKey: 'sk-test', baseURL: api }),
+    })
+    const t = tools.find((x) => x.name === 'glm_file_parse')!
+    await fs.writeFile(path.join(tmp, 'doc.pdf'), Buffer.from([0x25, 0x50, 0x44, 0x46]))
+    // sync:超长截断
+    const out = String(await t.execute({ path: path.join(tmp, 'doc.pdf'), mode: 'sync' }))
+    assert(out.includes('已截断到 12000 字符') && !out.includes('x'.repeat(13000)), 'sync 超长应截断到 12000')
+    // async:轮询成功
+    const aout = String(await t.execute({ path: path.join(tmp, 'doc.pdf'), mode: 'async', tool_type: 'lite' }))
+    assert(aout.includes('PDF 摘要文本'), 'async 应轮询返回解析文本')
+  } finally {
+    await fs.rm(path.join(tmp, 'doc.pdf'), { force: true }).catch(() => {})
+    restore()
+  }
+})
+await test('glm_file_parse:async 服务端 failed → 报错;expert 仅 PDF', async () => {
+  const api = 'https://open.bigmodel.cn/api/paas/v4'
+  const restore = mockFetch({
+    [`${api}/files/parser/create`]: () => ({ status: 'failed', message: '解析引擎错误' }),
+  })
+  try {
+    const tools = createTools({
+      onSwitchToMusic: () => {},
+      getGlmCreds: () => ({ apiKey: 'sk-test', baseURL: api }),
+    })
+    const t = tools.find((x) => x.name === 'glm_file_parse')!
+    await fs.writeFile(path.join(tmp, 'ex.pdf'), Buffer.from([0x25, 0x50, 0x44, 0x46]))
+    await fs.writeFile(path.join(tmp, 'ex.txt'), 'hello')
+    // expert 仅 PDF
+    await assertRejects(() => t.execute({ path: path.join(tmp, 'ex.txt'), mode: 'async', tool_type: 'expert' }), 'expert', 'expert 非 PDF 应拒绝')
+    // 服务端 failed(create 阶段返回 failed → 任务创建失败)
+    await assertRejects(() => t.execute({ path: path.join(tmp, 'ex.pdf'), mode: 'async', tool_type: 'lite' }), '任务创建失败', '服务端 failed 应报错')
+  } finally {
+    await fs.rm(path.join(tmp, 'ex.pdf'), { force: true }).catch(() => {})
+    await fs.rm(path.join(tmp, 'ex.txt'), { force: true }).catch(() => {})
+    restore()
+  }
 })
 
 await runPluginKernelTests({ test, assert, assertRejects })

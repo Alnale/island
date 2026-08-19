@@ -1644,6 +1644,12 @@ export function MediaFrame({
         // 媒体名(2026-08-10,get_conversation_media 工具读取:LLM 查对话
         // 窗口有哪些媒体附件、哪个在播放)
         data-media-name={alt ?? ''}
+        // 本地图片绝对路径(2026-08-19,getConversationMedia 返回 path 供
+        // LLM 把对话中展示的图片设为背景等;仅本地文件暴露,dataUrl/blob
+        // /http 远程不泄露磁盘路径)
+        data-media-src={
+          kind === 'img' && !/^(https?:|data:|blob:)/i.test(src) ? src : undefined
+        }
         // aspect 未知(视频元数据未加载)时 16/9 兜底:video 元素没有
         // 内在尺寸,容器无高度 = 高度 0 = **视频不可见**(2026-08-08
         // 修复"播放视频看不到");元数据加载后按真实比例修正

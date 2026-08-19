@@ -764,10 +764,17 @@ export function AgentView({
     el.scrollTop = el.scrollHeight
   }, [])
   // 最简滚动方案(2026-08-18):每帧 useLayoutEffect 强制滚底,无依赖数组、
-  // 无守卫、无条件。确保每次 DOM 更新后 scrollTop 都指向 scrollHeight,
-  // 消除所有"先显示最新→突然跳回历史"的时序竞态。
+  // 无守卫。确保每次 DOM 更新后 scrollTop 都指向 scrollHeight,消除所有
+  // "先显示最新→突然跳回历史"的时序竞态。
+  // 修复(2026-08-19):原实现**无条件**滚底,会在用户主动向上滚动时仍强拉
+  // 到底部。对话窗口打开多张图片(如 14 张)时,图片异步加载持续改变内容
+  // 高度并触发重渲染,该 effect 每帧覆写 scrollTop → 用户无法向上滚动看
+  // 历史图片。改为**贴底守卫**:仅当 atBottomRef 为 true(用户仍贴底)时
+  // 强制跟随到底;用户已向上滚动(atBottomRef=false)则放行,不再强拉。
+  // 与下方 ResizeObserver 跟随路径的行为保持一致。
   useLayoutEffect(() => {
     if (view !== 'chat' || phase !== 'content') return
+    if (!atBottomRef.current) return
     const el = scrollRef.current
     if (!el) return
     el.scrollTop = el.scrollHeight

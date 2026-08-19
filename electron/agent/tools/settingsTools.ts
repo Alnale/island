@@ -55,16 +55,19 @@ export function createSettingsTools(deps: SettingsToolsDeps): AgentTool[] {
       description:
         '列出 Agent 对话窗口内**作为附件展示**的多媒体元素(图片/视频/音频,' +
         '含 LLM 在回复里 markdown 内嵌的 ![名字](路径));' +
+        '图片带**绝对路径(path)**,可传给 import_background 等设背景/复用;' +
         '视频带详细播放状态:是否正在播放、音量(0-100%)、播放速度(x)、' +
         '是否循环播放、是否全屏、播放进度;' +
         '音频带播放状态、音量(0-100%)、是否循环、播放进度。' +
         '适合:用户问"对话里有什么媒体""现在播的是什么""声音多大/循环没"' +
-        '等;配合 set_video_config / set_audio_config 调整(如用户说"把声音调大"先查当前音量)。',
+        '等;配合 set_video_config / set_audio_config 调整(如用户说"把声音调大"先查当前音量)、' +
+        '配合 import_background 把对话中展示的图片设为背景。',
       parameters: { type: 'object', properties: {} },
       async execute() {
         const items = (await run('getConversationMedia', [])) as Array<{
           kind: 'img' | 'video' | 'audio'
           name?: string
+          path?: string
           playing?: boolean
           volume?: number
           speed?: number
@@ -92,7 +95,7 @@ export function createSettingsTools(deps: SettingsToolsDeps): AgentTool[] {
             if (it.kind === 'audio') {
               return `- 音频 ${label(it.name)}:${it.playing ? ' 正在播放' : ' 已暂停'}`
             }
-            return `- 图片 ${label(it.name)}`
+            return `- 图片 ${label(it.name)}${it.path ? ` 路径 ${it.path}` : ''}`
           })
           .join('\n')
       },

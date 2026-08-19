@@ -1580,13 +1580,15 @@ export const DynamicIsland = memo(function DynamicIsland({
   // 多媒体库(seq≥1)后,之后即使点的是"设置",mediaLibrarySeq 仍为真 →
   // 永远误入多媒体库。改用两组 seq 的**增量**比较:本轮只有递增的那一组
   // 才被兑现,另一组不视为新请求,互不干扰。
-  const prevSettingsSeqRef = useRef(requestSettingsSeq)
-  const prevMediaLibrarySeqRef = useRef(requestMediaLibrarySeq)
+  const prevSettingsSeqRef = useRef(requestSettingsSeq ?? 0)
+  const prevMediaLibrarySeqRef = useRef(requestMediaLibrarySeq ?? 0)
   useEffect(() => {
-    const settingsUp = requestSettingsSeq > prevSettingsSeqRef.current
-    const mediaUp = requestMediaLibrarySeq > prevMediaLibrarySeqRef.current
-    prevSettingsSeqRef.current = requestSettingsSeq
-    prevMediaLibrarySeqRef.current = requestMediaLibrarySeq
+    const sSeq = requestSettingsSeq ?? 0
+    const mSeq = requestMediaLibrarySeq ?? 0
+    const settingsUp = sSeq > prevSettingsSeqRef.current
+    const mediaUp = mSeq > prevMediaLibrarySeqRef.current
+    prevSettingsSeqRef.current = sSeq
+    prevMediaLibrarySeqRef.current = mSeq
     if (!settingsUp && !mediaUp) return
     // 两组同帧递增时优先多媒体库(原"多媒体库优先"语义保留)
     setPanelView(mediaUp ? 'media-library' : 'settings')
