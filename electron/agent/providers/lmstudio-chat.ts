@@ -1282,10 +1282,11 @@ export async function lmstudioStreamChatCompletion(params: {
     }
   }
 
-  // GLM-4-9B 档位正文清洗:残片标签(</tool_result> 等)移除——实测编造
-  // 结果会带 </tool_result> 回声;真实结果经 user 消息回传,正文里的
-  // 这些标签一律是伪造/残片
-  if (glm4) finalText = glm4SanitizeText(finalText)
+  // GLM-4-9B 档位正文清洗:残片标签(</tool_result> 等)与**工具名标签包裹**
+  // (<工具名>…</工具名>,如 <notify>…</notify>)移除——实测编造结果带
+  // </tool_result> 回声,调用意图会被当 XML 标签输出;真实结果经 user
+  // 消息回传,正文里这些一律是伪造/残片。
+  if (glm4) finalText = glm4SanitizeText(finalText, glm4BareNames ?? undefined)
 
   return {
     calls: finalCalls,

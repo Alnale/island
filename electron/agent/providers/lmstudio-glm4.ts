@@ -89,6 +89,7 @@ remember(content="我是一只鲸鱼娘,温柔可爱", type="preference", tags=[
 - 媒体库(播放列表/音频库/视频库) → music_control / list_playlist / remove_playlist_item / list_audio_library / import_audio_library / add_audio_to_playlist / remove_background / rename_audio_library / remove_audio_library / list_video_library / import_video_library / rename_video_library / remove_video_library / play_library_video / set_video_config / set_audio_config;列表/管理图片库 → list_library_images / rename_library_image;调媒体窗口宽 → set_media_window_size
 - 提取图片/文档文字(OCR/解析) → glm_ocr / glm_file_parse;文档格式转换 → doc_convert
 - B 站(登录/搜索/下载/扫码)→ bili;超星答题 → xxt
+- **QQ/NapCat 相关 → napcat**——用户问"QQ 有消息吗/NapCat 连上没/之前和谁聊过/看看我QQ动态"或要**主动发私聊/群消息**(action=send/send_group)、撤消息、查群成员/好友、群管理、空间动态、会话管理时调用 napcat(action=...)**:QQ 消息自动回复是系统链路(收到自动进对话回复,无需调用);接入某群前先 napcat(action=groups) 拿真实群号**;会话订阅/静音/绑定 → manage_sessions(action=list/watch/unwatch/mute/unmute/bind)
 - 会话情况记录(说话风格/群特定要求)→ set_session_note;查/清 → get_session_note / clear_session_context;设定总结/心理揣测文风人格 → set_sub_agent_config;设主动陪伴开关/间隔 → set_proactive_config
 - 配置 MCP/技能/工具开关/输出目录/QQ → mcp_config / skills_config / tools_config / set_output_dir / set_napcat_config / set_owner_qq;设输出预算/查余额 → set_output_budget / get_deepseek_balance;介绍功能/如何用 → get_feature_guide
 
@@ -615,7 +616,7 @@ const G4_MARKS: Array<{ start: string; end: string; fence?: boolean }> = [
  */
 export class Glm4StreamGuard {
   private pending = ''
-  private mode: 'pass' | 'mark' | 'bare' | 'solojson' | 'drain' = 'pass'
+  private mode: 'pass' | 'mark' | 'bare' | 'solojson' | 'tag' | 'drain' = 'pass'
   private endMark = ''
   private markStart = ''
   private fence = false
@@ -624,6 +625,8 @@ export class Glm4StreamGuard {
   private escaped = false
   private bareRe: RegExp
   private soloJsonRe: RegExp
+  /** 2026-08-19 标签包裹型调用:<工具名> 起始识别(名紧贴尖括号) */
+  private tagRe: RegExp
   private rawNames: string[]
   private maxStartLen: number
   private maxNameLen: number
@@ -643,6 +646,13 @@ export class Glm4StreamGuard {
     this.soloJsonRe = names.length
       ? new RegExp(`(?:^|\\n)[ \\t]*(?:${alt})[A-Za-z0-9_]{0,16}[ \\t]*\\n[ \\t]*\\{`, 'gm')
       : /(?!)\(/g
+    // 2026-08-19 标签包裹型调用:<工具名>…</工具名>(GLM-4-9B 把调用意图
+    // 当 XML 标签输出,如 "<notify>请提供 NapCat 路径</notify>"——无括号、
+    // 无调用语法,共享四通道/裸调用都不命中 → 当正文泄漏)。识别尖括号
+    // 包裹的 **已注册工具名**(名与 < > 紧贴无空白,防误伤 markdown)。
+    this.tagRe = names.length
+      ? new RegExp(`<(?:(?:${alt})[A-Za-z0-9_]{0,16})>`, 'g')
+      : /(?!)>/g // 空名单兜底:永不匹配
     this.maxStartLen = Math.max(...G4_MARKS.map((m) => m.start.length))
     this.maxNameLen = names.reduce((m, n) => Math.max(m, n.length), 0)
   }
@@ -769,7 +779,27 @@ export class Glm4StreamGuard {
         }
         return out
       }
-      // pass:标记对 / 括号裸调用 / 裸名+JSON 取**最早**命中
+      if (this.mode === 'tag') {
+        // 工具名标签:<工具名>…</工具名> —— 吞到闭合 `</xxx>` 后**恢复
+        // pass**(标签有明确闭合,闭合后的正文该保留;这与 bare/drain
+        // 不同——裸调用闭合后模型会编造"结果"所以整段抑制,而标签是
+        // 明确的包裹,闭合即恢复)
+        const endIdx = this.pending.indexOf('</')
+        if (endIdx >= 0) {
+          const closeIdx = this.pending.indexOf('>', endIdx)
+          if (closeIdx >= 0) {
+            this.suppressedChars += closeIdx + 1
+            this.pending = this.pending.slice(closeIdx + 1)
+            this.mode = 'pass'
+            continue
+          }
+        }
+        // 尚无闭合:整段属于标签,继续抑制(等出现闭合)
+        this.suppressedChars += this.pending.length
+        this.pending = ''
+        return out
+      }
+      // pass:标记对 / 括号裸调用 / 裸名+JSON / 工具名标签 取**最早**命中
       let hitIdx = Infinity
       let hitMark: (typeof G4_MARKS)[number] | null = null
       for (const mk of G4_MARKS) {
@@ -783,8 +813,10 @@ export class Glm4StreamGuard {
       const bm = this.bareRe.exec(this.pending)
       this.soloJsonRe.lastIndex = 0
       const sm = this.soloJsonRe.exec(this.pending)
-      // 三者取最早:标记对 / 括号裸调用 / 裸名+JSON
-      let kind: 'bare' | 'solojson' | 'mark' = 'mark'
+      this.tagRe.lastIndex = 0
+      const tm = this.tagRe.exec(this.pending)
+      // 四者取最早:标记对 / 括号裸调用 / 裸名+JSON / 工具名标签
+      let kind: 'bare' | 'solojson' | 'tag' | 'mark' = 'mark'
       if (bm && bm.index < hitIdx) {
         hitIdx = bm.index
         kind = 'bare'
@@ -792,6 +824,10 @@ export class Glm4StreamGuard {
       if (sm && sm.index < hitIdx) {
         hitIdx = sm.index
         kind = 'solojson'
+      }
+      if (tm && tm.index < hitIdx) {
+        hitIdx = tm.index
+        kind = 'tag'
       }
       if (kind === 'bare' && bm) {
         out += this.pending.slice(0, bm.index)
@@ -810,6 +846,16 @@ export class Glm4StreamGuard {
         this.pending = this.pending.slice(consumeTo)
         this.mode = 'solojson'
         this.depth = 1
+        this.quote = ''
+        this.escaped = false
+        continue
+      }
+      if (kind === 'tag' && tm) {
+        out += this.pending.slice(0, tm.index)
+        // 吞掉开标签 <工具名>,进入 tag 模式(后续内容含编造"结果"全抑制)
+        this.suppressedChars += tm[0].length
+        this.pending = this.pending.slice(tm.index + tm[0].length)
+        this.mode = 'tag'
         this.quote = ''
         this.escaped = false
         continue
@@ -847,6 +893,14 @@ export class Glm4StreamGuard {
       if (this.rawNames.some((n) => n.startsWith(tail) || (tail.length > n.length && tail.startsWith(n)))) {
         return hold
       }
+      // 2026-08-19 工具名标签跨 delta:'<' + 工具名前缀(`<not`→<notify>)——
+      // 开标签的 '<' 到达时暂缓,防 `<n` 先行放行后 `otify>` 到账才拼出
+      // 完整 <notify> 无法抑制(已验证:第一帧 `<n` 被放走导致泄漏)
+      const tagBody = tail.startsWith('<') ? tail.slice(1) : ''
+      if (tagBody) {
+        if (tagBody.includes('<') || tagBody.includes('>')) continue
+        if (this.rawNames.some((n) => n.startsWith(tagBody))) return hold
+      }
     }
     if (this.pending.length > 0 && /[A-Za-z0-9_]/.test(this.pending.slice(-1))) return 1
     return 0
@@ -864,7 +918,7 @@ export class Glm4StreamGuard {
       this.fence = false
       return rest
     }
-    if (this.mode === 'bare' || this.mode === 'solojson' || this.mode === 'drain') {
+    if (this.mode === 'bare' || this.mode === 'solojson' || this.mode === 'tag' || this.mode === 'drain') {
       this.pending = ''
       this.mode = 'pass'
       this.depth = 0
@@ -886,13 +940,30 @@ export class Glm4StreamGuard {
  * 正文残片标签清洗(GLM 实测:编造结果带 </tool_result> 残片;真实工具
  * 结果经 user 消息回传,assistant 正文里出现这些标签一律是伪造/回声):
  * - <tool_result>…</tool_result> 整对:内容是编造的"结果",整体丢弃;
- * - 孤立残片(开/闭标签)单独移除。
+ * - 孤立残片(开/闭标签)单独移除;
+ * - 2026-08-19 **工具名标签包裹**:`<工具名>…</工具名>`(GLM-4-9B 把调用
+ *   意图当 XML 标签输出,如 <notify>请提供 NapCat 路径</notify>)整对丢弃
+ *   ——只处理**已注册工具名**,防误伤 markdown 的自定义标签。调用方传入
+ *   toolNames(GLM 档位每轮真实工具清单)时启用。
  */
-export function glm4SanitizeText(text: string): string {
+export function glm4SanitizeText(text: string, toolNames?: string[]): string {
   if (!text) return text
   let out = text.replace(/<tool_result>[\s\S]*?<\/tool_result>/g, '')
   out = out.replace(/<\/?tool_result>/g, '')
   out = out.replace(/<\/tool_call>/g, '')
   out = out.replace(/<\|tool_call_end\|>/g, '')
+  // 工具名标签整对丢弃:仅处理注册工具名(含去下划线变体),防误伤
+  if (toolNames && toolNames.length > 0) {
+    const names = nameAlternatives(toolNames)
+    const alt0 = names.map(escapeRe).join('|')
+    try {
+      out = out.replace(
+        new RegExp(`<((?:${alt0})[A-Za-z0-9_]{0,16})>[\\s\\S]*?<\\/\\1>`, 'g'),
+        '',
+      )
+    } catch {
+      // 正则异常(极端名)忽略,保底不误删
+    }
+  }
   return out
 }

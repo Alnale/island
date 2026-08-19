@@ -306,6 +306,41 @@ check(true, `全部 ${p1Total} 个解析样本通过(逐工具 × 形态)`)
   check(!out2.includes('open_file'), '流式 solo-json 跨 delta:不泄漏', `输出:${JSON.stringify(out2)}`)
 }
 
+// 工具名标签包裹型调用(2026-08-19:<notify>…</notify> 形式)——GLM-4-9B
+// 把调用意图当 XML 标签输出(如"<notify>请提供 NapCat 路径</notify>"),
+// 共享四通道/裸调用都不命中 → 当正文泄漏。验证流式抑制 + 落定清洗 +
+// 不误伤 markdown/数值。
+{
+  const { Glm4StreamGuard, glm4SanitizeText } = await import('../electron/agent/providers/lmstudio-glm4')
+  // 运行时 napcat/manage_sessions 是经引擎工具组单独注册的,不在这批
+  // 提取的 68 个里——手动并入以贴近真实运行时(收到时资源表含 napcat)
+  const gNames = [...tools.map((t) => t.name), 'napcat', 'manage_sessions']
+  // 完整标签流式抑制
+  const g = new Glm4StreamGuard(gNames)
+  const out = g.feed('<notify>请提供 NapCat 路径</notify>') + g.flush()
+  check(!out.includes('<notify>') && !out.includes('NapCat'), '流式抑制 <notify>…</notify>', `输出:${JSON.stringify(out)}`)
+  // 跨 delta 分片标签
+  const g2 = new Glm4StreamGuard(gNames)
+  const out2 = g2.feed('<n') + g2.feed('otify>请提供路径</notify>剩余正文') + g2.flush()
+  check(!out2.includes('<notify>') && !out2.includes('请提供路径') && out2.includes('剩余正文'), '流式跨 delta 标签抑制(保留后续正文)', `输出:${JSON.stringify(out2)}`)
+  // napcat 标签
+  const g3 = new Glm4StreamGuard(gNames)
+  const out3 = g3.feed('<napcat>发送消息</napcat>') + g3.flush()
+  check(!out3.includes('<napcat>') && !out3.includes('发送消息'), '流式抑制 <napcat>…</napcat>', `输出:${JSON.stringify(out3)}`)
+  // 落定清洗:工具名标签整对剥离
+  const s1 = glm4SanitizeText('好的。<notify>请提供路径</notify>好了', gNames)
+  check(!s1.includes('<notify>') && !s1.includes('请提供路径'), '落定剥离 <notify>…</notify>', `输出:${JSON.stringify(s1)}`)
+  // 落定:不误伤非工具标签(markdown <b>/<em>)
+  const s2 = glm4SanitizeText('下面是<b>加粗</b>文字', gNames)
+  check(s2.includes('<b>加粗</b>'), '不误伤非工具标签 <b>', `输出:${JSON.stringify(s2)}`)
+  // 落定:不误伤数值比较
+  const s3 = glm4SanitizeText('a < 3 > b', gNames)
+  check(s3 === 'a < 3 > b', '不误伤数值比较 < 3 >', `输出:${JSON.stringify(s3)}`)
+  // 兼容:无工具名参数时不动(旧签名)
+  const s4 = glm4SanitizeText('<notify>请提供路径</notify>')
+  check(s4.includes('<notify>'), '无工具名参数保留原样(兼容旧调用)', `输出:${JSON.stringify(s4)}`)
+}
+
 // 反误伤:普通正文不触发(散文括号/未注册名/正文里的工具名提法)
 {
   const benign = [
