@@ -22,6 +22,8 @@
     box-shadow 0.3s ease,
     border-color 0.3s ease,
     transform 0.35s cubic-bezier(0.34, 1.56, 0.64, 1);
+  /* 2026-08-18 设计规范:形变面常驻提示合成层,减少动画期重排 */
+  will-change: width, height, transform;
   position: relative;
   overflow: hidden;
   border: 1px solid rgba(255, 255, 255, 0.1);
@@ -392,7 +394,7 @@
 .island-panel-icon-tag {
   font-size: 0.56rem;
   letter-spacing: 0.06em;
-  color: var(--text-dim, rgba(255, 255, 255, 0.45));
+  color: var(--text-dim, rgba(255, 255, 255, 0.55));
   white-space: nowrap;
   max-width: 64px;
   overflow: hidden;
@@ -434,7 +436,7 @@
   gap: 6px;
   font-size: 0.62rem;
   letter-spacing: 0.16em;
-  color: var(--text-dim, rgba(255, 255, 255, 0.42));
+  color: var(--text-dim, rgba(255, 255, 255, 0.5));
 }
 
 .island-panel-state-dot {
@@ -602,7 +604,7 @@
 }
 
 .island-ctl:active {
-  transform: scale(0.88);
+  transform: scale(0.93);
 }
 
 .island-ctl:focus-visible {
@@ -776,7 +778,9 @@
 @keyframes modeIconIn {
   from {
     opacity: 0;
-    transform: rotate(-15deg) scale(0.5);
+    /* 2026-08-18:起始缩放 0.5 偏小(规范建议 ≥0.9 附近),提到 0.7 减少"从
+       太小弹出"的突兀感;装饰性图标,不必到 0.9 */
+    transform: rotate(-15deg) scale(0.7);
   }
   to {
     opacity: 1;
@@ -790,7 +794,7 @@
   }
   to {
     opacity: 0;
-    transform: scale(0.5);
+    transform: scale(0.7);
   }
 }
 
@@ -883,7 +887,7 @@
   margin: 0;
   font-size: 0.78rem;
   line-height: 1.4;
-  color: var(--text-dim, rgba(255, 255, 255, 0.35));
+  color: var(--text-dim, rgba(255, 255, 255, 0.5));
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -932,6 +936,8 @@
 
 .icon-floater {
   display: flex;
+  /* 2026-08-18:图标浮动/形变动画层,提示合成层 */
+  will-change: transform;
   animation: iconFloat 3s ease-in-out infinite;
 }
 
@@ -1015,23 +1021,29 @@
   position: absolute;
   bottom: -2px;
   left: 0;
-  width: 0;
+  /* 2026-08-18 设计规范:width 是布局属性,逐帧动画触发 layout——改
+     scaleX 走合成层(width 固定 100%,缩放由 transform 完成) */
+  width: 100%;
   height: 2px;
   background: linear-gradient(
     90deg,
     var(--state-color, #4ade80),
     color-mix(in srgb, var(--state-color, #4ade80) 55%, #000)
   );
+  transform: scaleX(0);
+  transform-origin: left center;
   animation: textUnderline 2s ease-in-out infinite;
 }
 
 @keyframes textUnderline {
   0%,
   100% {
-    width: 0;
+    transform: scaleX(0);
+    opacity: 0;
   }
   50% {
-    width: 100%;
+    transform: scaleX(1);
+    opacity: 0.8;
   }
 }
 
@@ -1097,9 +1109,10 @@
   transform: scaleX(0);
   transform-origin: left center;
   opacity: 0;
+  /* 2026-08-18 设计规范:悬停反馈属即时反馈应 ≤300ms(原 0.45s 弹簧偏慢) */
   transition:
-    transform 0.45s cubic-bezier(0.34, 1.56, 0.64, 1),
-    opacity 0.25s ease;
+    transform 0.28s cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 0.2s ease;
 }
 
 .island-demo:hover .island-extra {
@@ -1168,9 +1181,11 @@
   transition: transform 0.15s linear;
 }
 
-/* 拖动中:填充带阻尼滞后跟随指针(明显的拖尾感,像拖着有重量的物体) */
+/* 拖动中:填充 1:1 跟随指针(2026-08-18 设计规范:拖拽必须 1:1——原
+   0.3s 阻尼让"时间已到、填充未到",与实时粒子时间不同步;松手吸附由
+   常规 0.15s 过渡兜底) */
 .island-extra.scrubbing .island-progress-fill {
-  transition: transform 0.3s cubic-bezier(0.3, 0.75, 0.3, 1);
+  transition: none;
 }
 
 /* ===== 拖动中的粒子时间 =====

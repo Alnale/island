@@ -15,6 +15,8 @@
 import { getDefaultLlmRuntime, protocolOf } from '../plugin/llm'
 import type { LlmProtocol, LlmStreamParams } from '../plugin/llm'
 import { isMimoProvider, mimoProviderLabel } from './mimo-constants'
+import { isLMStudioProvider, lmstudioProviderLabel } from './lmstudio-constants'
+import { isGlmCloudProvider, glmCloudProviderLabel } from './glm-cloud-constants'
 import { isDeepSeekProvider, deepseekProviderLabel } from './deepseek-constants'
 import type { ProviderOutcome } from '../types'
 
@@ -34,6 +36,8 @@ export function providerLabel(baseURL: string): string {
   const url = baseURL.toLowerCase()
   if (url.includes('anthropic')) return 'Anthropic Messages'
   if (isMimoProvider(url)) return mimoProviderLabel(url)
+  if (isLMStudioProvider(url)) return lmstudioProviderLabel(url)
+  if (isGlmCloudProvider(url)) return glmCloudProviderLabel(url)
   if (isDeepSeekProvider(url)) return deepseekProviderLabel(url)
   // 兜底:未知地址,按 DeepSeek Responses 显示
   return deepseekProviderLabel(url)
@@ -42,6 +46,8 @@ export function providerLabel(baseURL: string): string {
 // 供渲染端/其他模块使用的便捷判定
 export { isMimoProvider } from './mimo-constants'
 export { isDeepSeekProvider } from './deepseek-constants'
+export { isLMStudioProvider } from './lmstudio-constants'
+export { isGlmCloudProvider } from './glm-cloud-constants'
 export {
   MIMO_DEFAULT_BASE_URL,
   MIMO_DEFAULT_MODEL,
@@ -53,10 +59,20 @@ export {
   DEEPSEEK_TOPUP_URL,
   DEEPSEEK_PLATFORM_URL,
 } from './deepseek-constants'
+export {
+  LMSTUDIO_DEFAULT_BASE_URL,
+  LMSTUDIO_DEFAULT_MODEL,
+  LMSTUDIO_PLATFORM_URL,
+} from './lmstudio-constants'
+export {
+  GLM_CLOUD_DEFAULT_BASE_URL,
+  GLM_CLOUD_DEFAULT_MODEL,
+  GLM_CLOUD_PLATFORM_URL,
+} from './glm-cloud-constants'
 
-/** 按配置发起流式请求(经默认 LLM 接缝分发;五个 provider 同构返回
+/** 按配置发起流式请求(经默认 LLM 接缝分发;各 provider 同构返回
  * ProviderOutcome;jsonMode/noThinking 所有支持的 provider 均兼容,
- * Anthropic 路径忽略)。共用方:delegate 子代理 / 总结 Sub Agent /
+ * Anthropic/LM Studio 路径忽略)。共用方:delegate 子代理 / 总结 Sub Agent /
  * 自我进化 harness(主循环已迁至 ctx.llm) */
 export function streamByConfig(params: LlmStreamParams): Promise<ProviderOutcome> {
   return getDefaultLlmRuntime().stream(params)

@@ -21,12 +21,29 @@ import type {} from '../plugin/host' // 宿主服务键声明
 import { createRunTurn } from './engine-loop'
 import { fetchDeepseekBalance, MAIN_MAX_OUTPUT_TOKENS, MIN_OUTPUT_TOKENS, MAX_OUTPUT_TOKENS } from './engine-builtins'
 import type {
+  AgentConfig,
   AgentEvent,
   AgentMessage,
   AgentTool,
   EngineDeps,
   McpServerConfig,
 } from '../types'
+
+/**
+ * LM Studio 本地端点免鉴权放行(2026-08-18):apiKey 为空但激活本地
+ * 供应商或地址指向本地 1234 端口时不拦截——修复"选用 LM Studio 已
+ * 加载模型后对话报『尚未配置 DeepSeek API Key』"(本地工作站免 Key)
+ */
+function localFreeKey(config: AgentConfig): boolean {
+  if (config.apiKey.trim()) return true
+  const u = (config.baseURL || '').toLowerCase()
+  return (
+    config.activeProvider === 'lmstudio' ||
+    u.includes('lmstudio') ||
+    u.includes('127.0.0.1:1234') ||
+    u.includes('localhost:1234')
+  )
+}
 
 /** agentLoop 服务:唯一的 loop 实现也只是插件之一(扩展依赖事件与服务而非它) */
 type RunTurnFn = ReturnType<typeof createRunTurn>
@@ -184,8 +201,8 @@ export function createAgentEngine(deps: EngineDeps): AgentEngine {
         return
       }
       const config = deps.getConfig()
-      if (!config.apiKey.trim()) {
-        emit({ type: 'error', message: '尚未配置 DeepSeek API Key(托盘菜单 → 设置 → Agent 设置)' })
+      if (!localFreeKey(config)) {
+        emit({ type: 'error', message: '尚未配置 API Key(云端供应商请到 设置 → Agent 设置 填写;LM Studio 本地免 Key)' })
         return
       }
       currentSessionId = typeof sessionId === 'string' && sessionId ? sessionId : null
@@ -209,7 +226,7 @@ export function createAgentEngine(deps: EngineDeps): AgentEngine {
     proactiveTurn(history, opts) {
       if (running) return
       const config = deps.getConfig()
-      if (!config.apiKey.trim()) return
+      if (!localFreeKey(config)) return
       currentSessionId =
         typeof opts?.sessionId === 'string' && opts.sessionId ? opts.sessionId : null
       running = true

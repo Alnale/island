@@ -53,6 +53,8 @@ const config: AgentConfig = {
   providers: {
     deepseek: { apiKey: '', baseURL: '', model: '' },
     mimo: { apiKey: '', baseURL: '', model: '' },
+    lmstudio: { apiKey: '', baseURL: '', model: '' },
+    glm: { apiKey: '', baseURL: '', model: '' },
   },
   apiKey: settings.agent?.apiKey ?? '',
   baseURL: settings.agent?.baseURL ?? 'https://api.deepseek.com',

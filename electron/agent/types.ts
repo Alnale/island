@@ -173,8 +173,9 @@ export interface ProviderCredentials {
   model: string
 }
 
-/** 支持的 LLM 供应商标识 */
-export type ProviderId = 'deepseek' | 'mimo'
+/** 支持的 LLM 供应商标识(lmstudio = 本地工作站,2026-08-18;
+ * glm = 智谱 GLM 云端,2026-08-19) */
+export type ProviderId = 'deepseek' | 'mimo' | 'lmstudio' | 'glm'
 
 /** Agent 配置(settings.json 的 agent 段,主进程持有) */
 export interface AgentConfig {
@@ -187,6 +188,15 @@ export interface AgentConfig {
   activeProvider: ProviderId
   /** 各供应商独立的连接凭据(每个 Key/地址/模型互不覆盖) */
   providers: Record<ProviderId, ProviderCredentials>
+  /**
+   * Sub Agent 供应商拆分(2026-08-18):总结/心理/标题/记忆提取等
+   * Sub Agent 使用的供应商桶——主 Agent 用强模型、Sub Agent 用本地
+   * 弱模型的分工;缺省 = 跟随主供应商(activeProvider),凭据从
+   * providers[subProvider] 取,三供应商两两组合最多 9 种
+   */
+  subProvider?: ProviderId
+  /** Sub Agent 模型覆盖(空 = 用 providers[subProvider] 已存模型) */
+  subModel?: string
   /** 当前激活供应商的 API Key(与 providers[activeProvider].apiKey 同步) */
   apiKey: string
   /** 当前激活供应商的 Base URL */

@@ -35,6 +35,7 @@ import { extractMediaPathFromStart, mediaKindForPath } from './tools-media'
 import { toolsRoot, userDataDir, toolOutputDir, setOutputEnv } from './tools-env'
 import { biliQuery, BILI_CWD, setBiliConfirmAction, setBiliSessionKey } from './tools-bili'
 import { docConvert, disposeDocflow } from './tools-docflow'
+import { createGlmTools, type GlmCreds } from './tools-glm'
 
 // ---- 已拆出簇 barrel 兼容 re-export(engine.ts/测试既有路径不变) ----
 export * from './tools-search'
@@ -42,6 +43,7 @@ export * from './tools-media'
 export * from './tools-env'
 export * from './tools-bili'
 export * from './tools-docflow'
+export * from './tools-glm'
 
 
 /**
@@ -318,6 +320,12 @@ export function createTools(deps: {
    * 没有传递到其它会话");null = 主对话 main
    */
   getSessionKey?(): string | null
+  /**
+   * 智谱 GLM 云端凭据(2026-08-19 文档工具:glm_ocr / glm_file_parse):
+   * 每次执行实时读取 providers.glm 桶(与当前激活供应商无关——主 Agent
+   * 用 DeepSeek 也能调 GLM 文档工具,只要 glm 桶配了 Key);null = 未配置
+   */
+  getGlmCreds?(): GlmCreds | null
 }): AgentTool[] {
   // 工具输出目录环境注入(tools-env 模块级,工具执行时读取)
   setOutputEnv({
@@ -338,6 +346,9 @@ export function createTools(deps: {
     const suffix = task.status === 'done' ? '完成' : task.status === 'failed' ? '失败' : '已取消'
     deps.onBackgroundDone?.({ title: `${task.title}${suffix}`, message: task.detail, sessionKey: task.sessionKey })
   })
+  // 智谱 GLM 云端文档工具(2026-08-19:glm_ocr / glm_file_parse;
+  // 凭据实时读取,未配置时工具执行报错引导,不隐藏工具)
+  const glmTools = createGlmTools(deps.getGlmCreds ?? (() => null))
   return [
     {
       name: 'exec_command',
@@ -816,5 +827,6 @@ export function createTools(deps: {
         return biliQuery(params)
       },
     },
+    ...glmTools,
   ]
 }

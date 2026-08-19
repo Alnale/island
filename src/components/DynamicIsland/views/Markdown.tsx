@@ -119,27 +119,28 @@ function openExternalUrl(url: string) {
 }
 
 /**
- * 消息内嵌图片(2026-08-07,工具二维码等 data URL):
- * **按比例展示** —— 显示宽度 = 原图宽 × 界面缩放系数(--agent-s,
- * 岛体根变量,100% = 1) × **1/4**(2026-08-07 用户实测二维码仍太大,
- * 缩小为四分之一),面板放大时图片等比放大;超宽图由 CSS
- * max-width: 100% 兜底压缩(保持比例 height: auto)。
- * 缩放变化会触发窗口 resize → 监听重算;原图尺寸加载后读 naturalWidth
+ * 消息内嵌图片(2026-08-07,工具二维码等 data URL):尺寸全权交给
+ * `.island-agent-md-img` CSS——宽 max-width:100% 兜底,高按消息区可视高
+ * (--agent-h)×62% 封顶 + 160px 下限保扫码(2026-08-19 用户反馈二维码
+ * 高度超整个对话窗口)。
+ * **块级包裹(2026-08-19 修复"登录二维码被压扁,不 1:1")**:本组件挂在
+ * .island-agent-msg-assistant(flex column,默认 align-items:stretch)下,
+ * img 直接作为 flex 子项会被 stretch 拉到容器宽、再被 max-height 封顶
+ * → 宽高比破坏(方形二维码 342×160 压扁)。包一层块级容器让 img 回到
+ * 常规流,max-width/max-height 联合解析严格保持等比(任意宽高比都正确)
  */
 export function AgentImage({ src, alt }: { src: string; alt?: string }) {
-  // 纯 CSS 控制尺寸:max-width:100% 兜底防超宽,height:auto 保持比例;
-  // 不再用 JS 计算 naturalWidth * scale * 0.25(计算值可能超过内容区
-  // 宽度导致撑大,且 resize/预加载逻辑增加重渲染与时序问题)
   return (
-    <img
-      src={src}
-      alt={alt ?? ''}
-      className="island-agent-md-img"
-      style={{ maxWidth: '100%', height: 'auto' }}
-      onPointerDown={(event) => {
-        if (event.button === 0) event.stopPropagation()
-      }}
-    />
+    <div className="island-agent-md-img-wrap">
+      <img
+        src={src}
+        alt={alt ?? ''}
+        className="island-agent-md-img"
+        onPointerDown={(event) => {
+          if (event.button === 0) event.stopPropagation()
+        }}
+      />
+    </div>
   )
 }
 

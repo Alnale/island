@@ -43,6 +43,7 @@ import {
   AGENT_PANEL_MIN_H,
   AGENT_PHASE_IN_MS,
   AGENT_WIDTH_ANIMATE_MS,
+  SESSION_DOCK_OPEN_H,
 } from '../layout'
 
 /** 面板子视图:聊天 / 对话历史 / 工具列表 */
@@ -256,19 +257,18 @@ function AttachIcon({ kind }: { kind: DropAttachment['kind'] }) {
  * - 用户手动滚动(滚轮/拖拽/触摸)时立即取消动画与模糊,不打架。
  * (曾加入过冲回弹,用户反馈不合适,已移除——纯滑行到位的缓动)
  */
-function smoothScrollTo(el: HTMLElement, target: number, durationMs = 800, blur = true) {
+// 2026-08-18:移除逐帧 blur 逻辑——唯一调用(scrollToBottom smooth)传
+// blur=false,该分支是从未启用的死代码;且滚动中逐帧写 filter 属 paint
+// 重活,软件渲染下是卡顿源。现只做 scrollTop 位移(合成友好)
+function smoothScrollTo(el: HTMLElement, target: number, durationMs = 800) {
   const start = el.scrollTop
   const dist = target - start
   if (Math.abs(dist) < 1) return
   const duration = Math.min(1200, Math.max(500, durationMs))
   const startTime = performance.now()
   let cancelled = false
-  let lastScroll = start
-  let lastTime = startTime
-  let peakVel = 0
   const cancel = () => {
     cancelled = true
-    if (blur) el.style.filter = ''
   }
   // 用户介入(滚轮/触摸/点击)即中止自绘动画,交给浏览器原生行为
   el.addEventListener('wheel', cancel, { once: true, passive: true })
@@ -279,21 +279,8 @@ function smoothScrollTo(el: HTMLElement, target: number, durationMs = 800, blur 
   const step = (now: number) => {
     if (cancelled) return
     const t = Math.min(1, (now - startTime) / duration)
-    const pos = start + dist * easeInOutQuart(t)
-    el.scrollTop = pos
-    if (blur) {
-      // 动态模糊:按速度占比二次衰减(速度降到峰值 25% 以下完全清除,
-      // 提前消退让减速段清晰可见)
-      const dt = Math.max(1, now - lastTime)
-      const vel = Math.abs(pos - lastScroll) / dt
-      if (vel > peakVel) peakVel = vel
-      const ratio = peakVel > 0 ? vel / peakVel : 0
-      el.style.filter = ratio > 0.25 ? `blur(${(3.5 * ratio * ratio).toFixed(2)}px)` : ''
-    }
-    lastScroll = pos
-    lastTime = now
+    el.scrollTop = start + dist * easeInOutQuart(t)
     if (t < 1) requestAnimationFrame(step)
-    else el.style.filter = ''
   }
   requestAnimationFrame(step)
 }
@@ -334,8 +321,9 @@ function formatSessionTime(ts: number): string {
  * 渲染都对**所有工具**同步执行 JSON.stringify(parameters)(exec_command/
  * write_file/bili 等 schema 大,切视图必卡)且 <details> 折叠时 body
  * 仍全量渲染。参数文本 useMemo(工具清单一次加载引用稳定,仅变化时
- * 重算),**折叠时不渲染 body**(参数只在展开时出现);受控 details +
- * onToggle 读 DOM 状态,交互与原生一致)
+ * 重算),**body 常驻但 grid 0fr 收起**(2026-08-18 改受控 div + grid 动画:
+ * 原 details 条件渲染瞬间跳变,与窗口高度动画割裂、响应滞后;grid 平滑
+ * 展开后内容随窗口高度动画并行协调,参数仅展开时可见)
  */
 const ToolsItem = memo(function ToolsItem({
   tool,
@@ -349,40 +337,46 @@ const ToolsItem = memo(function ToolsItem({
   const [open, setOpen] = useState(false)
   const paramsText = useMemo(() => JSON.stringify(tool.parameters, null, 2), [tool.parameters])
   return (
-    <details
-      className={`island-agent-tools-item${animClass}`}
-      open={open}
-      onToggle={(event) => setOpen(event.currentTarget.open)}
+    <div
+      className={`island-agent-tools-item${open ? ' open' : ''}${animClass}`}
       onPointerDown={(event) => {
         if (event.button === 0) event.stopPropagation()
       }}
     >
-      <summary>
-        <span className="island-agent-tools-name">{tool.name}</span>
+      {/* 头部:名称 + 禁用 + 箭头(受控 button,2026-08-18 改 grid 平滑展开——
+          原 details 条件渲染瞬间跳变,与窗口高度动画割裂、响应滞后) */}
+      <div className="island-agent-tools-head">
+        <button
+          type="button"
+          className="island-agent-tools-summary"
+          aria-expanded={open}
+          onClick={() => setOpen((o) => !o)}
+        >
+          <span className="island-agent-tools-name">{tool.name}</span>
+          <span className="island-agent-tools-toggle" aria-hidden="true">
+            ▸
+          </span>
+        </button>
         <button
           type="button"
           className="island-tools-disable"
           title="禁用此工具(对话中不可用)"
           onClick={(event) => {
-            // preventDefault 阻止 summary 的展开/收起默认行为
-            event.preventDefault()
             event.stopPropagation()
             onDisable(tool.name)
           }}
         >
           禁用
         </button>
-        <span className="island-agent-tools-toggle" aria-hidden="true">
-          ▸
-        </span>
-      </summary>
-      {open && (
+      </div>
+      {/* body 常驻 + grid 0fr↔1fr 平滑展开(与窗口高度动画并行协调) */}
+      <div className="island-agent-tools-body-wrap">
         <div className="island-agent-tools-body">
           <p className="island-agent-tools-desc">{tool.description}</p>
           <pre className="island-agent-tool-code">{paramsText}</pre>
         </div>
-      )}
-    </details>
+      </div>
+    </div>
   )
 })
 
@@ -747,24 +741,12 @@ export function AgentView({
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   // 跳底锚点(2026-08-17 收敛):消息列表末尾 0 高哨兵,统一跳底用它对齐
-  // 滚动容器底边——见 scrollToBottom
   const bottomAnchorRef = useRef<HTMLDivElement>(null)
-  // 自动贴底校正中标志(2026-08-17 修复"发送消息偶现跳到历史中部"):
-  // scrollToBottom 的多帧持续校正循环置 true;用户滚动(handleScroll)
-  // 置 false 取消——防校正循环把用户刚滚到的位置拉回底部
-  const autoScrollRef = useRef(false)
-  // 统一跳底(2026-08-17 收敛,替代原 jumpToBottom / scrollMessagesToBottom):
-  // 桌面挂件直接 scrollTop = scrollHeight(浏览器标准可靠落底,自动钳制到
-  // max;单源 + atBottomRef 守卫不再多源覆盖,不抖动;rAF 校正兜底媒体/
-  // 图片异步加载后的高度增长);Web 演示保留平滑滚动(锚点 rect 差值,
-  // GPU 渲染下精确)。**修复"桌面端无法滚动"(2026-08-17):不再用
-  // getBoundingClientRect 差值驱动——布局动画/软件渲染下 rect 与
-  // scrollTop 时序偏差会把滚动位置钉在错误值,表现为滚动条无法滚动
-  // **持续校正(2026-08-17 修复"发送消息偶现跳到历史中部")**:单次
-  // scrollTop = scrollHeight 若恰在内容渲染完成前执行,scrollTop 停在
-  // 中间(旧底部 = 新内容中部),后续若无修正即卡死——改为连续 rAF
-  // 逼近底部,内容持续增高(媒体/流式/字体重排)期间始终跟随,连续两帧
-  // 距底 < 2px 判定稳定停止;用户滚动(handleScroll)取消校正不打扰
+  // 贴底标志:用户滚动时置 false,切会话/新消息贴底时置 true
+  const atBottomRef = useRef(true)
+  // 2026-08-18 完全重写滚动逻辑:移除 settle 循环和 autoScrollRef 守卫。
+  // 滚动 = 简单直接的 scrollTop = scrollHeight,无多帧校正、无守卫阻塞。
+  // 会话切换使用 useLayoutEffect(同帧滚底,不咯噔、不残留滚动空间)。
   const scrollToBottom = useCallback((smooth = false) => {
     const el = scrollRef.current
     if (!el) return
@@ -774,56 +756,24 @@ export function AgentView({
         const crect = el.getBoundingClientRect()
         const arect = a.getBoundingClientRect()
         const delta = arect.bottom - crect.bottom
-        if (delta > 0.5) smoothScrollTo(el, el.scrollTop + delta, 650, false)
+        if (delta > 0.5) smoothScrollTo(el, el.scrollTop + delta, 650)
       }
       return
     }
-    // 已在自动校正中:复用循环,不重复启动(循环每帧逼近最新底部,
-    // 新内容到达时下一帧自然覆盖)
-    if (autoScrollRef.current) return
-    autoScrollRef.current = true
+    // 简单直接:一次 scrollTop 赋值,无 settle 循环、无守卫
     el.scrollTop = el.scrollHeight
-    let stable = 0
-    const settle = () => {
-      if (!el.isConnected || !autoScrollRef.current) {
-        autoScrollRef.current = false
-        return
-      }
-      if (el.scrollHeight - el.scrollTop - el.clientHeight < 2) {
-        stable += 1
-        if (stable >= 2) {
-          autoScrollRef.current = false
-          return
-        }
-      } else {
-        stable = 0
-        el.scrollTop = el.scrollHeight
-      }
-      requestAnimationFrame(settle)
-    }
-    requestAnimationFrame(settle)
   }, [])
-  // 会话切换/新消息时滚底(2026-08-17 收敛:原"messages/currentSessionKey
-  // 即时跳底 effect"与"切会话强制贴底 effect"两处冗余合并为一——任何
-  // 触发路径都统一跳到底部):
-  // - 切会话(currentSessionKey 变化):无论旧会话是否上翻过,一律复位
-  //   贴底标志(atBottomRef)+ 跳底(切换语义 = 看新上下文最新进展,
-  //   2026-08-14 用户反馈"切会话不滚到底");
-  // - 同会话新消息落定 / 会话面板开合:贴底时才跳(用户上翻不打扰),
-  //   由统一 scrollToBottom 锚点对齐精确落底(2026-08-17 替代原
-  //   jumpToBottom 双 rAF + 150ms 定时器——高度动画中反复设置绝对
-  //   scrollTop 是滚动条上下抖动、不落底的根因)
-  const prevSessionKeyRef = useRef(currentSessionKey)
-  useEffect(() => {
-    if (prevSessionKeyRef.current !== currentSessionKey) {
-      prevSessionKeyRef.current = currentSessionKey
-      atBottomRef.current = true
-    }
-    if (atBottomRef.current && view === 'chat' && phase === 'content') {
-      scrollToBottom()
-    }
-  }, [messages, currentSessionKey, sessionOpen, view, phase, scrollToBottom])
-  const atBottomRef = useRef(true)
+  // 最简滚动方案(2026-08-18):每帧 useLayoutEffect 强制滚底,无依赖数组、
+  // 无守卫、无条件。确保每次 DOM 更新后 scrollTop 都指向 scrollHeight,
+  // 消除所有"先显示最新→突然跳回历史"的时序竞态。
+  useLayoutEffect(() => {
+    if (view !== 'chat' || phase !== 'content') return
+    const el = scrollRef.current
+    if (!el) return
+    el.scrollTop = el.scrollHeight
+  })
+  // 卸载时清理测量节流计时器
+  useEffect(() => () => window.clearTimeout(measureTimerRef.current), [])
   const busy = status === 'thinking' || status === 'running'
   // 快捷菜单项(2026-08-07 重构:通用 QuickMenu 取代 ⋯ 弹出菜单):
   // 条件项随状态(停止生成仅运行中、新对话仅非空历史)。**默认选中
@@ -867,22 +817,32 @@ export function AgentView({
   const measureHeight = useCallback(() => {
     const doMeasure = (el: HTMLElement) => {
       let contentH = 0
+      // 参与 gap 计数的可见子元素数(空 tail display:none 不占位,
+      // 排除后与条件渲染的测量口径一致,见 .island-agent-tail:empty)
+      let visibleCount = 0
       const children = el.children
       for (let i = 0; i < children.length; i++) {
         const child = children[i] as HTMLElement
+        if (child.offsetHeight === 0 && getComputedStyle(child).display === 'none') continue
+        visibleCount++
         contentH += child.offsetHeight
       }
-      if (children.length > 1) {
+      if (visibleCount > 1) {
         // 列表 gap 从运行时样式读取(聊天 10px / 历史、工具 8px,自动跟随)
         const gap = parseFloat(getComputedStyle(el).rowGap)
-        if (Number.isFinite(gap) && gap > 0) contentH += (children.length - 1) * gap
+        if (Number.isFinite(gap) && gap > 0) contentH += (visibleCount - 1) * gap
       }
       // **会话面板高度需求(2026-08-13 三轮,用户要求"窗口大小足够展示
       // 相关信息,支持高度响应式伸缩")**:面板展开时,窗口需容纳面板
       // (面板垂直居中于岛体,超出部分 = 需要的额外窗口高度)
       let dockH = 0
-      if (sessionOpenRef.current && dockRef.current) {
-        dockH = Math.max(0, Math.min(dockRef.current.offsetHeight, 480) - contentH)
+      if (sessionOpenRef.current) {
+        // 2026-08-18 优化:用目标高度(SESSION_DOCK_OPEN_H,与 CSS
+        // .island-session-dock.open 的 height 一致)而非动画中的 offsetHeight
+        // ——点击即按最终高度计算,窗口高度动画与 dock 动画并行一步到位,
+        // 不再等 CSS 动画完成再量(380ms 滞后 + 中间值错位的根源);
+        // 折叠时 dock(52px)比内容矮,无额外窗口高度需求
+        dockH = Math.max(0, Math.min(SESSION_DOCK_OPEN_H, 480) - contentH)
       }
       // **会话上下文横幅高度(2026-08-13 用户实测"收起会话面板后单条
       // 消息底部被截断、响应式布局失效")**:查看外部会话时横幅在消息
@@ -936,10 +896,11 @@ export function AgentView({
     return () => ro.disconnect()
   }, [view, phase, measureHeight, tools, toolQuery, excludedTools, sessions])
 
-  // 会话面板开合 → 重测高度(2026-08-13 三轮:窗口随面板伸缩)
+  // 会话面板开合 → 重测高度(2026-08-18 优化:去掉 380ms 延迟——原等 CSS
+  // 高度动画完成再测,窗口变化明显滞后"响应不及时";dockH 已按目标高度
+  // 计算,点击即测,窗口高度动画立即与 dock 动画并行开始)
   useEffect(() => {
-    const t = window.setTimeout(() => measureHeight(), 380)
-    return () => window.clearTimeout(t)
+    measureHeight()
   }, [sessionOpen, currentSessionKey, measureHeight])
   // 视图切换(chat ↔ 对话历史/工具列表):立即换主实例(新视图进场
   // 动画),旧视图副本盖在上层播放离场动画,结束后卸载并重测高度
@@ -1113,7 +1074,10 @@ export function AgentView({
     })
     for (let i = 0; i < el.children.length; i++) ro.observe(el.children[i])
     return () => ro.disconnect()
-  }, [phase, measureHeight, scrollToBottom])
+    // view 入 deps(2026-08-19):三视图共用滚动容器,切换时 children 被整批
+    // 替换——原 deps 不含 view,切回 chat 后 RO 观察的还是挂载时的旧节点
+    // 引用(已卸载,静默失效),工具卡片展开等高度变化无人测量
+  }, [phase, measureHeight, scrollToBottom, currentSessionKey, view])
 
   // 卸载时清理测量节流计时器
   useEffect(() => () => window.clearTimeout(measureTimerRef.current), [])
@@ -1138,14 +1102,9 @@ export function AgentView({
   // 引用,既绑定 React onScroll,又经下方 effect 加原生 scroll 监听——
   // 保证用户滚动(滚轮/拖滚动条)时 atBottomRef 一定置 false,后续
   // effect 才不把滚动拉回底部(否则表现为"滚动条无法滚动/一滚就弹回")
-  // **取消自动贴底校正(2026-08-17)**:任何 scroll 事件都视为用户介入,
-  // 置 autoScrollRef=false 终止 scrollToBottom 的持续校正循环——防止
-  // 校正循环把用户刚滚到的位置拉回底部。程序化 scrollTop 赋值不触发
-  // scroll 事件,故自动校正自身不会误取消
   const handleScroll = useCallback(() => {
     const el = scrollRef.current
     if (!el) return
-    autoScrollRef.current = false
     atBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48
   }, [])
   // atBottomRef 可靠更新:chat 内容态给滚动容器加原生 scroll 监听
@@ -1618,7 +1577,7 @@ export function AgentView({
               </div>
             ) : (
               <>
-                <span className="island-session-current-title">
+                <span key={currentSessionKey} className="island-session-current-title">
                   {(() => {
                     const it = (sessionList ?? []).find((x) => x.key === currentSessionKey)
                     const kind = it?.kind
@@ -1648,7 +1607,7 @@ export function AgentView({
                     )
                   })()}
                 </span>
-                <span className="island-session-current-actions">
+                <span key={currentSessionKey} className="island-session-current-actions">
                   <button
                     type="button"
                     className={`island-session-ctl${sessionNoteText ? ' has-note' : ''}`}
@@ -1765,54 +1724,58 @@ export function AgentView({
                 </div>
               ))}
             </div>
-            {/* 尾部(流式/思考/错误):独立 flex 段,消息落定后并入列表 */}
-            {(streaming && (streaming.text || streaming.tools.length > 0)) ||
-            (status === 'thinking' && !streaming?.text) ||
-            lastError ? (
-              <div className="island-agent-tail">
-                {/* 流式中的助手回复:工具实时并入同一汇总列表(收纳态
-                    只有一行,执行中脉冲/成功失败计数实时更新;展开可
-                    看各卡状态,卡片 key 稳定 → open 状态跨事件保留) */}
-                {streaming && (streaming.text || streaming.tools.length > 0) && (
-                  <div className={`island-agent-msg-assistant${hasTurnMark(streaming.text) ? ' qq-peer' : ''}`}>
-                    {hasTurnMark(streaming.text) && <PeerTurnTag />}
-                    {hasMasterTurnMark(streaming.text) && <MasterTurnTag />}
-                    {streaming.text && (
-                      <div className="island-agent-text">
-                        {/* 流式前缀可能先到指纹标记(未凑齐时 strip 不命中,
-                            凑齐即剥)——与落定消息同款剥离,气泡不露标记 */}
-                        <Markdown text={stripTurnMarks(streaming.text)} caret />
-                      </div>
-                    )}
-                    {streaming.tools.length > 0 && (
-                      <ToolSummary
-                        items={streaming.tools.map((tool) => ({
-                          id: tool.id,
-                          name: tool.name,
-                          args: tool.args,
-                          ok: tool.ok,
-                          result: tool.result,
-                          durationMs: tool.durationMs,
-                        }))}
-                      />
-                    )}
-                  </div>
-                )}
-                {/* 思考中(无文本输出时) */}
-                {status === 'thinking' && !streaming?.text && (
-                  <div className="island-agent-thinking">
-                    <span className="island-agent-dot thinking" aria-hidden="true" />
-                    正在思考
-                    <span className="island-agent-dots" aria-hidden="true">
-                      <span />
-                      <span />
-                      <span />
-                    </span>
-                  </div>
-                )}
-                {lastError && <div className="island-agent-error">{lastError}</div>}
-              </div>
-            ) : null}
+            {/* 尾部(流式/思考/错误):独立 flex 段,消息落定后并入列表。
+                **恒渲染(2026-08-19 修复"工具静默期展开/收起工具列表窗口
+                不伸缩")**:高度 RO 在 effect 挂载时快照观察子元素——tail
+                原为条件渲染,流式开始才挂载,deps(phase/measureHeight/
+                scrollToBottom/currentSessionKey)无变化 → RO 永不观察它;
+                纯工具调用静默期(调用已显示、结果未回,无事件流)展开/
+                收起 ToolSummary 无人测量。恒渲染 + :empty 隐藏让 tail 在
+                RO 建立时即被观察,内部内容照旧条件渲染(空态 display:none
+                不占 gap、不参与测量) */}
+            <div className="island-agent-tail">
+              {/* 流式中的助手回复:工具实时并入同一汇总列表(收纳态
+                  只有一行,执行中脉冲/成功失败计数实时更新;展开可
+                  看各卡状态,卡片 key 稳定 → open 状态跨事件保留) */}
+              {streaming && (streaming.text || streaming.tools.length > 0) && (
+                <div className={`island-agent-msg-assistant${hasTurnMark(streaming.text) ? ' qq-peer' : ''}`}>
+                  {hasTurnMark(streaming.text) && <PeerTurnTag />}
+                  {hasMasterTurnMark(streaming.text) && <MasterTurnTag />}
+                  {streaming.text && (
+                    <div className="island-agent-text">
+                      {/* 流式前缀可能先到指纹标记(未凑齐时 strip 不命中,
+                          凑齐即剥)——与落定消息同款剥离,气泡不露标记 */}
+                      <Markdown text={stripTurnMarks(streaming.text)} caret />
+                    </div>
+                  )}
+                  {streaming.tools.length > 0 && (
+                    <ToolSummary
+                      items={streaming.tools.map((tool) => ({
+                        id: tool.id,
+                        name: tool.name,
+                        args: tool.args,
+                        ok: tool.ok,
+                        result: tool.result,
+                        durationMs: tool.durationMs,
+                      }))}
+                    />
+                  )}
+                </div>
+              )}
+              {/* 思考中(无文本输出时) */}
+              {status === 'thinking' && !streaming?.text && (
+                <div className="island-agent-thinking">
+                  <span className="island-agent-dot thinking" aria-hidden="true" />
+                  正在思考
+                  <span className="island-agent-dots" aria-hidden="true">
+                    <span />
+                    <span />
+                    <span />
+                  </span>
+                </div>
+              )}
+              {lastError && <div className="island-agent-error">{lastError}</div>}
+            </div>
             {/* 跳底锚点(2026-08-17):列表末尾 0 高哨兵,统一跳底
                 scrollToBottom 按实时布局对齐容器底边,精确落底 */}
             <div ref={bottomAnchorRef} className="island-msgs-anchor" aria-hidden="true" />

@@ -139,11 +139,25 @@ contextBridge.exposeInMainWorld('desktop', {
     ipcRenderer.on('napcat:session-deleted', listener)
     return () => ipcRenderer.removeListener('napcat:session-deleted', listener)
   },
+  /** 已删除会话列表下发(2026-08-18 根治"重启后又出现"):主进程启动时把
+   * userData 持久化的已删除会话恢复并下发,渲染端合并进 deletedKeys——
+   * 重启后不依赖渲染端 localStorage */
+  onDeletedSessions(callback) {
+    const listener = (_event, payload) => callback(payload)
+    ipcRenderer.on('island:deleted-sessions', listener)
+    return () => ipcRenderer.removeListener('island:deleted-sessions', listener)
+  },
   /** 删除单个外部会话(2026-08-18 用户要求"增加会话删除功能,除主对话"):
    * key = 'private:<QQ>' / 'group:<群号>',主对话 'main' 不可删除。
    * 主进程清理引擎/聊天记录/人格/监听名单后广播,这里返回等待结果 */
   napcatDeleteSession(key) {
     return ipcRenderer.invoke('napcat:session-delete', String(key))
+  },
+  /** 渲染端主动拉取会话状态(2026-08-18 重构):挂载时调用,返回主进程权威的
+   * { sessions: Record<key, {title,kind,lastAt}>, deleted: string[] }——
+   * 消除启动事件(seed/deleted 广播)在渲染端订阅前发出的时序竞态 */
+  getNapcatSessions() {
+    return ipcRenderer.invoke('napcat:get-sessions')
   },
   /** Agent:中止当前轮(sessionKey = 会话隔离键,缺省主对话——外部会话
    * 面板的停止按钮必须中止对应会话引擎,2026-08-13 与 agentSend 同款
@@ -190,6 +204,13 @@ contextBridge.exposeInMainWorld('desktop', {
   /** Agent:测试 MCP 服务连通性(独立连接 → 列工具 → 销毁) */
   agentTestMcp(server) {
     return ipcRenderer.invoke('agent:mcp-test', server)
+  },
+  /** Agent:LM Studio 模型挂载管理(2026-08-18 本地部署接入):
+   * action 'list' 列模型+加载状态 / 'load' 加载(payload 含 identifier/
+   * contextLength/gpuLayers)/ 'unload' 卸载;baseURL/apiKey 随 payload
+   * 传(编辑中未保存的地址也能管理);失败返回 {error} */
+  agentLmstudioModels(action, payload) {
+    return ipcRenderer.invoke('agent:lmstudio-models', String(action), payload || {})
   },
   /** Agent:读取记忆条目列表(记忆管理器用) */
   agentMemoryGet() {

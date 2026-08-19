@@ -6,7 +6,7 @@
  * 状态(列表/测量/输入/菜单)留在 AgentView。
  */
 
-import { memo, useEffect, useRef, useState } from 'react'
+import { memo, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { AgentMessage, AgentPart } from '../../../agent/types'
 import { stripNapcatInstructions, stripTurnMarks, textFromMessage, textFromParts } from '../../../agent/text'
 import { firstMediaKindInText } from './markdownParser'
@@ -256,20 +256,94 @@ export const ToolCard = memo(function ToolCard({ call }: { call: ToolCallData })
   const [showBody, setShowBody] = useState(false)
   const bodyClearTimerRef = useRef(0)
   useEffect(() => () => window.clearTimeout(bodyClearTimerRef.current), [])
+  // 气泡宽度动画(2026-08-19 用户要求:详情展开/收起时列表整体变宽/缩窄
+  // 无动画):参数/结果长行把 shrink-to-fit 气泡瞬间撑宽/缩窄。宽度是
+  // 内容驱动的 auto 布局结果——interpolate-size 只支持数值↔关键字过渡,
+  // auto→auto(内容变化)不触发 transition,纯 CSS 无解。走 FLIP(QuickMenu
+  // 按钮宽度过渡同款):显式 width 从旧值过渡到新值,结束后清回 auto
+  // 不干扰后续自然布局。展开在内容挂载帧启动(挂载后才知道目标宽);
+  // **收起并行化(2026-08-19 二次优化,用户要求"一边收缩变窄,一边收缩
+  // 变矮同步进行")**:原两段式(高度先收完 0.28s,300ms 后内容卸载气泡
+  // 才缩窄)改为 toggle 收起时同帧启动——临时 display:none body 量出
+  // "卸载后目标宽"再恢复,宽度过渡与高度 grid 动画同时长同曲线并行
+  const cardRef = useRef<HTMLDivElement | null>(null)
+  const flipW0Ref = useRef<number | null>(null)
+  const flipStopRef = useRef<(() => void) | null>(null)
+  useEffect(() => () => flipStopRef.current?.(), [])
+  /** 启动宽度过渡 w0→w1。clearOnEnd:结束后清显式宽回 auto(展开用);
+   *  收起传 false——保留 w1 到 300ms 后内容卸载帧再清:过渡完成(280ms)
+   *  到内容卸载(300ms)之间内容仍渲染,清掉会弹回内容宽闪烁;卸载后
+   *  自然宽已 = w1(display:none 量的就是卸载等效态),清掉无跳变 */
+  const startWidthFlip = (bubble: HTMLElement, w0: number, w1: number, clearOnEnd: boolean) => {
+    flipStopRef.current?.()
+    bubble.style.width = `${w0}px`
+    void bubble.offsetWidth // 强制 reflow 锁定过渡起点
+    bubble.style.width = `${w1}px`
+    const stop = () => {
+      bubble.removeEventListener('transitionend', done)
+      bubble.removeEventListener('transitioncancel', done)
+      if (clearOnEnd) bubble.style.width = ''
+      if (flipStopRef.current === stop) flipStopRef.current = null
+    }
+    const done = (event: TransitionEvent) => {
+      if (event.propertyName !== 'width') return
+      stop()
+    }
+    bubble.addEventListener('transitionend', done)
+    bubble.addEventListener('transitioncancel', done)
+    flipStopRef.current = stop
+  }
   const toggle = () => {
+    // 快照/启动前终止进行中的 FLIP 并清显式宽,取真实布局宽(快速连点时
+    // 新动画从当前实际宽度出发,不残留旧目标)
+    const bubble = cardRef.current?.closest<HTMLElement>('.island-agent-msg-assistant')
+    flipStopRef.current?.()
+    if (bubble) bubble.style.width = ''
     if (!open) {
+      // 展开:快照当前宽,内容挂载帧 layout effect 启动(挂载后才知道
+      // 目标宽;挂载瞬间气泡已被内容撑宽,FLIP 锁回 w0 再过渡到 w1)
+      if (bubble) flipW0Ref.current = bubble.offsetWidth
       setShowBody(true)
       requestAnimationFrame(() => {
         requestAnimationFrame(() => setOpen(true))
       })
     } else {
+      // 收起:宽度与高度**并行**收缩(同帧启动,0.28s 同曲线)。收起后
+      // 目标宽量不到(内容 300ms 后才卸载)——临时 display:none body
+      // 绕过 React 量一次"卸载后宽度"再恢复(同一同步块,无渲染帧介入
+      // 不闪烁);宽度不变(短参数)则跳过。showBody 卸载帧 layout effect
+      // 里 flipW0Ref 为 null,不会重复启动
+      const bodyWrap = cardRef.current?.querySelector<HTMLElement>('.island-agent-tool-body-wrap')
+      if (bubble && bodyWrap) {
+        const w0 = bubble.offsetWidth
+        bodyWrap.style.display = 'none'
+        const w1 = bubble.offsetWidth
+        bodyWrap.style.display = ''
+        if (Math.abs(w1 - w0) >= 1) startWidthFlip(bubble, w0, w1, false)
+      }
       setOpen(false)
       window.clearTimeout(bodyClearTimerRef.current)
       bodyClearTimerRef.current = window.setTimeout(() => setShowBody(false), 300)
     }
   }
+  // 展开:内容挂载帧(showBody 翻 true)paint 前启动宽度过渡;收起的
+  // 收尾也在此——内容卸载帧(翻 false)清收起 FLIP 残留的显式宽
+  useLayoutEffect(() => {
+    const bubble = cardRef.current?.closest<HTMLElement>('.island-agent-msg-assistant')
+    if (!showBody) {
+      if (bubble) bubble.style.width = ''
+      return
+    }
+    const w0 = flipW0Ref.current
+    flipW0Ref.current = null
+    if (w0 === null || !bubble) return
+    bubble.style.width = ''
+    const w1 = bubble.offsetWidth
+    if (Math.abs(w1 - w0) < 1) return
+    startWidthFlip(bubble, w0, w1, true)
+  }, [showBody])
   return (
-    <div className={`island-agent-tool${open ? ' open' : ''}`}>
+    <div ref={cardRef} className={`island-agent-tool${open ? ' open' : ''}`}>
       {/* 卡片是交互元素:拦截左键,长按卡片不触发岛体收回 */}
       <button
         type="button"

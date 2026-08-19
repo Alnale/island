@@ -1,13 +1,19 @@
 # 灵动岛挂件 · 技术文档
 
-> 版本:**V3.1** · 更新:2026-08-17 · 配套代码:dynamic-island(桌面挂件 + Web 演示版双入口)
+> 版本:**V3.1** · 更新:2026-08-18 · 配套代码:dynamic-island(桌面挂件 + Web 演示版双入口)
 >
 > 本文档是灵动岛桌面挂件(Windows)的完整技术说明——架构设计、模块实现、
 > 交互细节、踩坑记录、测试体系与调试工具。同时作为 Agent 模式的功能引导
 > 知识库:LLM 对话中可调用 `get_feature_guide` 工具按话题读取本文档章节,
 > 向用户介绍灵动岛有什么功能、怎么用(见「第 11 章 功能清单与使用引导」)。
 >
-> **V3.1 工程重点**(本版文档新增专章):
+> **2026-08-19 工程重点**(本版文档新增专章):
+> [第 45 章 智谱 GLM 云端供应商与 GLM 工具族](#第-45-章-智谱-glm-云端供应商与-glm-工具族2026-08-19)——
+> 智谱 GLM 云端 Chat Completions 供应商(第七适配器) + GLM 云端文档工具簇
+> (`glm_ocr` / `glm_file_parse`) + LM Studio 本地 GLM-4-9B 系专属档位(第五
+> 解析通道 / 流式裸调用防护 / 残片清洗) + 多模型并存分工。
+>
+> V3.1 工程重点保留专章:
 > [第 43 章 安装器与发行(V3.1 重点)](#第-43-章-安装器与发行v31-重点)——
 > 自绘安装向导(Apple 设计语言重绘) + 绿色发布打包 + 独立安装器 exe,
 > 以及 asar 复制 / 可写性兜底 / 权限降级三个关键踩坑。
@@ -66,6 +72,8 @@
 - [第 41 章 新开发者 30 分钟上手](#第-41-章-新开发者-30-分钟上手)
 - [第 42 章 插件化架构重构(V3.0 重点)](#第-42-章-插件化架构重构v30-重点)
 - [第 43 章 安装器与发行(V3.1 重点)](#第-43-章-安装器与发行v31-重点)
+- [第 44 章 2026-08-18 动画与交互优化专题](#第-44-章-2026-08-18-动画与交互优化专题)
+- [第 45 章 智谱 GLM 云端供应商与 GLM 工具族(2026-08-19)](#第-45-章-智谱-glm-云端供应商与-glm-工具族2026-08-19)
 - [结语](#结语)
 - [附录 A:Agent 事件一览](#附录-aagent-事件一览)
 - [附录 B:常量与阈值表](#附录-b常量与阈值表)
@@ -110,7 +118,7 @@ B站查询与下载、文档转换、超星答题等),并挂载 MCP 服务、技
 | 渲染 | React 19 + TypeScript + Vite | 双入口共享一个岛体组件 |
 | 构建 | esbuild | Electron 侧 agent.cjs / bridge.cjs 打包(零第三方依赖) |
 | 系统媒体 | Windows SMTC | PowerShell 读取 + C# WinRT 桥接 |
-| LLM | DeepSeek / Anthropic / MiMo API | 五适配器:DeepSeek Responses(默认)/ DeepSeek Chat / Anthropic Messages / MiMo Responses / MiMo Chat |
+| LLM | DeepSeek / Anthropic / MiMo / 智谱 GLM API + LM Studio 本地 | 七适配器:DeepSeek Responses(默认)/ DeepSeek Chat / Anthropic Messages / MiMo Responses / MiMo Chat / LM Studio Chat / GLM Chat(云端) |
 | 存储 | localStorage + IndexedDB + settings.json | 参数 / 媒体数据 / 引擎配置 |
 | 测试 | node 直测 + esbuild 打包 | 引擎核心测试 / Markdown 解析器测试 / UI 巡检 |
 
@@ -178,9 +186,9 @@ dynamic-island/
 │       │   ├── tool-events.ts / lifecycle-events.ts     # 能力事件/生命周期事件
 │       │   ├── session-log.ts / prompt.ts / errors.ts / index.ts
 │       ├── providers/          # LLM 供应商域(deepseek/chat/anthropic/mimo-*
-│       │                       #  五适配器 + sse 公共层 + provider.ts 分发)
+│       │                       #  lmstudio-*/glm-cloud + sse 公共层 + provider 分发)
 │       ├── tools/              # 工具族域(tools.ts 主入口 + env/bili/docflow/
-│       │                       #  search/media 分簇 + settingsTools 四文件
+│       │                       #  search/media/glm 分簇 + settingsTools 四文件
 │       │                       #  + sessionTools/configTools/tool-args)
 │       ├── napcat/             # QQ 通道域(napcat.ts 入口 + client/message/
 │       │                       #  session/store/text + wsclient 手写 WS)
@@ -509,7 +517,7 @@ seek 并返回 false。验证结果按 sourceAppId 持久化(localStorage
   `electron` external;入口 `engine/engine.ts`,evolution 经 re-export 打进
   同一产物),主进程内运行(非 utilityProcess:纯异步网络/文件 IO)。
 - **一切皆插件(V3.0)**:引擎能力树由插件内核(`plugin/kernel.ts` 服务
-  容器)装配——LLM 接缝(ctx.llm 五适配器)、工具接缝(ctx.tools)、提示
+  容器)装配——LLM 接缝(ctx.llm 七适配器)、工具接缝(ctx.tools)、提示
   段落、会话日志全部是插件,声明式组合层(Profile/Patch)驱动;架构全貌
   与重构过程见[第 42 章 插件化架构重构](#第-42-章-插件化架构重构v30-重点)。
 - **无状态**:渲染端每次 send 回传完整历史(参考后端"客户端持有历史"模式)。
@@ -568,8 +576,9 @@ send(text, history)
 
 ### 5.3 Provider 详解
 
-五个 provider(DeepSeek Responses / DeepSeek Chat / Anthropic Messages /
-MiMo Responses / MiMo Chat)同构返回 `ProviderOutcome {calls, text, usage, aborted}`,
+七个 provider(DeepSeek Responses / DeepSeek Chat / Anthropic Messages /
+MiMo Responses / MiMo Chat / LM Studio Chat / GLM Chat 云端)同构返回
+`ProviderOutcome {calls, text, usage, aborted}`,
 引擎循环共用;工具结果截断 8000 字符回填上下文(各 provider 一致)。
 
 #### 5.3.1 DeepSeek Responses API(默认)
@@ -663,9 +672,178 @@ MiMo Responses / MiMo Chat)同构返回 `ProviderOutcome {calls, text, usage, ab
   sanitizeJsonStrings / truncateResult),同构返回 `ProviderOutcome`;
   `mimo-constants.ts` 提供 MiMo 错误码映射(403 地区/风控、404 资源未找到、
   421 内容拦截等)与展示名。
-- **接入**:五适配器注册进 ctx.llm 接缝(`plugin/llm.ts` 的 ALL_LLM_ADAPTERS:
-  mimoResponsesAdapter / mimoChatAdapter),执行时按 Base URL 经 `protocolOf`
-  解析分发;设置界面协议提示行走 `mimoProviderLabel`。
+- **接入**:MiMo 适配器(mimoResponsesAdapter / mimoChatAdapter)注册进
+  ctx.llm 接缝(`plugin/llm.ts` 的 ALL_LLM_ADAPTERS),执行时按 Base URL 经
+  `protocolOf` 解析分发;设置界面协议提示行走 `mimoProviderLabel`。
+
+#### 5.3.6 LM Studio 本地模型(第四供应商,2026-08-18 本地部署接入)
+
+- **定位**:LM Studio 是本地模型工作站——启动 Developer 服务器(默认端口
+  1234)后同时暴露两套 API:OpenAI 兼容层 `/v1/chat/completions`(对话,
+  支持 tools/stream,推理模型经 `delta.reasoning_content` 输出思维链)与
+  Native 管理层 `/api/v0/models`(列表)/ load / unload(需服务器 ≥ 0.3.6)。
+- **判定与常量**(`lmstudio-constants.ts`):`isLMStudioProvider`——地址含
+  "lmstudio" 或指向默认本地端口(127.0.0.1:1234 / localhost:1234 /
+  [::1]:1234);默认端点 `http://127.0.0.1:1234`,默认模型空 = 未选择;
+  错误码映射(401/403 拒绝访问→填 Key、404 版本过低、500 系模型加载失败/
+  显存不足)。
+- **实现**(`lmstudio-chat.ts`,`lmstudioStreamChatCompletion`):独立适配
+  OpenAI Chat Completions 流式协议,与 DeepSeek/MiMo 模块零相互导入
+  (工程约定:厂商模块完全独立),共用 sse.ts 公共层。与云端 provider 的
+  关键差异:**不发送思考参数**(本地端点不支持 reasoning_effort,思考与否
+  由所加载模型决定)/ **不发送 max_tokens**(输出长度由 LM Studio 内部
+  加载配置管理,旧硬编码 4096 会掐断推理模型超长思维链后的正文)/
+  **历史不回传 reasoning_content**(无 DeepSeek 多轮思考回传要求,未知
+  字段有被严格校验拒绝的风险)/ **API Key 可选**(本地默认免鉴权,非空
+  才带 Bearer)。
+- **model 为空直接报错**:不猜默认模型,报可读错误引导到设置界面
+  「模型挂载管理」选用已加载模型(或手填模型 key)。
+- **防"卸载后又自动加载"**:LM Studio 对 chat/completions 里未加载的
+  model 会自动懒加载——发请求前先 list 探测目标模型已加载,未加载直接
+  报错引导手动加载(list 探测失败时放行,由后续请求自行报错)。
+- **模型挂载管理面板**(AgentSettingsView「账号」tab,LM Studio 激活时
+  显示;经 `agent:lmstudio-models` IPC → main.cjs `lmstudioModelsApi`):
+  列出已下载模型与加载状态(ctx 长度/GPU 层数/量化)、加载/卸载/选用。
+  加载/卸载走 v1 REST 权威端点 → 老版本无 v1 时回退 v0 → OpenAI
+  兼容懒加载;**加载沿用 LM Studio 内部挂载配置,不做单独参数配置**
+  (2026-08-18 用户明确,上下文长度/GPU 层数在 LM Studio 应用内设置)。
+- **卸载必须用 v1 instance_id 语义(2026-08-19 修复"卸载不生效")**:
+  LM Studio 0.4+ 的 `/api/v1/models/unload` 要求 body 传 **instance_id**
+  (模型实例唯一 id,同一模型多实例时形如 "key:2"),不是 model key——
+  旧实现发 `{model}` 时 v1 返回 2xx 假成功,v0 回退永不触发,模型实际
+  一直挂在内存(LM Studio 后台看得见还在跑)。修复:卸载前 GET
+  `/api/v1/models` 探测 `data[].loaded_instances[].id`(多实例逐个卸),
+  v1 未探测到时按 key 赌一次再回退 v0 `{model}`;**卸载后复查确认**
+  (v1 实例探测 + v0 state 双查),仍 loaded 则报错引导手动处理,
+  绝不静默假成功;list 分支同样补了 v1 `loaded_instances` 解析。
+- **挂载操作必须自带持久化(三次踩坑实录)**:面板的「选用」「卸载」
+  操作直接 onSave 写 settings.json,不依赖用户点保存——① 卸载清空
+  model 若不持久化,残留旧模型引用,任何对话都会被 LM Studio 懒加载
+  "复活"已卸载模型;② 选用若只改表单状态,用户不点保存退出后引擎读到
+  空 model,对话报"LM Studio 未选择模型",重开设置又显示未选用
+  (2026-08-19 修复:`selectLmsModel` 选用即持久化,与卸载清空同款);
+  ③ 模型分工页 Sub 选用同样即时持久化(`selectSubLmsModel`)。
+  **即时持久化 patch 必须带 activeProvider(2026-08-19 修复"选用/卸载
+  后跳回旧供应商")**:switchProvider 只改表单不落盘,持久化里
+  activeProvider 还是旧值(如 mimo)——onSave 返回的 config 触发
+  AgentSettingsView 的 config 填充 effect(`[config]` 依赖)重建表单,
+  供应商跳回持久化旧值。四个即时调用点(selectLmsModel/lmsUnload 两
+  分支/selectSubLmsModel)patch 均显式带 `activeProvider: 表单当前值`;
+  且**不带顶层 model 字段**——applyAgentConfigPatch 先把顶层凭据同步
+  进旧 activeProvider 桶(在处理 activeProvider 切换之前),顶层 model
+  会污染旧供应商桶;只走 providers 全桶合并,主进程在 pid === 新
+  activeProvider 时自动同步顶层镜像。
+- **卸载 UI 时序(乐观更新 + 轮询确认)**:LM Studio 的 unload 应答可能
+  先于实际卸载完成(大模型释放显存需要时间),立即刷新会拉回旧状态
+  造成 UI"闪回"——点击卸载先乐观移出已加载分组(置灰"卸载中"过渡),
+  IPC 成功后每 1.2s 轮询(最多 6 次)直到模型真正从 loaded 列表消失;
+  操作进行中(`lmsAction` 非空)全部按钮互斥禁用,防刷新间隙重复触发。
+- **json_object 兼容降级(2026-08-19 修复本地模型 Sub 失效)**:不支持
+  structured output(grammar)的本地模型对 `response_format` 直接 400
+  ——适配器捕获后**去掉 response_format 重发整条降级链**,靠 prompt
+  约束 + 上层严格解析(extractJsonTitle 等)兜底;400 在链内短路
+  (每级都 400 时不再空转)。
+- **文本工具调用幻觉解析(2026-08-19 修复小模型不调工具,当日多轮实测+压测收口)**:
+  小模型(nanbeige4.2-3b / lfm2.5-2.6b 等)的 chat template 不支持
+  OpenAI tools 协议,LM Studio 不解析其工具意图,而是当正文原样吐出。
+  `parseTextToolCalls`(lmstudio-chat.ts,仅当协议通道零 tool_calls 时
+  介入)负责把这些"文本化调用意图"还原成真调用。**实测格式全家福**
+  (lfm2.5 同一模型逐轮变形,全部固化在 test-agent-core.ts 回归):
+
+  | 通道 | 实测形态 | 出处 |
+  |---|---|---|
+  | ① 特殊 token | `<\|tool_call_start\|>[bili_tool(action='saved', params={...})]<\|tool_call_end\|>` | lfm2.5 首轮 |
+  | ① 特殊 token | `[tool_call('name': 'read_file', 'arguments={'path': 'C:\...'})]` 引号键+冒号分隔+杂散引号 | 第三轮 |
+  | ① 特殊 token | `[工具名='search', 参数名='query', 值='...']` 中文键值对 | 压测 |
+  | ①b XML 标签 | `<tool_call>{"name":..., "arguments":{...}}</tool_call>`(TOOL_CALL_GUIDE 引导的规范格式,Qwen/Hermes 系原生训练格式) | 指引输出 |
+  | ② fence/裸 JSON | ```` ```json {"action": "search", ...} ````(nanbeige,常伴随编造"结果"段落)/ 整身裸 JSON `{"name": "create_task", ...}` | 压测 |
+  | 包装函数 | `tool_call(name='bili-tool', arguments='up_info')` 通用包装(含中文包装词:工具名/函数名/工具调用/调用工具) | 压测 |
+  | 位置式 | `工具名('read_file', '参数名': 'path', '参数值': 'C:\...')` 三件套 / `工具名='search', 参数={'query': '...'}` 两件套 | 压测 |
+
+  **解析管线**:`stripUnterminated`(未闭合半截调用段剥离,流被
+  max tokens 掐断时)→ 三通道片段提取(①/①b 容器内 + ② fence/
+  裸 JSON 行,`claimed` 区间去重防同片段双通道重复执行)→
+  `parseBody`(JSON 对象→单调用/JSON 数组→逐元素/非 JSON→位置式
+  三件套→两件套→剥 `[...]` 数组包裹→Python 调用 `parsePyCall`)
+  → `unwrapGenericCall`(通用包装解包:name=/工具名= 提升真名,
+  arguments/params/parameters/args 四键收纳,裸字符串→action 值)
+  → `resolveCall` 归一 → 正文截断到首个片段前(编造结果丢弃,
+  引擎执行真工具后回填,下一轮模型继续)。Python 字面量解析器
+  (单引号字符串/嵌套 dict/true/None)对 **Windows 路径反斜杠安全**:
+  仅收敛 `\\'` `\\"` `\\\\`,其余(`\U` `\A` 等)原样保留。
+
+  **关键容错(逐个都是实测/压测换来的)**:
+  - `parsePyCall` 键扫描:裸标识符与带引号键(`'name'`)皆认,
+    分隔符 `=`(kwargs)与 `:`(dict)皆可,函数名支持中文开头;
+  - **严格/非严格双模式**:①/①b 容器内是明确调用意图——工具名
+    幻觉(google/create_task)时**按原名非严格产出**,引擎执行报
+    "未知工具"回传 LLM 下一轮自愈(优于静默丢弃:流式过滤已吞掉
+    标记段,丢弃 = 用户只见空白);② fence/正文间裸 JSON 是弱信号
+    ——严格模式,未命中注册表不产出(防普通 JSON 展示块误判),
+    整身裸 JSON(全文就是 JSON)除外;
+  - **参数名同义归一**:`ARG_SYNONYMS` 表(file_path→path、
+    content/message/task_name→text、keyword→query、qq号→qq 等,
+    含中文同义词),多键竞争同一名取信息量更大值;**键值颠倒兜底**
+    (键是内容风格 `{"2026年科技新闻": "..."}` → 取键为主 string
+    参数);**全滤空保留**:参数键全不在 schema 时原样保留(剥元键)
+    而非滤成 `{}`——参数全可选的工具会静默空执行,原样保留让引擎
+    `validateRequiredArgs` 报错回传自愈;
+  - **`parsePyValue` 死循环修复(压测首轮抓出的致命 bug)**:首字符
+    不可识别(`=` `}` `)` 等)时原实现返回但**不消费字符** → 调用方
+    while 永不前进 → 主进程挂死。任何畸形输出必须消费一个字符返回。
+
+  测试:test-agent-core.ts 12+ 用例(五种实测变形逐一回归/流式过滤/
+  历史回传分流/防误判),另有独立压测脚本(见 8.4)。
+- **流式标记过滤 StreamCallFilter(2026-08-19 修复 SSE 指令暴露)**:
+  流式转发 `delta.content` 时工具调用标记(`<tool_call>`/
+  `<|tool_call_start|>`/```` ```json ````)会作为正文实时打到对话
+  窗口(解析器只在流结束后介入)——`StreamCallFilter` 在转发前抑制
+  标记段:**标记前正文照常打字机转发**(体验不变),标记段(开始→
+  结束)不转发;**跨 delta 分割保护**(标记被 SSE 切碎时尾部前缀
+  字符暂缓转发,`<tool_` + `call>` 不漏判);**fence 误伤兜底**
+  (抑制 ```` ```json ```` 但流结束仍未闭合 → flush 补发整段,可能
+  是普通展示块);**半截调用**(流被掐断的未闭合标记段)丢弃,与
+  `stripUnterminated` 落定剥离保持 UI 流式与落定 message 一致。
+  非流式路径同款过滤(一次性 content 也不留暴露口)。
+- **落定泄漏防护(2026-08-19 压测抓出的真 bug)**:流式过滤让"过程"
+  干净,但流结束后若 `parseTextToolCalls` 解析失败(新格式未收口),
+  finalText 仍含原始标记 → 落定 message 原样显示 `<|tool_call_start|>...`
+  ——修复:解析失败分支让 finalText 重过一遍 StreamCallFilter 剥标记
+  (与流式所见强制一致);剥空且有抑制时给可见提示"(模型尝试调用
+  工具,但调用格式无法识别,已忽略)"而非空白。
+- **Sub Agent 本地模型适配三防线(2026-08-19)**:① `resolveSubConfig`
+  Sub 桶 model 与 subModel 都空时**回退主配置**(旧版拿空 model 硬撞
+  LM Studio 报"未选择模型",总结/心理揣测全部静默失败——"Sub Agent
+  失效"的根因之一);② `subTimeout`——Sub 指向 LM Studio 时后台标签
+  任务超时统一放宽到 300s(本地推理模型思维链动辄数分钟,云端 60-90s
+  全部掐死;classify/monologue 等**发送前同步判定不放宽**,超时回退
+  放行不阻塞 QQ 路由);③ 模型分工页 Sub(lmstudio)专供**下拉菜单**
+  (自绘垂直弹层列已加载模型,选用即持久化,可与主 Agent 不同——
+  大模型对话/小模型跑总结揣测的本地分工;原生 select 无法定制滚动条,
+  弹层 max-height 176px + thin/`::-webkit-scrollbar` 定制滚动)。
+  **Sub LM Studio 端点凭据修复(2026-08-19)**:主 Agent 激活时顶层镜像
+  (form.baseURL/apiKey)是主供应商的;Sub 选了 lmstudio 但主在别的供应商
+  时,分工页下拉直接用顶层镜像 = 拿 DeepSeek 地址调 LM Studio API 全部
+  失败——端点凭据改从 lmstudio 供应商桶取(`lmsCreds`:主激活用顶层
+  镜像,否则用 `form.providers.lmstudio`)。
+- **设置屏蔽**:LM Studio 激活时「思考强度」「输出预算」两项隐藏
+  (本地端点不支持 reasoning effort;输出上限由 LM Studio 内部加载配置
+  决定,max_tokens 交由适配器忽略)。
+- **接入**:`lmstudioChatAdapter` 注册进 `plugin/llm.ts` 的
+  ALL_LLM_ADAPTERS,按 Base URL 经 `protocolOf` 解析分发;设置界面协议
+  提示行走 `lmstudioProviderLabel`。
+
+#### 5.3.7 智谱 GLM 云端(第五供应商,2026-08-19 云端接入)
+
+智谱开放平台(BigModel)官方 Chat Completions 端点,独立适配模块
+`providers/glm-cloud.ts` + `glm-cloud-constants.ts`,与其它厂商零相互导入;
+默认 Base URL `https://open.bigmodel.cn/api/paas/v4`、默认模型 `glm-4.7-flash`;
+判定 = URL 含 `bigmodel`。支持工具调用 / 深度思考(thinking,GLM-4.5+ 传)/
+推理程度(reasoning_effort,GLM-5.2 传)。GLM 云端无官方"余额查询"接口(设置
+界面引导到智谱控制台)。完整参数适配、流式解析、错误码映射见
+[第 45 章 45.1 节](#第-45-章-智谱-glm-云端供应商与-glm-工具族2026-08-19);
+同日的 **LM Studio GLM-4-9B 系专属档位**(裸调用解析/流式防护/残片清洗)
+与该章 45.3 节、45.4 节。
 
 ### 5.4 内置工具系统
 
@@ -1109,6 +1287,18 @@ running(detail 带进程与输出目录),完成/失败进终态——**顺带修
   + 总耗时 + 箭头),点击展开看各卡、再点卡片展开参数)。**0fr 折叠必须把
   grid item 的 padding-bottom 归零**(Chromium 实测:0fr 轨道残留 item
   padding 高度,收纳态露出被截断的「参数」标题带)。
+- **工具卡详情展开/收起的气泡宽度 FLIP 动画(2026-08-19)**:参数/结果长行
+  会把 shrink-to-fit 气泡瞬间撑宽/缩窄——宽度是内容驱动的 auto 布局结果,
+  `interpolate-size` 只支持数值↔关键字过渡(MDN 明确:两个 intrinsic 值
+  之间不可动画),auto→auto 不触发 transition,纯 CSS 无解,走 JS FLIP
+  (QuickMenu 按钮同款),详见 44.4.5。
+- **尾部容器 `.island-agent-tail` 恒渲染(2026-08-19 修复「工具静默期
+  展开/收起工具列表窗口不伸缩」)**:高度 ResizeObserver 在 effect 挂载时
+  快照观察子元素——tail 原为条件渲染,流式开始才挂载,deps 无变化 → RO
+  永不观察它;纯工具调用静默期(调用已显示、结果未回,无事件流)展开/
+  收起 ToolSummary 无人测量。恒渲染 + `:empty { display: none }` 让 tail
+  在 RO 建立时即被观察,空态不占 flex gap、不参与高度测量,布局与条件
+  渲染等价。
 - 底部输入 Enter 发送(IME 组字不触发)/Shift+Enter 换行、运行中变"停止"。
 - **面板高度自适应**:岛体高度 = `--agent-h` 变量驱动(AgentView 用
   scrollHeight 测量内容自然高,clamp [200, 600],消息列表 max-height =
@@ -1266,6 +1456,15 @@ DOM 数千节点,挂件禁用硬件加速(透明窗口 alpha 稳定,见 10.2)软
 - **链接**:仅 http(s) 渲染为锚点,点击经 window.desktop.openExternal
   (preload 新增,main.cjs app:open-external 处理器校验后 shell.openExternal,
   Web 演示版回退 window.open)。
+- **内嵌图片尺寸双约束(2026-08-19 修复二维码撑爆对话窗口)**:工具注入的
+  data URL 图片(Bili 登录二维码 342×342 等)经 `AgentImage`
+  (`.island-agent-md-img`)纯 CSS 约束——宽 `max-width: 100%` 兜底,
+  高 `max(160px, calc((var(--agent-h, 260px) - 116px) * 0.62))` 按消息区
+  可视高 62% 封顶(公式与 `.island-agent-messages` max-height 同源,任何
+  窗口高度下不超对话窗口六成,余量留给正文/工具卡/脚注);**160px 下限
+  保扫码**(二维码 57 模块,再小单模块 <3px 手机扫码不可靠——Bili 扫码
+  失效的老教训);`width/height: auto` 双 auto 保比例不变形。pointerDown
+  stopPropagation 防拖图冒泡成窗口拖拽。
 - **易踩坑(实测抓出)**:共享 /g 行内正则单例 + exec 循环 + 递归 parseInlines
   ——内层递归把 lastIndex 重置为 0,外层从 0 重扫同一匹配 = **死循环 OOM**
   (~~s~~ 链接分支复现,堆 4GB 被打爆);必须用 text.matchAll(内部克隆正则,
@@ -1485,6 +1684,13 @@ DOCEOF
   放开基础 500px 上限——否则在设置视图切缩放看不到效果),高度仍由内容
   驱动(--agent-h,不乘缩放),面板本身不 transform/zoom(**只放大面板/窗口
   尺寸,UI 元素(文字/按钮/气泡)不缩放**——"让程序大一点,眼睛不累")。
+- **账号页「供应商选择」QuickMenu 化(2026-08-19)**:原三个静态
+  `.island-agent-scale-btn` 按钮改为 QuickMenu(与左上角分组菜单同款:
+  悬浮展开一体胶囊 + 滚轮逐格切换 wheelWhenOpen + 高亮滑块 + 宽度过渡),
+  切换仍走 `switchProvider`(自动保存当前输入到旧供应商桶、加载新供应商
+  已存凭据)。**items 必须模块级稳定引用**(`PROVIDER_OPTIONS` 常量):
+  QuickMenu 的宽度测量/滑块定位 effect 以 items 为依赖,内联数组每次渲染
+  重建 → effect 每帧重跑 → setState → 渲染循环。
 
 ### 6.8 QuickMenu 通用组件
 
@@ -1678,7 +1884,7 @@ direction?('right'|'left'), wheelWhenOpen?}>`,四处复用:Agent 设置菜单 /
   + sse(GET 事件流 + POST 回传,含直接响应体与 bare 推送变体)。
 - **221 用例**(V3.0 收官;tests/plugin-kernel-tests.ts 并入同入口执行),
   覆盖:插件内核(注册/大声失败/逆序 dispose/inject 依赖校验/waterfall
-  中间件与短路/serial 观察钩子)、LLM 接缝(五适配器协议判定与解析错误
+  中间件与短路/serial 观察钩子)、LLM 接缝(适配器协议判定与解析错误
   码)、工具接缝(静态注册排除与动态源)、pre-step 提示拼装顺序、工具执行
   能力事件(tools/pre-execute deny/改写 + post-execute)、turn/step 生命
   周期事件(全出口覆盖与顺序)、组合层(Profile/patch/dump/未知 name 与
@@ -1748,6 +1954,32 @@ direction?('right'|'left'), wheelWhenOpen?}>`,四处复用:Agent 设置菜单 /
 `WIDGET_SCREENSHOT_QUIT=1`:截图/巡检完成后优雅退出(app.quit)——**必须
 带**:应用托盘常驻不自退,测试命令若用 timeout/taskkill 强杀进程树,
 子进程(bridge/GPU/renderer)被杀会打出 "renderer gone: crashed" 假象。
+
+### 8.4 LM Studio 工具调用压测(tests/stress-lmstudio.mjs,2026-08-19)
+
+本地模型工具调用链路的**高强度压力测试**,两段式:
+
+```
+node tests/stress-lmstudio.mjs [--base URL] [--model KEY] [--cases N] [--seed S] [--rounds N] [--offline-only]
+```
+
+- **A 离线压力**(无需 LM Studio 运行):语义模板(工具×参数形态)× 渲染
+  维度(容器 xml/token/fence × 体格式 json/py/引号键/包装/位置式 × 引号
+  风格 × 数组包裹 × 正文前后缀)可复现随机组合(mulberry32 固定种子,
+  `--seed` 换种子复跑)生成数百用例,roundtrip 验证 `parseTextToolCalls`
+  (名称精确命中/参数深等/正文截断语义)+ `StreamCallFilter`(随机 1-6
+  字符切块模拟 SSE delta,标记段零泄漏);
+- **B 端到端在线**(LM Studio 运行时自动执行,不可达自动跳过):真实 SSE
+  流式对话,围绕两大核心指标严格断言——**① 流式零泄漏**(text-delta
+  拼接 + 落定 message 双通道,五种标记形态零暴露)/ **② 正确调用**
+  (工具名命中注册表 + 参数实质断言:path 含文件名/query 非空/text 含
+  关键词;幻觉工具名单列软通过——格式解析已通,自愈交引擎报错循环);
+- 分项指标小结独立打印(泄漏/调用/参数错误分开计数),任一失败非零退出。
+- **首轮运行即抓出 6 个真实缺陷**(全部已修,详见 5.3.6):parsePyValue
+  畸形输入死循环挂死主进程(致命)、dict 等号分隔卡死、fence/裸 JSON
+  数组体跳过、幻觉工具名静默空回复、中文函数名不识别、参数名幻觉
+  全滤空静默空执行——**解析器任何改动后必跑**(离线段秒级,在线段
+  数十秒)。
 
 
 ---
@@ -2020,6 +2252,10 @@ showNotify**,给 fetch 加 signal 前重读本条。
   "把桌面截图保存一下"(需要先问清楚目标)。
 - **入口**:展开岛体 → Agent 面板;输入框 Enter 发送、Shift+Enter 换行;
   运行中变"停止";⋯ 菜单有新对话/历史/工具列表/多媒体库/设置/收起。
+- **本地模型(离线可用)**:安装 LM Studio 并启动 Developer 服务器(默认
+  端口 1234)→ Agent 设置「账号」切到 LM Studio → 「模型挂载管理」加载
+  模型后点「选用」(即时保存,无需点保存按钮)即可对话;思考强度/输出
+  预算由 LM Studio 内部配置决定,设置界面自动隐藏这两项。详见 5.3.6。
 
 ### 11.5 工具执行透明与确认
 
@@ -3559,7 +3795,7 @@ WidgetApp handlePanelViewChange 按视图查表调 set-height;大面板(440/540/
 | ToolSummary | 工具调用汇总行(收纳列表,默认折叠,见 6.2) |
 | MediaFrame | 媒体附件(图片/视频/音频气泡,见 6.4) |
 | VoiceBubble | 音频语音气泡(胶囊 + 声波动画) |
-| AgentImage | data URL/远程图片(按 --agent-s 缩放 × 1/4 展示) |
+| AgentImage | data URL/远程图片(高度按消息区可视高 62% 封顶 + 160px 扫码下限,见 6.3) |
 | VideoPlayer | 定制视频播放器(见 6.4/19.2) |
 
 - 已落定块 React.memo;工具结果一次遍历建 Map 配对(去 O(parts²));
@@ -3810,6 +4046,7 @@ remember / forget / list_memory / update_memory / evolve_memory
 | 2026-08-12 | **HEVC 原生软解**(自编译 Electron:ffmpeg HEVC 解码器 + media 层门控补丁,apply-hevc-electron.mjs 换装/回退,dev.bat 自动应用;AV1 验证本就支持)、hevc-frame 巡检改断言、**lint 警告清零(12 处)+ TS2367 修复 + 音乐控制桥实时状态修复(ref 镜像,原空依赖闭包读到首次渲染值)**、NapCat 主人硬编码、群消息直进对话与记忆强化、分会话人格、工具输出目录、set_audio_config/set_output_budget 等工具、消息列表虚拟滚动 |
 | 2026-08-13 | **受保护记忆条目**(进化丢失岛灵设定修复:protected 标记 + 人设自动锁定/加载迁移/applyChanges 硬拦截/forget 拒删/设置界面 🔒)、**NapCat 主人视角叙述剥离**(私聊窗口泄露修复:stripMasterNarration + 回他「…」引号回复提取 + 三处注入指令补人称约束)、**补丁版段错误根治**(toast 迁移托盘气泡 showNotify 统一出口 + fetch 移除 AbortSignal(llhttp UAF 规避,中止移 parseSse 安全点)+ NapCat 手写 WS 传输 wsclient.ts;补丁版 + 真流量 3×3 轮 90s 全稳定)、**恢复硬件加速**(roundedCorners:false 等透明窗口硬化,GPU 合成 + 视频硬解)、**图标优化**(make-icon 产出多尺寸 icon.ico(16-256 PNG-in-ICO)+ brand-electron-icon.mjs rcedit 烙进自编译 exe,弹窗/托盘/进程图标 256 高清;托盘与窗口图标 32→256)、**视频岛边缘裁切加固**(内层容器 + 视频/图片自身 22px 圆角 + isolation,GPU 合成层逃逸父级裁剪的四角矩形残留根治;全屏态重置圆角;mini 巡检增小窗截图 + 前后 DOM 几何诊断)、**QQ 提示词约束与窗口布局重构**(统一注入模板:类别行 QQ私聊/群聊·QQ号·称呼 + 原文 + 档案卡 + 编号回复规则[含安全红线:拒绝教唆操控主人电脑];buildProfileCard 按 QQ 号聚合联系人/人格/记忆 = 档案卡;UserBubble 分层显示 QQ→私聊/群聊→QQ号→可展开档案卡;Sub Agent 提示词精简:标题降级链 3→2、揣测四条规则;**档案卡 UI 动画化**(受控展开 + 0fr↔1fr 高度过渡与工具卡同款曲线,箭头旋转 180°,标签行轻强调,内容随高度渐入/收起淡出;历史剥离双通道:历史保留档案卡做消息隔离)、**档案卡称呼实时更新 + 唯一主人称呼**(主人缺名兜底「主人」,LLM 经 contact_update 实时更新档案下次生效,「主人」称呼只属于 主人账号)、**群聊冒泡**(主动陪伴判断注入群聊状态块,群里安静超陪伴间隔时偶尔 send_group 活跃气氛)、**bili 完成通知防吞**(background-done busy 时入队,idle 后逐条补发)、**QQ 回复路由泄露根治**(2026-08-13 用户实测:询问内容与后台下载完成的窗口回复被发给了陌生人——轮次来源三分类 qq/group/ask/window/system,只有主人窗口直发或主人 QQ 轮才消费陌生人 pending 且一次性,主动陪伴/系统轮永不路由;陌生人规则补"执行回复只写发给对方的话")、**陌生人执行轮防重发与防串线**(规则:执行轮禁止调 send/send_group 工具[回复文字即消息],禁止给主人发 QQ 消息;代码:agent:send 快照已发给该陌生人的私聊消息数,落定路由时对比——本轮已用工具发过则跳过 pending 路由,对方不再收到 2-3 条重复)、**媒体消息常驻**(MessageWindow 窗口化渲染扩范围覆盖全部媒体消息——新消息插入把播放中的视频顶出 overscan 不再卸载,进度/音量/倍速/播放态不丢)、**执行回复标记化串台根治**(「【回复对方】」标记:只有带标记的回复才路由给待回复陌生人并消费 pending——主人先回"嗯/让我想想"这类应答不再串台给陌生人也不清空 pending,真正指示轮的回复必达对方;无标记回复留在主人侧;气泡显示层剥离标记)、**主人权限显式化**(MASTER_IDENTITY_LINE 拼进主引擎系统提示:**逐条按标记判定身份**——带 QQ 来源标注 = 外部消息(只有 主人账号 是主人,不继承主人权限)、无来源标注窗口直发 = 主人最高权限、系统通知 = 系统事件;QQ 四处回复规则同步声明;档案卡增「最近发言」段(聊天记录备份按 QQ 过滤计入,群聊发言归到各人卡内,当前消息排除)) |、**会话隔离三 bug 联修**(17.6,用户实测:① 外部会话消息 LLM 完全不知道——agent:send 对 {engine,route} 条目直接 .send 是 undefined 抛 uncaughtException,改 .engine.send;② 会话首条消息回复不回发——routeFor 在引擎创建前回退 mainRoute,来源标记写进主对话路由,先取条目再取路由;③ 主对话让 LLM 发的消息切会话看不到——onSent → session-activity 回显链路 + 去重空白归一;stripToolNarration/stripMasterNarration 保留段尾换行,多行回复不再粘连;④ 单消息会话收起面板后消息被截断——岛体高度预算零余量,AGENT_PANEL_HEIGHT_SLACK 6px 计入;新增 session-debug 巡检(mock LLM 回显 + 假 OneBot 服务器 14 断言全链路复现,设置侧备份崩溃安全)) |
 | **V3.0**(2026-08-14) | **插件化架构重构十四期收官**(详见第 42 章):① 自研插件内核 kernel.ts(服务容器 + 可逆效果 + emit/waterfall/serial 类型化四通道,零外部依赖,per-engine ctx);② 能力接缝 ctx.llm(五适配器:DeepSeek Responses/Chat、Anthropic、MiMo Responses/Chat,执行时解析 + 专属错误码)与 ctx.tools(静态注册 + 动态源);③ 能力事件 tools/pre-execute/post-execute(瀑布可改写/否决)与生命周期事件 agent/turn-start/end、step-start/end(turn-end finally 全出口);④ 会话日志约束 Model-visible⟺Logged(session-log.ts,JSONL sink 可替换 + 图片清洗);⑤ 声明式组合层 composition.ts(PLUGIN_REGISTRY 18 工厂 + defaultProfile/applyPatch/dump,缺省装配与既往硬编码逐位一致);⑥ **域目录化整合**:electron/agent 扁平文件收编为 engine/plugin/providers/tools/napcat/subagents 六域,构建入口改 engine/engine.ts;验证基线 tsc 0 错、221/221 通过、build + smoke 全绿;**文档 V3.0 重写**:README/TECH.md 升级 V3.0(第 42 章插件化架构重构专章)|
+| **V3.1**(2026-08-17/18/19) | **安装器与发行(V3.1 主线,第 43 章)**:自绘安装向导 installer/ + 绿色发布 build-release + 独立安装器 build-installer + original-fs 修 asar 复制坑 + 可写性兜底 + 权限降级;→ **LM Studio 本地接入(第 5.3.6 章)**:第六适配器 lmstudio-chat(免 Key 模型挂载管理、instance_id 权威卸载、小模型文本工具调用解析、StreamCallFilter 流式过滤、格式全家福回归)→ **模型分工页**:主/Sub 不同供应商、本地模型下拉选用持久化 → **动画交互专题(第 44 章)**:会话滚动重写/手势/进度动量/工具面板 FLIP 等 → **供应商快捷切换(8-19)**:QuickMenu 化 + 凭据独立桶同步 → **智谱 GLM 云端(第 45 章,8-19)**:第七适配器 glm-chat(独立模块零相互导入、protocolOf 顺序 anthropic→mimo→lmstudio→glm→deepseek、错误码映射)+ GLM 文档工具簇(glm_ocr/glm_file_parse,工具总数 68→70)→ **LM Studio GLM-4-9B 专属档位**(第 45.3 章):裸调用第五解析通道/流式防护/残片清洗/多模型并存|
 
 
 ---
@@ -3933,9 +4170,10 @@ tools.ts/settingsTools.ts/napcat.ts 各自膨胀成数千行工厂、新能力�
   解析**——指定 id 未注册 → `LLM_ADAPTER_MISSING`;零个可用 →
   `LLM_ADAPTER_UNAVAILABLE`;多个未指定 → `LLM_ADAPTER_AMBIGUOUS`(选择
   永不依赖注册顺序);恰好一个 → 自动选中;
-- **Provider**:五个适配器实现同一 `LlmAdapter` 接口(`providers/` 域):
+- **Provider**:七个适配器实现同一 `LlmAdapter` 接口(`providers/` 域):
   DeepSeek Responses(默认)/ DeepSeek Chat / Anthropic Messages /
-  MiMo Responses / MiMo Chat——协议按 Base URL 细分(详见 5.3 与第 38 章);
+  MiMo Responses / MiMo Chat / LM Studio Chat(本地)/ GLM Chat(智谱云端)——
+  协议按 Base URL 细分(详见 5.3 与第 38 章);
 - **Consumer**:engine-loop(主循环)/ engine-tool-execution(delegate 子
   代理)/ subagents / evolution 经 `ctx.get('llm').stream()` 调用。
 
@@ -4357,11 +4595,11 @@ provider/工具/任务/总结/揣测/主动陪伴/记忆/进化/MCP/技能/预�
 
 ## 附录 I:全部工具一览
 
-引擎注册的全部工具(**68 个** `name:` 定义,按域分组;`createSettingsTools` 注入设置桥后注册
+引擎注册的全部工具(**70 个** `name:` 定义,按域分组;`createSettingsTools` 注入设置桥后注册
 **31 个**设置工具 + `music_control` 走独立音乐控制桥 `createMusicControlTools`,测试断言见
 tests/test-agent-core.ts「注入后 31 个工具齐」)。
 
-### 基础工具族(tools/tools.ts,16)
+### 基础工具族(tools/tools.ts,18)
 
 | 工具 | 一句话 |
 | --- | --- |
@@ -4378,6 +4616,8 @@ tests/test-agent-core.ts「注入后 31 个工具齐」)。
 | doc_convert | 文档转换(DocFlow 服务) |
 | xxt | 超星学习通自动答题 |
 | bili | B站查询/下载(内置 bili-tool,HEVC 自动转码/convert) |
+| glm_ocr | 图片文字识别 OCR(智谱 GLM 云端,含手写体/多语言;见 45.2) |
+| glm_file_parse | 文档解析提取文本(智谱 GLM 云端,sync/async;见 45.2) |
 
 ### 配置工具族(tools/configTools.ts,7)
 
@@ -4418,7 +4658,7 @@ get_session_note / set_session_note / clear_session_context
   remove_video_library / play_library_video / set_video_config / set_audio_config
 - **createMusicControlTools**(独立音乐控制桥,1):music_control(播放/暂停/切歌/进度/音量)
 
-合计:16 + 7 + 3 + 4 + 4 + 2 + 31 + 1 = **68 个工具定义**。
+合计:18 + 7 + 3 + 4 + 4 + 2 + 31 + 1 = **70 个工具定义**。
 
 ---
 
@@ -4437,3 +4677,418 @@ get_session_note / set_session_note / clear_session_context
 | lyric-api | 440 | 480 | 返回设置(设置类) |
 | agent-settings | 540 | 580 | 返回对话(设置类) |
 | media-library | 540 | 580 | 从哪来回哪去(托盘收起/菜单回对话) |
+
+---
+
+## 第 44 章 2026-08-18 动画与交互优化专题
+
+本章记录 2026-08-18 对 Agent 模式对话窗口进行的大规模动画与交互优化,涵盖
+滚动机制、手势系统、动效曲线、工具面板动画、会话切换、以及心理揣测文本清洗。
+
+### 44.1 会话切换滚动(彻底重写)
+
+#### 背景
+
+切换外部会话(主对话↔QQ 私聊/群聊)时,会话历史消息列表需要滚动到最新消息。
+原实现使用 `scrollToBottom` 函数,包含 settle 循环(rAF 多帧校正)+
+`autoScrollRef` 守卫,导致一系列时序竞态:
+
+- 首次 render:外部控制器未注册,`currentAgent` 回退为主 agent → 滚到主对话底部(错误)
+- 二次 render:控制器注册后消息更新,`scrollToBottom` 被 `autoScrollRef` 阻塞 → 不滚底
+- 用户感知:两次滚动造成"咯噔"顿挫,且残留滚动空间(还能再往下滚)
+
+#### 最终方案
+
+`useLayoutEffect` 无依赖数组 + 无条件 `scrollTop = scrollHeight`:
+
+```tsx
+// AgentView.tsx
+useLayoutEffect(() => {
+  if (view !== 'chat' || phase !== 'content') return
+  const el = scrollRef.current
+  if (!el) return
+  el.scrollTop = el.scrollHeight
+})
+```
+
+- 每帧 DOM 更新后强制滚底,消除所有时序竞态
+- 无 settle 循环、无 `autoScrollRef` 守卫、无 `atBottomRef` 条件
+- `useLayoutEffect` 在 paint 前同步执行,用户无感知滚动
+
+#### 辅助改动
+
+**SessionHost 控制器注册**(WidgetApp.tsx):`useEffect` → `useLayoutEffect`,
+确保控制器在 paint 前注册完毕,避免首次 render 的 `currentAgent` 回退。
+
+**ResizeObserver 依赖**(AgentView.tsx):添加 `currentSessionKey` 到依赖数组,
+确保会话切换时重新观察新消息 children,内容变化后触发滚底。
+
+#### 迭代历史(7 次重写)
+
+| 版本 | 方案 | 问题 |
+| --- | --- | --- |
+| v1 | `useEffect` + `scrollToBottom`(settle) | 咯噔+不贴底 |
+| v2 | `useEffect` + 直接 `scrollTop` | 首次正常,后续回退 |
+| v3 | `useEffect` + rAF 延迟 | 咯噔(一帧错位) |
+| v4 | `useLayoutEffect` + `messages` 引用检测 | 后续不触发 |
+| v5 | `useLayoutEffect` + `queueMicrotask` | cleanup 清除 |
+| v6 | `useEffect` + `setTimeout` 0(不清除) | React re-render 取消 |
+| v7 | `useLayoutEffect` 无依赖 + 无条件 | 最终稳定 |
+
+### 44.2 手势与交互优化
+
+#### 44.2.1 岛体长按 `setPointerCapture`(移除→改用 window 监听)
+
+**问题**:岛体按压/长按缺少 `setPointerCapture`,指针移出元素后 move/up
+事件不派发 → slop 取消失效、450ms 长按意外触发、按压态滞留。
+
+**修复**:放弃 island 自身的 `setPointerCapture`,改用 **window 级**
+`pointermove`/`pointerup`/`pointercancel` 监听兜底。监听在设 pressRef
+时绑定、命中即自我移除,卸载时清理,无泄漏。
+
+#### 44.2.2 文字区 swipe 手势
+
+**问题**:无速度判定 → 慢拖误触切歌;无方向滞后 → 先右后左被锁定首向;
+无跟手 → 跳变而非"拖动→动画"接缝。
+
+**修复**:新增末段速度判定(`|v|>0.4 px/ms` 才提交)、方向滞后(10px 滞后)、
+多指防护(校验已有活动 pointerId)。
+
+#### 44.2.3 进度条动量投影
+
+**问题**:快速甩动松手后时间瞬间停住,有"撞墙"接缝感。
+
+**修复**:维护 150ms 速度,超阈值时目标 = 当前 + v×0.2s 投影,clamp 后 seek。
+拖动中 fill 改 `transition:none`(1:1 跟手,与粒子时间同步)。
+
+#### 44.2.4 长按 slop 阈值
+
+**问题**:长按 slop 8px 过严,手抖 9px 即取消,而 swipe 要 36px →
+中间是"长按已取消、swipe 不够"的死区。
+
+**修复**:8px → 12px,消除死区。
+
+### 44.3 动效曲线优化
+
+#### 44.3.1 滚轮切换(`@keyframes` → `transition`)
+
+**问题**:滚轮切换用 `@keyframes` 动画,快速滚动时每次被打断从零重启 →
+闪烁/倒带。
+
+**修复**:WheelSwap 重构为常驻两层 + 双帧 class 驱动过渡,transition
+可重定向平滑续接,无闪烁。
+
+#### 44.3.2 曲线统一
+
+| 位置 | 原曲线 | 新曲线 |
+| --- | --- | --- |
+| textTransition 离场 | `ease-in` | `cubic-bezier(0.23,1,0.32,1)`(强 ease-out) |
+| 历史条目离场 | `ease-in` | ease-out |
+| 悬停反馈 | 0.45s | 0.28s |
+| 菜单展开 | 0.42s | 0.32s |
+| `.island-ctl:active` | `scale(0.88)` | `scale(0.93)` |
+| modeIcon 起始 | `scale(0.5)` | `scale(0.7)` |
+
+#### 44.3.3 无障碍媒体查询
+
+追加三项降级:
+
+- `@media (prefers-reduced-motion: reduce)` — 关闭弹性/无限动画
+- `@media (prefers-reduced-transparency: reduce)` — 毛玻璃变实底
+- `@media (prefers-contrast: more)` — 提高对比度
+
+#### 44.3.4 会话 dock 收起动画
+
+**问题**:dock 收起时"会话"按钮高度骤变(360→52),面板 0.16s 淡出太快,
+观感突兀。
+
+**修复**:
+- 收起曲线:0.3s → 0.34s `cubic-bezier(0.4,0,0.2,1)`(平缓开场)
+- 展开保持 0.28s 利落(收起慢、展开快)
+- 面板淡出:0.16s → 0.24s(与 dock 压缩协调)
+
+### 44.4 工具面板动画优化
+
+#### 44.4.1 工具列表视图(ToolsItem)
+
+**问题**:`<details>` 条件渲染瞬间跳变,与窗口高度动画割裂、响应滞后。
+
+**修复**:改为受控 `div` + `grid-template-rows 0fr↔1fr` 平滑展开。
+body 常驻但 grid 0fr 收起,展开时 0.28s 无过冲曲线。
+body-wrap 补 `overflow:hidden` 防止折叠态内边距透出。
+
+#### 44.4.2 工具汇总栏(ToolSummary)
+
+**问题**:`grid-template-rows 0fr↔1fr` 仅能动画展开/收起。已展开(1fr)时
+内部 ToolCard 状态变化(耗时数字/状态字/卡片自身展开)导致高度突变。
+
+**修复**:改用 `interpolate-size: allow-keywords` + `height: 0↔auto`
+(Chrome 133+)。覆盖两种场景:
+- 展开/收起时 height 0↔auto 平滑
+- 已展开时内部内容高度变化也平滑过渡
+
+内层 `opacity`/`transform` 淡入从 0.2s 同步为 0.28s,与 height 动画时序一致。
+
+#### 44.4.3 宽度稳定性
+
+**问题**:展开卡片参数时 pre 内容宽度可能大于卡片头部,导致汇总栏宽度突变。
+
+**修复**:全线加 `min-width: 0` 让 flex 项目可收缩,内容在父容器可用宽度内
+自然换行。移除 `interpolate-size` 宽度动画(不生效)。
+
+#### 44.4.4 会话菜单高度动画
+
+**问题**:dock 折叠/展开与窗口高度动画割裂,dock 展开用回弹过冲曲线,
+窗口高度动画用 `easeOutQuart`,两套曲线并行不协调。
+
+**修复**:
+- dock 展开/折叠统一 0.3s `cubic-bezier(0.22,1,0.36,1)`(去回弹过冲)
+- 窗口高度动画 `easeOutQuart`→`easeOutCubic`(利落但仍平滑,与 dock 曲线一致)
+
+#### 44.4.5 工具卡气泡宽度 FLIP 动画(2026-08-19)
+
+**问题**:44.4.3 的 `min-width: 0` 只是防"内容牵动容器"的跳变;气泡本身是
+shrink-to-fit(内容驱动宽度),展开/收起工具卡详情(参数/结果 pre 长行)
+仍会把气泡瞬间撑宽/缩窄,无任何过渡。
+
+**根因**:宽度是 auto 布局结果。`interpolate-size: allow-keywords` 只支持
+**数值 ↔ 关键字**之间的过渡(MDN:不支持两个 intrinsic 值之间动画),
+auto→auto(内容变化)不触发 transition——纯 CSS 无解,必须 JS 显式驱动
+(QuickMenu 按钮宽度过渡同款 FLIP 模式)。
+
+**实现**(AgentMessages.tsx ToolCard + views-agent.css 气泡
+`transition: width 0.28s cubic-bezier(0.4,0,0.2,1)`,与高度 grid 动画
+同时长同曲线):
+
+- **展开路径**:toggle 时快照气泡宽(终止进行中的 FLIP + 清显式宽后量
+  `offsetWidth`——快速连点从当前实际宽度出发);内容挂载帧
+  `useLayoutEffect [showBody]`(paint 前)量新宽,显式 `width` 锁回 w0
+  → 强制 reflow → 过渡到 w1;`transitionend` 清显式宽回 auto。
+- **收起路径(并行化,二次优化"一边收缩变窄,一边收缩变矮同步进行")**:
+  难点 = 收起后的目标宽量不到(内容 300ms 后才卸载)。解法:toggle 收起
+  时**临时 `display: none` 卡片 body 绕过 React 量一次"卸载后等效宽度"
+  再恢复**(同一同步块完成,无渲染帧介入不闪烁),与 `setOpen(false)`
+  (高度 grid 动画)同帧启动——宽度与高度 0.28s 同曲线并行收缩,内容
+  一边被垂直卷起一边水平压缩。
+- **clearOnEnd 时序差**(280ms 过渡完成 vs 300ms 内容卸载):展开结束即清
+  显式宽;收起**保留 w1 到内容卸载帧再清**——否则 280~300ms 之间内容还
+  渲染着,清掉会弹回内容宽闪烁;卸载后自然宽已 = w1(display:none 量的
+  就是卸载等效态),清掉无跳变。
+- **边界**:多卡场景自动正确(展开第二张卡时宽度不变则跳过 <1px;
+  收起一张时另一张还在撑宽则不缩);宽度不变(短参数)自动跳过;宽度
+  收缩中 pre 换行变高被 grid 高度动画裁剪(正是并行收缩的观感)。
+
+#### 44.4.6 动画审计补齐(2026-08-19)
+
+按频率/目的/速度/功能四问门禁筛选后的低频补齐(全部复用现有词汇
+`island-ui-in`,无新 keyframes、无 JS 改动):
+
+| 位置 | 修复 |
+| --- | --- |
+| `.island-agent-sublms-pop`(Sub 本地模型下拉) | 条件渲染瞬间出现 → `island-ui-in 0.2s` 从底部触发点缩放展开(`transform-origin: bottom left`,向上开的弹层 origin 在触发一侧;与右键菜单同款节奏) |
+| `.island-agent-lmstudio-item` | `.on` 状态描边/背景瞬间跳变 → `border-color/background 0.25s ease`(与 `.unloading` opacity 同节奏,加载完成平滑"点亮") |
+| `.island-agent-scale-btn`(档位文字按钮) | 无按压反馈 → `:active scale(0.97)` + `transform 0.16s ease-out`(与库卡片 `:active` 同力度档) |
+| `.island-agent-confirm-actions button`(确认卡允许/拒绝) | 同上按压缩小(危险操作确认,全程序风险最高的一次点击;红/绿语义已有不叠加变色) |
+| `.island-session-item`(会话行) | QQ 新会话到来瞬间挂载 → `island-ui-in 0.26s` 入场(animation 只在挂载时播一次;面板开合是 opacity 驱动不重挂载,hover/选中不重播) |
+
+审计中**否决**的候选(防止过度动画):媒体库卡片网格错峰入场(数据
+读取界面不为样式而动)、确认卡改长按确认(确认卡本身已是确认步骤,
+双重摩擦)、搜索清空按钮入场(高频微交互瞬时出现即最优)、加载占位
+文案愉悦动画(瞬态过渡文案,非稀有情感时刻)。
+
+### 44.5 会话切换 UI 动画
+
+#### 44.5.1 横幅进入/离开
+
+| 元素 | 动画 |
+| --- | --- |
+| 会话横幅(`.island-session-current`) | 淡入+下滑 0.22s;关闭 0.18s |
+| 标题(`.island-session-current-title`) | `key={currentSessionKey}` 重挂载淡入 |
+| 记录/清除按钮 | 交错 0.2s(记录先行,清除 40ms 后) |
+| 清除按钮 armed 态 | `color` 加入 `transition`,红底红字平滑过渡 |
+
+### 44.6 心理揣测文本清洗(sanitizeMind)
+
+#### 问题
+
+LLM 输出的心理揣测文本格式如 `[推测]她可能很高兴`。清洗函数 `sanitizeMind`
+的标签白名单未覆盖 `推测`/`猜测` → 步骤①不匹配 → 步骤③剥掉 `[` →
+残留 `推测]她可能很高兴`(左括号没了右括号还在,显示呆板)。
+
+#### 修复
+
+1. 白名单加 `推测`/`猜测`
+2. 新增步骤③b 通用兜底: `/^[^\s\]】]+[\]】]/` — 检测开头连续非空非闭合
+   括号字符后紧跟 `]`/`】` 并清除,覆盖任何白名单外标签
+
+### 44.7 会话删除持久化(根治"重启复活")
+
+#### 问题
+
+会话删除标记只存在渲染端 localStorage,重启后丢失。NapCat 私聊消息不按
+监听名单过滤,删除的会话因新消息或 seed 重新出现。
+
+#### 修复
+
+**主进程权威持久化**:`userData/deleted-sessions.json` 记录已删除会话键,
+启动时先于 `broadcastSessionSeed` 加载。消息/seed/activity 三条通道
+统一过滤,彻底阻断重启重建。
+
+### 44.8 性能优化
+
+| 优化 | 文件 | 说明 |
+| --- | --- | --- |
+| 下划线 `width` → `scaleX` | base.css | 合成层(原触发 layout) |
+| 声波 `height` → `scaleY` | views-agent.css | 合成层 |
+| 弹层补 `transform-origin` | views-agent.css | 从触发点缩放,非中心 |
+| `letter-spacing` 固定 px → `em` | 多处 | 随字号缩放 |
+| 装饰 hover 加 `@media (hover:hover)` | 多处 | 触屏不误触发 |
+| 补充 `:active` 按压反馈 | 多处 | 设置项/菜单/色板/发送键 |
+| 移除 `smoothScrollTo` 逐帧 blur | AgentView.tsx | 死代码,从未启用 |
+| 消息气泡淡入 | views-agent.css | 新增 0.22s 上浮淡入 |
+| 设置面板入口 stagger | views-settings.css | 30ms 错峰 |
+| 删除重复 CSS 块 | views-settings.css | ripple/mode-icons/ctl 删 settings 副本 |
+| 重复定义合并 | 多处 | 删除 base.css 中与 settings 重复的段 |
+
+---
+
+## 第 45 章 智谱 GLM 云端供应商与 GLM 工具族(2026-08-19)
+
+2026-08-19 完成**智谱 GLM 云端(chat completions)供应商**接入,并配套推出
+**GLM 云端文档工具簇**(`glm_ocr` / `glm_file_parse`,图片 OCR / 文档解析)。
+同日在 LM Studio 本地接入侧完成 **GLM-4-9B 系专属档位**(第五解析通道 + 流式
+裸调用防护 + 残片清洗)——工程硬约束延续:各厂商模块完全独立、零相互导入,
+允许合理重复(见 42.1 工程约定)。
+
+### 45.1 GLM 云端供应商(第七适配器,`glm-chat`)
+
+智谱大模型开放平台(BigModel)官方 Chat Completions 端点,裸 fetch + SSE 解析,
+与 deepseek/mimo/lmstudio/anthropic **零相互导入**(独立适配模块
+`providers/glm-cloud.ts` + 常量 `providers/glm-cloud-constants.ts`)。
+
+- **默认 Base URL**:`https://open.bigmodel.cn/api/paas/v4`(v4 端点,
+  不含 `/chat/completions`,请求时拼接);API Key 在
+  `https://bigmodel.cn/usercenter/proj-mgmt/apikeys` 创建,充值/用量控制台在
+  同一地址。
+- **默认模型**:`glm-4.7-flash`(4.7 系 flash 变体,高性能低价格);旗舰
+  `glm-5.2` / `glm-4.7` / `glm-4.6` 等可在设置界面手填切换。
+- **判定**:`isGlmCloudProvider(baseURL)` = 地址含 **`bigmodel`**
+  (open.bigmodel.cn 官方端点及自定义代理均命中)。**必须在 DeepSeek 兜底
+  之前判定**——DeepSeek 会吞掉一切未知地址;bigmodel 地址含 "chat" 也不得
+  落到 deepseek chat。
+- **适配器**:`glmCloudChatAdapter`(id `glm-chat`)注册进 `ctx.llm` 接缝
+  (`plugin/llm.ts` ALL_LLM_ADAPTERS),match = `protocolOf(url) === 'glm-chat'`。
+  **`protocolOf` 判定顺序恒为 anthropic → mimo → lmstudio → glm(bigmodel) →
+  deepseek 兜底**(2026-08-19 硬约束,GLM 必须在 DeepSeek 之前)。
+
+#### 45.1.1 请求体兼容要点(对照官方文档)
+
+- `model` / `messages` / `stream:true` / `tools`(Function Call:
+  `{type:'function', function:{name,description,parameters}}`)/ `tool_choice:'auto'`
+  / `response_format:{type:'json_object'}` / `max_tokens`(1–131072,GLM-5/4.7/4.6
+  系最大 128K 输出,main 循环传 8192 防工具参数被截断;未显式覆盖时缺省 4096)。
+- **thinking 开关(仅 GLM-4.5+ 传)**:纯 `glm-4` 系
+  (`glm-4-flash-250414`/`glm-4-flashx-250414`)与 `glm-3` 系不支持,不传
+  (平台默认,避免 1214 参数非法);未知命名(非 `glm-\d` 开头)保守不传。
+  `noThinking`(引擎短输出任务)或设置页思考强度 `none`/`noThinking` →
+  `thinking:{type:'disabled'}`(短输出避免思维链挤占输出预算)。
+- **reasoning_effort(仅 GLM-5.2 传)**:`none/minimal` 放弃思考、
+  `low/medium → high`、`xhigh → max`——配置值直通,平台负责映射;thinking 已
+  disabled 时不传(无效参数)。
+- **辅助函数**:`glmCloudHistoryToMessages`(assistant 消息不回传
+  `reasoning_content`——GLM 无 DeepSeek 式回传要求,回传徒增 token;工具结果
+  每条独立 `role:'tool'` 消息带 `tool_call_id` 紧跟对应 assistant)。
+
+#### 45.1.2 流式解析与收尾
+
+- SSE 帧 `data: {...}` → `data: [DONE]`;`delta.content`(正文)/ 
+  `delta.reasoning_content`(思维链,UI 深度思考)/ `delta.tool_calls`(按 index
+  累积,arguments JSON 增量;未开 tool_stream 时整段一次性到达,同款累积兼容)。
+- `usage` 在末尾 chunk(`prompt_tokens_details.cached_tokens` = 上下文缓存命中)。
+- **finish_reason**:`stop` / `length`(输出预算截断,置 truncated)/
+  `tool_calls` / **`sensitive`**(内容安全拦截,官方以 finish_reason 返回异常
+  原因不再走错误码——正文可能为空,仅告警,由引擎空回复兜底)。
+- **请求体深度清洗孤立代理码元**(sse.ts `sanitizeJsonStrings`,历史文本含
+  \udXXX 时 JSON.stringify 原样输出,服务器 400,同 deepseek 处理);
+  **不传 signal**(llhttp UAF 规避,中止判定移到 parseSse 安全点)。
+
+#### 45.1.3 错误码映射(`glmCloudErrorMessage`)
+
+外层 HTTP 状态码 + 内层业务错误码 `{"error":{code,message}}`,按业务码优先
+映射,未识别回落 HTTP 状态码。业务码覆盖:1000(Key 无效)/ 1003(Key 过期)/
+1113(欠费)/ 1211(模型不存在)/ 1261(Prompt 超长)/ 1301(内容安全拦截)/
+1302(速率限制)/ 1308~1321(各类使用上限)等;HTTP 兜底 400/401/403/429/500/503。
+GLM 暂不支持余额查询(设置界面提示前往智谱开放平台控制台查看用量与充值)。
+
+### 45.2 GLM 云端文档工具簇(tools/tools-glm.ts)
+
+两个工具,均走 **glm 供应商桶凭据**(`providers.glm` 的 apiKey/baseURL,
+`getGlmCreds` 注入、每次执行实时读,与当前激活供应商无关——主 Agent 用
+DeepSeek 时也能调,只要设置里 GLM 桶配了 Key);Key 为空时工具报错引导填写
+而非隐藏。
+
+- **`glm_ocr`**(POST `/files/ocr`,multipart,同步返回):图片文字识别,支持
+  **手写体**(tool_type `hand_write`)与 24 种语言枚举(language_type:CHN_ENG
+  缺省 / AUTO / ENG / JAP / KOR / FRE 等),可选返回逐块置信度(probability)。
+  适合截图/照片/扫描图/手写笔记提取文字。
+- **`glm_file_parse`**(文件解析提取文本):同步模式 POST `/files/parser/sync`
+  (`tool_type:prime-sync`,一步拿 content);异步模式 POST `/files/parser/create`
+  (lite 快速 / expert 深度仅 PDF / prime 全能)→ 轮询
+  GET `/files/parser/result/{taskId}/text`(2.5s 间隔,最长 ~150s,含中止退出)。
+  支持扩展名(pdf/doc/docx/xls/xlsx/ppt/pptx/png/jpg/csv/txt/md/html…,
+  file_type = 扩展名大写);上传上限 50MB;**解析文本截断 12000 字符**;status
+  failed 时报错,无 content 时给出下载链接引导(纯图片扫描件可改用 glm_ocr 逐页)。
+- **与相邻工具的分工**(description 同步注入 LLM 供模型选型):
+  `read_file` 读纯文本文件(代码/配置/日志)、`glm_file_parse` 提文档内容、
+  `doc_convert` 做格式**转换**(输出文件)、`glm_ocr` 做图片/手写识别。
+- 工具注册进基础工具族(`tools/tools.ts` `createGlmTools`),测试断言见
+  tests/test-agent-core.ts(工具总数因此 **68 → 70**)。
+
+### 45.3 LM Studio GLM-4-9B 系专属档位(providers/lmstudio-glm4.ts)
+
+2026-08-19 实测 LM Studio 本地挂载的 **GLM-4-9B-0414**:不把工具意图送
+tool_calls 协议通道、也不遵循 `<tool_call>` 指引,而是按其训练习惯输出**裸
+Python 风格调用**(无包装标记)并自行编造工具结果(模仿 `</tool_result>` 标签)。
+共享解析器(lmstudio-chat.ts)四通道(特殊 token / `<tool_call>` / fence / 裸
+JSON 行)全部不命中 → 整段当正文落定,工具不执行。本模块为 **GLM-4-9B 专属
+档位**,仅 `isGlm4Model` 命中时接入,其它模型(nanbeige / lfm2.5 / qwen3 /
+glm-4.6v 等)不经过本模块任何代码路径,已调好的共享解析不受影响。
+
+- **识别**:`isGlm4Model(model)` = 归一化 model key(小写去非字母数字)含
+  **`glm49b`**——覆盖 glm-4-9b / glm-4-9b-chat / glm-4-9b-chat-0414 及厂商
+  前缀(thudm/…、zai-org/…)变体;glm-4.5 / glm-4.6v / qwen / nanbeige 不命中。
+- **系统提示补充**:`GLM4_TOOL_GUIDE_ADDON` 拼在共享 TOOL_CALL_GUIDE 之后——
+  认可裸 Python 调用格式(`bili(action="whoami")` / `read_file(path=…)`)+
+  调用后立即停止等待 `<tool_result>` 真实结果 + **严禁编造工具执行结果** +
+  能力判断纠偏(先查工具表再下结论、禁止让用户自己操作、场景→工具映射表;
+  开班 GLM-4-9B 习惯性拒绝"播放视频",open_file 明明能播)。**指引示例只示范
+  直接调用注册工具**(如 bili(action="whoami")),严禁示范 exec_command 跑
+  bili-tool CLI(裸命令名不在 PATH 必失败,二轮实测模型照抄后向用户报"工具
+  未安装")。
+- **裸 bili-tool CLI 转写**(`rewriteBiliCli`):exec_command 包装的裸
+  `bili-tool[.exe] <action> [...]` 自动转 bili 工具调用(action 须在枚举内、
+  无路径分隔符才转写、位置参数→query、--flag 丢弃)——绕过引擎 bili 工具的
+  扫码登录二维码展示/后台轮询增强。
+- **落定裸调用解析**(`glm4ParseBareCalls`,共享四通道未命中时的**第五通道**):
+  仅认注册工具名(模糊匹配)、工具名与 '(' 间不允许空白(防散文括号误触发)、
+  括号必须配平(未闭合 = 流截断)、位置参数映射工具主 string 参数、参数名
+  同义词归一、键全幻觉时原样保留(引擎 validateRequiredArgs 报错回传自愈);
+  正文截断到首个调用前(**其后编造的"结果"整体丢弃**)。支持 3 通道:
+  整条即工具名 / 裸名独行+下一行裸 JSON(`open_file\n{...}`)/ 括号裸调用;
+  同工具+同参数(稳定 JSON)去重(防同一视频重复 open_file 播两次)。
+- **流式防护**(`Glm4StreamGuard`,GLM 档位替换共享 StreamCallFilter):在共享
+  标记对抑制基础上追加**裸调用段抑制**(工具名+`(`起吞到配平括号);闭合后
+  **drain**(其后正文全抑制,与落定截断一致);未闭合调用 flush 丢弃;尾字符
+  跨 delta 暂缓(防词尾+工具名拼接出伪 `\b` 边界)。API 与 StreamCallFilter
+  同构(feed/flush/suppressedChars)。
+- **正文残片清洗**(`glm4SanitizeText`):`<tool_result>…</tool_result>` 整对
+  丢弃(编造结果)、孤立 `</tool_result>` / `</tool_call>` / `<|tool_call_end|>`
+  残片移除(真实工具结果经 user 消息回传,assistant 正文出现这些必是伪造/回声)。
+
+### 45.4 多模型并存分工(2026-08-19 用户要求改)
+
+LM Studio 挂载管理(`action:load`)不再自动卸载其他已加载模型(2026-08-18 旧
+策略"一次只跑一个"废止)——主 Agent 用 GLM-4-9B、Sub Agent 用本地其他模型
+(如南北阁4.2)分工可同时挂多个模型。显存/内存由 LM Studio 自行调度,资源不足
+时加载请求本身失败报错;卸载仍可在挂载管理里逐个手动执行。建模分工页(第三列)
+Sub 本地下拉列出已加载模型选用即持久化。

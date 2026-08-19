@@ -116,12 +116,15 @@ export function useAgentPanelLayout(params: AgentPanelLayoutParams): {
     // 时长单位**毫秒**(now - startAt 也是毫秒)
     const duration = Math.min(340, Math.max(140, 120 + dist * 1.5))
     const startAt = performance.now()
-    // easeOutQuart:开始快、收尾极缓,展开动作"丝滑"而非"戛然而止"
-    const easeOutQuart = (t: number) => 1 - Math.pow(1 - t, 4)
+    // 2026-08-18 曲线调整:easeOutQuart(t^4) 收尾极缓,会话折叠/展开等
+    // "明确目标变化"场景显得拖沓(用户反馈"动画曲线不舒服");改 easeOutCubic
+    // (t^3) 利落但仍平滑,与 dock 的 cubic-bezier(0.22,1,0.36,1)(≈t³)
+    // 曲线一致,窗口高度动画与 dock 动画视觉连贯;消息流式小步跟追不受影响
+    const easeOutCubic = (t: number) => 1 - Math.pow(1 - t, 3)
     const tick = (now: number) => {
       // t 钳制 [0,1]:首帧 rAF 时间戳可能略早于 performance.now()
       const t = Math.min(1, Math.max(0, (now - startAt) / duration))
-      apply(from + (to - from) * easeOutQuart(t))
+      apply(from + (to - from) * easeOutCubic(t))
       if (t < 1) agentHAnimRef.current = { raf: requestAnimationFrame(tick) }
       else agentHAnimRef.current = null
     }

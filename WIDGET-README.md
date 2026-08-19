@@ -4,9 +4,12 @@
 调试说明,面向维护者。V3.1 重点:**安装器与发行**——自绘安装向导
 `installer/` + 绿色发布打包 `scripts/build-release.mjs` + 独立安装器打包
 `scripts/build-installer.mjs`(完整设计见 TECH.md 第 43 章,命令见下文
-「开发调试」)。V3.0 重点:**插件化架构重构概览**(第 1 章,完整设计见
-TECH.md 第 42 章);V2.0 重点保留:**HEVC 补丁操作手册**(第 2 章)与
-**提示词约束工程概览**(第 3 章)。用户使用指南见 [README.md](README.md);
+「开发调试」);后续迭代(2026-08-18/19):**LM Studio 本地模型接入**
+(第 4 章,适配器 + 挂载管理 + 小模型文本工具调用解析,完整设计见
+TECH.md 5.3)与**工具面板动画打磨**(TECH.md 44.4)。V3.0 重点:
+**插件化架构重构概览**(第 1 章,完整设计见 TECH.md 第 42 章);V2.0
+重点保留:**HEVC 补丁操作手册**(第 2 章)与**提示词约束工程概览**
+(第 3 章)。用户使用指南见 [README.md](README.md);
 完整技术文档见 [docs/TECH.md](docs/TECH.md)(V3.1,第 43 章为安装器与
 发行专章、第 42 章为插件化架构重构专章);引擎级操作手册见
 [CLAUDE.md](CLAUDE.md)。
@@ -20,6 +23,7 @@ TECH.md 第 42 章);V2.0 重点保留:**HEVC 补丁操作手册**(第 2 章)与
 - [插件化架构重构概览(V3.0)](#插件化架构重构概览v30)
 - [HEVC 补丁操作手册(V2.0)](#hevc-补丁操作手册v20)
 - [提示词约束工程概览(V2.0)](#提示词约束工程概览v20)
+- [LM Studio 本地模型(V3.1 迭代)](#lm-studio-本地模型v31-迭代)
 - [挂件版与 Web 演示版差异](#挂件版与-web-演示版差异)
 - [开发调试](#开发调试)
 - [UI 巡检(WIDGET_SCREENSHOT)](#ui-巡检widget_screenshot)
@@ -59,8 +63,9 @@ serial 类型化通道,零外部依赖),引擎能力树由**声明式组合层**
 
 - **六域目录**:`electron/agent/` 扁平文件已收编为 engine/(装配入口
   engine.ts + 主循环等 8 文件)、plugin/(内核与接缝 14 文件)、providers/
-  (五 LLM 适配器)、tools/(工具族 13 文件)、napcat/(QQ 通道 7 文件)、
-  subagents/;esbuild 入口 = `engine/engine.ts`;
+  (六 LLM 适配器:DeepSeek×2/Anthropic/MiMo×2/LM Studio)、tools/(工具族
+  13 文件)、napcat/(QQ 通道 7 文件)、subagents/;esbuild 入口 =
+  `engine/engine.ts`;
 - **扩展纪律**:新能力 = 写一个插件 + `PLUGIN_REGISTRY` 注册工厂 +
   `defaultProfile` 加一行——不改 engine-loop、不改其他插件;观察/统计挂
   生命周期事件(agent/turn-start/end、step-start/end),工具策略挂能力
@@ -116,7 +121,8 @@ node scripts/brand-electron-icon.mjs --check
 
 **验证基线**:补丁版 + 真实 QQ 流量 + 气泡通知 3×3 轮 90s 全稳定;
 155 用例单测;hevc-frame 巡检(补丁应用断言持续出帧、缺失断言错误文案)。
-(V3.0 收官后核心测试升至 221 用例,V3.1 实测 233 用例,含插件内核/接缝/事件套件。)
+(V3.0 收官后核心测试升至 221 用例,V3.1 实测 233 用例;LM Studio 接入后
+2026-08-19 增至 247 用例,含插件内核/接缝/事件/lms 解析套件。)
 
 ### 日常检查清单
 
@@ -179,6 +185,37 @@ V2.0 把提示词当工程对象:分层拼装、逐条身份判定、注入/剥�
 
 ---
 
+## LM Studio 本地模型(V3.1 迭代)
+
+第六个 LLM 适配器(`providers/lmstudio-chat.ts`,本地端口 1234 免 Key),
+设置页内置**模型挂载管理**。维护者须知(完整设计见 TECH.md 5.3):
+
+- **挂载管理走 native REST API**:需 LM Studio ≥ 0.3.6;加载用
+  `/api/v1/models/load`(仅 model + echo_load_config,沿用 LM Studio
+  内部挂载配置),卸载**必须以实例 id 为权威**(探测
+  `loaded_instances[].id`,同一模型多实例逐个卸;v1 未探测到按 key 赌
+  一次再回退 v0)——发 model key 时 v1 返回 2xx 假成功,模型实际挂在
+  内存;卸载后**轮询确认**(unload 应答可能先于实际卸载完成,乐观更新
+  + 每 1.2s 复查,防 UI"闪回");
+- **选用/卸载必须即时持久化**(onSave 直写 settings.json):卸载清空
+  model 不落盘 = 残留旧模型引用被 LM Studio 懒加载"复活";选用不落盘 =
+  退出后引擎读空 model 报"未选择模型";
+- **小模型文本工具调用解析**:chat template 不支持 OpenAI tools 协议的
+  小模型把调用意图当正文吐出——`parseTextToolCalls`(lmstudio-chat.ts,
+  仅协议通道零 tool_calls 时介入)负责还原,实测格式全家福(引号键/
+  冒号分隔/中文函数名/键值倒置/参数同义词等)固化在 test-agent-core.ts
+  回归;**改解析逻辑必跑该套件**,幻觉工具名不静默丢弃(回传引擎让 LLM
+  自我纠正);
+- **StreamCallFilter 流式标记过滤**:工具调用指令(`<tool_call>`/
+  `<|tool_call_start|>`/```json 块)不在流式转发中暴露——含跨 delta
+  分割保护、fence 误伤兜底、解析失败时 finalText 重过过滤(落定泄漏
+  防护);离线压测 `node tests/stress-lmstudio.mjs`(200 用例);
+- **调试命令**:`node tests/test-agent-core.mjs`(含 lms 解析回归)、
+  LM Studio 端点不通先确认 Developer 服务器已启动(设置页协议提示行
+  有说明)。
+
+---
+
 ## 挂件版与 Web 演示版差异
 
 - 挂件版只渲染灵动岛本体(`mode=widget`,base='./' 产物可 file:// 加载),
@@ -194,7 +231,7 @@ dev.bat                # 一键构建 + 启动(自动应用 HEVC 补丁)
 pnpm dev:widget        # 构建挂件页 + 启动 Electron(日常调试主入口,已前置 build:electron)
 pnpm watch:electron    # 热重建 Agent 引擎/桥(改 electron/agent/ 下源码用)
 pnpm bridge            # 独立运行 SMTC 桥
-node tests/test-agent-core.mjs   # 引擎核心测试(233 用例,含插件内核套件)
+node tests/test-agent-core.mjs   # 引擎核心测试(247 用例,含插件内核/lms 解析套件)
 npx electron --disable-gpu tests/test-title-live.cjs  # 标题/揣测真实 API 测试
 
 # V3.1 安装器与发行

@@ -3,8 +3,13 @@
 > **V3.1(2026-08-17)** 本版重点是**安装器与发行**:自绘安装向导
 > (Apple 设计语言重绘) + 绿色版发布打包 + 独立安装器 exe 打包,项目从
 > "源码运行"走向"可安装发行"。Agent 引擎继续沿用 V3.0 的插件化架构重构。
+> **后续迭代(2026-08-18/19)**:接入 **LM Studio 本地模型**(模型挂载
+> 管理 + 小模型文本工具调用解析)、新增**模型分工页**(主 Agent 云端强
+> 模型 / Sub Agent 本地小模型省云端额度)与工具面板动画体系打磨、接入
+> **智谱 GLM 云端供应商**(第七适配器,免 Key 设置 + 全新文档工具),并
+> 完成 **LM Studio GLM-4-9B 系专属适配**。
 > 详见 [安装与发行](#安装与发行)与
-> [docs/TECH.md 第 43 章](docs/TECH.md)。
+> [docs/TECH.md 第 45 章](docs/TECH.md)。
 
 把 iOS 灵动岛带到 Windows 桌面的独立小程序:一个悬浮在屏幕顶部的灵动岛,
 自动感知当前正在播放的音乐(QQ音乐 / 网易云音乐 / 酷狗 / 酷我 / 汽水音乐 /
@@ -16,11 +21,15 @@
 - **音乐模式**:SMTC 系统媒体监听 + 本地播放器双轨,歌词字幕、主题色、
   自定义背景、字体库、时间粒子,复刻 iOS 灵动岛的观感与手感。
 - **Agent 模式**:LLM 对话 + 本机工具执行(命令 / 文件 / 浏览器 / 搜索 /
-  通知 / B站下载 / 文档转换 / 超星答题),可挂 MCP 服务、技能、长期记忆,
-  记忆自我进化;主动陪伴、心理揣测、多媒体库、对话内播放音视频。
+  通知 / B站下载 / 文档转换 / 超星答题 / **GLM 文档解析与 OCR**),可挂
+  MCP 服务、技能、长期记忆,记忆自我进化;主动陪伴、心理揣测、多媒体库、
+  对话内播放音视频。
+  多供应商:DeepSeek / 小米 MiMo / Anthropic / **智谱 GLM** 云端 +
+  **LM Studio 本地部署**(免 Key、模型挂载管理、GLM-4-9B 专属适配),
+  主 Agent 与 Sub Agent 可分工用不同供应商。
 - **QQ 机器人**:NapCat 接入后私聊/群聊消息进入对话窗口,LLM 按人区分、
-  调用长期记忆与当次对话上下文自主回复;主人身份硬编码,外人消息分级
-  (自主回复 / 先询问主人),信息隔离防泄露。
+  调用长期记忆与当次对话上下文自主回复;主人身份经 privacy.json 配置,
+  外人消息分级(自主回复 / 先询问主人),信息隔离防泄露。
 - **对话即功能引导**:问岛灵"你有什么功能",它会读取内置技术文档
   (docs/TECH.md)按你的兴趣介绍和引导使用。
 
@@ -30,8 +39,8 @@
 [安装与发行](#安装与发行)与[快速开始](#快速开始)。
 
 > 开发者与详细技术说明见 [docs/TECH.md](docs/TECH.md)(第 42 章 插件化
-> 架构重构 / 第 43 章 安装器与发行)与
-> [WIDGET-README.md](WIDGET-README.md)(挂件部署/调试说明)。
+> 架构重构 / 第 43 章 安装器与发行 / 第 45 章 智谱 GLM 云端供应商与 GLM
+> 工具族)与 [WIDGET-README.md](WIDGET-README.md)(挂件部署/调试说明)。
 
 ---
 
@@ -119,9 +128,10 @@ V3.0 把 Agent 引擎从"巨型工厂 + 扁平文件"改造为 **"一切皆插�
 - **Service Definition**:`llm.ts` 的 `LlmRuntime` 拥有 `ctx.llm` key,维护
   适配器注册表,**执行时解析**(指定 id 未注册 / 零个可用 / 多个歧义各有
   专属错误码,唯一可用自动选中——选择永不依赖注册顺序);
-- **Service Provider**:五个适配器实现同一 `LlmAdapter` 接口——DeepSeek
+- **Service Provider**:七个适配器实现同一 `LlmAdapter` 接口——DeepSeek
   Responses(默认)/ DeepSeek Chat / Anthropic Messages / MiMo Responses /
-  MiMo Chat,注册进接缝,**不拥有** key;
+  MiMo Chat / **LM Studio Chat**(本地部署,2026-08-18)/ **智谱 GLM 云端
+  Chat**(2026-08-19),注册进接缝,**不拥有** key;
 - **Consumer**:引擎主循环、delegate 子代理、subagents、evolution 经
   `ctx.get('llm').stream()` 调用,从不 import 具体供应商实现。
 
@@ -169,10 +179,10 @@ electron/agent/
 ├── plugin/       # ★ 插件内核与接缝(14 文件):kernel/composition/host/
 │                 # host-bridge/llm/tool-registry/tool-plugins/prompt-plugins/
 │                 # tool-events/lifecycle-events/session-log/prompt/errors/index
-├── providers/    # LLM 供应商(9 文件):deepseek/chat/anthropic/mimo-* +
-│                 # sse 公共层 + provider 分发入口
-├── tools/        # 工具族(13 文件):tools.ts 主入口 + env/bili/docflow/
-│                 # search/media 分簇 + settingsTools 四文件 + session/config
+├── providers/    # LLM 供应商(14 文件):deepseek/chat/anthropic/mimo-*/
+│                 # lmstudio-* / glm-cloud-* + sse 公共层 + provider 分发入口
+├── tools/        # 工具族(14 文件):tools.ts 主入口 + env/bili/docflow/
+│                 # search/media/glm 分簇 + settingsTools 四文件 + session/config
 ├── napcat/       # QQ 通道(7 文件):napcat.ts 入口 + client/message/
 │                 # session/store/text + wsclient(手写 WS 传输)
 ├── subagents/    # 后台子代理(2 文件):总结标题/心理揣测/主动陪伴判断
@@ -251,13 +261,25 @@ V2.0 把提示词当作**工程对象**管理——分层拼装、逐条身份�
 托盘切到 Agent 模式 → 长按展开对话面板:
 
 - 直接对话:让岛灵执行本机操作(命令/文件/浏览器/搜索/B站下载/文档转换
-  /超星答题等),工具调用过程在窗口内可见(仅主人);
+  /超星答题 **/GLM 文档解析与 OCR** 等),工具调用过程在窗口内可见(仅主人);
 - 记住偏好:说"记住:…"写入长期记忆,自动附加到每轮系统提示;
 - 记忆进化:设置 → 自我进化,自动整合重复记忆;**人设类记忆自动锁定**
   (🔒),进化不会改动主人指定的人设;
 - 主动陪伴:无操作满 N 分钟岛灵主动开口(可关/调间隔);
 - API 配置:设置 → Agent 设置(API Key / Base URL / 模型 / 思考强度 /
-  输出预算 / MCP 服务 / 技能目录)。
+  输出预算 / MCP 服务 / 技能目录)。供应商在「账号」页**快捷切换**
+  (悬浮菜单 + 滚轮逐格,凭据按供应商独立存储互不覆盖);
+- **本地部署(2026-08-18)**:切到 LM Studio 供应商即用本地模型——免
+  API Key,内置**模型挂载管理**(列表/加载/卸载/选用,直接调用 LM Studio
+  ≥ 0.3.6 的本地 API);小模型也能调工具(文本工具调用解析);
+- **智谱 GLM 云端(2026-08-19)**:切到「智谱 GLM」供应商即用云端
+  **GLM 文档解析与 OCR**(`glm_file_parse` 读 PDF/Word/Excel/PPT 等文档
+  内容、`glm_ocr` 识别图片含手写体),凭据在 glm 供应商桶配置(与当前对话
+  供应商无关,主 Agent 用 DeepSeek 也能调);
+- **模型分工(2026-08-18)**:「模型分工」页可让主 Agent(对话/工具)用
+  云端强模型、Sub Agent(总结标题/心理揣测/记忆提取)用本地小模型省
+  云端额度,两两组合最多 16 种(4 供应商 × 4);LM Studio 支持多模型并存
+  (主 GLM-4-9B + Sub 其他模型同时挂载)。
 
 ## QQ 机器人
 
@@ -366,15 +388,17 @@ pnpm build             # 类型检查 + Web 版构建
 pnpm build:electron    # esbuild 打包 Agent 引擎(入口 engine/engine.ts)/SMTC 桥/图标
 pnpm lint              # oxlint
 pnpm test:markdown     # Markdown 解析器测试
-node tests/test-agent-core.mjs   # 引擎核心测试(233 用例,含插件内核/接缝/事件套件)
+node tests/test-agent-core.mjs   # 引擎核心测试(247 用例,含插件内核/接缝/事件套件)
 node scripts/build-release.mjs   # ① 打包绿色发布目录 release/灵动岛
 node scripts/build-installer.mjs # ② 打包独立安装器 release/灵动岛安装器(需先跑 ①)
 ```
 
-验证基线(V3.1 实测):`tsc -b` 0 错、核心测试 233/233 通过、
-`pnpm build:electron` 与冒烟会话全绿、oxlint 无告警。
+验证基线(V3.1 实测):`tsc -b` 0 错、核心测试 247 用例(244 通过,3 失败
+为 QQ 空间工具本机环境相关,非回归)、`pnpm build:electron` 与冒烟会话
+全绿、oxlint 无告警。
 
-架构与踩坑记录见 [docs/TECH.md](docs/TECH.md)(第 42 章 插件化架构重构);
+架构与踩坑记录见 [docs/TECH.md](docs/TECH.md)(第 42 章 插件化架构重构 /
+第 45 章 智谱 GLM 云端供应商与 GLM 工具族);
 部署与调试见 [WIDGET-README.md](WIDGET-README.md)。
 
 ## 更新日志
@@ -389,7 +413,40 @@ node scripts/build-installer.mjs # ② 打包独立安装器 release/灵动岛�
 - **安装健壮性修复**:复制文件改用 `original-fs`(修复 Electron 主进程复制
   `.asar` 被自动解包导致的 ENOENT);默认安装目录/userData 可写性预检与自动
   回退;桌面快捷方式/开机自启/卸载项等附加项失败降级为警告不阻断安装;
-  安装失败留在安装页直接显示错误(不再闪回造成"没反应"假象)。
+  安装失败留在安装页直接显示错误(不再闪回造成"没反应"假象);
+- **LM Studio 本地模型接入(2026-08-18)**:第六个 LLM 适配器(本地端口
+  1234,免 API Key);设置内置**模型挂载管理**(列表/加载/卸载/选用,基于
+  实例 id 的权威卸载 + 多端点版本回退 + 卸载后轮询确认);**小模型文本
+  工具调用解析**(parseTextToolCalls 还原小模型当正文吐出的调用意图,
+  实测格式全家福固化回归)+ **StreamCallFilter 流式标记过滤**(工具调用
+  指令不暴露到对话窗口,含跨 delta 分割保护/落定泄漏防护);
+- **模型分工页(2026-08-18)**:主 Agent(对话/工具/进化)与 Sub Agent
+  (总结/心理揣测/标题/记忆提取)可用不同供应商模型(3×3 组合,加入 GLM
+  后 4×4),云端强模型对话 + 本地小模型跑后台任务省额度;Sub 指向本地时
+  超时统一放宽 300s(本地推理思维链耗时);Sub 本地模型下拉列出已加载模型
+  选用即持久化;
+- **供应商快捷切换(2026-08-19)**:账号页供应商选择改为快捷菜单(悬浮
+  展开一体胶囊 + 滚轮逐格切换 + 高亮滑块),凭据按供应商独立桶存储,
+  切换自动保存/加载互不覆盖;
+- **智谱 GLM 云端接入(2026-08-19)**:第七个 LLM 适配器 `glm-chat`
+  (智谱开放平台 v4 端点,默认 glm-4.7-flash;免额外注册,API Key 在智谱
+  控制台创建);支持工具调用 / 深度思考(thinking,GLM-4.5+)/ 推理程度
+  (reasoning_effort,GLM-5.2);protocolOf 判定顺序恒为 anthropic → mimo →
+  lmstudio → glm(bigmodel)→ deepseek;完整错误码映射(欠费/Key 过期/使用
+  上限等);
+- **GLM 云端文档工具簇(2026-08-19)**:新增 `glm_ocr`(图片 OCR,含手写体/
+  多语言/置信度)与 `glm_file_parse`(PDF/Word/Excel/PPT 等文档解析提取
+  文本,sync/async 双模式,50MB 上限,12000 字符截断);凭据走 glm 供应商
+  桶,与当前对话供应商无关(主 Agent 用 DeepSeek 也能调);工具总数
+  68 → 70;
+- **LM Studio GLM-4-9B 专属适配(2026-08-19)**:仅命中 GLM-4-9B 系的第五
+  解析通道(裸 Python 调用还原,位置参数映射/同义词归一/括号配平/去重)+
+  流式裸调用防护(Glm4StreamGuard)+ 正文残片清洗 + 反编造系统提示;多模型
+  并存分工(主 GLM-4-9B + Sub 其他模型同时挂载,不再自动卸载);
+- **工具面板动画打磨(2026-08-18/19)**:工具汇总栏 height:auto 平滑
+  过渡(interpolate-size)、工具卡详情展开/收起的气泡宽度 FLIP 动画
+  (收起时宽度与高度并行收缩)、Sub 本地模型下拉入场、LM Studio 模型行
+  状态点亮、确认卡/档位按钮按压反馈、会话行入场等(见 TECH.md 44.4)。
 
 ### V3.0(2026-08-14)
 

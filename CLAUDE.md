@@ -9,6 +9,9 @@
 > 接缝/事件模型/声明式组合层与扩展纪律);`electron/agent/` 按域目录组织
 > (engine/plugin/providers/tools/napcat/subagents 六域 + 根层共享模块),
 > **新能力 = 写插件 + 注册工厂 + Profile 加一行,不改 engine-loop**。
+> **改 LM Studio 适配器/工具调用解析前先读 TECH.md 5.3**(实例 id 权威
+> 卸载/挂载即时持久化/parseTextToolCalls 文本调用解析/StreamCallFilter
+> 流式标记过滤——小模型格式多变,解析逻辑有实测格式全家福回归兜底)。
 > V2.0 两大工程专章见 docs/TECH.md 第 15 章(HEVC 补丁工程)与第 16 章(提示
 > 词约束工程)。**改任何提示词前先读 TECH.md 16.1-16.3**(分层拼装/身份判定/
 > 注入模板/剥离双通道);动补丁二进制前先读 TECH.md 15 章与 10.11(段错误实录)。
@@ -56,7 +59,10 @@ pnpm bridge          # 独立运行系统媒体桥接脚本(单独调试 SMTC)
 pnpm watch:electron # 热重建 Agent 引擎/桥(监听 electron/agent/*.ts 与 scripts/,自动 esbuild 重建 + 重启 electron;渲染端仍用 dev:widget)
 node tests/test-agent-core.mjs   # Agent 引擎核心测试(后端直测,不经 UI;
                      # esbuild 打包测试 bundle + electron 别名 stub + 真实
-                     # mock MCP stdio/sse 服务器,137 个用例)
+                     # mock MCP stdio/sse 服务器,247 个用例——含插件内核/
+                     # 接缝/事件/组合层 + LM Studio 文本工具调用解析回归
+                     # (小模型格式全家福:引号键/冒号分隔/中文函数名/键值
+                     # 倒置/参数同义词),改解析逻辑必跑)
 npx electron --disable-gpu tests/test-title-live.cjs   # 后台标签(总结标题 + 心理揣测)真实 API 测试(2026-08-12):electron 主进程跑——内嵌 esbuild 打包最新 agent.cjs(不跑完整 build-electron,其 make-icon 会再 spawn electron 离屏渲染互锁)+ safeStorage 解密 settings.json 的 apiKey(**必须 ready 前 app.setPath('userData', %APPDATA%/dynamic-island)——Electron 43 safeStorage app-bound 熵绑定 userData 路径,实测不设解不开密文**)+ 5 段真实风格对话历史:① summarize 断言非空/≤20 码元/非句子式;② mind guess 断言 ≤16 码元/非空/非残句;③ **风格验证段**——同一段历史分别跑标题 4 文风预设+自定义、揣测 4 人格预设+自定义,断言输出互不相同(风格确实影响生成)+ 自定义粤语特征词核验;可变配置引用(currentConfig)切换 summaryStyle/mindPersona,Sub Agent 每次调用独立读配置;结果双写 tests/title-test-result.log(stdout 管道缓冲吞掉,实测;引擎 mind 重试诊断经 console.warn 进 stderr,跑时保留 2> 文件);迭代措辞 = 改 subagents.ts 重跑
 pnpm test:markdown    # 消息气泡 Markdown 解析器测试(esbuild 打包纯解析器
                      # 直测,39 个断言:块级/行内/流式退化/递归不循环)

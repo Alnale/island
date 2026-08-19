@@ -7,9 +7,9 @@
  *   未指定且零个匹配 → LLM_ADAPTER_UNAVAILABLE;多个匹配 → LLM_ADAPTER_AMBIGUOUS
  *   (选择永不依赖注册顺序);恰好一个 → 自动选中。
  * - **Service Provider**:deepseek.ts / chat.ts / anthropic.ts /
- *   mimo-responses.ts / mimo-chat.ts 各包一层 LlmAdapter 声明(见
- *   ALL_LLM_ADAPTERS)——provider **不拥有** key,只经 registerAdapter
- *   注册进本接缝,正如 web-search-exa 注册进 ctx.web。
+ *   mimo-responses.ts / mimo-chat.ts / lmstudio-chat.ts 各包一层
+ *   LlmAdapter 声明(见 ALL_LLM_ADAPTERS)——provider **不拥有** key,
+ *   只经 registerAdapter 注册进本接缝,正如 web-search-exa 注册进 ctx.web。
  * - **Consumer**:engine-loop(主循环)/ engine-tool-execution(delegate
  *   子代理)/ subagents / evolution——经 ctx.get('llm').stream() 调用,
  *   永不 import 具体供应商实现。
@@ -20,7 +20,11 @@ import { streamChatCompletion } from '../providers/chat'
 import { streamAnthropic } from '../providers/anthropic'
 import { mimoStreamResponse } from '../providers/mimo-responses'
 import { mimoStreamChatCompletion } from '../providers/mimo-chat'
+import { lmstudioStreamChatCompletion } from '../providers/lmstudio-chat'
+import { glmCloudStreamChatCompletion } from '../providers/glm-cloud'
 import { isMimoProvider, detectMimoProtocol } from '../providers/mimo-constants'
+import { isLMStudioProvider } from '../providers/lmstudio-constants'
+import { isGlmCloudProvider } from '../providers/glm-cloud-constants'
 import { detectDeepSeekProtocol } from '../providers/deepseek-constants'
 import { CodedError, LLM_ADAPTER_AMBIGUOUS, LLM_ADAPTER_MISSING, LLM_ADAPTER_UNAVAILABLE } from './errors'
 import { createContext } from './kernel'
@@ -34,9 +38,9 @@ declare module './kernel' {
 }
 
 /** 所有支持的 provider 协议标识(与 provider.ts 的 ProviderProtocol 同款) */
-export type LlmProtocol = 'responses' | 'chat' | 'anthropic' | 'mimo-responses' | 'mimo-chat'
+export type LlmProtocol = 'responses' | 'chat' | 'anthropic' | 'mimo-responses' | 'mimo-chat' | 'lmstudio-chat' | 'glm-chat'
 
-/** 流式调用统一入参(五个适配器同构) */
+/** 流式调用统一入参(各适配器同构) */
 export interface LlmStreamParams {
   config: AgentConfig
   system: string
@@ -62,11 +66,15 @@ export interface LlmAdapter {
 }
 
 /**
- * 协议自动判定(按 baseURL)——与原 provider.ts detectProvider 语义完全
- * 一致,是五个适配器 match() 的唯一判定源,保证解析互斥:
+ * 协议自动判定(按 baseURL)——是各适配器 match() 的唯一判定源,保证解析互斥:
  * 1. 含 "anthropic" → Anthropic Messages;
  * 2. 含 mimo 关键词(且非 deepseek):含 "chat" → MiMo Chat;否则 MiMo Responses;
- * 3. 其余(含 deepseek/空/自定义代理):含 "chat" → DeepSeek Chat;否则 Responses。
+ * 3. LM Studio 本地地址(lmstudio/127.0.0.1:1234/localhost:1234)→
+ *    LM Studio Chat(2026-08-18 本地部署接入;必须在 DeepSeek 兜底之前
+ *    判定——DeepSeek 会吞掉一切未知地址);
+ * 4. 智谱 GLM 云端地址(含 bigmodel)→ GLM Chat(2026-08-19 云端
+ *    接入;同样必须在 DeepSeek 兜底之前判定);
+ * 5. 其余(含 deepseek/空/自定义代理):含 "chat" → DeepSeek Chat;否则 Responses。
  */
 export function protocolOf(baseURL: string): LlmProtocol {
   const url = baseURL.toLowerCase()
@@ -74,6 +82,8 @@ export function protocolOf(baseURL: string): LlmProtocol {
   if (isMimoProvider(url)) {
     return detectMimoProtocol(url) === 'mimo-chat' ? 'mimo-chat' : 'mimo-responses'
   }
+  if (isLMStudioProvider(url)) return 'lmstudio-chat'
+  if (isGlmCloudProvider(url)) return 'glm-chat'
   return detectDeepSeekProtocol(url) === 'chat' ? 'chat' : 'responses'
 }
 
@@ -140,7 +150,7 @@ export function getLlmRuntime(ctx: AgentContext): LlmRuntime {
   return ctx.get('llm')
 }
 
-/** LLM 接缝初始化插件:注册 ctx.llm + 五个内置适配器(接缝自带默认装配) */
+/** LLM 接缝初始化插件:注册 ctx.llm + 七个内置适配器(接缝自带默认装配) */
 export function llmSeamPlugin(): Plugin {
   return {
     name: 'seam-llm',
@@ -191,6 +201,22 @@ export const mimoChatAdapter: LlmAdapter = {
   stream: mimoStreamChatCompletion,
 }
 
+/** LM Studio Chat 适配器(2026-08-18 本地部署接入) */
+export const lmstudioChatAdapter: LlmAdapter = {
+  id: 'lmstudio-chat',
+  label: 'LM Studio Chat',
+  match: (u) => protocolOf(u) === 'lmstudio-chat',
+  stream: lmstudioStreamChatCompletion,
+}
+
+/** 智谱 GLM 云端 Chat 适配器(2026-08-19 云端接入) */
+export const glmCloudChatAdapter: LlmAdapter = {
+  id: 'glm-chat',
+  label: '智谱 GLM 云端',
+  match: (u) => protocolOf(u) === 'glm-chat',
+  stream: glmCloudStreamChatCompletion,
+}
+
 /** 内置适配器全集(装配层一键注册;外部新增适配器平行挂载即可) */
 export const ALL_LLM_ADAPTERS: LlmAdapter[] = [
   deepseekResponsesAdapter,
@@ -198,6 +224,8 @@ export const ALL_LLM_ADAPTERS: LlmAdapter[] = [
   anthropicAdapter,
   mimoResponsesAdapter,
   mimoChatAdapter,
+  lmstudioChatAdapter,
+  glmCloudChatAdapter,
 ]
 
 // ---------------------------------------------------------------------------

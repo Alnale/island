@@ -280,6 +280,7 @@ export async function runPluginKernelTests({ test, assert, assertRejects }: Harn
       'https://api.xiaomimimo.com/chat',
       'https://mimo.mi.com/api',
       'https://mimo.mi.com/anthropic',
+      'https://open.bigmodel.cn/api/paas/v4',
       '',
       'https://my-proxy.example.com',
     ]
@@ -288,14 +289,18 @@ export async function runPluginKernelTests({ test, assert, assertRejects }: Harn
     }
   })
 
-  await test('llm 接缝:默认运行时五适配器预注册,按 baseURL 唯一解析', () => {
+  await test('llm 接缝:默认运行时七适配器预注册,按 baseURL 唯一解析', () => {
     const rt = getDefaultLlmRuntime()
-    assert(rt.adapters().length === 5, `应预注册 5 个适配器,实际 ${rt.adapters().length}`)
+    assert(rt.adapters().length === 7, `应预注册 7 个适配器,实际 ${rt.adapters().length}`)
     assert(rt.resolve('https://api.deepseek.com').id === 'responses', 'deepseek 默认 → responses')
     assert(rt.resolve('https://api.deepseek.com/chat').id === 'chat', 'deepseek chat → chat')
     assert(rt.resolve('https://api.deepseek.com/anthropic').id === 'anthropic', 'anthropic 端点 → anthropic')
     assert(rt.resolve('https://api.xiaomimimo.com').id === 'mimo-responses', 'mimo → mimo-responses')
     assert(rt.resolve('https://api.xiaomimimo.com/chat').id === 'mimo-chat', 'mimo chat → mimo-chat')
+    assert(rt.resolve('http://127.0.0.1:1234').id === 'lmstudio-chat', 'lmstudio 本地端口 → lmstudio-chat')
+    assert(rt.resolve('http://localhost:1234/v1').id === 'lmstudio-chat', 'lmstudio localhost → lmstudio-chat')
+    assert(rt.resolve('https://open.bigmodel.cn/api/paas/v4').id === 'glm-chat', '智谱云端 → glm-chat')
+    assert(rt.resolve('https://open.bigmodel.cn/api/paas/v4/chat/completions').id === 'glm-chat', '智谱云端含 chat → glm-chat(不落 deepseek chat)')
   })
 
   await test('llm 接缝:零匹配大声失败(LLM_ADAPTER_UNAVAILABLE)', async () => {

@@ -12,13 +12,21 @@ type IslandAgentConfig = {
   reasoningEffort: string
   /** 最大输出 token 数(2026-08-14 模型参数面板,默认 8192) */
   maxOutputTokens: number
-  /** 当前激活的 LLM 供应商(2026-08-14 多供应商独立存储:deepseek / mimo) */
-  activeProvider: 'deepseek' | 'mimo'
+  /** 当前激活的 LLM 供应商(2026-08-14 多供应商独立存储:deepseek / mimo;
+   * lmstudio = 本地工作站,2026-08-18;glm = 智谱云端,2026-08-19) */
+  activeProvider: 'deepseek' | 'mimo' | 'lmstudio' | 'glm'
   /** 各供应商独立凭据(apiKey/baseURL/model 按供应商分别保存,切换不覆盖) */
   providers: {
     deepseek: { apiKey: string; baseURL: string; model: string }
     mimo: { apiKey: string; baseURL: string; model: string }
+    lmstudio: { apiKey: string; baseURL: string; model: string }
+    glm: { apiKey: string; baseURL: string; model: string }
   }
+  /** Sub Agent 供应商拆分(2026-08-18 模型分工):总结/心理/标题等
+   *  Sub Agent 使用的供应商;缺省 = 跟随主供应商(activeProvider) */
+  subProvider?: 'deepseek' | 'mimo' | 'lmstudio' | 'glm'
+  /** Sub Agent 模型覆盖(空 = 用 providers[subProvider] 已存模型) */
+  subModel?: string
   mcpServers: Array<{
     name: string
     command: string
@@ -126,9 +134,18 @@ interface DesktopApi {
   /** 会话被删除(2026-08-18):外部会话被删除,渲染端移除条目/未读与
    * localStorage 历史 */
   onSessionDeleted(callback: (payload: { key: string }) => void): () => void
+  /** 已删除会话列表下发(2026-08-18 根治"重启后又出现"):主进程启动时把
+   * userData 持久化的已删除会话恢复并下发,渲染端合并进 deletedKeys */
+  onDeletedSessions(callback: (payload: { keys: string[] }) => void): () => void
   /** 删除单个外部会话(2026-08-18,主对话 'main' 除外):key =
    * 'private:<QQ>' / 'group:<群号>';主进程清理引擎/NapCat 数据后广播 */
   napcatDeleteSession(key: string): Promise<{ ok?: boolean; error?: string }>
+  /** 渲染端主动拉取会话状态(2026-08-18 重构):主进程唯一权威的会话列表 +
+   * 已删除列表;挂载时调用,消除启动事件时序竞态 */
+  getNapcatSessions(): Promise<{
+    sessions: Record<string, { title?: string; kind?: 'private' | 'group'; lastAt?: number }>
+    deleted: string[]
+  } | undefined>
   /** Agent:中止当前轮(sessionKey = 会话隔离键,缺省主对话) */
   agentAbort(sessionKey?: string): void
   /** Agent:撤销拍快照(2026-08-14):主人输入轮 send 前调;监控目录未
@@ -154,13 +171,20 @@ interface DesktopApi {
       > & {
         /** 最大输出 token 数(2026-08-14) */
         maxOutputTokens?: number
-        /** 当前激活的 LLM 供应商(2026-08-14 多供应商独立存储) */
-        activeProvider?: 'deepseek' | 'mimo'
+        /** 当前激活的 LLM 供应商(2026-08-14 多供应商独立存储;
+         * lmstudio = 本地工作站,2026-08-18;glm = 智谱云端,2026-08-19) */
+        activeProvider?: 'deepseek' | 'mimo' | 'lmstudio' | 'glm'
         /** 各供应商独立凭据(apiKey/baseURL/model 按供应商分别保存) */
         providers?: {
           deepseek?: { apiKey?: string; baseURL?: string; model?: string }
           mimo?: { apiKey?: string; baseURL?: string; model?: string }
+          lmstudio?: { apiKey?: string; baseURL?: string; model?: string }
+          glm?: { apiKey?: string; baseURL?: string; model?: string }
         }
+        /** Sub Agent 供应商(2026-08-18 模型分工;缺省跟随主供应商) */
+        subProvider?: 'deepseek' | 'mimo' | 'lmstudio' | 'glm'
+        /** Sub Agent 模型覆盖(空 = 用该供应商桶已存模型) */
+        subModel?: string
         mcpServers?: Array<{
           name: string
           command: string
@@ -223,6 +247,36 @@ interface DesktopApi {
     url?: string
     headers?: Record<string, string>
   }): Promise<{ ok: boolean; error?: string; toolCount?: number }>
+  /** Agent:LM Studio 模型挂载管理(2026-08-18 本地部署接入):
+   * 'list' 列出全部已下载模型与加载状态 / 'load' 加载(沿用 LM Studio
+   * 内部挂载配置,不做单独参数配置)/ 'unload' 卸载;baseURL/apiKey 随
+   * payload 传;失败返回 {error} */
+  agentLmstudioModels(
+    action: 'list' | 'load' | 'unload',
+    payload?: {
+      baseURL?: string
+      apiKey?: string
+      identifier?: string
+    },
+  ): Promise<{
+    ok?: boolean
+    error?: string
+    /** 全部已下载模型(type=llm) */
+    models?: Array<{
+      id: string
+      state: 'not-loaded' | 'loaded' | 'loading' | string
+      maxContextLength?: number
+      quantization?: string
+      arch?: string
+    }>
+    /** 已加载模型(含挂载参数) */
+    loaded?: Array<{
+      id: string
+      state: string
+      contextLength?: number
+      gpuLayers?: number
+    }>
+  }>
   /** Agent:读取记忆条目列表(记忆管理器用) */
   agentMemoryGet(): Promise<unknown[]>
   /** Agent:写入记忆(add/remove/update/replaceAll,返回最新列表) */

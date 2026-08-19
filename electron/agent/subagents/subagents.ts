@@ -10,6 +10,7 @@
  */
 
 import { getDefaultLlmRuntime, type LlmStreamParams } from '../plugin/llm'
+import { isLMStudioProvider } from '../providers/lmstudio-constants'
 import { formatMemoryBlock } from '../memory'
 import { getTasksStatusBlock } from '../tasks'
 import type { ReplyIntent } from '../napcat/napcat-session'
@@ -46,6 +47,58 @@ import type { AgentConfig, AgentMessage, EvolutionLike, MemoryEntry, MemoryStore
 
 // 纯辅助函数簇已拆至 subagents-helpers.ts(barrel 兼容 re-export,engine.ts 既有路径不变)
 export * from './subagents-helpers'
+
+/**
+ * Sub Agent 专用配置解析(2026-08-18 主/Sub 供应商拆分):主 Agent 用
+ * 强模型、Sub Agent 用本地弱模型的分工——subProvider 指定 Sub 使用的
+ * 供应商桶(缺省跟随主供应商),apiKey/baseURL/model 从
+ * providers[subProvider] 取,subModel 非空则覆盖该桶的 model。
+ * 三供应商两两组合最多 9 种;未配置时行为与旧版完全一致(跟随主)。
+ *
+ * 2026-08-19 修复"Sub Agent 失效"(用户实测:Sub 指向 LM Studio 但桶
+ * 里 model 为空——旧版「选用」不持久化的遗留):空 model 去调 LM
+ * Studio 会直接报"未选择模型",总结/心理揣测全部静默失败——Sub 桶
+ * model 与 subModel 都为空时**回退主配置**(跟着主 Agent 走),绝不
+ * 用空 model 硬撞本地端点。
+ */
+function resolveSubConfig(config: AgentConfig): AgentConfig {
+  const pid = config.subProvider ?? config.activeProvider
+  const creds = config.providers?.[pid]
+  const subModel = (config.subModel ?? '').trim()
+  // Sub 桶凭据不全(无 model 可用)→ 回退主配置,与"未配置"同行为
+  if (!creds || (!creds.model && !subModel)) return config
+  if (pid === config.activeProvider && !subModel) return config
+  return {
+    ...config,
+    apiKey: creds.apiKey,
+    baseURL: creds.baseURL,
+    model: subModel || creds.model,
+  }
+}
+
+/**
+ * Sub Agent 任务超时(2026-08-19 修复本地模型 Sub 失效):本地推理模型
+ * 思维链动辄数分钟,云端的 20-90s 上限会把它全部掐死(心理揣测 60s × 5
+ * 次重试全超时 = 空串,总结同理)——Sub 配置指向 LM Studio 时统一放宽
+ * 到 300s(后台静默任务不阻塞对话,慢但总比静默失败好);云端保持原值。
+ */
+function subTimeout(config: AgentConfig, baseMs: number): AbortSignal {
+  const ms = isLMStudioProvider(config.baseURL) ? 300000 : baseMs
+  return AbortSignal.timeout(ms)
+}
+
+/** Sub Agent 发送前置检查:apiKey 为空时仅 LM Studio 本地端点放行
+ * (2026-08-18 本地部署免 Key;与 engine.ts 同款规则,业务允许重复) */
+function subKeyReady(config: AgentConfig): boolean {
+  if (config.apiKey.trim()) return true
+  const u = (config.baseURL || '').toLowerCase()
+  return (
+    config.activeProvider === 'lmstudio' ||
+    u.includes('lmstudio') ||
+    u.includes('127.0.0.1:1234') ||
+    u.includes('localhost:1234')
+  )
+}
 
 /**
  * LLM 流式调用默认实现(经 LLM 接缝默认运行时,与兼容层 streamByConfig
@@ -120,8 +173,8 @@ export function createSummaryAgent(deps: {
   const stream = deps.stream ?? defaultStream
   return {
     async summarize(messages: AgentMessage[]) {
-      const config = deps.getConfig()
-      if (!config.apiKey.trim() || messages.length === 0) return ''
+      const config = resolveSubConfig(deps.getConfig())
+      if (!subKeyReady(config) || messages.length === 0) return ''
       try {
         // 静默总结:无工具、单轮、事件不转发 UI(标题生成不打扰用户);
         // 输入只取最近 12 条消息,并压缩 reasoning(500 字)/工具结果
@@ -182,7 +235,7 @@ export function createSummaryAgent(deps: {
                 system: attempt.system,
                 history: recent,
                 tools: [],
-                signal: AbortSignal.timeout(90000),
+                signal: subTimeout(config, 90000),
                 onEvent: () => {},
                 jsonMode: attempt.jsonMode,
                 noThinking: true,
@@ -233,8 +286,8 @@ export function createSummaryAgent(deps: {
       }
     },
     async judgeProactive(messages: AgentMessage[], idleMinutes: number) {
-      const config = deps.getConfig()
-      if (!config.apiKey.trim() || messages.length === 0) return { should: false }
+      const config = resolveSubConfig(deps.getConfig())
+      if (!subKeyReady(config) || messages.length === 0) return { should: false }
       try {
         const recent = recentMessages(messages)
         // 与主引擎同源上下文(自定义提示词 + 记忆块 + 进化状态 + 后台
@@ -279,7 +332,7 @@ export function createSummaryAgent(deps: {
               system,
               history: recent,
               tools: [],
-              signal: AbortSignal.timeout(60000),
+              signal: subTimeout(config, 60000),
               onEvent: () => {},
               jsonMode: true,
               noThinking: true,
@@ -298,8 +351,8 @@ export function createSummaryAgent(deps: {
       }
     },
     async extractMemories(messages: AgentMessage[]) {
-      const config = deps.getConfig()
-      if (!config.apiKey.trim() || messages.length === 0) return []
+      const config = resolveSubConfig(deps.getConfig())
+      if (!subKeyReady(config) || messages.length === 0) return []
       try {
         // 输入:完整历史(最多 40 条),reasoning/工具结果/工具参数压缩
         // ——记忆提取需要全文语境,但细节(长思维链/大参数)无用
@@ -333,7 +386,7 @@ export function createSummaryAgent(deps: {
               system,
               history,
               tools: [],
-              signal: AbortSignal.timeout(60000),
+              signal: subTimeout(config, 60000),
               onEvent: () => {},
               jsonMode: true,
               noThinking: true,
@@ -385,8 +438,8 @@ export function createMindAgent(deps: {
   const stream = deps.stream ?? defaultStream
   return {
     async guess(messages: AgentMessage[]) {
-      const config = deps.getConfig()
-      if (!config.apiKey.trim() || messages.length === 0) return ''
+      const config = resolveSubConfig(deps.getConfig())
+      if (!subKeyReady(config) || messages.length === 0) return ''
       try {
         // 输入特化:心理揣测只需要文本语义,剥离工具调用/结果 parts——
         // ① 工具语法噪音干扰揣测(心态在文本里,不在参数里);
@@ -469,7 +522,7 @@ export function createMindAgent(deps: {
                     '请重新写一句:**严格 ≤16 汉字、说完的完整一句**,不要逗号/连词收尾、不要照抄示例)',
               history: recent,
               tools: [],
-              signal: AbortSignal.timeout(60000),
+              signal: subTimeout(config, 60000),
               onEvent: () => {},
               noThinking: true,
             })
@@ -532,8 +585,8 @@ export function createMindAgent(deps: {
       }
     },
     async analyzeUserStyle(messages: AgentMessage[]) {
-      const config = deps.getConfig()
-      if (!config.apiKey.trim() || messages.length === 0) return ''
+      const config = resolveSubConfig(deps.getConfig())
+      if (!subKeyReady(config) || messages.length === 0) return ''
       try {
         const recent = recentMessages(messages)
         const system = buildUserStyleSystem([config.systemPrompt])
@@ -546,7 +599,7 @@ export function createMindAgent(deps: {
               system,
               history: recent,
               tools: [],
-              signal: AbortSignal.timeout(60000),
+              signal: subTimeout(config, 60000),
               onEvent: () => {},
               jsonMode: true,
               noThinking: true,
@@ -600,8 +653,8 @@ export function createReplyClassifier(deps: {
   const stream = deps.stream ?? defaultStream
   return {
     async classify(input) {
-      const config = deps.getConfig()
-      if (!config.apiKey.trim()) return null
+      const config = resolveSubConfig(deps.getConfig())
+      if (!subKeyReady(config)) return null
       try {
         const system = buildClassifierSystem(input.kindLabel, input.targetLabel, input.trigger)
         // 单措辞 + 一次重试;20s 超时,noThinking 低强度——路由等待判定,
@@ -619,6 +672,8 @@ export function createReplyClassifier(deps: {
                 },
               ],
               tools: [],
+              // 路径同步等待场景不放宽(QQ 消息路由等它定去留,本地模型
+              // 也不等 300s——超时回退 null = 放行,不阻塞消息)
               signal: AbortSignal.timeout(20000),
               onEvent: () => {},
               jsonMode: true,
@@ -638,8 +693,8 @@ export function createReplyClassifier(deps: {
       }
     },
     async judgeMonologue(reply) {
-      const config = deps.getConfig()
-      if (!config.apiKey.trim()) return null
+      const config = resolveSubConfig(deps.getConfig())
+      if (!subKeyReady(config)) return null
       try {
         const system = buildMonologueJudgeSystem()
         // 与 classify 同款:低强度无思考 + JSON + 20s 超时 + 一次重试;
@@ -657,6 +712,7 @@ export function createReplyClassifier(deps: {
                 },
               ],
               tools: [],
+              // 同 classify:发送前同步判定,超时回退放行,不放宽
               signal: AbortSignal.timeout(20000),
               onEvent: () => {},
               jsonMode: true,

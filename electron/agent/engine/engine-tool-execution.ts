@@ -207,7 +207,17 @@ async function runSubAgent(
   const task = String(params.task ?? '').trim()
   if (!task) throw new Error('delegate 的 task 参数不能为空')
   const config = getConfig()
-  if (!config.apiKey.trim()) throw new Error('尚未配置 DeepSeek API Key')
+  // LM Studio 本地端点免 Key 放行(2026-08-18,与 engine.ts 同款规则)
+  {
+    const u = (config.baseURL || '').toLowerCase()
+    const free =
+      config.apiKey.trim() ||
+      config.activeProvider === 'lmstudio' ||
+      u.includes('lmstudio') ||
+      u.includes('127.0.0.1:1234') ||
+      u.includes('localhost:1234')
+    if (!free) throw new Error('尚未配置 API Key(云端供应商到 Agent 设置填写;LM Studio 本地免 Key)')
+  }
   const allowAll = !Array.isArray(params.tools) || params.tools.length === 0
   const allowed = new Set((Array.isArray(params.tools) ? params.tools : []).map(String))
 

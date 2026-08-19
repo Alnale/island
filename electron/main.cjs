@@ -431,6 +431,21 @@ const MIMO_DEFAULTS = {
   model: 'mimo-v2.5-pro',
 }
 
+// LM Studio 默认配置(2026-08-18 本地部署接入):本地工作站默认端口
+// 1234,免鉴权;model 空由设置界面「模型挂载管理」选用后写入
+const LMSTUDIO_DEFAULTS = {
+  baseURL: 'http://127.0.0.1:1234',
+  model: '',
+}
+
+// 智谱 GLM 云端默认配置(2026-08-19 云端接入):开放平台 v4 端点,
+// 默认 glm-4.7-flash(高性能低价格);旗舰 glm-5.2 / glm-4.7 等
+// 在设置界面手填切换
+const GLM_CLOUD_DEFAULTS = {
+  baseURL: 'https://open.bigmodel.cn/api/paas/v4',
+  model: 'glm-4.7-flash',
+}
+
 const AGENT_CONFIG_DEFAULTS = {
   // 多供应商独立存储(2026-08-14):每个供应商拥有独立的 Key/地址/模型,
   // 切换时互不覆盖;顶层 apiKey/baseURL/model = providers[activeProvider]
@@ -446,6 +461,16 @@ const AGENT_CONFIG_DEFAULTS = {
       apiKey: '',
       baseURL: MIMO_DEFAULTS.baseURL,
       model: MIMO_DEFAULTS.model,
+    },
+    lmstudio: {
+      apiKey: '',
+      baseURL: LMSTUDIO_DEFAULTS.baseURL,
+      model: LMSTUDIO_DEFAULTS.model,
+    },
+    glm: {
+      apiKey: '',
+      baseURL: GLM_CLOUD_DEFAULTS.baseURL,
+      model: GLM_CLOUD_DEFAULTS.model,
     },
   },
   // 以下三个字段始终镜像 providers[activeProvider] 的值(见 currentAgentConfig)
@@ -545,18 +570,35 @@ function currentAgentConfig() {
         baseURL: MIMO_DEFAULTS.baseURL,
         model: MIMO_DEFAULTS.model,
       },
+      lmstudio: {
+        apiKey: '',
+        baseURL: LMSTUDIO_DEFAULTS.baseURL,
+        model: LMSTUDIO_DEFAULTS.model,
+      },
+      glm: {
+        apiKey: '',
+        baseURL: GLM_CLOUD_DEFAULTS.baseURL,
+        model: GLM_CLOUD_DEFAULTS.model,
+      },
     }
     // 旧配置只有 DeepSeek,默认激活 deepseek
-    if (!agent.activeProvider || (agent.activeProvider !== 'deepseek' && agent.activeProvider !== 'mimo')) {
+    if (!agent.activeProvider || (agent.activeProvider !== 'deepseek' && agent.activeProvider !== 'mimo' && agent.activeProvider !== 'lmstudio' && agent.activeProvider !== 'glm')) {
       agent.activeProvider = 'deepseek'
     }
   } else {
-    // 确保 providers 两个 key 都存在(防御)
+    // 确保 providers 各 key 都存在(防御;lmstudio 2026-08-18 / glm
+    // 2026-08-19 新增,旧配置兜底)
     if (!agent.providers.deepseek || typeof agent.providers.deepseek !== 'object') {
       agent.providers.deepseek = { apiKey: '', baseURL: 'https://api.deepseek.com', model: 'deepseek-v4-flash' }
     }
     if (!agent.providers.mimo || typeof agent.providers.mimo !== 'object') {
       agent.providers.mimo = { apiKey: '', baseURL: MIMO_DEFAULTS.baseURL, model: MIMO_DEFAULTS.model }
+    }
+    if (!agent.providers.lmstudio || typeof agent.providers.lmstudio !== 'object') {
+      agent.providers.lmstudio = { apiKey: '', baseURL: LMSTUDIO_DEFAULTS.baseURL, model: LMSTUDIO_DEFAULTS.model }
+    }
+    if (!agent.providers.glm || typeof agent.providers.glm !== 'object') {
+      agent.providers.glm = { apiKey: '', baseURL: GLM_CLOUD_DEFAULTS.baseURL, model: GLM_CLOUD_DEFAULTS.model }
     }
   }
 
@@ -566,10 +608,22 @@ function currentAgentConfig() {
   merged.providers = {
     deepseek: { ...AGENT_CONFIG_DEFAULTS.providers.deepseek, ...(agent.providers?.deepseek ?? {}) },
     mimo: { ...AGENT_CONFIG_DEFAULTS.providers.mimo, ...(agent.providers?.mimo ?? {}) },
+    lmstudio: { ...AGENT_CONFIG_DEFAULTS.providers.lmstudio, ...(agent.providers?.lmstudio ?? {}) },
+    glm: { ...AGENT_CONFIG_DEFAULTS.providers.glm, ...(agent.providers?.glm ?? {}) },
   }
   // activeProvider 合法化
-  if (merged.activeProvider !== 'deepseek' && merged.activeProvider !== 'mimo') {
+  if (merged.activeProvider !== 'deepseek' && merged.activeProvider !== 'mimo' && merged.activeProvider !== 'lmstudio' && merged.activeProvider !== 'glm') {
     merged.activeProvider = 'deepseek'
+  }
+  // Sub Agent 供应商拆分(2026-08-18):非法 subProvider 清除(缺省 =
+  // 跟随主供应商,subagents.ts 的 resolveSubConfig 兜底),subModel 钳字符串
+  if (merged.subProvider !== 'deepseek' && merged.subProvider !== 'mimo' && merged.subProvider !== 'lmstudio' && merged.subProvider !== 'glm') {
+    delete merged.subProvider
+  }
+  if (typeof merged.subModel !== 'string') {
+    delete merged.subModel
+  } else {
+    merged.subModel = merged.subModel.slice(0, 500)
   }
   // 顶层 apiKey/baseURL/model = 当前激活供应商的镜像(引擎直接读)
   const active = merged.providers[merged.activeProvider]
@@ -635,6 +689,8 @@ function applyAgentConfigPatch(patch) {
         model: typeof next.model === 'string' && next.model ? next.model : 'deepseek-v4-flash',
       },
       mimo: { apiKey: '', baseURL: MIMO_DEFAULTS.baseURL, model: MIMO_DEFAULTS.model },
+      lmstudio: { apiKey: '', baseURL: LMSTUDIO_DEFAULTS.baseURL, model: LMSTUDIO_DEFAULTS.model },
+      glm: { apiKey: '', baseURL: GLM_CLOUD_DEFAULTS.baseURL, model: GLM_CLOUD_DEFAULTS.model },
     }
   }
   if (!next.activeProvider) next.activeProvider = 'deepseek'
@@ -655,13 +711,17 @@ function applyAgentConfigPatch(patch) {
 
   // 处理 activeProvider 切换 → 顶层凭据切到新供应商的已存值
   if (typeof patch?.activeProvider === 'string' &&
-      (patch.activeProvider === 'deepseek' || patch.activeProvider === 'mimo')) {
+      (patch.activeProvider === 'deepseek' || patch.activeProvider === 'mimo' || patch.activeProvider === 'lmstudio' || patch.activeProvider === 'glm')) {
     const newPid = patch.activeProvider
     next.activeProvider = newPid
     if (!next.providers[newPid]) {
       next.providers[newPid] = newPid === 'mimo'
         ? { apiKey: '', baseURL: MIMO_DEFAULTS.baseURL, model: MIMO_DEFAULTS.model }
-        : { apiKey: '', baseURL: 'https://api.deepseek.com', model: 'deepseek-v4-flash' }
+        : newPid === 'lmstudio'
+          ? { apiKey: '', baseURL: LMSTUDIO_DEFAULTS.baseURL, model: LMSTUDIO_DEFAULTS.model }
+          : newPid === 'glm'
+            ? { apiKey: '', baseURL: GLM_CLOUD_DEFAULTS.baseURL, model: GLM_CLOUD_DEFAULTS.model }
+            : { apiKey: '', baseURL: 'https://api.deepseek.com', model: 'deepseek-v4-flash' }
     }
     next.apiKey = next.providers[newPid].apiKey || ''
     next.baseURL = next.providers[newPid].baseURL || ''
@@ -670,7 +730,7 @@ function applyAgentConfigPatch(patch) {
 
   // 处理 providers[pid].* 直接更新(UI 切换供应商后批量保存该供应商凭据)
   if (patch?.providers && typeof patch.providers === 'object') {
-    for (const pid of ['deepseek', 'mimo']) {
+    for (const pid of ['deepseek', 'mimo', 'lmstudio', 'glm']) {
       const pPatch = patch.providers[pid]
       if (pPatch && typeof pPatch === 'object') {
         if (!next.providers[pid]) next.providers[pid] = { apiKey: '', baseURL: '', model: '' }
@@ -695,6 +755,15 @@ function applyAgentConfigPatch(patch) {
     if (typeof value === 'string') {
       next[key] = value.trim().slice(0, 100)
     }
+  }
+  // Sub Agent 供应商拆分(2026-08-18):subProvider 三选一(合法才存,
+  // 不在 patch 里则保持已存值)、subModel ≤500 字符(空 = 用该桶已存模型)
+  if (typeof patch?.subProvider === 'string' &&
+      (patch.subProvider === 'deepseek' || patch.subProvider === 'mimo' || patch.subProvider === 'lmstudio' || patch.subProvider === 'glm')) {
+    next.subProvider = patch.subProvider
+  }
+  if (typeof patch?.subModel === 'string') {
+    next.subModel = patch.subModel.slice(0, 500)
   }
   // 工具输出根目录(2026-08-12):绝对路径字符串(≤1000,trim);
   // 空串 = 恢复默认位置(userData 下)
@@ -919,8 +988,14 @@ function resolveGroupName(groupId) {
  * 精化覆盖) */
 function broadcastSessionSeed() {
   const cfg = currentAgentConfig()
-  const groups = (cfg.napcatAllowedGroups ?? []).filter((g) => typeof g === 'string')
-  const privates = (cfg.napcatAllowed ?? []).filter((q) => typeof q === 'string')
+  // 已删除会话过滤(2026-08-18 根治"重启后又出现"):即使 config 残留
+  // (settings 防抖未落盘等),seed 也不下发已删除会话——渲染端 onSessionsSeed
+  // 不会清除删除标记、不会重建条目;重新 watch(恢复)时 watchSession 已移除
+  // deletedSessions 标记,此处自然放行
+  const groups = (cfg.napcatAllowedGroups ?? [])
+    .filter((g) => typeof g === 'string' && !isDeletedSession(`group:${g}`))
+  const privates = (cfg.napcatAllowed ?? [])
+    .filter((q) => typeof q === 'string' && !isDeletedSession(`private:${q}`))
   void (async () => {
     let names = {}
     try {
@@ -1297,6 +1372,12 @@ function getNapcatClient() {
     // broadcastSessionSeed → 渲染端会话面板立即建条目(不等消息到达);
     // 同步登记 knownSessions 使 list 立即可见
     watchSession: (kind, id) => {
+      // 用户主动恢复该会话(2026-08-18):移除持久删除标记,允许消息重建
+      const watchKey = `${kind}:${id}`
+      if (deletedSessionsSet.has(watchKey)) {
+        deletedSessionsSet.delete(watchKey)
+        saveNapcatSessions()
+      }
       const cfg = currentAgentConfig()
       if (kind === 'group') {
         const set = new Set(cfg.napcatAllowedGroups ?? [])
@@ -1312,6 +1393,7 @@ function getNapcatClient() {
         kind,
         lastAt: Date.now(),
       })
+      saveNapcatSessions()
     },
     unwatchSession: (kind, id) => {
       const cfg = currentAgentConfig()
@@ -1331,11 +1413,16 @@ function getNapcatClient() {
       void (async () => {
         try {
           const key = sent.type === 'group' ? `group:${sent.target}` : `private:${sent.target}`
+          // 已删除会话(2026-08-19 语义修正,与 onMessage/onGroupMessage
+          // 同款):主动发送成功 = 真实新活动,重建全新会话(消息已真实发出,
+          // 主人应能在对应会话看到),而非跳过登记导致发送无迹可寻
+          resurrectSession(key)
           knownSessions.set(key, {
             title: sent.type === 'group' ? `群 ${sent.target}` : `QQ ${sent.target}`,
             kind: sent.type,
             lastAt: Date.now(),
           })
+          saveNapcatSessions()
           // 私聊标题优先联系人档案称呼
           let title = sent.type === 'group' ? `群 ${sent.target}` : `QQ ${sent.target}`
           let caption = sent.type === 'group' ? `群号 ${sent.target}` : `QQ ${sent.target}`
@@ -1414,6 +1501,12 @@ function getNapcatClient() {
     // 提示词注入前缀进对话,LLM 先询问主人怎么回复,得到指示后再回**
     // ——同步上下文,回复链路见 pendingQQReply
     onMessage: (msg) => {
+      // 已删除会话(2026-08-19 语义修正,修复"删除/清除记录后再发消息没有
+      // 重建新会话"):真实新消息到达 = **全新会话重建**——清除持久删除
+      // 标记放行(旧聊天记录/人格/监听信任已在删除时清理),而非永久丢弃
+      // 消息(原实现连主人 QQ 的消息也一并丢弃)。防重启复活不受影响:
+      // 重启只从 knownSessions 恢复(删除时已物理移除)
+      resurrectSession(agentEngineModule.sessionKeyFor(msg.qq))
       // 自动记录联系人档案(2026-08-12 用户要求"读取并记忆群聊和私聊
       // 内成员信息,计入工具记忆目录"):消息到达即落盘 QQ 号 + 来源
       // (名称/信息由 LLM 在对话中经 contact_update 补充)
@@ -1429,6 +1522,7 @@ function getNapcatClient() {
       // (private:<QQ>),标题 = 称呼/QQ 号;屏蔽会话消息只显示不回复
       const sKey = agentEngineModule.sessionKeyFor(msg.qq)
       knownSessions.set(sKey, { title: `QQ ${msg.qq}`, kind: 'private', lastAt: Date.now() })
+      saveNapcatSessions()
       const sMuted = (currentAgentConfig().mutedSessions ?? []).includes(sKey)
       // **图片下载(2026-08-12 收图链路,用户要求"收到图片让 LLM 能看")**:
       // 消息带图片段 → 下载到 userData/napcat-media/ → 转发 payload 带
@@ -1554,6 +1648,12 @@ function getNapcatClient() {
     // 介入),系统通知已由客户端发出;回复发回群,LLM 用
     // 「【不回复群消息】」声明不发回
     onGroupMessage: (msg) => {
+      // 已删除会话(2026-08-19 语义修正,与私聊 onMessage 同款):真实新
+      // 群消息到达 = 全新会话重建——清除持久删除标记放行,而非丢弃。
+      // (NapCat 客户端仍有 allowedGroups 过滤:删除群已移出监听名单,
+      // 常规情况下消息到不了这里;监听名单为空时客户端放行全部群消息,
+      // 此处即已删除群的唯一防线,复活后按新会话重建)
+      resurrectSession(agentEngineModule.sessionKeyFor(msg.qq, msg.groupId))
       groupContext.push({ qq: msg.qq, text: msg.text, atMe: msg.atMe })
       groupContext = groupContext.slice(-20)
       // 群聊活动时间(2026-08-13 群聊冒泡:主动陪伴判断"群安静多久了")
@@ -1563,9 +1663,11 @@ function getNapcatClient() {
       // 最近群发言人(2026-08-13:主人在群里发言 → 该轮回复私发主人)
       routeFor(gKey).lastGroupSpeakerQQ = msg.qq
       knownSessions.set(gKey, { title: `群 ${msg.groupId}`, kind: 'group', lastAt: Date.now() })
+      saveNapcatSessions()
       // 八轮:标题用真实群名(get_group_info 异步补发活动事件)
       void resolveGroupName(msg.groupId).then((name) => {
         knownSessions.set(gKey, { title: name, kind: 'group', lastAt: Date.now() })
+        saveNapcatSessions()
         sendToWidget('napcat:session-activity', { key: gKey, kind: 'group', title: name, caption: `群号 ${msg.groupId}` })
       }).catch((err) => {
         console.warn('[napcat] resolve group name failed:', err?.message)
@@ -2159,12 +2261,20 @@ async function handleEngineMessageForNapcat(message, sessionKey) {
       // 兜底,启发式误伤面小)
       {
         const dailyIntent = await classifyReplyIntent('master-daily', '主人日常对话轮', text, triggerText, `主人 QQ ${masterQQ()}`)
-        if (dailyIntent === null) {
+        // **hold 不再扣留(2026-08-19 修复"偶现主人 QQ 发消息,LLM 只在
+        // 对话窗口回复、QQ 上收不到")**:turnMasterDirectRule 已向 LLM 承诺
+        // "你的回复会直接发送到主人 QQ",扣留 = 违背承诺且主人收不到任何
+        // 回复;且能走到这里的回复都过了前置独白审核(hold 语义里的"纯思考
+        // 过程"已被拦截,此处 hold 多为判定器误判)——与判定失败(null)同
+        // 路径:转达启发式(疑似替主人发给别人的短草稿扣留防串台)兜底后
+        // 直发主人
+        if (dailyIntent === null || dailyIntent === 'hold') {
           if (agentEngineModule.looksLikeForwardInstruction(triggerText) && Array.from(text).length <= 60) {
             logFpGate(sessionKey, 'master-other-no-target', text)
             return
           }
-          sendToMaster(text)
+          notifyRouted('master')
+          sendToMaster(agentEngineModule.stripFingerprintMarks(text))
           return
         }
         if (dailyIntent === 'master') {
@@ -2172,11 +2282,9 @@ async function handleEngineMessageForNapcat(message, sessionKey) {
           sendToMaster(agentEngineModule.stripFingerprintMarks(text))
           return
         }
-        if (dailyIntent === 'other') {
-          logFpGate(sessionKey, 'master-other-no-target', text)
-          return
-        }
-        logFpGate(sessionKey, 'classify-hold', text)
+        // dailyIntent === 'other':疑似替主人发给别人的话(无指纹草稿),
+        // 扣留防串台(2026-08-16 语义,主人可指示用 send 工具补发)
+        logFpGate(sessionKey, 'master-other-no-target', text)
         return
       }
     }
@@ -2381,6 +2489,7 @@ function startNapcatMaintenance() {
         for (const [key] of toRemove) {
           knownSessions.delete(key)
         }
+        saveNapcatSessions()
         console.log('[napcat] pruned', toRemove.length, 'old sessions, now', knownSessions.size)
       }
       // 清理 groupContext(保留最近 50 条)
@@ -3718,6 +3827,276 @@ safeHandle('agent:tools', async () => getAgentEngine().listAllTools())
 // get_deepseek_balance 同一实现(引擎 queryBalance),结构化数据供 UI;
 // 未配置 Key / Anthropic 端点 / 余额不足等错误统一 {error} 返回
 safeHandle('agent:balance', async () => getAgentEngine().queryBalance())
+// LM Studio 模型挂载管理(2026-08-18 本地部署接入,设置界面「模型挂载
+// 管理」面板):调 LM Studio native REST API(需服务器版本 ≥ 0.3.6)。
+// 加载/卸载的权威端点是 v1 REST(`/api/v1/models/load`,字段名 model +
+// context_length/n_gpu_layers/eval_batch_size/flash_attention/
+// offload_kv_cache_to_gpu/num_experts/echo_load_config,见官方
+// docs/developer/rest/load);老版本无 v1 时回退 v0 与 OpenAI 兼容懒加载。
+// - action 'list'   GET  {base}/api/v0/models(v0 无则回退 v1)→ 已下载模型+加载状态
+// - action 'load'   POST {base}/api/v1/models/load(候选回退 v0/懒加载)
+// - action 'unload' POST {base}/api/v1/models/unload(候选回退 v0)
+// baseURL/apiKey 由渲染端传(编辑中未保存的地址也能管理);/v1 结尾
+// 归一为根路径;API Key 本地默认免鉴权,非空才带 Bearer。
+async function lmstudioModelsApi(action, payload) {
+  const base = String(payload?.baseURL || '').trim().replace(/\/+$/, '')
+  if (!base) throw new Error('未填写 LM Studio Base URL')
+  const root = base.toLowerCase().endsWith('/v1') ? base.slice(0, -2) : base
+  const headers = { 'Content-Type': 'application/json' }
+  const key = String(payload?.apiKey || '').trim()
+  if (key) headers.Authorization = `Bearer ${key}`
+  const baseInit = { headers, signal: AbortSignal.timeout(30000) }
+
+  /** 加载/卸载候选端点逐个尝试:LM Studio 多套 API 并存,模型管理的权威
+   *  端点是 v1 REST(`/api/v1/models/load`),老版本无 v1 时回退 v0/懒加载。
+   *  - 网络/连接错误:直接抛友好提示(同一地址换端点结果相同,不重试);
+   *  - HTTP 404/405:老版本不支持该端点 → 换下一个候选。 */
+  async function invokeWithFallback(candidates) {
+    if (!candidates || candidates.length === 0) throw new Error('缺少候选端点')
+    let lastErr = null
+    for (const cand of candidates) {
+      let res
+      try {
+        res = await fetch(cand.url, { ...baseInit, method: 'POST', body: cand.body })
+      } catch (err) {
+        throw new Error(
+          `无法连接 LM Studio(${cand.url}):${err && err.message ? err.message : err}——请确认 LM Studio 已启动 Developer 服务器(默认端口 1234)`,
+        )
+      }
+      const text = await res.text()
+      if (res.ok) return { ok: true, text }
+      const msg = `LM Studio HTTP ${res.status}:${text.slice(0, 300)}`
+      if (res.status >= 400 && res.status < 500) {
+        lastErr = new Error(msg)
+        continue
+      }
+      throw new Error(msg)
+    }
+    throw lastErr || new Error('所有候选端点均失败')
+  }
+
+  if (action === 'list') {
+    // 列表优先 v0(0.3.6+,state 权威);老版本无 v0 → 回退 v1
+    let url = `${root}/api/v0/models`
+    let res
+    try {
+      res = await fetch(url, { ...baseInit, method: 'GET' })
+    } catch (err) {
+      throw new Error(
+        `无法连接 LM Studio(${url}):${err && err.message ? err.message : err}——请确认 LM Studio 已启动 Developer 服务器(默认端口 1234)`,
+      )
+    }
+    if (res.status === 404 || res.status === 405) {
+      res = await fetch(`${root}/api/v1/models`, { ...baseInit, method: 'GET' })
+    }
+    const text = await res.text()
+    if (!text) return { ok: true, models: [], loaded: [] }
+    if (!res.ok) throw new Error(`LM Studio HTTP ${res.status}:${text.slice(0, 300)}`)
+    let data = null
+    try {
+      data = JSON.parse(text)
+    } catch {
+      data = null
+    }
+
+  // 列表归一:data = 全部已下载模型(state 标记加载状态;老版本权威),
+  // loadedModels = 0.3.10+ 新字段(数组/对象两形态均容错),两者合并
+  const models = []
+  const arr = Array.isArray(data?.data) ? data.data : []
+  for (const m of arr) {
+    if (!m || typeof m !== 'object') continue
+    if (m.type && m.type !== 'llm') continue // 跳过 embedding 模型
+    const id = typeof m.id === 'string' ? m.id : typeof m.key === 'string' ? m.key : ''
+    if (!id) continue
+    models.push({
+      id,
+      state: typeof m.state === 'string' ? m.state : 'not-loaded',
+      maxContextLength: typeof m.max_context_length === 'number' ? m.max_context_length : undefined,
+      quantization: typeof m.quantization === 'string' ? m.quantization : undefined,
+      arch: typeof m.arch === 'string' ? m.arch : undefined,
+    })
+  }
+  const loadedRaw = data?.loadedModels
+  const loadedList = Array.isArray(loadedRaw)
+    ? loadedRaw
+    : loadedRaw && typeof loadedRaw === 'object'
+      ? Object.values(loadedRaw)
+      : []
+  const loaded = []
+  for (const m of loadedList) {
+    if (!m || typeof m !== 'object') continue
+    const id =
+      typeof m.identifier === 'string'
+        ? m.identifier
+        : typeof m.id === 'string'
+          ? m.id
+          : typeof m.key === 'string'
+            ? m.key
+            : ''
+    if (!id) continue
+    loaded.push({
+      id,
+      state: typeof m.state === 'string' ? m.state : 'loaded',
+      contextLength: typeof m.context_length === 'number' ? m.context_length : undefined,
+      gpuLayers:
+        typeof m.num_gpu_layers === 'number'
+          ? m.num_gpu_layers
+          : typeof m.n_gpu_layers === 'number'
+            ? m.n_gpu_layers
+            : undefined,
+    })
+    const hit = models.find((x) => x.id === id)
+    if (hit) hit.state = typeof m.state === 'string' ? m.state : 'loaded'
+  }
+  // 老版本(无 loadedModels):按 data[].state 提取已加载条目;
+  // v1(0.4+)响应无 state/loadedModels,按 data[].loaded_instances 提取
+  if (loaded.length === 0) {
+    for (const m of models) {
+      if (m.state === 'loaded' || m.state === 'loading') {
+        loaded.push({ id: m.id, state: m.state, contextLength: m.maxContextLength })
+        continue
+      }
+      // v1 形态:模型对象带 loaded_instances 数组(实例 id 可能是 key:2)
+      const insts = Array.isArray(m.loaded_instances) ? m.loaded_instances : []
+      for (const it of insts) {
+        const iid = it && typeof it === 'object' && typeof it.id === 'string' ? it.id : ''
+        if (iid) loaded.push({ id: iid, state: 'loaded', contextLength: m.maxContextLength })
+      }
+    }
+  }
+  return { ok: true, models, loaded }
+  }
+
+  if (action === 'load' || action === 'unload') {
+    const identifier = String(payload?.identifier || '').trim()
+    if (!identifier) throw new Error('缺少模型标识(identifier)')
+
+    /**
+     * 探测模型实例 id(2026-08-19 修复"卸载不生效"):LM Studio 0.4+ 的
+     * v1 unload 要求 body 传 **instance_id**(模型实例唯一 id,同一模型
+     * 多实例时形如 "key:2"),不是 model key——旧实现发 {model} 时 v1
+     * 可能返回 2xx 但实际什么都没卸载,v0 回退永不触发,模型一直挂在
+     * 内存里。探测:GET /api/v1/models → data[].loaded_instances[].id
+     * (精确 id/key 匹配 + "key:N" 多实例变体);老版本无 v1 → 返回 []。
+     */
+    async function probeInstanceIds() {
+      try {
+        const res = await fetch(`${root}/api/v1/models`, { ...baseInit, method: 'GET' })
+        if (!res.ok) return []
+        let data = null
+        try {
+          data = JSON.parse(await res.text())
+        } catch {
+          return []
+        }
+        const arr = Array.isArray(data?.data) ? data.data : []
+        const ids = []
+        for (const m of arr) {
+          if (!m || typeof m !== 'object') continue
+          const key = typeof m.key === 'string' ? m.key : typeof m.id === 'string' ? m.id : ''
+          const isTarget = key === identifier || (typeof m.id === 'string' && m.id === identifier)
+          if (!isTarget) continue
+          const inst = Array.isArray(m.loaded_instances) ? m.loaded_instances : []
+          for (const it of inst) {
+            const iid = it && typeof it === 'object' && typeof it.id === 'string' ? it.id : ''
+            if (iid) ids.push(iid)
+          }
+        }
+        return ids
+      } catch {
+        return []
+      }
+    }
+
+    /**
+     * 卸载一个模型(尽力而为,抛错交调用方):优先 v1 instance_id 语义
+     * (0.4+ 权威;探测到实例 id 逐个卸,多实例一并清),回退 v0 {model}
+     * (0.3.x)。v1 未探测到实例 id 时仍按 key 赌一次 instance_id(部分
+     * 版本单实例时 id == key),失败换 v0。
+     */
+    async function unloadModel(id) {
+      const instIds = await probeInstanceIds()
+      const cands = []
+      if (instIds.length > 0) {
+        for (const iid of instIds) {
+          cands.push({ url: `${root}/api/v1/models/unload`, body: JSON.stringify({ instance_id: iid }) })
+        }
+      } else {
+        cands.push({ url: `${root}/api/v1/models/unload`, body: JSON.stringify({ instance_id: id }) })
+      }
+      cands.push({ url: `${root}/api/v0/models/unload`, body: JSON.stringify({ model: id }) })
+      return invokeWithFallback(cands)
+    }
+
+    if (action === 'load') {
+      // 多模型并存(2026-08-19 用户要求改):主 Agent 用 GLM4、Sub Agent
+      // 用南北阁4.2 等本地分工需要同时挂多个模型——加载不再自动卸载
+      // 其他已加载模型(2026-08-18 旧策略"一次只跑一个"废止)。显存/
+      // 内存由 LM Studio 自行调度,资源不足时加载请求本身会失败报错;
+      // 卸载仍可在挂载管理里逐个手动执行。
+      // 用户明确:不单独配置挂载参数,沿用 LM Studio 内部设置——请求只带
+      // model,不传 context_length/n_gpu_layers 等;echo_load_config 回传
+      // 实际生效配置以确认加载真成功。
+      const body = { model: identifier, echo_load_config: true }
+      // 候选:v1(权威)→ v0(老版本)→ OpenAI 兼容懒加载(最老版本;发一条
+      // max_tokens=1 的请求触发 LM Studio 按需加载,不消耗推理工作量)
+      const candidates = [
+        { url: `${root}/api/v1/models/load`, body: JSON.stringify(body) },
+        { url: `${root}/api/v0/models/load`, body: JSON.stringify({ model: identifier }) },
+        {
+          url: `${root}/v1/chat/completions`,
+          body: JSON.stringify({ model: identifier, messages: [{ role: 'user', content: 'ping' }], max_tokens: 1, stream: false }),
+        },
+      ]
+      const res = await invokeWithFallback(candidates)
+      let data = null
+      try {
+        data = res.text ? JSON.parse(res.text) : null
+      } catch {
+        data = null
+      }
+      // 回显实际生效的挂载配置(echo_load_config;懒加载路径为空),
+      // 供渲染端展示"确实加载成功 + 实际参数"而非只提示"已提交"
+      const appliedConfig = (data?.load_config || data?.config || null)
+      return { ok: true, data, appliedConfig }
+    }
+    // unload(2026-08-19 重写):v1 instance_id 权威(探测多实例逐个卸),
+    // v0 {model} 回退;卸载后**复查确认**——仍 loaded 则报错不静默
+    // (旧实现 v1 收到 {model} 返回 2xx 假成功,模型实际没卸,用户在
+    // LM Studio 后台看得见模型还在跑)
+    await unloadModel(identifier)
+    // 复查确认:仍 loaded 则报错不静默(v1 实例探测 + v0 state 双查)
+    let stillLoaded = (await probeInstanceIds()).length > 0
+    if (!stillLoaded) {
+      try {
+        const res = await fetch(`${root}/api/v0/models`, { ...baseInit, method: 'GET' })
+        if (res.ok) {
+          const data = JSON.parse(await res.text())
+          const arr = Array.isArray(data?.data) ? data.data : []
+          stillLoaded = arr.some(
+            (m) =>
+              m &&
+              typeof m === 'object' &&
+              ((typeof m.id === 'string' && m.id === identifier) ||
+                (typeof m.key === 'string' && m.key === identifier)) &&
+              (m.state === 'loaded' || m.state === 'loading'),
+          )
+        }
+      } catch {
+        // v0 复查失败:不阻断,信任 v1 探测结果
+      }
+    }
+    if (stillLoaded) {
+      throw new Error(
+        `LM Studio 报告卸载成功但模型「${identifier}」仍在运行——请尝试在 LM Studio 应用内手动卸载,或重启 LM Studio 后重试`,
+      )
+    }
+    return { ok: true }
+  }
+
+  throw new Error(`未知操作: ${action}`)
+}
+safeHandle('agent:lmstudio-models', (action, payload) => lmstudioModelsApi(action, payload))
 // 清除数据(2026-08-10 用户要求,Agent 设置「数据管理」区):
 // - scope 'app'   = 灵动岛所有数据:记忆/进化版本/settings.json(含
 //   API Key/模型/模式)——渲染端已清 localStorage + IndexedDB,这里清
@@ -3745,6 +4124,11 @@ safeHandle('agent:clear-data', async (scope) => {
     rm(path.join(ud, 'napcat-seen.json'))
     rm(path.join(ud, 'napcat-media'))
     rm(path.join(ud, 'undo-snapshots.json'))
+    // 重置会话状态文件(2026-08-18):清除所有数据 = 重置全部会话状态
+    // (会话列表 + 已删除列表),清除后重新启用会话(watch)可正常建立
+    rm(path.join(ud, 'napcat-sessions.json'))
+    deletedSessionsSet = new Set()
+    knownSessions.clear()
     memoryStore = null
     evolutionHandle = null
     resetSettingsCache()
@@ -3765,6 +4149,19 @@ safeHandle('agent:clear-data', async (scope) => {
       }
       agentEngine = null
     }
+    // 停止 NapCat 连接(2026-08-18 根治"清除数据重启还是恢复"):清除所有
+    // 数据后 config 清空——NapCat 客户端群聊过滤(allowedGroups 非空才过滤)
+    // 失效、私聊全收,若仍连接则收到的消息会实时重建会话(用户实测"清除
+    // 数据重启还是恢复")。清除 = 重置,停止连接;用户在设置重新启用
+    // NapCat(syncNapcatLifecycle)后再连接
+    if (napcatClientState?.active) {
+      try {
+        napcatClientState.client.stop()
+      } catch {
+        // already stopped
+      }
+      napcatClientState.active = false
+    }
     return { ok: true }
   }
   if (scope === 'tools') {
@@ -3776,24 +4173,103 @@ safeHandle('agent:clear-data', async (scope) => {
   }
   return { error: `未知的清除范围:${String(scope)}` }
 })
+// ---- 外部会话状态持久化(2026-08-18 重构:单一权威文件,推倒旧的
+// deleted-sessions.json 拼补方案)----
+// 会话列表(knownSessions)+ 已删除列表(deletedSessionsSet)合并存
+// userData/napcat-sessions.json。主进程是唯一权威——渲染端不再从
+// localStorage 恢复会话列表,挂载时主动 invoke getNapcatSessions 拉取。
+// 删除 = 从 sessions **物理移除** + deleted **屏蔽**(消息/seed 不再重建),
+// 重启后文件里已无该会话,自然不恢复;重新 watch 时移除 deleted 恢复。
+function napcatSessionsFile() {
+  try {
+    return path.join(app.getPath('userData'), 'napcat-sessions.json')
+  } catch {
+    return path.join(process.env.APPDATA || '', 'dynamic-island', 'napcat-sessions.json')
+  }
+}
+/** 已删除会话(主进程消息/seed/activity 转发前过滤;清除所有数据时整体重置) */
+let deletedSessionsSet = new Set()
+let napcatSessionsSaveTimer = null
+/** 节流写盘(sessions + deleted 单文件原子写) */
+function saveNapcatSessions() {
+  clearTimeout(napcatSessionsSaveTimer)
+  napcatSessionsSaveTimer = setTimeout(() => {
+    try {
+      const file = napcatSessionsFile()
+      const tmp = file + '.tmp'
+      fs.writeFileSync(
+        tmp,
+        JSON.stringify({ sessions: Object.fromEntries(knownSessions), deleted: [...deletedSessionsSet] }, null, 2),
+        'utf8',
+      )
+      fs.renameSync(tmp, file)
+    } catch (err) {
+      console.error('[napcat] save sessions failed:', err?.message)
+    }
+  }, 150)
+}
+/** 启动/恢复:载入会话列表与已删除列表(须在 seed 前调用,seed 据此过滤) */
+function loadNapcatSessions() {
+  try {
+    const p = JSON.parse(fs.readFileSync(napcatSessionsFile(), 'utf8'))
+    if (p && typeof p === 'object') {
+      if (p.sessions && typeof p.sessions === 'object') {
+        for (const [k, v] of Object.entries(p.sessions)) {
+          if (v && typeof v === 'object' && typeof v.kind === 'string') {
+            knownSessions.set(k, { title: String(v.title ?? k), kind: v.kind, lastAt: Number(v.lastAt) || 0 })
+          }
+        }
+      }
+      if (Array.isArray(p.deleted)) {
+        for (const k of p.deleted) if (typeof k === 'string') deletedSessionsSet.add(k)
+      }
+    }
+  } catch {
+    // 无文件/损坏 = 空
+  }
+}
+/** 已删除会话过滤(消息转发前调用):该会话的一切消息直接忽略,持久生效 */
+function isDeletedSession(key) {
+  return deletedSessionsSet.has(key)
+}
+/** 已删除会话复活(2026-08-19 修复"删除会话/清除记录后再发消息,没有重建
+ * 一个新的会话"):真实新活动(私聊/群消息到达、主动发送成功)到达时,清除
+ * 持久删除标记并下发渲染端对账——会话随后按**全新会话**重建(旧聊天记录/
+ * 人格/监听信任已在删除时清理,knownSessions 由调用方正常登记)。防"删除
+ * 后重启复活"语义不受影响:重启只从 knownSessions 恢复(删除时已物理移除),
+ * seed 广播在标记清除后自然放行(与 watch 重接入同款路径)。幂等:未标记
+ * 时无操作。必须在转发消息/活动事件**之前**同步调用(同一 webContents
+ * 发送队列保序,渲染端先对账清标记,后续 reg 不被本地删除标记拦截) */
+function resurrectSession(key) {
+  if (!key || !deletedSessionsSet.has(key)) return
+  deletedSessionsSet.delete(key)
+  saveNapcatSessions()
+  sendToWidget('island:deleted-sessions', { keys: [...deletedSessionsSet] })
+}
 // 删除单个外部会话(2026-08-18 用户要求"增加会话删除功能,除主对话");
 // key = 'private:<QQ>' / 'group:<群号>',主对话 'main' 禁止删除。清理:
 // 会话引擎实例(LRU 缓存 dispose)+ 会话登记(列表/未读源)+ 监听名单 +
-// 屏蔽名单 + NapCat 聊天记录 + 会话人格;完成后广播通知所有窗口同步移除
+// 屏蔽名单 + NapCat 聊天记录 + 会话人格 + **持久删除标记**(根治重启复活);
+// 完成后广播通知所有窗口同步移除
 safeHandle('napcat:session-delete', async (key) => {
   if (!key || key === 'main') return { error: '主对话不可删除' }
   const m = /^(private|group):(\d+)$/.exec(String(key))
   if (!m) return { error: '非法会话键' }
   const kind = m[1]
   const id = m[2]
+  // 持久删除标记:写入后该会话被主进程忽略(消息转发前过滤),重启后仍生效
+  deletedSessionsSet.add(key)
+  saveNapcatSessions()
   // 1. 会话引擎实例(LRU 缓存)dispose 并移除(引擎在忙则中断其回合)
   const entry = sessionEngines.get(key)
   if (entry && entry.engine && typeof entry.engine.dispose === 'function') {
     try { entry.engine.dispose() } catch { /* already gone */ }
   }
   sessionEngines.delete(key)
-  // 2. 会话登记(渲染端列表/未读源)
+  // 2. 会话登记(渲染端列表/未读源):物理移除 + 持久化——重启后从文件恢复
+  //    的列表已无该会话,从源头杜绝"删除后重启又出现"
   knownSessions.delete(key)
+  saveNapcatSessions()
   // 3. 监听名单 + 屏蔽名单移除(settings.json 持久化)
   const cfg = currentAgentConfig()
   const patch = {}
@@ -3817,6 +4293,13 @@ safeHandle('napcat:session-delete', async (key) => {
   sendToWidget('napcat:session-deleted', { key })
   return { ok: true, key }
 })
+// 渲染端主动拉取会话状态(2026-08-18 重构):挂载时调用,消除启动事件
+// 时序竞态(seed/deleted 广播可能在渲染端订阅前发出而丢失)——渲染端无论
+// 何时挂载,invoke 一定能拿到主进程唯一权威的完整状态(会话列表 + 已删除
+safeHandle('napcat:get-sessions', () => ({
+  sessions: Object.fromEntries(knownSessions),
+  deleted: [...deletedSessionsSet],
+}))
 
 /** 媒体扩展名 → MIME(island-media 协议推断 Content-Type;与渲染端
  * uploadStore 同款推断表,保持一致) */
@@ -4271,10 +4754,15 @@ if (!gotLock) {
     startNapcatMaintenance()
     // 内存监控(2026-08-14:定期检查内存,超阈值主动GC)
     startMemoryMonitor()
+    // 会话状态恢复(2026-08-18 重构):载入会话列表与已删除列表,**必须先于
+    // seed**——seed 据此过滤已删除会话(上次把加载放 seed 之后,启动首次
+    // seed 不过滤,带被删会话下发导致"打开后恢复")
+    loadNapcatSessions()
     // 监听会话种子(2026-08-13 二轮):启动即广播——渲染端按配置注册
     // 监听私聊(napcatAllowed,含主人)+ 群聊(napcatAllowedGroups)会话
     // 条目,不等消息到达;种子带精化标题(主人/档案称呼),reg 更新覆盖
     broadcastSessionSeed()
+    sendToWidget('island:deleted-sessions', { keys: [...deletedSessionsSet] })
   })
 
   app.on('before-quit', () => {

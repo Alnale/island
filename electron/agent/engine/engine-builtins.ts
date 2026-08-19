@@ -7,6 +7,7 @@
 
 import { isMimoProvider } from '../providers/mimo-constants'
 import { deepseekErrorMessage } from '../providers/deepseek-constants'
+import { isLMStudioProvider } from '../providers/lmstudio-constants'
 import type { AgentConfig, AgentTool, EvolutionLike, ToolParams } from '../types'
 
 /** 主对话输出预算缺省值(含思维链 token) */
@@ -41,6 +42,9 @@ async function fetchDeepseekBalance(config: {
   }
   if (isMimoProvider(config.baseURL)) {
     throw new Error('当前 API 是小米 MiMo,MiMo 暂不支持余额查询,请前往 MiMo 平台查看余额')
+  }
+  if (isLMStudioProvider(config.baseURL)) {
+    throw new Error('当前 API 是 LM Studio 本地部署,本地推理没有余额概念')
   }
   const base = config.baseURL.trim().replace(/\/+$/, '')
   const key = config.apiKey.trim()

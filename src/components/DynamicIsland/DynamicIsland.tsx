@@ -84,6 +84,9 @@ import {
   LONG_PRESS_MS,
   SWIPE_TIME_MS,
   LONG_PRESS_SLOP_PX,
+  SWIPE_HYSTERESIS_PX,
+  SEEK_MOMENTUM_VELOCITY_PX,
+  SEEK_MOMENTUM_WINDOW_MS,
   MAX_WIDTH_PX,
   MODE_ICON_MORPH_MS,
   MORPH_ANIMATE_MS,
@@ -595,7 +598,12 @@ export const DynamicIsland = memo(function DynamicIsland({
     onAgentAudioHandoffRef.current = onAgentAudioHandoff
   }, [onAgentAudioHandoff])
   // 长按展开:按下起点 + 计时器;位移超阈值或提前抬起则取消
-  const pressRef = useRef<{ startX: number; startY: number; timer: number } | null>(null)
+  const pressRef = useRef<{
+    startX: number
+    startY: number
+    pointerId: number
+    timer: number
+  } | null>(null)
   // 长按触发后的那次 click 只消费此标记(不切换状态也不收起,防止刚展开又被点掉)。
   // 限时 600ms 自动清除:面板按钮点击都 stopPropagation 不触发岛 click,
   // 若标记长期滞留,下一次点岛本体会被误吞而无法收起
@@ -611,7 +619,13 @@ export const DynamicIsland = memo(function DynamicIsland({
     done: boolean
     /** 按下时刻(时间窗判定:快速滑动才算手势,长按/慢速拖动不算) */
     startAt: number
+    /** 末段速度采样历史(方向滞后/速度判定用,150ms 窗口) */
+    hist: { t: number; x: number }[]
+    /** 主导方向(2026-08-18 设计规范:方向滞后——先右后左等反转不提交) */
+    dir: 1 | -1 | null
   } | null>(null)
+  // 进度条/滑杆拖动的速度采样历史(松手动量投影用,SEEK_MOMENTUM_WINDOW_MS 窗口)
+  const barHistRef = useRef<{ t: number; x: number }[]>([])
   // 文字区点击时间序列(三连击检测:三次点击间隔都在窗口内即触发)
   const tripleClickRef = useRef<number[]>([])
   onSeekRef.current = onSeek
@@ -902,6 +916,8 @@ export const DynamicIsland = memo(function DynamicIsland({
     if (duration <= 0) return
     // 仅左键:右键留给挂件层的"长按拖拽移动挂件"
     if (event.button !== 0) return
+    // 多指防护(2026-08-18 设计规范):已在拖动中时忽略新指针,避免第二指跳变
+    if (scrubbingRef.current) return
     event.preventDefault()
     event.stopPropagation() // 不向上冒泡为岛体长按
     // 按下瞬间记录"文字区实际渲染宽度"供粒子时间居中。
@@ -915,9 +931,17 @@ export const DynamicIsland = memo(function DynamicIsland({
     scrubbingRef.current = true
     setScrubbing(true)
     setScrubRatio(ratioFromPointer(event, bar))
+    // 速度采样历史起点(松手动量投影)
+    barHistRef.current = [{ t: performance.now(), x: event.clientX }]
   }
   const handleBarPointerMove = (event: PointerEvent<HTMLDivElement>, bar: HTMLDivElement) => {
     if (!scrubbingRef.current) return
+    // 采样末段速度:只留窗口内的历史
+    const now = performance.now()
+    barHistRef.current.push({ t: now, x: event.clientX })
+    while (barHistRef.current.length && now - barHistRef.current[0].t > SEEK_MOMENTUM_WINDOW_MS) {
+      barHistRef.current.shift()
+    }
     setScrubRatio(ratioFromPointer(event, bar))
   }
   const handleBarPointerUp = (event: PointerEvent<HTMLDivElement>, bar: HTMLDivElement) => {
@@ -925,7 +949,23 @@ export const DynamicIsland = memo(function DynamicIsland({
     scrubbingRef.current = false
     setScrubbing(false)
     setScrubRatio(null)
-    onSeek?.(ratioFromPointer(event, bar) * duration)
+    // 动量投影(2026-08-18 设计规范 #5):快速甩动松手时,把落点投影到
+    // 惯性终点再吸附,消除"时间瞬间停住"的接缝感;慢速拖动则常规落点
+    let target = ratioFromPointer(event, bar)
+    const hist = barHistRef.current
+    const now = performance.now()
+    while (hist.length && now - hist[0].t > SEEK_MOMENTUM_WINDOW_MS) hist.shift()
+    if (hist.length >= 2) {
+      const last = hist[hist.length - 1]
+      const vPxPerS = ((event.clientX - last.x) / Math.max(now - last.t, 1)) * 1000
+      if (Math.abs(vPxPerS) > SEEK_MOMENTUM_VELOCITY_PX) {
+        // Apple 指数衰减投影:projPx = (v/1000)·r/(1-r),乘 0.2 权重收敛行程
+        const projPx = (vPxPerS / 1000) * (0.998 / (1 - 0.998)) * 0.2
+        target = Math.min(1, Math.max(0, target + projPx / bar.getBoundingClientRect().width))
+      }
+    }
+    barHistRef.current = []
+    onSeek?.(target * duration)
   }
 
   // 键盘控制进度(与指针拖动走同一 onSeek 通道)
@@ -969,20 +1009,32 @@ export const DynamicIsland = memo(function DynamicIsland({
     if (!hasTextGestures) return
     // 仅左键:右键留给挂件层的"长按拖拽移动挂件"
     if (event.button !== 0) return
+    // 多指防护(2026-08-18 设计规范):已有手势进行中时忽略新指针,避免跳变
+    if (swipeRef.current) return
     swipeRef.current = {
       startX: event.clientX,
       startY: event.clientY,
       pointerId: event.pointerId,
       done: false,
       startAt: performance.now(),
+      hist: [],
+      dir: null,
     }
     event.currentTarget.setPointerCapture(event.pointerId)
   }
   const handleTextPointerMove = (event: PointerEvent<HTMLSpanElement>) => {
     const gesture = swipeRef.current
     if (!gesture || gesture.done) return
+    // 多指:只响应发起手势的那根指针
+    if (gesture.pointerId !== event.pointerId) return
     const dx = event.clientX - gesture.startX
     const dy = event.clientY - gesture.startY
+    const now = performance.now()
+    // 维护末段速度采样历史(150ms 窗口,方向滞后/速度判定用)
+    gesture.hist.push({ t: now, x: event.clientX })
+    while (gesture.hist.length && now - gesture.hist[0].t > SEEK_MOMENTUM_WINDOW_MS) {
+      gesture.hist.shift()
+    }
     // 时间窗(2026-08-08 修复"长按边缘切换成音乐模式"):swipe 是
     // **快速滑动**手势,按下后须在 SWIPE_TIME_MS 内达到位移阈值——
     // 长按展开(450ms)期间的慢速位移/手抖先超 slop 取消长按后继续
@@ -991,10 +1043,22 @@ export const DynamicIsland = memo(function DynamicIsland({
     if (
       Math.abs(dx) < SWIPE_THRESHOLD_PX ||
       Math.abs(dy) > Math.abs(dx) * 1.2 ||
-      performance.now() - gesture.startAt > SWIPE_TIME_MS
+      now - gesture.startAt > SWIPE_TIME_MS
     ) {
       return
     }
+    // 方向滞后(2026-08-18 设计规范 #9):末段速度方向与总位移方向一致
+    // 才提交——"先右后左"等反转(真实意图是左滑)首次越阈时不锁定方向。
+    // 末段速度 = 窗口起点→当前点的平均速度;反向拖动时符号相反 → 等待确认
+    const hist = gesture.hist
+    const lastX = hist.length ? hist[0].x : gesture.startX
+    const lastT = hist.length ? hist[0].t : gesture.startAt
+    const v = (event.clientX - lastX) / Math.max(now - lastT, 1)
+    if (Math.sign(v) !== Math.sign(dx)) return
+    // 反向位移超过滞后量时翻转主导方向(双保险:极端"大幅反向再正向"保持跟手)
+    if (gesture.dir === null) gesture.dir = dx > 0 ? 1 : -1
+    else if (gesture.dir === 1 && -dx >= SWIPE_HYSTERESIS_PX) gesture.dir = -1
+    else if (gesture.dir === -1 && dx >= SWIPE_HYSTERESIS_PX) gesture.dir = 1
     gesture.done = true
     // Agent 模式:左滑/右滑无方向语义,都是退出 Agent 切回音乐
     if (agentActive) {
@@ -1171,6 +1235,9 @@ export const DynamicIsland = memo(function DynamicIsland({
         setIslandWidth(`${natural}px`)
       }
     }, COLLAPSE_HIDE_MS)
+    // doCollapse 体依赖大量 ref/稳定回调,依赖数组保持空(避免无谓重建);
+    // releasePress 为稳定 useCallback 但声明在其后(前向引用 TDZ),此处豁免
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   /**
@@ -1216,11 +1283,53 @@ export const DynamicIsland = memo(function DynamicIsland({
     pressRafRef.current = requestAnimationFrame(step)
   }
 
-  /** 结束按压:取消渐进循环并回弹 */
-  const releasePress = () => {
+  /** 结束按压:取消渐进循环并回弹(useCallback 稳定引用,供 window 监听绑定/解绑) */
+  const releasePress = useCallback(() => {
     cancelAnimationFrame(pressRafRef.current)
     setPress(null)
-  }
+  }, [])
+
+  // 岛体按压/长按的指针事件(2026-08-18 修复回归):**不用 setPointerCapture**——
+  // pointerdown 冒泡顺序是子→父,文字区/进度条先捕获,岛体再捕获会**覆盖**
+  // 子元素捕获,导致文字区 swipe 的 pointermove/up 不再派发(Agent 模式手势
+  // 切换失效的根因)。改用 window 级 pointermove/up/cancel 监听,移出岛体仍
+  // 能收到事件(slop 取消失效、长按误触发、按压态滞留的问题同样解决),且不
+  // 与任何子元素手势冲突。绑定在 handleIslandPointerDown 设 pressRef 后进行,
+  // 命中即自我移除(引用稳定,不会泄漏)
+  const handlePressMove = useCallback((event: globalThis.PointerEvent) => {
+    const press = pressRef.current
+    if (!press || press.pointerId !== event.pointerId) return
+    if (
+      Math.hypot(event.clientX - press.startX, event.clientY - press.startY) >
+      LONG_PRESS_SLOP_PX
+    ) {
+      window.clearTimeout(press.timer)
+      pressRef.current = null
+      window.removeEventListener('pointermove', handlePressMove)
+      window.removeEventListener('pointerup', handlePressEnd)
+      window.removeEventListener('pointercancel', handlePressEnd)
+      releasePress() // 位移超阈值视为滑动/拖动,取消按压
+    }
+    // move/end 互相引用(slop 取消需同时移除两个监听);两者均稳定,无陈旧闭包
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [releasePress])
+  const handlePressEnd = useCallback((event: globalThis.PointerEvent) => {
+    const press = pressRef.current
+    if (!press || press.pointerId !== event.pointerId) return
+    window.clearTimeout(press.timer)
+    pressRef.current = null
+    window.removeEventListener('pointermove', handlePressMove)
+    window.removeEventListener('pointerup', handlePressEnd)
+    window.removeEventListener('pointercancel', handlePressEnd)
+    releasePress() // 松手回弹
+    // 同上:move/end 互相引用,两者稳定,运行时无陈旧闭包
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [releasePress])
+  const bindPressWindow = useCallback(() => {
+    window.addEventListener('pointermove', handlePressMove)
+    window.addEventListener('pointerup', handlePressEnd)
+    window.addEventListener('pointercancel', handlePressEnd)
+  }, [handlePressMove, handlePressEnd])
 
   /** 上传音乐:文件选择后回调外部(清空 input 允许重复选择同一文件) */
   const handleFileChange = (event: ChangeEvent<HTMLInputElement>) => {
@@ -1248,7 +1357,13 @@ export const DynamicIsland = memo(function DynamicIsland({
     // 只能通过返回键收起),避免设置/编辑中被误缩回
     if (isSettingsView(panelView)) return
     const prev = pressRef.current
-    if (prev) window.clearTimeout(prev.timer)
+    // 多指防护(2026-08-18 设计规范):已有按压手势时忽略新指针(松手由
+    // window 级 pointerup 监听兜底保证必达,pressRef 在松手即清空,
+    // 非空即代表第二根手指)
+    if (prev) return
+    // 不做 setPointerCapture(2026-08-18 修复回归):会覆盖文字区/进度条
+    // 先建立的捕获,导致子元素手势失效。移出岛体后的事件由 window 级
+    // pointermove/up/cancel 监听兜底(bindPressWindow 在设 pressRef 时绑定)
     const startX = event.clientX
     const startY = event.clientY
     // Agent 展开态:不做 3D 按压反馈(聊天面板交互区已拦截左键,
@@ -1262,6 +1377,7 @@ export const DynamicIsland = memo(function DynamicIsland({
       pressRef.current = {
         startX,
         startY,
+        pointerId: event.pointerId,
         timer: window.setTimeout(() => {
           pressRef.current = null
           suppressClickRef.current = true // 吞掉松手后的 click,避免收起后误切换状态
@@ -1273,11 +1389,13 @@ export const DynamicIsland = memo(function DynamicIsland({
           changeExpanded(false)
         }, LONG_PRESS_MS),
       }
+      bindPressWindow()
       return
     }
     pressRef.current = {
       startX,
       startY,
+      pointerId: event.pointerId,
       timer: window.setTimeout(() => {
         pressRef.current = null
         suppressClickRef.current = true // 吞掉松手后那次 click,避免刚展开即被收起
@@ -1300,26 +1418,7 @@ export const DynamicIsland = memo(function DynamicIsland({
         changeExpanded(true)
       }, LONG_PRESS_MS),
     }
-  }
-  const handleIslandPointerMove = (event: PointerEvent<HTMLDivElement>) => {
-    const press = pressRef.current
-    if (!press) return
-    if (
-      Math.hypot(event.clientX - press.startX, event.clientY - press.startY) >
-      LONG_PRESS_SLOP_PX
-    ) {
-      window.clearTimeout(press.timer)
-      pressRef.current = null
-      releasePress() // 位移超阈值视为滑动/拖动,取消按压
-    }
-  }
-  const handleIslandPointerEnd = () => {
-    const press = pressRef.current
-    if (press) {
-      window.clearTimeout(press.timer)
-      pressRef.current = null
-    }
-    releasePress() // 松手回弹
+    bindPressWindow()
   }
 
   const handleClick = () => {
@@ -1584,8 +1683,12 @@ export const DynamicIsland = memo(function DynamicIsland({
       window.clearTimeout(suppressTimerRef.current)
       window.clearTimeout(rippleTimerRef.current)
       window.clearTimeout(fontErrorTimerRef.current)
+      // 卸载时移除岛体按压的 window 级监听(引用稳定,防泄漏)
+      window.removeEventListener('pointermove', handlePressMove)
+      window.removeEventListener('pointerup', handlePressEnd)
+      window.removeEventListener('pointercancel', handlePressEnd)
     },
-    [],
+    [handlePressMove, handlePressEnd],
   )
 
   // 播放模式切换:旧图标线条擦除动画(主题色涟漪已移除,
@@ -1634,20 +1737,23 @@ export const DynamicIsland = memo(function DynamicIsland({
       : textMotion === 'below'
         ? `translateY(${TEXT_RISE_PX}px)`
         : 'translateY(0)'
+  // 文字位移动画(2026-08-18 设计规范:UI 禁用 ease-in——起步缓慢感觉迟钝;
+  // 离场改强 ease-out"先快后慢"立即响应,入场用无过冲缓出;mask-size 从
+  // 0.45s 弹簧收敛到 0.3s 无过冲,减少 paint 属性动画时长)
   const textTransition =
     `opacity ${textMotion === 'out' || textMotion === 'below' ? FADE_OUT_MS : FADE_IN_MS}ms ${
       textMotion === 'out' || textMotion === 'below'
-        ? 'ease-in'
+        ? 'cubic-bezier(0.23, 1, 0.32, 1)'
         : 'cubic-bezier(0.22, 1, 0.36, 1)'
     }, ` +
     `transform ${
       textMotion === 'out' || textMotion === 'below' ? FADE_OUT_MS : FADE_IN_MS
     }ms ${
       textMotion === 'out' || textMotion === 'below'
-        ? 'ease-in'
+        ? 'cubic-bezier(0.23, 1, 0.32, 1)'
         : 'cubic-bezier(0.22, 1, 0.36, 1)'
     }, ` +
-    `mask-size 0.45s cubic-bezier(0.34, 1.56, 0.64, 1)`
+    `mask-size 0.3s cubic-bezier(0.22, 1, 0.36, 1)`
 
   const makeSnapshot = useCallback(
     (): IslandSnapshot => ({
@@ -1735,9 +1841,6 @@ export const DynamicIsland = memo(function DynamicIsland({
       onMouseEnter={handleMouseEnter}
       onMouseLeave={handleMouseLeave}
       onPointerDown={handleIslandPointerDown}
-      onPointerMove={handleIslandPointerMove}
-      onPointerUp={handleIslandPointerEnd}
-      onPointerCancel={handleIslandPointerEnd}
     >
       <div className="island-bg" aria-hidden="true">
         {/* 自定义背景:覆盖在深色底之上,不透明度可调;内容层在其上 */}

@@ -120,12 +120,15 @@ process.env.AGENT_TEST_STUB_SHELL = '1'
 declare const __ROOT__: string
 const mockDir = path.join(__ROOT__, 'tests', 'mocks')
 
-/** 多供应商字段(AgentConfig 2026-08-14 新增):测试运行时不读取,纯满足类型检查 */
+/** 多供应商字段(AgentConfig 2026-08-14 新增;lmstudio 2026-08-18;
+ * glm 2026-08-19):测试运行时不读取,纯满足类型检查 */
 const MOCK_PROVIDERS = {
   activeProvider: 'deepseek' as const,
   providers: {
     deepseek: { apiKey: '', baseURL: '', model: '' },
     mimo: { apiKey: '', baseURL: '', model: '' },
+    lmstudio: { apiKey: '', baseURL: '', model: '' },
+    glm: { apiKey: '', baseURL: '', model: '' },
   },
 }
 
@@ -1557,6 +1560,17 @@ await test('sanitizeMind:引号/首尾括号/前缀/尾随标点清洗', () => {
   assert(sanitizeMind('「嘴上淡定」') === '嘴上淡定', '引号剥除不回归')
   assert(sanitizeMind('心理揣测:在慌') === '在慌', '前缀剥除')
   assert(sanitizeMind('这下明白了吧。') === '这下明白了吧', '尾随句末标点剥除')
+  // 2026-08-18 实机修复:非白名单标签词(心情)带方括号,须整段剥除不留]残片
+  assert(sanitizeMind('[心情]嘴上恭喜') === '嘴上恭喜', '带方括号标签(心情)整段剥除')
+  assert(sanitizeMind('嘴上恭喜[心情]') === '嘴上恭喜', '尾部标签标注剥除')
+  assert(sanitizeMind('喵～我已经瞄到主人了哦[揣测：表情…]') === '喵～我已经瞄到主人了哦', '中段标签标注剥除')
+  // 防御:历史持久化的"标签]+"残片(无[ 开头)也兜底剥除
+  assert(sanitizeMind('心情]嘴上恭喜') === '嘴上恭喜', '残留"标签]+"残片兜底剥除')
+  // 2026-08-18 修复:非白名单标签(推测)带方括号,步骤①未匹配,步骤③剥"["后
+  // 步骤③b兜底剥"推测]"(推测/猜测已加入白名单,此测试验证③b通用兜底)
+  assert(sanitizeMind('[估计]她可能很高兴') === '她可能很高兴', '非白名单方括号标签(估计)③b兜底剥除')
+  assert(sanitizeMind('估计]她可能很高兴') === '她可能很高兴', '无"["的"文字+]"残片③b兜底剥除')
+  assert(sanitizeMind('[推测]嘴上说好') === '嘴上说好', '新加白名单标签(推测)步骤①直接剥除')
 })
 
 // ---------------------------------------------------------------------------
@@ -4910,6 +4924,645 @@ await test('undo 回滚:快照不完整(无 headSha/snapSha)拒绝执行不动�
 // ---------------------------------------------------------------------------
 // 插件内核与能力接缝(kernel / llm / tools / prompt,2026-08-14 插件化重构)
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// LM Studio 文本工具调用幻觉解析(2026-08-19 修复本地模型不调工具)
+// ---------------------------------------------------------------------------
+
+await test('lms 文本工具解析:lfm2.5 特殊 token Python kwargs 格式', async () => {
+  const { parseTextToolCalls } = await import('../electron/agent/providers/lmstudio-chat')
+  const tools: AgentTool[] = [
+    {
+      name: 'bili',
+      description: 'B站',
+      execute: async () => 'ok',
+      parameters: {
+        type: 'object',
+        properties: {
+          action: { type: 'string', enum: ['up_info', 'search', 'saved'] },
+          query: { type: 'string' },
+        },
+      },
+    },
+  ]
+  const text =
+    "我来看看下载目录的情况。\n<|tool_call_start|>bili_tool(action='saved', params={'path': 'C:\\\\Users\\\\downloads'})<|tool_call_end|>"
+  const parsed = parseTextToolCalls(text, tools)
+  assert(parsed, '应解析出调用')
+  assert(parsed!.calls.length === 1, '应有一个调用')
+  assert(parsed!.calls[0]!.name === 'bili', 'bili_tool 应模糊匹配到 bili')
+  assert(parsed!.calls[0]!.args.action === 'saved', 'action 应为 saved')
+  assert(!('path' in parsed!.calls[0]!.args), '幻觉键 path 应被过滤')
+  assert(parsed!.text.includes('我来看看'), '前导文本保留')
+  assert(!parsed!.text.includes('tool_call'), '调用片段应从文本剥离')
+})
+
+await test('lms 文本工具解析:nanbeige markdown JSON 块 + 编造结果截断', async () => {
+  const { parseTextToolCalls } = await import('../electron/agent/providers/lmstudio-chat')
+  const tools: AgentTool[] = [
+    {
+      name: 'bili',
+      description: 'B站',
+      execute: async () => 'ok',
+      parameters: {
+        type: 'object',
+        properties: {
+          action: { type: 'string', enum: ['up_info', 'search', 'saved'] },
+          query: { type: 'string' },
+          type: { type: 'string' },
+        },
+      },
+    },
+  ]
+  const text =
+    '好的,我来查看B站的本地下载目录～\n\n正在调用 Bili 工具:\n\n' +
+    '```json\n{"action": "search", "params": {"type": "download_dir"}}\n```\n\n' +
+    '---\n**结果**:\n- 本地下载目录路径(编造的假结果)\n\n✅ 已为你查看!'
+  const parsed = parseTextToolCalls(text, tools)
+  assert(parsed, '应解析出调用')
+  assert(parsed!.calls[0]!.name === 'bili', 'action 枚举反查应命中 bili')
+  assert(parsed!.calls[0]!.args.action === 'search', 'action 应提升平铺')
+  assert(parsed!.calls[0]!.args.type === 'download_dir', 'params 应展开')
+  assert(parsed!.text.includes('好的'), '前导文本保留')
+  assert(!parsed!.text.includes('编造'), '编造结果应截断丢弃')
+})
+
+await test('lms 文本工具解析:普通 JSON 展示块不误判 / 无工具不介入', async () => {
+  const { parseTextToolCalls } = await import('../electron/agent/providers/lmstudio-chat')
+  const tools: AgentTool[] = [
+    {
+      name: 'bili',
+      description: 'B站',
+      execute: async () => 'ok',
+      parameters: { type: 'object', properties: { action: { type: 'string', enum: ['search'] } } },
+    },
+  ]
+  // 无工具特征键的 JSON 块(如配置展示)不应被解析为调用
+  const a = parseTextToolCalls('配置如下:\n```json\n{"theme": "dark", "font": 14}\n```', tools)
+  assert(a === null, '无 action/name 线索的 JSON 块不应误判')
+  // 普通文本
+  const b = parseTextToolCalls('今天天气不错,出去玩吧!', tools)
+  assert(b === null, '普通文本不应误判')
+  // tools 为空(Sub Agent jsonMode)不介入
+  const c = parseTextToolCalls('{"action": "search"}', [])
+  assert(c === null, '无注册工具时不介入')
+})
+
+await test('lms 文本工具解析:action 不在任何枚举时不强制匹配', async () => {
+  const { parseTextToolCalls } = await import('../electron/agent/providers/lmstudio-chat')
+  const tools: AgentTool[] = [
+    {
+      name: 'bili',
+      description: 'B站',
+      execute: async () => 'ok',
+      parameters: { type: 'object', properties: { action: { type: 'string', enum: ['search'] } } },
+    },
+  ]
+  const parsed = parseTextToolCalls('```json\n{"action": "nonexistent_action"}\n```', tools)
+  assert(parsed === null, 'action 不在枚举内且无名称匹配时应放弃(不乱调)')
+})
+
+await test('lms 文本工具解析:lfm2.5 数组包裹 + Windows 路径反斜杠保留(实测回归)', async () => {
+  const { parseTextToolCalls } = await import('../electron/agent/providers/lmstudio-chat')
+  const tools: AgentTool[] = [
+    {
+      name: 'bili',
+      description: 'B站',
+      execute: async () => 'ok',
+      parameters: {
+        type: 'object',
+        properties: {
+          action: { type: 'string', enum: ['up_info', 'search', 'saved'] },
+          path: { type: 'string' },
+        },
+      },
+    },
+  ]
+  // 用户实测原文(lfm2.5-2.6b):调用被方括号数组包裹 + 单反斜杠 Windows 路径
+  const text =
+    "<|tool_call_start|>[bili_tool(action='up_info', params={'path': 'C:\\Users\\asus\\AppData\\Roaming\\dynamic-island\\bili\\downloads'})]<|tool_call_end|>"
+  const parsed = parseTextToolCalls(text, tools)
+  assert(parsed, '数组包裹的 Python 调用应解析成功(旧解析器被前导 [ 卡住)')
+  assert(parsed!.calls.length === 1 && parsed!.calls[0]!.name === 'bili', 'bili_tool 应模糊匹配 bili')
+  assert(parsed!.calls[0]!.args.action === 'up_info', 'action 应为 up_info')
+  assert(
+    parsed!.calls[0]!.args.path === 'C:\\Users\\asus\\AppData\\Roaming\\dynamic-island\\bili\\downloads',
+    'Windows 路径反斜杠应完整保留(旧实现丢反斜杠成 C:Users...)',
+  )
+  assert(parsed!.text === '', '整条消息即调用,正文应为空')
+  // JSON 数组体同样支持:[{"name":"bili","arguments":{...}}]
+  const arr = parseTextToolCalls(
+    '<|tool_call_start|>[{"name": "bili", "arguments": {"action": "saved"}}]<|tool_call_end|>',
+    tools,
+  )
+  assert(arr && arr.calls.length === 1 && arr.calls[0]!.name === 'bili', 'JSON 数组体应解析')
+  assert(arr!.calls[0]!.args.action === 'saved', 'JSON 数组体参数应展开')
+})
+
+await test('lms 文本工具解析:通用包装 tool_call(name=..., arguments=裸字符串)(实测回归)', async () => {
+  const { parseTextToolCalls } = await import('../electron/agent/providers/lmstudio-chat')
+  const tools: AgentTool[] = [
+    {
+      name: 'bili',
+      description: 'B站',
+      execute: async () => 'ok',
+      parameters: {
+        type: 'object',
+        properties: {
+          action: { type: 'string', enum: ['up_info', 'search', 'saved'] },
+          query: { type: 'string' },
+        },
+      },
+    },
+  ]
+  // 用户实测原文(lfm2.5-2.6b 二轮):通用包装函数 + 裸字符串 arguments
+  const text = "<|tool_call_start|>[tool_call(name='bili-tool', arguments='up_info')]<|tool_call_end|>"
+  const parsed = parseTextToolCalls(text, tools)
+  assert(parsed, '通用包装格式应解析成功')
+  assert(parsed!.calls.length === 1 && parsed!.calls[0]!.name === 'bili', 'name= 参数应提升为工具名并模糊匹配')
+  assert(parsed!.calls[0]!.args.action === 'up_info', '裸字符串 arguments 应转为 action 值')
+  // dict 形式的包装参数
+  const dict = parseTextToolCalls(
+    "<|tool_call_start|>[tool_call(name='bili', arguments={'action': 'search', 'query': 'test'})]<|tool_call_end|>",
+    tools,
+  )
+  assert(dict && dict.calls[0]!.args.query === 'test', 'dict 形式 arguments 应展开')
+  // JSON 字符串形式
+  const jsonStr = parseTextToolCalls(
+    `<|tool_call_start|>[tool_call(name='bili', arguments='{"action": "saved"}')]<|tool_call_end|>`,
+    tools,
+  )
+  assert(jsonStr && jsonStr.calls[0]!.args.action === 'saved', 'JSON 字符串 arguments 应解析')
+})
+
+await test('lms 文本工具解析:引号键+冒号分隔+杂散引号(实测回归)', async () => {
+  const { parseTextToolCalls } = await import('../electron/agent/providers/lmstudio-chat')
+  const tools: AgentTool[] = [
+    {
+      name: 'read_file',
+      description: '读文件',
+      execute: async () => 'ok',
+      parameters: {
+        type: 'object',
+        properties: { path: { type: 'string' } },
+        required: ['path'],
+      },
+    },
+  ]
+  // 用户实测原文(lfm2.5-2.6b 三轮):键带引号 + 冒号分隔 + 'arguments= 杂散引号
+  const text =
+    "<|tool_call_start|>[tool_call('name': 'read_file', 'arguments={'path': 'C:\\Users\\asus\\AppData\\Roaming\\dynamic-island\\memory.json'})]<|tool_call_end|>"
+  const parsed = parseTextToolCalls(text, tools)
+  assert(parsed, '引号键+冒号分隔格式应解析成功')
+  assert(parsed!.calls.length === 1 && parsed!.calls[0]!.name === 'read_file', '应精确命中 read_file')
+  assert(
+    parsed!.calls[0]!.args.path === 'C:\\Users\\asus\\AppData\\Roaming\\dynamic-island\\memory.json',
+    '路径反斜杠应完整保留',
+  )
+  // 混合:裸 kwargs 与引号键混用 + dict 风格冒号
+  const mixed = parseTextToolCalls(
+    "<|tool_call_start|>[tool_call(action='search', 'query': \"测试\")]<|tool_call_end|>",
+    [{ name: 'bili', description: 'B站', execute: async () => 'ok', parameters: { type: 'object', properties: { action: { type: 'string', enum: ['search'] }, query: { type: 'string' } } } }],
+  )
+  assert(mixed && mixed.calls[0]!.name === 'bili' && mixed.calls[0]!.args.query === '测试', '混合键风格应解析')
+})
+
+await test('lms 流式标记过滤:工具调用指令不暴露到对话窗口(SSE)', async () => {
+  const { StreamCallFilter } = await import('../electron/agent/providers/lmstudio-chat')
+  // 模拟 SSE delta 序列:<tool_call> 跨 delta 分割 + 正文前后包裹
+  const deltas = [
+    '我来看看。',
+    '<tool_', 'call>\n{"name": "bili", ', '"arguments": {"action": "up_info"}}\n', '</tool_', 'call>',
+    '结果出来了。',
+  ]
+  const filter = new StreamCallFilter()
+  const shown = deltas.map((d) => filter.feed(d)).join('') + filter.flush()
+  assert(shown === '我来看看。结果出来了。', `调用段应被抑制,实际:${JSON.stringify(shown)}`)
+})
+
+await test('lms 流式标记过滤:特殊 token 与多段抑制', async () => {
+  const { StreamCallFilter } = await import('../electron/agent/providers/lmstudio-chat')
+  const filter = new StreamCallFilter()
+  const shown =
+    filter.feed('前文<|tool_call_start|>[bili(action=') +
+    filter.feed("'up_info')]<|tool_call_end|>中文") +
+    filter.feed('<tool_call>{"name":"x"}</tool_call>后文') +
+    filter.flush()
+  assert(shown === '前文中文后文', `两段调用都应抑制,实际:${JSON.stringify(shown)}`)
+})
+
+await test('lms 流式标记过滤:```json fence 闭合抑制/未闭合补发/普通文本直通', async () => {
+  const { StreamCallFilter } = await import('../electron/agent/providers/lmstudio-chat')
+  // 闭合 fence:抑制
+  const a = new StreamCallFilter()
+  const shownA = a.feed('看这个:\n```json\n{"action": "search"}\n```\n完事') + a.flush()
+  assert(shownA === '看这个:\n\n完事', `闭合 fence 应抑制,实际:${JSON.stringify(shownA)}`)
+  // 未闭合 fence:flush 补发(可能是普通展示块,不能丢)
+  const b = new StreamCallFilter()
+  const shownB = b.feed('配置:\n```json\n{"theme": "dark"}') + b.flush()
+  assert(shownB === '配置:\n```json\n{"theme": "dark"}', '未闭合 fence 应补发不丢内容')
+  // 普通文本(含反引号/代码块其他语言)直通
+  const c = new StreamCallFilter()
+  const shownC = c.feed('代码:\n```python\nprint(1)\n```\n完') + c.flush()
+  assert(shownC === '代码:\n```python\nprint(1)\n```\n完', '非 json fence 不应误伤')
+  // 无标记纯文本
+  const d = new StreamCallFilter()
+  const shownD = d.feed('今天天气') + d.feed('不错') + d.flush()
+  assert(shownD === '今天天气不错', '普通文本直通')
+})
+
+await test('lms 流式标记过滤:未闭合调用标记丢弃 + parseTextToolCalls 一致剥离', async () => {
+  const { StreamCallFilter, parseTextToolCalls } = await import('../electron/agent/providers/lmstudio-chat')
+  const tools: AgentTool[] = [
+    {
+      name: 'bili',
+      description: 'B站',
+      execute: async () => 'ok',
+      parameters: { type: 'object', properties: { action: { type: 'string', enum: ['search'] } } },
+    },
+  ]
+  // 流截断:tool_call 只输出一半(流被 max tokens 掐断)
+  const filter = new StreamCallFilter()
+  const shown = filter.feed('我来查。<tool_call>\n{"name": "bi') + filter.flush()
+  assert(shown === '我来查。', '未闭合调用标记应丢弃(半截调用无意义)')
+  // parseTextToolCalls 对同款全文的剥离与 UI 一致
+  const parsed = parseTextToolCalls('我来查。<tool_call>\n{"name": "bi', tools)
+  assert(parsed === null, '未闭合段无法解析出调用')
+  // 前面有闭合段 + 尾部未闭合:只剥尾部,闭合段正常解析(首片段在开头,
+  // 其后正文按"截断到首个片段前"语义一并丢弃——防编造结果)
+  const mixed = parseTextToolCalls(
+    '<tool_call>{"name": "bili", "arguments": {"action": "search"}}</tool_call>正文<tool_call>{"na',
+    tools,
+  )
+  assert(mixed && mixed.calls.length === 1 && mixed.text === '', '闭合段解析 + 未闭合尾部剥离')
+})
+
+await test('lms 工具闭环:<tool_call> 规范格式解析(指引引导输出)', async () => {
+  const { parseTextToolCalls } = await import('../electron/agent/providers/lmstudio-chat')
+  const tools: AgentTool[] = [
+    {
+      name: 'bili',
+      description: 'B站',
+      execute: async () => 'ok',
+      parameters: {
+        type: 'object',
+        properties: { action: { type: 'string', enum: ['search', 'saved'] }, query: { type: 'string' } },
+      },
+    },
+  ]
+  const text = '我来查一下。\n<tool_call>\n{"name": "bili", "arguments": {"action": "search", "query": "花花卡"}}\n</tool_call>'
+  const parsed = parseTextToolCalls(text, tools)
+  assert(parsed, '应解析出调用')
+  assert(parsed!.calls.length === 1 && parsed!.calls[0]!.name === 'bili', '应命中 bili')
+  assert(parsed!.calls[0]!.args.action === 'search', 'arguments 应展开')
+  assert(parsed!.calls[0]!.args.query === '花花卡', '参数应保留')
+  assert(parsed!.text === '我来查一下。', '正文应截断到调用前')
+  // Python 风格混用兜底
+  const py = parseTextToolCalls('<tool_call>bili(action="search", query="x")</tool_call>', tools)
+  assert(py && py.calls[0]!.name === 'bili', '非 JSON 的 Python 风格也应解析')
+})
+
+await test('lms 工具闭环:历史回传分流(伪调用转文本,协议调用保持原生)', async () => {
+  const { lmstudioHistoryToMessages, TEXT_CALL_ID_PREFIX } = await import(
+    '../electron/agent/providers/lmstudio-chat'
+  )
+  const history: AgentMessage[] = [
+    {
+      id: 'u1',
+      role: 'user',
+      parts: [{ type: 'text', text: '看看B站' }],
+    },
+    {
+      id: 'a1',
+      role: 'assistant',
+      parts: [
+        { type: 'text', text: '好的,我来查看' },
+        // 文本解析伪调用(id 前缀标记)
+        { type: 'tool-call', id: `${TEXT_CALL_ID_PREFIX}100-0`, name: 'bili', args: { action: 'search' } },
+        { type: 'tool-result', id: `${TEXT_CALL_ID_PREFIX}100-0`, name: 'bili', ok: true, result: '真实工具结果', durationMs: 5 },
+        // 协议通道真调用(无前缀)
+        { type: 'tool-call', id: 'call-abc', name: 'web_search', args: { q: 'test' } },
+        { type: 'tool-result', id: 'call-abc', name: 'web_search', ok: true, result: '协议工具结果', durationMs: 3 },
+      ],
+    },
+  ]
+  const msgs = await lmstudioHistoryToMessages(history)
+  // assistant 消息:伪调用展开为 <tool_call> 回放,协议调用保留 tool_calls
+  const assistant = msgs.find((m) => m.role === 'assistant') as Record<string, unknown>
+  assert(assistant, '应有 assistant 消息')
+  assert(String(assistant.content).includes('<tool_call>'), '伪调用应回放为 <tool_call> 文本')
+  assert(String(assistant.content).includes('"bili"'), '回放应含工具名')
+  const tcs = assistant.tool_calls as Array<Record<string, unknown>> | undefined
+  assert(tcs && tcs.length === 1 && (tcs[0]!.id as string) === 'call-abc', '协议调用应保留 tool_calls 原生格式')
+  // 伪调用结果 → user 消息 <tool_result>(template 不支持 role:'tool')
+  const resultUser = msgs.find((m) => m.role === 'user' && String(m.content).includes('<tool_result>'))
+  assert(resultUser && String(resultUser.content).includes('真实工具结果'), '伪调用结果应转 user 消息回传')
+  // 协议调用结果 → role:'tool'
+  const toolMsg = msgs.find((m) => m.role === 'tool') as Record<string, unknown> | undefined
+  assert(toolMsg && toolMsg.tool_call_id === 'call-abc', '协议调用结果应保持 role:tool + tool_call_id')
+})
+
+// ---------------------------------------------------------------------------
+// LM Studio GLM-4-9B 系适配(2026-08-19 GLM-4-9B-0414 实测:裸 Python 调用
+// 当正文 + 编造工具结果;lmstudio-glm4.ts 独立档位,不影响其它模型)
+// ---------------------------------------------------------------------------
+
+/** GLM 测试用工具集(exec_command/bili/read_file——与真实 schema 对齐) */
+function glm4TestTools(): AgentTool[] {
+  return [
+    {
+      name: 'exec_command',
+      description: '执行命令',
+      execute: async () => 'ok',
+      parameters: {
+        type: 'object',
+        properties: {
+          command: { type: 'string' },
+          cwd: { type: 'string' },
+          timeout: { type: 'number' },
+        },
+        required: ['command'],
+      },
+    },
+    {
+      name: 'bili',
+      description: 'B站',
+      execute: async () => 'ok',
+      parameters: {
+        type: 'object',
+        properties: {
+          action: { type: 'string', enum: ['up_info', 'search', 'saved'] },
+          query: { type: 'string' },
+        },
+      },
+    },
+    {
+      name: 'read_file',
+      description: '读文件',
+      execute: async () => 'ok',
+      parameters: {
+        type: 'object',
+        properties: { path: { type: 'string' } },
+        required: ['path'],
+      },
+    },
+  ]
+}
+
+await test('lms GLM-4-9B:模型识别(glm49b 系命中,其它系不误判)', async () => {
+  const { isGlm4Model } = await import('../electron/agent/providers/lmstudio-glm4')
+  assert(isGlm4Model('glm-4-9b-chat-0414'), 'glm-4-9b-chat-0414 应命中')
+  assert(isGlm4Model('glm-4-9b-chat'), 'glm-4-9b-chat 应命中')
+  assert(isGlm4Model('THUDM/glm-4-9b-chat-0414'), '厂商前缀变体应命中')
+  assert(isGlm4Model('glm-4-9b'), '基础名应命中')
+  assert(!isGlm4Model('glm-4.6v-flash'), 'glm-4.6v 视觉系不应命中(独立档位)')
+  assert(!isGlm4Model('glm-4.5-air'), 'glm-4.5 不应命中')
+  assert(!isGlm4Model('qwen3-8b'), 'qwen 不应命中')
+  assert(!isGlm4Model('nanbeige4.2-3b'), 'nanbeige 不应命中')
+  assert(!isGlm4Model('lfm2.5-2.6b'), 'lfm 不应命中')
+})
+
+await test('lms GLM-4-9B:裸调用解析(用户实测原文:调用 + 编造结果 + 残片标签)', async () => {
+  const { glm4ParseBareCalls } = await import('../electron/agent/providers/lmstudio-glm4')
+  const tools = glm4TestTools()
+  // 用户实测原文(GLM-4-9B-0414,问「我B站登录了吗」):
+  // 裸 Python 调用 + 编造的 bili-tool.exe 输出 + </tool_result> 残片
+  const text =
+    'exec_command("bili-tool login/whoami")ili-tool.exe: -352, 二维码过期,请重新生成并扫码确认\n</tool_result>'
+  const parsed = glm4ParseBareCalls(text, tools)
+  assert(parsed, '裸调用应解析成功')
+  assert(parsed!.calls.length === 1 && parsed!.calls[0]!.name === 'exec_command', '应命中 exec_command')
+  assert(parsed!.calls[0]!.args.command === 'bili-tool login/whoami', '位置参数应映射主参数 command')
+  assert(parsed!.text === '', '正文应截断到调用前(编造结果与残片全丢)')
+})
+
+await test('lms GLM-4-9B:kwargs / 位置参数 / 路径反斜杠 / 嵌套提升', async () => {
+  const { glm4ParseBareCalls } = await import('../electron/agent/providers/lmstudio-glm4')
+  const tools = glm4TestTools()
+  // kwargs 风格
+  const a = glm4ParseBareCalls('我来查。exec_command(command="bili-tool whoami")', tools)
+  assert(a && a.calls[0]!.name === 'exec_command' && a.calls[0]!.args.command === 'bili-tool whoami', 'kwargs 应解析')
+  assert(a!.text === '我来查。', '前导文本保留')
+  // 位置参数 + Windows 路径(单反斜杠原样保留)
+  const b = glm4ParseBareCalls('read_file("C:\\Users\\asus\\bili\\downloads")', tools)
+  assert(b && b.calls[0]!.args.path === 'C:\\Users\\asus\\bili\\downloads', '位置参数→path,反斜杠完整保留')
+  // params 嵌套提升 + 单引号 dict
+  const c = glm4ParseBareCalls("bili(action='search', params={'query': '花花卡'})", tools)
+  assert(c && c.calls[0]!.name === 'bili' && c.calls[0]!.args.query === '花花卡', '嵌套 params 应展开')
+  // 同义词归一(read_file(file_path=...) → path)
+  const d = glm4ParseBareCalls('read_file(file_path="C:\\test.txt")', tools)
+  assert(d && d.calls[0]!.args.path === 'C:\\test.txt', 'file_path 同义词应归一到 path')
+  // 混合:kwargs + 前导中文文本 + 调用后编造结果截断
+  const e = glm4ParseBareCalls('好的。\nbili(action="search", query="天气")\n结果: sunny(编造)', tools)
+  assert(e && e.text === '好的。', '调用后编造结果应截断')
+})
+
+await test('lms GLM-4-9B:防误判(未注册名/散文括号/带空格括号/未闭合)', async () => {
+  const { glm4ParseBareCalls } = await import('../electron/agent/providers/lmstudio-glm4')
+  const tools = glm4TestTools()
+  // 未注册工具名(print)不触发
+  assert(glm4ParseBareCalls('print("hello world")', tools) === null, '未注册名不应误判')
+  // 工具名与括号间有空白(散文形态)不触发——防真实命令误执行
+  assert(glm4ParseBareCalls('exec_command (see docs) 是一个工具', tools) === null, '带空格括号不应触发')
+  // 词中拼接(notexec_command)不触发
+  assert(glm4ParseBareCalls('notexec_command("x")', tools) === null, '词中拼接不应触发')
+  // 未闭合(流截断半截调用)返回 null,交上层剥离路径
+  assert(glm4ParseBareCalls('exec_command("bili-tool who', tools) === null, '未闭合调用不应产出')
+  // 普通文本
+  assert(glm4ParseBareCalls('今天天气不错', tools) === null, '普通文本不误判')
+})
+
+await test('lms GLM-4-9B:流式防护(裸调用段抑制 + 标记对抑制 + 一致性)', async () => {
+  const { Glm4StreamGuard } = await import('../electron/agent/providers/lmstudio-glm4')
+  const names = ['exec_command', 'bili', 'read_file']
+  // ① 裸调用跨 delta 分割:调用段抑制,前后正文照常
+  const a = new Glm4StreamGuard(names)
+  const shownA =
+    a.feed('我查一下。\nexec_') +
+    a.feed('command("bili-tool login/whoami")ili-tool.exe: -352, 二维码过期') +
+    a.feed('\n</tool_result>') +
+    a.flush()
+  assert(shownA === '我查一下。\n', `裸调用段应抑制,实际:${JSON.stringify(shownA)}`)
+  assert(a.suppressedChars > 0, '抑制字符应计数(防静默空回复)')
+  // ② <tool_call> 标记对抑制(与共享过滤器同款行为)
+  const b = new Glm4StreamGuard(names)
+  const shownB =
+    b.feed('前文<tool_') +
+    b.feed('call>{"name": "bili", "arguments": {"action": "search"}}</tool_') +
+    b.feed('call>后文') +
+    b.flush()
+  assert(shownB === '前文后文', `标记对应抑制,实际:${JSON.stringify(shownB)}`)
+  // ③ 未闭合裸调用(流截断):flush 丢弃,与落定解析返回 null 一致
+  const c = new Glm4StreamGuard(names)
+  const shownC = c.feed('我来查。exec_command("bili-tool who') + c.flush()
+  assert(shownC === '我来查。', '未闭合裸调用应丢弃')
+  // ④ 伪边界防护:"not"+"exec_command(" 跨 delta 拼接不得命中
+  const d = new Glm4StreamGuard(names)
+  const shownD = d.feed('not') + d.feed('exec_command("x")') + d.flush()
+  assert(shownD === 'notexec_command("x")', '词尾拼接的伪边界不应抑制')
+  // ⑤ 普通文本直通(含 ```python 代码示例不误伤)
+  const e = new Glm4StreamGuard(names)
+  const shownE = e.feed('代码:\n```python\nprint(1)\n```\n完') + e.flush()
+  assert(shownE === '代码:\n```python\nprint(1)\n```\n完', '普通代码示例不应误伤')
+  // ⑥ 未闭合 ```json fence:flush 补发(展示块不能丢)
+  const f = new Glm4StreamGuard(names)
+  const shownF = f.feed('配置:\n```json\n{"theme": "dark"}') + f.flush()
+  assert(shownF === '配置:\n```json\n{"theme": "dark"}', '未闭合 fence 应补发')
+})
+
+await test('lms GLM-4-9B:正文残片清洗(编造结果整对丢弃 + 孤立标签移除)', async () => {
+  const { glm4SanitizeText } = await import('../electron/agent/providers/lmstudio-glm4')
+  // 整对 <tool_result>(编造结果):内容 + 标签整体丢弃
+  const a = glm4SanitizeText('根据查询:\n<tool_result>\nbili-tool.exe: 登录成功\n</tool_result>\n以上')
+  assert(a === '根据查询:\n\n以上', `编造结果整对应丢弃,实际:${JSON.stringify(a)}`)
+  // 孤立残片标签移除(实测 </tool_result> 回声)
+  const b = glm4SanitizeText('查询完成。</tool_result>')
+  assert(b === '查询完成。', '孤立闭合标签应移除')
+  // 混合残片
+  const c = glm4SanitizeText('好的。</tool_call><|tool_call_end|><tool_result>')
+  assert(c === '好的。', '各类残片标签应移除')
+  // 无标签文本不动
+  const d = glm4SanitizeText('正常回复,含 100% 与 <b>HTML</b>')
+  assert(d === '正常回复,含 100% 与 <b>HTML</b>', '普通文本不应误伤')
+})
+
+await test('lms GLM-4-9B:裸 bili-tool CLI 转写为 bili 工具调用(二轮实测回归)', async () => {
+  const { glm4ParseBareCalls, GLM4_TOOL_GUIDE_ADDON } = await import(
+    '../electron/agent/providers/lmstudio-glm4'
+  )
+  const tools = glm4TestTools()
+  // 二轮实测形态:模型受系统提示 CLI 用法引导,输出 exec_command 包装的
+  // 裸 bili-tool 命令(不在 PATH 必失败)——转写为 bili 工具调用
+  // 无 bili 工具注册(仅 exec_command):不转写,保持原调用
+  const a = glm4ParseBareCalls('exec_command("bili-tool login --json")', [tools[0]!])
+  assert(a && a.calls[0]!.name === 'exec_command', '无 bili 工具注册时不应转写')
+  // 真实同款工具集(bili 含 login/whoami 枚举)
+  const realBili: AgentTool = {
+    name: 'bili',
+    description: 'B站',
+    execute: async () => 'ok',
+    parameters: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['login', 'whoami', 'search', 'saved'] },
+        query: { type: 'string' },
+      },
+    },
+  }
+  const b = glm4ParseBareCalls('exec_command("bili-tool login --json")', [tools[0]!, realBili])
+  assert(b && b.calls[0]!.name === 'bili' && b.calls[0]!.args.action === 'login', '裸 login CLI 应转写为 bili(action=login)')
+  assert(!('query' in (b!.calls[0]!.args ?? {})), '--json flag 应丢弃')
+  const c = glm4ParseBareCalls('exec_command("bili-tool.exe whoami")', [tools[0]!, realBili])
+  assert(c && c.calls[0]!.name === 'bili' && c.calls[0]!.args.action === 'whoami', '.exe 变体也应转写')
+  const d = glm4ParseBareCalls('exec_command("bili-tool search 花花卡 --json")', [tools[0]!, realBili])
+  assert(
+    d && d.calls[0]!.name === 'bili' && d.calls[0]!.args.action === 'search' && d.calls[0]!.args.query === '花花卡',
+    '位置参数应映射 query',
+  )
+  // 不转写的边界:幻觉 action / 带完整路径(模型已写全路径,执行可成功)
+  const e = glm4ParseBareCalls('exec_command("bili-tool notanaction")', [tools[0]!, realBili])
+  assert(e && e.calls[0]!.name === 'exec_command', '幻觉 action 不应转写')
+  const f = glm4ParseBareCalls(
+    'exec_command("C:\\tools\\bili\\bili-tool.exe login")',
+    [tools[0]!, realBili],
+  )
+  assert(f && f.calls[0]!.name === 'exec_command', '完整路径命令应保持原样(可执行成功)')
+  // 指引防回归:不得再示范 exec_command 跑 bili-tool CLI(禁止性说明除外)
+  assert(
+    !/exec_command\((command\s*=\s*)?"bili-tool/.test(GLM4_TOOL_GUIDE_ADDON),
+    '指引不得示范 exec_command 跑 bili-tool CLI(防有害示范回归)',
+  )
+  assert(GLM4_TOOL_GUIDE_ADDON.includes('bili(action='), '指引示例应示范直接调用注册工具')
+})
+
+await test('lms GLM-4-9B:适配独立(共享解析器对 GLM 形态保持原行为不受影响)', async () => {
+  const { parseTextToolCalls } = await import('../electron/agent/providers/lmstudio-chat')
+  const tools = glm4TestTools()
+  // 共享四通道(特殊 token/<tool_call>/fence/裸 JSON 行)对裸 Python 调用
+  // 不命中(这正是 GLM 档位第五通道存在的原因)——确认共享解析不被改动
+  const bare = 'exec_command("bili-tool login/whoami")ili-tool.exe: -352'
+  assert(parseTextToolCalls(bare, tools) === null, '共享解析器对裸调用应保持不命中(GLM 档位接管)')
+  // 共享通道的既有行为不受 GLM 模块影响(<tool_call> 规范格式照常解析)
+  const xml = parseTextToolCalls('<tool_call>{"name": "bili", "arguments": {"action": "search"}}</tool_call>', tools)
+  assert(xml && xml.calls[0]!.name === 'bili', '共享 <tool_call> 通道应不受影响')
+  // 普通文本/普通 JSON 展示块不误判(回归)
+  assert(parseTextToolCalls('今天天气不错', tools) === null, '普通文本不误判(回归)')
+  assert(
+    parseTextToolCalls('配置:\n```json\n{"theme": "dark"}\n```', tools) === null,
+    '普通 JSON 展示块不误判(回归)',
+  )
+})
+
+await test('lms 视觉消息构造:vision 模型图片 → content 数组,文本模型保持纯文本', async () => {
+  const { lmstudioHistoryToMessages, isVisionModel } = await import(
+    '../electron/agent/providers/lmstudio-chat'
+  )
+  // 模型识别:视觉系命中 / 文本系不误判
+  assert(isVisionModel('glm-4.6v-flash'), 'glm-4.6v 应识别为视觉模型')
+  assert(isVisionModel('Qwen2.5-VL-7B-Instruct'), 'qwen vl 应识别为视觉模型')
+  assert(isVisionModel('zai-org/glm-4.6v-flash'), '带 org 前缀也应命中')
+  assert(!isVisionModel('glm-4.7-flash'), 'glm-4.7-flash 文本模型不应误判')
+  assert(!isVisionModel('lfm2.5-2.6b'), 'lfm 不应误判')
+  assert(!isVisionModel('qwen3-8b'), 'qwen3-8b 不应误判')
+  // 本地图片文件(1x1 PNG)→ media part;image part 直取 dataUrl
+  const png = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+    'base64',
+  )
+  const imgPath = path.join(tmp, 'vision-test.png')
+  await fs.writeFile(imgPath, png)
+  const history: AgentMessage[] = [
+    {
+      id: 'u1',
+      role: 'user',
+      parts: [
+        { type: 'text', text: '看看这张图' },
+        { type: 'media', kind: 'img', url: imgPath, name: '附件1' },
+        { type: 'image', dataUrl: 'data:image/png;base64,aGVsbG8=' },
+        // 非图片媒体不参与
+        { type: 'media', kind: 'video', url: path.join(tmp, 'v.mp4') },
+      ],
+    },
+  ]
+  // vision 模型:content 数组(text + 2 个 image_url,video 不参与)
+  const vmsgs = await lmstudioHistoryToMessages(history, 'glm-4.6v-flash')
+  const vuser = vmsgs[0] as { role: string; content: Array<Record<string, unknown>> }
+  assert(Array.isArray(vuser.content), 'vision 模型 content 应为数组')
+  const textPart = vuser.content.find((c) => c.type === 'text') as { text: string }
+  assert(textPart && textPart.text === '看看这张图', 'text part 应保留')
+  const imgParts = vuser.content.filter((c) => c.type === 'image_url')
+  assert(imgParts.length === 2, 'media(img)+image 两图都应构造 image_url,video 不参与')
+  const firstUrl = (imgParts[0]!.image_url as { url: string }).url
+  assert(firstUrl.startsWith('data:image/png;base64,'), '本地图片应读文件转 dataUrl')
+  assert(firstUrl.endsWith(png.toString('base64')), 'base64 内容应与源文件一致')
+  const secondUrl = (imgParts[1]!.image_url as { url: string }).url
+  assert(secondUrl === 'data:image/png;base64,aGVsbG8=', 'image part 的 dataUrl 应直取')
+  // 纯文本消息(vision 模型无图):保持字符串
+  const pure = await lmstudioHistoryToMessages(
+    [{ id: 'u2', role: 'user', parts: [{ type: 'text', text: '你好' }] }],
+    'glm-4.6v-flash',
+  )
+  assert(typeof pure[0]!.content === 'string', 'vision 模型无图消息应保持纯字符串 content')
+  // 文本模型(有图):保持纯字符串(现状不破坏)
+  const tmsgs = await lmstudioHistoryToMessages(history, 'glm-4.7-flash')
+  assert(typeof tmsgs[0]!.content === 'string', '非 vision 模型应保持纯字符串 content')
+  assert((tmsgs[0]!.content as string).includes('看看这张图'), '文本内容应保留')
+  // 路径不存在的图:跳过不报错,退回纯文本
+  const bad = await lmstudioHistoryToMessages(
+    [
+      {
+        id: 'u3',
+        role: 'user',
+        parts: [
+          { type: 'text', text: '坏图' },
+          { type: 'media', kind: 'img', url: path.join(tmp, 'not-exist.png') },
+        ],
+      },
+    ],
+    'glm-4.6v-flash',
+  )
+  assert(typeof bad[0]!.content === 'string' && (bad[0]!.content as string) === '坏图', '读失败的图应跳过并退回纯文本')
+})
 
 await runPluginKernelTests({ test, assert, assertRejects })
 

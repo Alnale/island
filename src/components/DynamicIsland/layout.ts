@@ -44,8 +44,20 @@ export const SWIPE_THRESHOLD_PX = 36
 export const TRACK_CYCLE_MS = 9000
 // 长按触发展开的持续时间(ms),参考 iOS 长按手感
 export const LONG_PRESS_MS = 450
-// 长按判定允许的指针位移(px):移动超过该值视为滑动/拖动,取消长按
-export const LONG_PRESS_SLOP_PX = 8
+// 长按判定允许的指针位移(px):移动超过该值视为滑动/拖动,取消长按。
+// 2026-08-18 从 8 提到 12(设计规范:方向判定需滞后量):8px 对桌面鼠标
+// 过严——按住想长按展开时手抖 9px 即取消,而文字区 swipe 需 36px,中间
+// 是"长按已取消、swipe 又不够"的死区;12px 保留误触过滤又不卡手抖
+export const LONG_PRESS_SLOP_PX = 12
+// 文字区滑动手势的方向滞后量(px,2026-08-18 设计规范):总位移已超
+// SWIPE_THRESHOLD_PX 但末段速度方向与总方向相反(先右后左等反转)时
+// 不提交,避免方向误判;只有反向位移同样超过该值才翻转主导方向
+export const SWIPE_HYSTERESIS_PX = 10
+// 进度条/滑杆甩动的动量投影速度阈值(px/s):超过才把松手点投影到
+// 惯性终点再吸附(Apple 指数衰减投影);低于阈值视为常规落点
+export const SEEK_MOMENTUM_VELOCITY_PX = 400
+// 进度条速度采样窗口(ms):维护最近窗口内的指针位置历史算末段速度
+export const SEEK_MOMENTUM_WINDOW_MS = 150
 // 文字区滑动手势时间窗(ms,2026-08-08 修复"长按边缘误切换音乐模式"):
 // swipe 是快速滑动——按下后须在该时间内达到位移阈值才算手势,
 // 长按(450ms)取消后的慢速位移/手抖不触发
@@ -124,6 +136,11 @@ export function clamp01(v: number): number {
 export const AGENT_PANEL_FIXED_H = 116
 export const AGENT_PANEL_MIN_H = 176
 export const AGENT_PANEL_MAX_H = 700
+/** 会话面板(右缘 dock)展开高度(px,2026-08-18 与 CSS
+ * .island-session-dock.open 的 height 一致):会话折叠/展开时窗口高度按
+ * 此**目标值**计算(而非动画中的 offsetHeight),点击即测、窗口动画一步
+ * 到位,消除"等 CSS 动画完成再量"的响应滞后 */
+export const SESSION_DOCK_OPEN_H = 360
 /** 高度预算余量(2026-08-13 用户实测"切会话收起面板后单条消息底部被
  * 截断"):FIXED_H + contentH + bannerH 是零余量预算——offsetHeight 取整
  * 与行高小数叠加,消息区实际可用高比内容矮 1-2px,最后一条消息底缘

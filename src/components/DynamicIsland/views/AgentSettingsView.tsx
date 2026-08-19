@@ -13,6 +13,8 @@ import type { AgentConfig, AgentToolInfo, McpServerConfig, MemoryEntry, Provider
 import { MIND_PERSONAS, SUMMARY_STYLES } from '../../../../electron/agent/constants'
 import { MIMO_DEFAULT_BASE_URL, MIMO_DEFAULT_MODEL, MIMO_PLATFORM_URL, mimoProviderLabel } from '../../../../electron/agent/providers/mimo-constants'
 import { DEEPSEEK_DEFAULT_BASE_URL, DEEPSEEK_DEFAULT_MODEL, DEEPSEEK_TOPUP_URL, deepseekProviderLabel } from '../../../../electron/agent/providers/deepseek-constants'
+import { LMSTUDIO_DEFAULT_BASE_URL, LMSTUDIO_DEFAULT_MODEL, lmstudioProviderLabel } from '../../../../electron/agent/providers/lmstudio-constants'
+import { GLM_CLOUD_DEFAULT_BASE_URL, GLM_CLOUD_DEFAULT_MODEL, GLM_CLOUD_PLATFORM_URL, glmCloudProviderLabel } from '../../../../electron/agent/providers/glm-cloud-constants'
 import { useLeavingList } from '../../../hooks/useLeavingList'
 import { BackFoot, PanelHead } from './shared'
 import { QuickMenu } from './QuickMenu'
@@ -21,6 +23,14 @@ import { QuickMenu } from './QuickMenu'
 const EMPTY_DEEPSEEK: ProviderCredentials = { apiKey: '', baseURL: DEEPSEEK_DEFAULT_BASE_URL, model: DEEPSEEK_DEFAULT_MODEL }
 /** 空凭据(MiMo 默认地址/模型) */
 const EMPTY_MIMO: ProviderCredentials = { apiKey: '', baseURL: MIMO_DEFAULT_BASE_URL, model: MIMO_DEFAULT_MODEL }
+/** 空凭据(LM Studio 本地工作站:默认端口 1234,模型由挂载面板选用) */
+const EMPTY_LMSTUDIO: ProviderCredentials = { apiKey: '', baseURL: LMSTUDIO_DEFAULT_BASE_URL, model: LMSTUDIO_DEFAULT_MODEL }
+/** 空凭据(智谱 GLM 云端:开放平台 v4 端点,默认 glm-4.7-flash) */
+const EMPTY_GLM: ProviderCredentials = { apiKey: '', baseURL: GLM_CLOUD_DEFAULT_BASE_URL, model: GLM_CLOUD_DEFAULT_MODEL }
+
+/** 按供应商 id 取空凭据兜底(桶缺 key / 旧配置无该供应商时) */
+const emptyCredsOf = (pid: ProviderId): ProviderCredentials =>
+  pid === 'mimo' ? EMPTY_MIMO : pid === 'lmstudio' ? EMPTY_LMSTUDIO : pid === 'glm' ? EMPTY_GLM : EMPTY_DEEPSEEK
 
 export interface AgentSettingsViewProps {
   config: AgentConfig | null
@@ -41,7 +51,21 @@ export interface AgentSettingsViewProps {
  * 由整合按钮悬浮展开切换;保存脚全局共用。第 5 组「Sub Agent」=
  * 总结标题文风 + 心理揣测人格设置)。渲染用通用 QuickMenu 组件
  * (整合按钮 + 同行联通展开 + 滚轮 + 高亮滑块 + 宽度过渡,同款设计) */
-const SETTINGS_TABS = ['账号', '行为与界面', '工具与能力', '记忆与进化', 'Sub Agent', '数据管理'] as const
+const SETTINGS_TABS = ['账号', '模型分工', '行为与界面', '工具与能力', '记忆与进化', 'Sub Agent', '数据管理'] as const
+
+/** 供应商标签(模型分工页展示,2026-08-18) */
+const PROVIDER_LABELS: Record<ProviderId, string> = {
+  deepseek: 'DeepSeek',
+  mimo: '小米 MiMo',
+  lmstudio: 'LM Studio',
+  glm: '智谱 GLM',
+}
+/** 供应商选项(2026-08-19 账号页快捷切换菜单;模块级稳定引用——
+ *  QuickMenu 的测量 effect 以 items 为依赖,内联数组每次渲染重建
+ *  会触发测量→setState→渲染循环) */
+const PROVIDER_OPTIONS: ProviderId[] = ['deepseek', 'mimo', 'lmstudio', 'glm']
+/** Sub Agent 供应商选项(与主供应商两两组合 = 16 种) */
+const SUB_PROVIDER_OPTIONS: ProviderId[] = ['deepseek', 'mimo', 'lmstudio', 'glm']
 
 /** MCP 服务表单行(参数/环境变量以逐行文本编辑,保存时转换) */
 interface McpServerForm {
@@ -474,11 +498,19 @@ export function AgentSettingsView({
     providers: {
       deepseek: { ...EMPTY_DEEPSEEK },
       mimo: { ...EMPTY_MIMO },
+      lmstudio: { ...EMPTY_LMSTUDIO },
+      glm: { ...EMPTY_GLM },
     } as Record<ProviderId, ProviderCredentials>,
     // 以下三个字段 = providers[activeProvider] 的镜像(兼容现有输入框 onChange)
     apiKey: '',
     baseURL: DEEPSEEK_DEFAULT_BASE_URL,
     model: DEEPSEEK_DEFAULT_MODEL,
+    // 主/Sub Agent 模型分工(2026-08-18):Sub(总结/心理/标题/记忆提取)
+    // 使用的供应商与模型;subProvider 缺省跟随主供应商(form 里总有具体值,
+    // 填充时以 config.subProvider ?? activePid 落定),三供应商两两组合
+    // 最多 9 种;subModel 空 = 用该供应商桶在「账号」里已存的模型
+    subProvider: 'deepseek' as ProviderId,
+    subModel: '',
     systemPrompt: '',
     reasoningEffort: 'high',
     // 主对话输出预算(2026-08-08):缺省 8192(与 main 默认一致;
@@ -513,7 +545,7 @@ export function AgentSettingsView({
         [oldPid]: { apiKey: f.apiKey, baseURL: f.baseURL, model: f.model },
       }
       // 2. 加载新 pid 的凭据
-      const nextCreds = updatedProviders[pid] ?? (pid === 'mimo' ? { ...EMPTY_MIMO } : { ...EMPTY_DEEPSEEK })
+      const nextCreds = updatedProviders[pid] ?? emptyCredsOf(pid)
       return {
         ...f,
         activeProvider: pid,
@@ -529,7 +561,7 @@ export function AgentSettingsView({
   const patchActiveCred = useCallback((patch: Partial<ProviderCredentials>) => {
     setForm((f) => {
       const pid = f.activeProvider
-      const current = f.providers[pid] ?? (pid === 'mimo' ? { ...EMPTY_MIMO } : { ...EMPTY_DEEPSEEK })
+      const current = f.providers[pid] ?? emptyCredsOf(pid)
       const next = { ...current, ...patch }
       return {
         ...f,
@@ -715,6 +747,8 @@ export function AgentSettingsView({
       const emptyProviders: Record<ProviderId, ProviderCredentials> = {
         deepseek: { ...EMPTY_DEEPSEEK },
         mimo: { ...EMPTY_MIMO },
+        lmstudio: { ...EMPTY_LMSTUDIO },
+        glm: { ...EMPTY_GLM },
       }
       const cfgProviders: Record<ProviderId, ProviderCredentials> =
         (config.providers && typeof config.providers === 'object')
@@ -722,18 +756,32 @@ export function AgentSettingsView({
           : {
               deepseek: { apiKey: config.apiKey, baseURL: config.baseURL, model: config.model },
               mimo: { ...EMPTY_MIMO },
+              lmstudio: { ...EMPTY_LMSTUDIO },
+              glm: { ...EMPTY_GLM },
             }
-      const activePid: ProviderId = (config.activeProvider === 'mimo') ? 'mimo' : 'deepseek'
-      const activeCreds: ProviderCredentials = cfgProviders[activePid] ?? (activePid === 'mimo' ? EMPTY_MIMO : EMPTY_DEEPSEEK)
+      const activePid: ProviderId =
+        config.activeProvider === 'mimo' ? 'mimo'
+          : config.activeProvider === 'lmstudio' ? 'lmstudio'
+            : config.activeProvider === 'glm' ? 'glm'
+              : 'deepseek'
+      const activeCreds: ProviderCredentials = cfgProviders[activePid] ?? emptyCredsOf(activePid)
       setForm({
         activeProvider: activePid,
         providers: {
           deepseek: { ...EMPTY_DEEPSEEK, ...cfgProviders.deepseek },
           mimo: { ...EMPTY_MIMO, ...cfgProviders.mimo },
+          lmstudio: { ...EMPTY_LMSTUDIO, ...cfgProviders.lmstudio },
+          glm: { ...EMPTY_GLM, ...cfgProviders.glm },
         },
         apiKey: activeCreds.apiKey,
         baseURL: activeCreds.baseURL,
         model: activeCreds.model,
+        // 模型分工(2026-08-18):旧配置无 subProvider → 跟随主供应商
+        subProvider:
+          config.subProvider === 'mimo' || config.subProvider === 'lmstudio' || config.subProvider === 'glm' || config.subProvider === 'deepseek'
+            ? config.subProvider
+            : activePid,
+        subModel: config.subModel ?? '',
         systemPrompt: config.systemPrompt,
         reasoningEffort: config.reasoningEffort || 'high',
         maxOutputTokens: config.maxOutputTokens ?? 8192,
@@ -754,6 +802,250 @@ export function AgentSettingsView({
       setExcludedSkills(config.excludedSkills ?? [])
     }
   }, [config])
+
+  // ---- LM Studio 模型挂载管理(2026-08-18 本地部署接入)----
+  // 经 agent:lmstudio-models IPC 调 LM Studio native REST API:列表/
+  // 加载(可指定挂载上下文长度与 GPU 层数)/卸载;"选用"把模型 key 写入
+  // 当前供应商凭据的 model 字段(随保存持久化)
+  const [lmsModels, setLmsModels] = useState<
+    Array<{ id: string; state: string; maxContextLength?: number; quantization?: string; arch?: string }>
+  >([])
+  const [lmsLoaded, setLmsLoaded] = useState<
+    Array<{ id: string; state: string; contextLength?: number; gpuLayers?: number }>
+  >([])
+  const [lmsBusy, setLmsBusy] = useState(false)
+  const [lmsMsg, setLmsMsg] = useState('')
+  const [lmsAction, setLmsAction] = useState('')
+  // 当前操作类型(2026-08-18):乐观更新后模型移入未加载分组,lmsAction
+  // 仍在跟踪它——需区分"加载中/卸载中"避免乐观移出的行误显示"加载中"
+  const [lmsActionKind, setLmsActionKind] = useState<'load' | 'unload' | ''>('')
+  const lmsFetchedRef = useRef(false)
+  const isLmstudioActive = form.activeProvider === 'lmstudio'
+  // 分工页 Sub=lmstudio 场景也要拉模型列表(独立一次性标记)
+  const lmsSubFetchedRef = useRef(false)
+
+  /** LM Studio 端点凭据(2026-08-19 修复):主 Agent 激活时用顶层镜像
+   *  (form.baseURL/apiKey);Sub Agent 选了 lmstudio 但主在别的供应商时,
+   *  顶层镜像是**主供应商的地址**——必须改从 lmstudio 供应商桶取,否则
+   *  分工页下拉会拿 DeepSeek 地址去调 LM Studio API 全部失败 */
+  const lmsCreds = isLmstudioActive
+    ? { baseURL: form.baseURL, apiKey: form.apiKey }
+    : { baseURL: form.providers.lmstudio?.baseURL || '', apiKey: form.providers.lmstudio?.apiKey || '' }
+
+  /** 拉取模型列表;返回 loaded 列表(供卸载轮询判断),失败返回 null。
+   *  不清 lmsMsg——消息由调用方管理(轮询期间保留"已卸载"提示) */
+  const refreshLms = useCallback(async () => {
+    setLmsBusy(true)
+    try {
+      const res = await window.desktop?.agentLmstudioModels?.('list', { baseURL: lmsCreds.baseURL, apiKey: lmsCreds.apiKey })
+      if (res && typeof res === 'object' && typeof (res as { error?: string }).error === 'string') {
+        setLmsMsg(`获取失败:${(res as { error: string }).error}`)
+        return null
+      }
+      const r = res as { models?: typeof lmsModels; loaded?: typeof lmsLoaded }
+      setLmsModels(r?.models ?? [])
+      setLmsLoaded(r?.loaded ?? [])
+      return r?.loaded ?? []
+    } catch (e) {
+      setLmsMsg(`获取失败:${(e as Error).message}`)
+      return null
+    } finally {
+      setLmsBusy(false)
+    }
+  }, [lmsCreds.baseURL, lmsCreds.apiKey])
+
+  // 切换到 LM Studio 时自动拉取一次(仅一次,失败后走手动刷新);
+  // 分工页 Sub 供应商切到 lmstudio 时同样自动拉(下拉菜单需要已加载列表)
+  useEffect(() => {
+    if (isLmstudioActive && !lmsFetchedRef.current) {
+      lmsFetchedRef.current = true
+      void refreshLms()
+    }
+    if (form.subProvider === 'lmstudio' && !lmsSubFetchedRef.current) {
+      lmsSubFetchedRef.current = true
+      void refreshLms()
+    }
+  }, [isLmstudioActive, form.subProvider, refreshLms])
+
+  /** 选用 LM Studio 模型(2026-08-19 修复):除更新表单状态外 **立即
+   *  持久化**——此前只 patchActiveCred 不 onSave,用户不点保存就退出
+   *  设置时 settings.json 里 model 仍为空,对话报"未选择模型",重开
+   *  设置表单从持久化配置重新初始化又显示未选用(与卸载清空 model
+   *  同一坑:挂载管理操作必须自带持久化,不依赖用户点保存)。
+   *  patch 必须带 activeProvider(2026-08-19 修复"选用后跳回旧供应商"):
+   *  switchProvider 只改表单不落盘,持久化里 activeProvider 还是旧值
+   *  (如 mimo)——onSave 返回的 config 触发表单重建,供应商跳回旧值。
+   *  且**不带顶层 model**:主进程 applyAgentConfigPatch 先同步顶层凭据
+   *  到旧 activeProvider 桶再处理切换,顶层 model 会污染旧供应商桶;
+   *  只走 providers 全桶合并,主进程在 pid === activeProvider 时自动
+   *  同步顶层镜像。subProvider 同理一并带上(2026-08-19 修复:分工页
+   *  切过 Sub 供应商但未点保存时,选用主模型触发表单重建同样会把 Sub
+   *  供应商冲回持久化旧值) */
+  const selectLmsModel = useCallback(
+    (identifier: string) => {
+      patchActiveCred({ model: identifier })
+      const pid = form.activeProvider
+      const current = form.providers[pid] ?? emptyCredsOf(pid)
+      onSave({
+        activeProvider: pid,
+        subProvider: form.subProvider,
+        providers: { ...form.providers, [pid]: { ...current, model: identifier } },
+      })
+    },
+    [form.activeProvider, form.subProvider, form.providers, onSave, patchActiveCred],
+  )
+
+  /** Sub Agent 选用 LM Studio 模型(2026-08-19):subModel 覆盖值即时
+   *  持久化(与主 Agent selectLmsModel 同款"挂载操作自带持久化"规则);
+   *  空 = 清除覆盖(沿用 lmstudio 桶已存模型,桶也空 = 回退主 Agent)。
+   *  带 activeProvider + subProvider(2026-08-19 修复"选用后 Sub 供应商
+   *  跳回 mimo"):分工页切 Sub 供应商只改表单不落盘,而挂载操作触发的
+   *  onSave 返回会让 useEffect([config]) 整体重建表单——patch 不带
+   *  subProvider 时主进程保持持久化旧值(如 mimo),重建后 Sub 供应商
+   *  跳回旧值,南北阁4.2 的 subModel 覆盖值就悬空了 */
+  const selectSubLmsModel = useCallback(
+    (identifier: string) => {
+      setForm((f) => ({ ...f, subModel: identifier }))
+      onSave({ subModel: identifier, activeProvider: form.activeProvider, subProvider: form.subProvider })
+    },
+    [form.activeProvider, form.subProvider, onSave],
+  )
+
+  // Sub 本地模型下拉(2026-08-19):分工页专用,自绘垂直弹层(原生 select
+  // 无法定制滚动条);点击外部收起
+  const [subLmsOpen, setSubLmsOpen] = useState(false)
+  const subLmsRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (!subLmsOpen) return
+    const onDown = (e: PointerEvent) => {
+      if (subLmsRef.current && !subLmsRef.current.contains(e.target as Node)) setSubLmsOpen(false)
+    }
+    window.addEventListener('pointerdown', onDown)
+    return () => window.removeEventListener('pointerdown', onDown)
+  }, [subLmsOpen])
+  // Sub(lmstudio)当前生效模型:覆盖值 → 桶已选 → 空(跟随主 Agent)
+  const subLmsEffective = form.subModel.trim() || form.providers.lmstudio?.model || ''
+
+  const lmsLoad = useCallback(
+    async (identifier: string) => {
+      setLmsAction(identifier)
+      setLmsActionKind('load')
+      setLmsMsg('')
+      try {
+        const res = await window.desktop?.agentLmstudioModels?.('load', {
+          baseURL: form.baseURL,
+          apiKey: form.apiKey,
+          identifier,
+        })
+        if (res && typeof res === 'object' && typeof (res as { error?: string }).error === 'string') {
+          setLmsMsg(`加载失败:${(res as { error: string }).error}`)
+        } else {
+          // 沿用 LM Studio 内部挂载配置加载;LM Studio 回声 load_config
+          // 确认真加载成功,随后自动刷新列表同步加载状态。多模型并存
+          // (2026-08-19):加载不影响其他已加载模型,主/Sub Agent 可
+          // 分工挂不同模型(如主 GLM4 + Sub 南北阁4.2)
+          const r = res as { appliedConfig?: { context_length?: number; n_gpu_layers?: number } }
+          const cfg = r?.appliedConfig
+          const parts: string[] = []
+          if (cfg?.context_length) parts.push(`上下文 ${Math.round(cfg.context_length / 1024)}K`)
+          if (typeof cfg?.n_gpu_layers === 'number') parts.push(`GPU${cfg.n_gpu_layers === -1 ? '全部' : cfg.n_gpu_layers === 0 ? '纯CPU' : ` ${cfg.n_gpu_layers}层`}`)
+          setLmsMsg(cfg ? `已加载:${identifier} · ${parts.join(' / ') || '沿用 LM Studio 配置'}` : `已提交加载:${identifier}(老版本,稍后刷新查看)`)
+          void refreshLms()
+        }
+      } catch (e) {
+        setLmsMsg(`加载失败:${(e as Error).message}`)
+      }
+      setLmsAction('')
+      setLmsActionKind('')
+    },
+    [form.baseURL, form.apiKey, refreshLms],
+  )
+
+  /** 卸载后轮询确认(2026-08-18):LM Studio 的 unload 应答可能先于实际
+   *  卸载完成(大模型释放显存/内存需要时间),立即刷新会拉回 loaded 旧
+   *  状态造成 UI"闪回"且之后不再刷新。每 1.2s 拉一次(最多 6 次),直到
+   *  该模型从 loaded 列表消失;超时仍 loaded 时以 LM Studio 实际数据为
+   *  准(恢复已加载显示)。全程保持 lmsAction 禁用操作按钮防重复触发。 */
+  const pollLmsUnloaded = useCallback(
+    async (identifier: string) => {
+      for (let i = 0; i < 6; i++) {
+        await new Promise((r) => setTimeout(r, 1200))
+        const loaded = await refreshLms()
+        if (!loaded) break // 拉取失败:保留乐观结果,用户可手动刷新
+        if (!loaded.some((l) => l.id === identifier)) break // 卸载已确认
+      }
+      setLmsAction('')
+      setLmsActionKind('')
+    },
+    [refreshLms],
+  )
+
+  const lmsUnload = useCallback(
+    async (identifier: string) => {
+      setLmsAction(identifier)
+      setLmsActionKind('unload')
+      setLmsMsg('')
+      try {
+        const res = await window.desktop?.agentLmstudioModels?.('unload', {
+          baseURL: form.baseURL,
+          apiKey: form.apiKey,
+          identifier,
+        })
+        if (res && typeof res === 'object' && typeof (res as { error?: string }).error === 'string') {
+          setLmsMsg(`卸载失败:${(res as { error: string }).error}`)
+          setLmsAction('')
+          setLmsActionKind('')
+          void refreshLms() // 失败:拉回真实状态恢复显示
+          return
+        }
+        // 卸载成功:若卸载的正是当前选用模型,清空 model(镜像+bucket)
+        // 并 **持久化保存**——2026-08-18 用户实测确认:此前只 setForm
+        // 不 onSave,settings.json 残留旧模型引用,对话时 LM Studio 会
+        // 懒加载该模型导致"卸载后又自动加载"。
+        // patch 带 activeProvider + 不带顶层 model(2026-08-19 修复
+        // "卸载后跳回旧供应商"):switchProvider 只改表单不落盘,onSave
+        // 返回的 config 会触发表单重建——不带 activeProvider 就跳回持久化
+        // 里的旧供应商(如 mimo);顶层 model 会被主进程先写进旧供应商桶
+        // 再处理切换(污染),只走 providers 全桶合并让镜像自动同步
+        if (form.activeProvider === 'lmstudio' && form.model === identifier) {
+          const lm = { ...(form.providers.lmstudio ?? EMPTY_LMSTUDIO), model: '' }
+          const patch: Record<string, unknown> = {
+            activeProvider: 'lmstudio',
+            // subProvider 同带(2026-08-19):表单重建会把分工页未保存的
+            // Sub 供应商切换冲回持久化旧值(同 selectSubLmsModel 修复)
+            subProvider: form.subProvider,
+            providers: { ...form.providers, lmstudio: lm },
+          }
+          if (form.subModel === identifier) patch.subModel = ''
+          onSave(patch)
+          setForm((f) => ({
+            ...f,
+            model: '',
+            providers: { ...f.providers, lmstudio: { ...(f.providers.lmstudio ?? EMPTY_LMSTUDIO), model: '' } },
+            ...(f.subModel === identifier ? { subModel: '' } : {}),
+          }))
+        } else if (form.subModel === identifier) {
+          // Sub Agent 单独指向被卸载模型 → 一并清掉持久化(同样带
+          // activeProvider + subProvider 防 onSave 返回触发表单重建时
+          // 跳供应商)
+          onSave({ subModel: '', activeProvider: form.activeProvider, subProvider: form.subProvider })
+          setForm((f) => ({ ...f, subModel: '' }))
+        }
+        setLmsMsg(`已卸载:${identifier}`)
+        // 乐观更新:立即把该模型移出已加载分组(UI 即时反馈,不等轮询),
+        // 后续轮询以 LM Studio 实际状态为准做最终同步
+        setLmsLoaded((prev) => prev.filter((m) => m.id !== identifier))
+        setLmsModels((prev) => prev.map((m) => (m.id === identifier ? { ...m, state: 'not-loaded' } : m)))
+        void pollLmsUnloaded(identifier)
+      } catch (e) {
+        setLmsMsg(`卸载失败:${(e as Error).message}`)
+        setLmsAction('')
+        setLmsActionKind('')
+        void refreshLms() // 异常:拉回真实状态恢复显示
+      }
+    },
+    [form, onSave, refreshLms, pollLmsUnloaded],
+  )
   // 记忆与进化日志异步加载(挂载时);日志刷新抽成可复用回调——
   // 挂载加载 + 进化事件驱动实时刷新(用户反馈:进化完成后日志不更新)
   const refreshEvolutionLog = useCallback(() => {
@@ -827,6 +1119,9 @@ export function AgentSettingsView({
       apiKey: form.apiKey,
       baseURL: form.baseURL,
       model: form.model,
+      // 模型分工(2026-08-18):Sub Agent 供应商/模型(9 种组合)
+      subProvider: form.subProvider,
+      subModel: form.subModel.trim(),
       systemPrompt: form.systemPrompt,
       reasoningEffort: form.reasoningEffort,
       maxOutputTokens: form.maxOutputTokens,
@@ -1099,12 +1394,18 @@ export function AgentSettingsView({
 
   // Provider 判定:优先用 activeProvider(用户明确选择),再用 baseURL 兜底检测协议子类型
   const isMimo = form.activeProvider === 'mimo'
+  const isLmstudio = form.activeProvider === 'lmstudio'
+  const isGlm = form.activeProvider === 'glm'
   const isAnthropic = form.baseURL.toLowerCase().includes('anthropic')
   const protocol = isAnthropic
     ? 'Anthropic Messages'
-    : isMimo
-      ? mimoProviderLabel(form.baseURL)
-      : deepseekProviderLabel(form.baseURL)
+    : isLmstudio
+      ? lmstudioProviderLabel(form.baseURL)
+      : isGlm
+        ? glmCloudProviderLabel(form.baseURL)
+        : isMimo
+          ? mimoProviderLabel(form.baseURL)
+          : deepseekProviderLabel(form.baseURL)
 
   return (
     <div className="island-panel-list island-agent-settings">
@@ -1142,7 +1443,9 @@ export function AgentSettingsView({
                     className="island-agent-account-topup"
                     onClick={(event) => {
                       event.stopPropagation()
-                      window.desktop?.openExternal?.(isMimo ? MIMO_PLATFORM_URL : DEEPSEEK_TOPUP_URL)
+                      window.desktop?.openExternal?.(
+                        isMimo ? MIMO_PLATFORM_URL : isGlm ? GLM_CLOUD_PLATFORM_URL : DEEPSEEK_TOPUP_URL,
+                      )
                     }}
                   >
                     去充值
@@ -1150,7 +1453,7 @@ export function AgentSettingsView({
                   <button
                     type="button"
                     className="island-agent-account-refresh"
-                    disabled={balanceLoading || isMimo}
+                    disabled={balanceLoading || isMimo || isGlm}
                     onClick={(event) => {
                       event.stopPropagation()
                       void queryBalance()
@@ -1165,10 +1468,15 @@ export function AgentSettingsView({
                   小米 MiMo 暂不支持余额查询,请前往 MiMo 平台查看余额与充值
                 </div>
               )}
-              {!isMimo && balanceError && (
+              {isGlm && (
+                <div className="island-agent-account-empty">
+                  智谱 GLM 暂不支持余额查询,请前往智谱开放平台控制台查看用量与充值
+                </div>
+              )}
+              {!isMimo && !isGlm && balanceError && (
                 <div className="island-agent-account-error">{balanceError}</div>
               )}
-              {!isMimo && !balanceError && balance && balance.balances.length > 0 && (
+              {!isMimo && !isGlm && !balanceError && balance && balance.balances.length > 0 && (
                 <div className="island-agent-account-bal">
                   {balance.balances.map((b) => (
                     <div key={b.currency} className="island-agent-account-row">
@@ -1189,7 +1497,7 @@ export function AgentSettingsView({
                   )}
                 </div>
               )}
-              {!isMimo && !balanceError && !balance && !balanceLoading && (
+              {!isMimo && !isGlm && !balanceError && !balance && !balanceLoading && (
                 <div className="island-agent-account-empty">
                   未查询余额。填写下方 API Key 后点「刷新」(仅 DeepSeek API 支持余额查询)
                 </div>
@@ -1199,40 +1507,49 @@ export function AgentSettingsView({
             <div className="island-agent-protocol">
               {protocol === 'Anthropic Messages'
                 ? 'Anthropic 协议:填写含 anthropic 的地址自动切换'
-                : protocol === 'MiMo Chat'
-                  ? 'MiMo Chat 协议:小米 MiMo 官方 Chat Completions 端点,模型 mimo-v2.5-pro(推荐)或 mimo-v2.5'
-                  : protocol === 'MiMo Responses'
-                    ? 'MiMo Responses 协议(推荐):小米 MiMo 官方 Responses API 端点,模型 mimo-v2.5-pro,支持深度思考/联网搜索/多模态'
-                    : protocol === 'DeepSeek Chat'
-                      ? 'DeepSeek Chat 协议:地址含 chat 自动切换'
-                      : 'DeepSeek Responses 协议(默认):DeepSeek 官方端点,模型 deepseek-v4-flash'}
+                : protocol === 'LM Studio Chat'
+                  ? 'LM Studio 本地协议:启动 LM Studio Developer 服务器(默认 127.0.0.1:1234,免 Key);模型在下方「模型挂载管理」加载并选用'
+                  : protocol === '智谱 GLM 云端'
+                    ? '智谱 GLM 云端协议:官方 Chat Completions 端点(默认 glm-4.7-flash;旗舰 glm-5.2 / glm-4.7 可手填),支持工具调用/深度思考'
+                    : protocol === 'MiMo Chat'
+                      ? 'MiMo Chat 协议:小米 MiMo 官方 Chat Completions 端点,模型 mimo-v2.5-pro(推荐)或 mimo-v2.5'
+                      : protocol === 'MiMo Responses'
+                        ? 'MiMo Responses 协议(推荐):小米 MiMo 官方 Responses API 端点,模型 mimo-v2.5-pro,支持深度思考/联网搜索/多模态'
+                        : protocol === 'DeepSeek Chat'
+                          ? 'DeepSeek Chat 协议:地址含 chat 自动切换'
+                          : 'DeepSeek Responses 协议(默认):DeepSeek 官方端点,模型 deepseek-v4-flash'}
             </div>
-            {/* 供应商快捷切换(DeepSeek ↔ MiMo):切换时自动保存当前输入到旧供应商,加载新供应商已存凭据 */}
+            {/* 供应商快捷切换(2026-08-19 QuickMenu 化:Agent 设置左上角分组
+                菜单同款——悬浮展开一体胶囊 + 滚轮逐格切换 + 高亮滑块 + 宽度
+                过渡):切换时自动保存当前输入到旧供应商,加载新供应商已存凭据 */}
             <div className="island-agent-field">
               <span>供应商选择</span>
               <div className="island-agent-scale-row">
-                <button
-                  type="button"
-                  className={`island-agent-scale-btn${form.activeProvider === 'deepseek' ? ' on' : ''}`}
-                  onClick={() => switchProvider('deepseek')}
-                >
-                  DeepSeek
-                </button>
-                <button
-                  type="button"
-                  className={`island-agent-scale-btn${form.activeProvider === 'mimo' ? ' on' : ''}`}
-                  onClick={() => switchProvider('mimo')}
-                >
-                  小米 MiMo
-                </button>
+                <QuickMenu<ProviderId>
+                  items={PROVIDER_OPTIONS}
+                  value={form.activeProvider}
+                  onChange={switchProvider}
+                  getLabel={(pid) => PROVIDER_LABELS[pid]}
+                  title="滚轮切换供应商"
+                  wheelWhenOpen
+                />
+                <span className="island-agent-scale-hint">悬浮展开,滚轮快捷切换</span>
               </div>
             </div>
             <label className="island-agent-field">
-              <span>API Key{isMimo ? ' (小米 MiMo)' : ' (DeepSeek)'}</span>
+              <span>API Key{isLmstudio ? ' (本地,可留空)' : isMimo ? ' (小米 MiMo)' : isGlm ? ' (智谱 GLM)' : ' (DeepSeek)'}</span>
               <input
                 type="text"
                 value={form.apiKey}
-                placeholder={isMimo ? `小米 MiMo API Key(${MIMO_PLATFORM_URL} 创建)` : 'sk-…(DeepSeek 平台创建)'}
+                placeholder={
+                  isLmstudio
+                    ? '本地部署默认无需 API Key(LM Studio 设置了访问密钥才填)'
+                    : isMimo
+                      ? `小米 MiMo API Key(${MIMO_PLATFORM_URL} 创建)`
+                      : isGlm
+                        ? 'xxxxxxxx.xxxxxxxx.xxxxxxxx(智谱开放平台 API Keys 页创建)'
+                        : 'sk-…(DeepSeek 平台创建)'
+                }
                 spellCheck={false}
                 onChange={(event) => patchActiveCred({ apiKey: event.target.value })}
               />
@@ -1251,12 +1568,113 @@ export function AgentSettingsView({
               <input
                 type="text"
                 value={form.model}
+                placeholder={
+                  isLmstudio
+                    ? '从下方「模型挂载管理」选用,或手填已加载模型 key'
+                    : isGlm
+                      ? 'glm-5.2(旗舰)/ glm-4.7 / glm-4.7-flash(默认)/ glm-4.6 …'
+                      : ''
+                }
                 spellCheck={false}
                 onChange={(event) => patchActiveCred({ model: event.target.value })}
               />
             </label>
+            {/* LM Studio 模型挂载管理(2026-08-18 本地部署接入):直接在本程序
+                列出/加载/卸载模型、选用(写入模型字段)。加载沿用 LM Studio
+                内部挂载配置,不做单独参数配置(用户 2026-08-18 明确)。
+                需 LM Studio ≥ 0.3.6(native REST API) */}
+            {isLmstudio && (
+              <div className="island-agent-field island-agent-lmstudio">
+                <span>模型挂载管理(支持同时加载多个模型,主/Sub Agent 分工使用;加载沿用 LM Studio 配置)</span>
+                <div className="island-agent-lmstudio-toolbar">
+                  <button
+                    type="button"
+                    className="island-agent-lmstudio-refresh"
+                    onClick={() => {
+                      setLmsMsg('')
+                      void refreshLms()
+                    }}
+                    disabled={lmsBusy || lmsAction !== ''}
+                  >
+                    {lmsBusy ? '获取中…' : '刷新模型列表'}
+                  </button>
+                </div>
+                {lmsMsg && <div className="island-agent-lmstudio-msg">{lmsMsg}</div>}
+                {(lmsLoaded.length > 0 || lmsModels.length > 0) && (
+                  <div className="island-agent-lmstudio-list">
+                    {/* 已加载(含加载中):显示挂载参数,可选用/卸载。
+                        操作互斥(2026-08-18):lmsAction 非空(加载/卸载/
+                        轮询确认中)时禁用全部操作按钮,防止刷新间隙重复
+                        触发与 LM Studio 并发挂载操作竞态 */}
+                    {lmsLoaded.map((m) => (
+                      <div
+                        key={m.id}
+                        className={`island-agent-lmstudio-item on${lmsAction === m.id && lmsActionKind === 'unload' ? ' unloading' : ''}`}
+                      >
+                        <span className="island-agent-lmstudio-name" title={m.id}>
+                          {m.state === 'loading'
+                            ? '加载中 '
+                            : lmsAction === m.id && lmsActionKind === 'unload'
+                              ? '卸载中 '
+                              : ''}
+                          {m.id}
+                          {m.contextLength ? ` · ctx ${Math.round(m.contextLength / 1024)}K` : ''}
+                          {typeof m.gpuLayers === 'number'
+                            ? ` · GPU ${m.gpuLayers === -1 ? '全部层' : m.gpuLayers === 0 ? '纯CPU' : `${m.gpuLayers}层`}`
+                            : ''}
+                        </span>
+                        <span className="island-agent-lmstudio-ops">
+                          <button
+                            type="button"
+                            disabled={lmsBusy || lmsAction !== '' || form.model === m.id || m.state === 'loading'}
+                            onClick={() => selectLmsModel(m.id)}
+                          >
+                            {form.model === m.id ? '已选用' : '选用'}
+                          </button>
+                          <button
+                            type="button"
+                            disabled={lmsBusy || lmsAction !== '' || m.state === 'loading'}
+                            onClick={() => void lmsUnload(m.id)}
+                          >
+                            {lmsAction === m.id && lmsActionKind === 'unload' ? '卸载中…' : '卸载'}
+                          </button>
+                        </span>
+                      </div>
+                    ))}
+                    {/* 未加载模型:按上面填写的挂载参数加载 */}
+                    {lmsModels
+                      .filter(
+                        (m) =>
+                          m.state !== 'loaded' &&
+                          m.state !== 'loading' &&
+                          !lmsLoaded.some((l) => l.id === m.id),
+                      )
+                      .map((m) => (
+                        <div key={m.id} className="island-agent-lmstudio-item">
+                          <span className="island-agent-lmstudio-name" title={m.id}>
+                            {m.id}
+                            {m.quantization ? ` · ${m.quantization}` : ''}
+                            {m.maxContextLength ? ` · 最长 ${Math.round(m.maxContextLength / 1024)}K` : ''}
+                          </span>
+                          <span className="island-agent-lmstudio-ops">
+                            <button
+                              type="button"
+                              disabled={lmsBusy || lmsAction !== ''}
+                              onClick={() => void lmsLoad(m.id)}
+                            >
+                              {lmsAction === m.id && lmsActionKind === 'load' ? '加载中…' : '加载'}
+                            </button>
+                          </span>
+                        </div>
+                      ))}
+                  </div>
+                )}
+              </div>
+            )}
         {/* 思考强度(2026-08-08 QuickMenu 化):默认高;none 关闭思考模式
-            (设置页思考强度新增"关") */}
+            (设置页思考强度新增"关")。LM Studio 屏蔽——本地端点不支持
+            reasoning effort 参数,思考与否由所加载模型决定(2026-08-18) */}
+        {!isLmstudio && (
         <div className="island-agent-field">
           <span>思考强度(深度思考 vs 速度)</span>
           <div className="island-agent-scale-row">
@@ -1270,12 +1688,16 @@ export function AgentSettingsView({
             />
           </div>
         </div>
+        )}
         {/* 输出预算(2026-08-08):主对话 max_output_tokens,含思维链;
             LLM 对话中也可经 set_output_budget 工具自主调整。
             单一 QuickMenu(与设置菜单同款):悬浮展开 2 的幂预设档位
             (一体胶囊 + 高亮滑块 + 错峰滑入,展开时滚轮照常逐格切换);
             单击按钮 = 内联编辑自定义值(Enter/失焦提交,Esc 取消);
-            值不在档位时滚轮经 compare 切到相邻档位 */}
+            值不在档位时滚轮经 compare 切到相邻档位。
+            LM Studio 屏蔽(2026-08-18):输出上限由 LM Studio 内部加载
+            配置决定(max_tokens 交由适配器默认值),不在此重复配置 */}
+        {!isLmstudio && (
         <label className="island-agent-field">
           <span>输出预算(含思维链,4096-262144)</span>
           <QuickMenu<number>
@@ -1291,9 +1713,116 @@ export function AgentSettingsView({
             compare={(a, b) => a - b}
           />
         </label>
+        )}
           </>
         )}
         {tab === 1 && (
+          <>
+            {/* 模型分工(2026-08-18):主 Agent(对话/工具/进化)用账号页
+                配置的强模型;Sub Agent(总结/心理/标题/记忆提取)可改用
+                能力稍差的本地模型省云端额度——供应商三选一 + 模型覆盖,
+                与主供应商两两组合最多 9 种。缺省跟随主供应商 */}
+            <div className="island-agent-field">
+              <span>主 Agent(对话/工具/进化)</span>
+              <div className="island-agent-split-note">
+                {PROVIDER_LABELS[form.activeProvider]} · {form.model || form.providers[form.activeProvider]?.model || '(未选模型)'}
+                <em>在「账号」页配置与切换</em>
+              </div>
+            </div>
+            <div className="island-agent-field">
+              <span>Sub Agent 供应商(总结/心理/标题/记忆提取)</span>
+              <div className="island-agent-scale-row">
+                {SUB_PROVIDER_OPTIONS.map((pid) => (
+                  <button
+                    key={pid}
+                    type="button"
+                    className={`island-agent-scale-btn${form.subProvider === pid ? ' on' : ''}`}
+                    onClick={() => setForm((f) => ({ ...f, subProvider: pid }))}
+                  >
+                    {PROVIDER_LABELS[pid]}
+                  </button>
+                ))}
+              </div>
+            </div>
+            {form.subProvider === 'lmstudio' ? (
+              // Sub 本地模型下拉(2026-08-19):列出 LM Studio 已加载模型,
+              // 选用即持久化——可与主 Agent 不同(本地分工省资源:大模型
+              // 对话、小模型跑总结/揣测);自绘弹层保证滚动条为定制样式
+              <div className="island-agent-field" ref={subLmsRef}>
+                <span>Sub Agent 本地模型(可与主 Agent 不同)</span>
+                <div className="island-agent-sublms">
+                  <button
+                    type="button"
+                    className="island-agent-sublms-btn"
+                    onClick={() => setSubLmsOpen((v) => !v)}
+                  >
+                    <span className="island-agent-sublms-value">
+                      {subLmsEffective || '跟随主 Agent'}
+                      {form.subModel.trim() ? ' · 专属' : subLmsEffective ? ' · 沿用账号页所选' : ''}
+                    </span>
+                    <span className={`island-agent-sublms-arrow${subLmsOpen ? ' open' : ''}`}>▾</span>
+                  </button>
+                  {subLmsOpen && (
+                    <div className="island-agent-sublms-pop" role="listbox">
+                      <button
+                        type="button"
+                        className={`island-agent-sublms-item${!form.subModel.trim() && !subLmsEffective ? ' cur' : ''}`}
+                        onClick={() => {
+                          selectSubLmsModel('')
+                          setSubLmsOpen(false)
+                        }}
+                      >
+                        默认 · 跟随主 Agent
+                      </button>
+                      {lmsLoaded.length === 0 ? (
+                        <div className="island-agent-sublms-empty">
+                          {lmsBusy ? '获取中…' : 'LM Studio 无已加载模型(先在「账号」页挂载管理加载)'}
+                        </div>
+                      ) : (
+                        lmsLoaded.map((m) => (
+                          <button
+                            key={m.id}
+                            type="button"
+                            className={`island-agent-sublms-item${form.subModel.trim() === m.id ? ' cur' : ''}`}
+                            onClick={() => {
+                              selectSubLmsModel(m.id)
+                              setSubLmsOpen(false)
+                            }}
+                          >
+                            {m.id}
+                          </button>
+                        ))
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
+            ) : (
+              <label className="island-agent-field">
+                <span>Sub Agent 模型(空 = 沿用该供应商已存模型)</span>
+                <input
+                  value={form.subModel}
+                  placeholder={form.providers[form.subProvider]?.model || '该供应商默认模型'}
+                  spellCheck={false}
+                  onChange={(e) => setForm((f) => ({ ...f, subModel: e.target.value }))}
+                />
+              </label>
+            )}
+            <div className="island-agent-field">
+              <span>当前生效组合</span>
+              <div className="island-agent-split-note">
+                主 {PROVIDER_LABELS[form.activeProvider]} / {form.model || form.providers[form.activeProvider]?.model || '(未选)'}
+                <em>
+                  Sub {PROVIDER_LABELS[form.subProvider]} /{' '}
+                  {form.subProvider === 'lmstudio'
+                    ? subLmsEffective || `跟随主(${form.model || '未选'})`
+                    : form.subModel.trim() || form.providers[form.subProvider]?.model || '(未选)'}
+                </em>
+              </div>
+            </div>
+          </>
+        )}
+        {tab === 2 && (
           <>
             {/* 行为与界面:自定义提示词 / 主动陪伴 / 界面放大
                 (exec_command 确认门设置已移除,2026-08-07 用户要求) */}
@@ -1405,7 +1934,7 @@ export function AgentSettingsView({
         </div>
           </>
         )}
-        {tab === 2 && (
+        {tab === 3 && (
           <>
             {/* 工具与能力:输出目录 / MCP 服务 / 技能目录 */}
         {/* 工具输出根目录(2026-08-12,用户要求"所有工具和文件的输出目录,
@@ -1623,7 +2152,7 @@ export function AgentSettingsView({
         </div>
           </>
         )}
-        {tab === 3 && (
+        {tab === 4 && (
           <>
             {/* 记忆与进化:长期记忆 / 自我进化 */}
         {/* 记忆系统:长期记忆条目(偏好/事实/工作流/教训),对话中 LLM
@@ -1806,7 +2335,7 @@ export function AgentSettingsView({
         </div>
           </>
         )}
-        {tab === 4 && (
+        {tab === 5 && (
           <>
             {/* Sub Agent(2026-08-07):总结标题文风 / 心理揣测人格。
                 预设(各 4 种,共 8)存 id;自定义 ≤100 字直接存文本;
@@ -1873,7 +2402,7 @@ export function AgentSettingsView({
             </div>
           </>
         )}
-        {tab === 5 && (
+        {tab === 6 && (
           <>
             {/* 数据管理(2026-08-10 用户要求):清除灵动岛所有数据 / 所有
                 工具的下载记录及源文件。危险操作:两段式确认(第一次点击

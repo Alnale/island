@@ -5,3 +5,78 @@
 @import './base.css';
 @import './views-settings.css';
 @import './views-agent.css';
+
+/* ===== 无障碍降级(2026-08-18 设计规范 apple-design #14 / emil 无障碍) =====
+   原实现三连媒体查询全部缺失;现按规范补齐:
+   - prefers-reduced-motion: 去除位移/弹性/无限循环动画,保留不引起眩晕的
+     透明度/颜色反馈(reduced motion 不等于无反馈);
+   - prefers-reduced-transparency: 毛玻璃/半透明表面变实;
+   - prefers-contrast: 近实底 + 明确对比边框。 */
+@media (prefers-reduced-motion: reduce) {
+  /* 岛体入场回弹(0.6s 过冲):关闭,保留短透明度反馈 */
+  .island-demo {
+    animation: none;
+  }
+  /* 无限循环装饰动画(图标浮动/发光/下划线扫描/加载点/声波/骨架/光晕)全部关闭 */
+  .icon-floater,
+  .island-icon::before,
+  .island-text::after,
+  .text-ellipsis .dot,
+  .island-demo .icon-floater svg,
+  .island-agent-voice-wave span,
+  .island-agent-dots span,
+  .island-agent-skeleton-item,
+  .island-media-lib-batch .island-ctl:not(:disabled) {
+    animation: none !important;
+  }
+  /* 面板/菜单/弹层入场与滑块:极短时长,去弹性过冲 */
+  .island-panel,
+  .island-panel-head,
+  .island-ctx-menu,
+  .island-agent-view,
+  .island-agent-mini,
+  .island-panel-list,
+  .island-bg-seg-thumb,
+  .island-toggle-knob,
+  .island-quick-menu-pop,
+  .island-quick-menu-indicator {
+    transition-duration: 0.001s;
+  }
+  /* 内容"上浮推远":去掉位移/模糊,保留透明度变化辅助理解 */
+  .island-content {
+    transition: opacity 0.2s ease;
+    transform: none !important;
+    filter: none !important;
+  }
+}
+@media (prefers-reduced-transparency: reduce) {
+  .island-bg,
+  .island-bg-viewport {
+    background: rgb(8, 10, 14);
+    backdrop-filter: none;
+  }
+  .island-panel-mask {
+    background: rgba(8, 10, 14, 0.72);
+  }
+  .island-panel-list,
+  .island-panel-bg,
+  .island-agent {
+    background: rgba(8, 10, 14, 0.9);
+  }
+}
+@media (prefers-contrast: more) {
+  .island-demo,
+  .island-bg {
+    background: rgb(8, 10, 14);
+  }
+  .island-demo {
+    border-color: rgba(255, 255, 255, 0.5);
+  }
+  .island-text,
+  .island-panel-title {
+    color: #fff;
+  }
+  .island-panel-mask {
+    background: rgba(8, 10, 14, 0.85);
+  }
+}

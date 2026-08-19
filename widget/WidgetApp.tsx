@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -50,8 +51,9 @@ const AGENT_THEME = '#4d6bfe'
 const MODE_SWITCH_ANIMATE_MS = 420
 /** 模式 localStorage 镜像键(启动瞬间避免闪错模式,权威值在主进程 settings.json) */
 const MODE_STORAGE_KEY = 'widget-mode'
-/** 外部会话登记表持久化键(2026-08-14:重启后群名/备注/会话不丢) */
-const EXT_SESSIONS_STORAGE_KEY = 'widget-agent-ext-sessions'
+/** 外部会话登记表持久化键(2026-08-14:重启后群名/备注/会话不丢)——已于
+ * 2026-08-18 重构弃用:会话列表改由主进程 napcat-sessions.json 唯一权威,
+ * 渲染端不再持久化/恢复会话列表(避免本地残留导致"删除后重启复活") */
 /** 已删除外部会话标记持久化键(2026-08-18 根治"删除后还在列表"):删除会话
  * 后写此标记,后续该会话的 seed/活动/甚至新消息都不再自动重建列表条目,
  * 直到用户重新通过 manage_sessions watch 接入(seed 到来时清除标记) */
@@ -124,42 +126,40 @@ export default function WidgetApp() {
   // 当前查看键(2026-08-13 八轮:提前声明——主实例的 active 由它决定)
   const [panelKey, setPanelKey] = useState<string | null>(null)
   const agent = useAgent({ allowProactive: mode === 'agent', active: panelKey === null || panelKey === 'main' })
+  // 已删除会话标记(2026-08-18 根治重启复活):**提前声明并同步从 localStorage
+  // 初始化**(须在 extSessions 恢复之前,恢复时据此过滤已删除会话——重启后
+  // localStorage 里残留的被删会话不再显示);删除写入,reg 跳过该 key 的一切
+  // 自动注册;watch 接入(seed 带来)/主进程 deletedSessions 下发时同步
+  const deletedKeysRef = useRef<Set<string>>(
+    (() => {
+      try {
+        const raw = localStorage.getItem(DELETED_SESSIONS_KEY)
+        if (raw) {
+          const arr = JSON.parse(raw)
+          if (Array.isArray(arr)) return new Set(arr.filter((k) => typeof k === 'string'))
+        }
+      } catch {
+        // 忽略损坏
+      }
+      return new Set<string>()
+    })(),
+  )
+  const persistDeletedKeys = useCallback(() => {
+    try {
+      localStorage.setItem(DELETED_SESSIONS_KEY, JSON.stringify([...deletedKeysRef.current]))
+    } catch {
+      // 忽略存储失败
+    }
+  }, [])
   // 会话隔离与并发(2026-08-13):外部会话注册表 + 多实例控制器。每个
   // 外部会话一个 SessionHost(独立 useAgent 状态机 + 主进程独立引擎
   // 实例)= 并行处理;记忆/档案卡经主进程共享单例共用;主人会话
   // (main)不计入外部列表。窗口绑定 = currentKey,QQ 风格一键切换
-  const [extSessions, setExtSessions] = useState<Array<{ key: string; title: string; caption: string; kind: 'private' | 'group' }>>(() => {
-    // 实时持久化(2026-08-14 用户实测"重启后群名/备注/会话丢失"):
-    // 启动时从 localStorage 恢复会话列表;标题随后被种子/消息的真实
-    // 称呼精化覆盖;数据损坏回退空列表
-    try {
-      const raw = localStorage.getItem(EXT_SESSIONS_STORAGE_KEY)
-      if (raw) {
-        const arr = JSON.parse(raw)
-        if (Array.isArray(arr)) {
-          return arr
-            .filter((it) => it && typeof it.key === 'string' && (it.kind === 'private' || it.kind === 'group'))
-            .map((it) => ({
-              key: String(it.key),
-              title: String(it.title ?? it.key),
-              caption: String(it.caption ?? ''),
-              kind: it.kind as 'private' | 'group',
-            }))
-        }
-      }
-    } catch {
-      // 忽略损坏数据
-    }
-    return []
-  })
-  // 会话列表变化 → 立即写入 localStorage(实时保存,非退出时一次性)
-  useEffect(() => {
-    try {
-      localStorage.setItem(EXT_SESSIONS_STORAGE_KEY, JSON.stringify(extSessions))
-    } catch {
-      // 忽略存储失败
-    }
-  }, [extSessions])
+  // 会话列表(2026-08-18 重构):不再从 localStorage 恢复(此前"删除/清除后
+  // 本地残留 → 重启复活"的温床),初始为空,挂载后主动 invoke
+  // getNapcatSessions 拉取主进程唯一权威状态填充;此后由 seed/消息/活动
+  // 事件增量更新,删除由主进程物理移除 + 广播同步
+  const [extSessions, setExtSessions] = useState<Array<{ key: string; title: string; caption: string; kind: 'private' | 'group' }>>([])
   const panelKeyRef = useRef(panelKey)
   panelKeyRef.current = panelKey
   const [unread, setUnread] = useState<Record<string, number>>({})
@@ -172,17 +172,6 @@ export default function WidgetApp() {
   // /群名异步解析等,若不抑制,条目会被立即 reg 加回。窗口过后新消息仍可
   // 正常重建(删除语义 = 不再关心旧条目,不影响未来真实消息)
   const pendingDeleteKeysRef = useRef<Set<string>>(new Set())
-  // 已删除会话标记(2026-08-18 根治重建):持久 localStorage,挂载 effect 里
-  // 加载;删除写入,reg 据此跳过该 key 的一切自动注册;watch 接入(seed 带
-  // 来)时清除
-  const deletedKeysRef = useRef<Set<string>>(new Set())
-  const persistDeletedKeys = useCallback(() => {
-    try {
-      localStorage.setItem(DELETED_SESSIONS_KEY, JSON.stringify([...deletedKeysRef.current]))
-    } catch {
-      // 忽略存储失败
-    }
-  }, [])
   const [, bumpExt] = useState(0)
   // 会话消息变化 → 面板刷新(2026-08-13):**必须稳定引用**(内联箭头
   // 每渲染新闭包 → SessionHost 的 onTick effect 每渲染触发 → bump →
@@ -269,6 +258,49 @@ export default function WidgetApp() {
   // 外部会话登记 + 未读计数(消息到达即创建会话条目;不自动切换,
   // 用户经折叠面板点击绑定,QQ 风格)
   useEffect(() => {
+    // 挂载即拉取主进程权威会话状态(2026-08-18 重构):初始化会话列表 + 合并
+    // 删除标记——消除启动事件(seed/deleted 广播早于订阅)的时序竞态,保证
+    // 无论何时挂载都拿到主进程唯一权威的完整状态
+    void window.desktop?.getNapcatSessions?.().then((state) => {
+      if (!state) return
+      const deleted = Array.isArray(state.deleted)
+        ? state.deleted.filter((k): k is string => typeof k === 'string' && k !== 'main')
+        : []
+      const delSet = new Set(deleted)
+      // 对账镜像主进程权威列表(2026-08-19,与 onDeletedSessions 同款):
+      // 本地有而主进程没有的标记一并移除(会话已被真实新活动复活/主进程
+      // 清库重置),避免残留本地标记拦截 reg 导致新会话建不出来
+      let delChanged = false
+      for (const k of delSet) {
+        if (!deletedKeysRef.current.has(k)) {
+          deletedKeysRef.current.add(k)
+          delChanged = true
+        }
+      }
+      for (const k of [...deletedKeysRef.current]) {
+        if (!delSet.has(k)) {
+          deletedKeysRef.current.delete(k)
+          delChanged = true
+        }
+      }
+      if (delChanged) persistDeletedKeys()
+      const sessions =
+        state.sessions && typeof state.sessions === 'object'
+          ? (Object.entries(state.sessions) as Array<[string, { title?: string; kind?: string }]>)
+              .filter(([key, v]) => v && (v.kind === 'private' || v.kind === 'group') && !delSet.has(key))
+              .map(([key, v]) => ({
+                key,
+                title: String(v.title ?? key),
+                caption: '',
+                kind: v.kind as 'private' | 'group',
+              }))
+          : []
+      // 合并而非覆盖:以主进程权威快照为基准,保留渲染端刚 reg 的新条目
+      setExtSessions((prev) => {
+        const baseKeys = new Set(sessions.map((s) => s.key))
+        return [...sessions, ...prev.filter((it) => !baseKeys.has(it.key) && !delSet.has(it.key))]
+      })
+    })
     // 挂载即加载已删除会话标记(持久,重启后仍生效)
     try {
       const raw = localStorage.getItem(DELETED_SESSIONS_KEY)
@@ -432,6 +464,38 @@ export default function WidgetApp() {
       }
     })
     if (typeof off7 === 'function') offs.push(off7)
+    // 已删除会话下发(2026-08-18 根治"重启后又出现"):主进程 userData 持久化
+    // 的删除标记。**对账镜像(2026-08-19 修复"删除/清除记录后再发消息没有
+    // 重建新会话")**:原实现只增不减——主进程在真实新活动到达时清除删除
+    // 标记复活会话(main.cjs resurrectSession)并下发新列表,但本地标记
+    // 无法移除,reg 持续被拦截,新会话建不出来。改为镜像主进程权威列表:
+    // 新增的合并进本地,主进程已清除的(会话复活)同步移除本地标记,
+    // 后续 napcat:message / session-activity 的 reg 即可正常重建条目
+    const offDel = window.desktop?.onDeletedSessions?.((payload) => {
+      if (payload && Array.isArray(payload.keys)) {
+        const next = new Set(payload.keys.filter((k): k is string => typeof k === 'string' && k !== 'main'))
+        let changed = false
+        for (const k of next) {
+          if (!deletedKeysRef.current.has(k)) {
+            deletedKeysRef.current.add(k)
+            changed = true
+          }
+        }
+        for (const k of [...deletedKeysRef.current]) {
+          if (!next.has(k)) {
+            deletedKeysRef.current.delete(k)
+            changed = true
+          }
+        }
+        if (changed) persistDeletedKeys()
+        // 主进程下发的已删除会话,同步从当前列表移除(localStorage 恢复 +
+        // 在途 seed 的残留条目一并清掉;复活的 key 不在 next 里,不受影响)
+        if (next.size > 0) {
+          setExtSessions((prev) => prev.filter((it) => !next.has(it.key)))
+        }
+      }
+    })
+    if (typeof offDel === 'function') offs.push(offDel)
     // 启动时拉一次配置(监听会话立即入面板;LLM 此前已配置过)——群聊 +
     // 私聊(2026-08-13 二轮:用户要求"只要是监听的,自动加入",原只预注册
     // 群,私聊要等消息到达才建会话;标题随后被主进程种子/消息的档案称呼
@@ -821,17 +885,18 @@ export default function WidgetApp() {
     }),
     [currentAgent.config, currentAgent.saveConfig, currentAgent.refreshConfig],
   )
-  // 清空会话(2026-08-18 修复"清除数据后会话还在"):主对话清空 = 存档到
-  // 历史(useAgent clear 语义);外部会话清空 = 清空消息 + **从会话面板移除**
-  // (空会话不该留在列表)——用 applySessionDelete(persistent:false):只本地
-  // 移除 + 12s 抑制窗口,不写持久删除标记,该会话后续新消息可正常重建
+  // 清空会话(2026-08-19 语义修正,用户要求"清空 ≠ 删除,只要清空上下文"):
+  // 主对话清空 = 存档到历史(useAgent clear 语义);外部会话清空 = **仅清空
+  // 消息上下文,会话条目保留**——agentClear 置空消息状态 + 持久化 effect
+  // 同步擦 widget-agent-session:<key>(重启不带回旧上下文)+ 下一轮 send
+  // 传空 hist = 引擎上下文清零;情况记录(widget-agent-session-note:<key>)
+  // 独立于消息历史,按既有语义保留。
+  // 原实现(2026-08-18)误用 applySessionDelete 持久删除——清空后条目从
+  // 列表消失、重启不恢复,等同删除会话;真正的删除走 deleteExternalSession
+  // (napcat:session-delete 持久删除链路,含"真实新活动复活"语义)
   const clearSession = useCallback(() => {
-    const key = panelKeyRef.current
     agentClear()
-    if (key && key !== 'main') {
-      applySessionDelete(key, { persistent: false })
-    }
-  }, [agentClear, applySessionDelete])
+  }, [agentClear])
   // 媒体窗口默认宽(2026-08-08):对话图片/视频窗口初始宽;localStorage
   // 即时生效(设置界面 QuickMenu / LLM set_media_window_size 工具写入,
   // MediaFrame 挂载时读取同一键)
@@ -1381,7 +1446,10 @@ function SessionHost({
   const ctl = useAgent({ sessionKey, active })
   const ctlRef = useRef(ctl)
   ctlRef.current = ctl
-  useEffect(() => {
+  // 2026-08-18 改 useLayoutEffect:控制器注册必须在 paint 前完成,
+  // 否则父组件 useLayoutEffect 滚动时 currentAgent 仍是主 agent 回退
+  // (会话切换一帧内"先滚错内容→咯噔→再滚对内容"的根因)
+  useLayoutEffect(() => {
     const proxy = new Proxy(
       {},
       {

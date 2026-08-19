@@ -25,7 +25,7 @@ import type { AgentContext, Plugin } from './kernel'
 export function coreToolsPlugin(): Plugin {
   return {
     name: 'tools-core',
-    inject: ['tools', 'events', 'confirm', 'switchToMusic', 'sessionState'],
+    inject: ['tools', 'events', 'confirm', 'switchToMusic', 'sessionState', 'config'],
     apply(ctx: AgentContext) {
       const tools = ctx.get('tools')
       tools.registerTools(
@@ -42,6 +42,13 @@ export function coreToolsPlugin(): Plugin {
           getSessionId: () => ctx.get('sessionState').getSessionId(),
           // 后台任务注册时的发起会话键(2026-08-16)
           getSessionKey: () => ctx.get('sessionState').getSessionKey(),
+          // 智谱 GLM 云端文档工具凭据(2026-08-19:glm_ocr / glm_file_parse):
+          // 实时读 providers.glm 桶,与激活供应商无关;Key 空返回 null
+          // (工具执行时报错引导,不隐藏工具)
+          getGlmCreds: () => {
+            const glm = ctx.get('config').getConfig().providers?.glm
+            return glm && glm.apiKey.trim() ? { apiKey: glm.apiKey, baseURL: glm.baseURL } : null
+          },
         }),
       )
       // docflow 常驻子进程随引擎销毁回收;**doneHandler 恢复链

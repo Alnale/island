@@ -24,6 +24,30 @@
   scrollbar-color: rgba(255, 255, 255, 0.15) transparent;
 }
 
+/* 设置入口成组进入:轻量淡入 + 30ms 错峰(2026-08-18 设计规范 stagger;
+   keyframes island-msg-in 定义在 views-agent.css,@keyframes 全局可解析) */
+.island-settings-items > .island-settings-item {
+  animation: island-msg-in 0.2s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+.island-settings-items > .island-settings-item:nth-child(1) {
+  animation-delay: 0ms;
+}
+.island-settings-items > .island-settings-item:nth-child(2) {
+  animation-delay: 30ms;
+}
+.island-settings-items > .island-settings-item:nth-child(3) {
+  animation-delay: 60ms;
+}
+.island-settings-items > .island-settings-item:nth-child(4) {
+  animation-delay: 90ms;
+}
+.island-settings-items > .island-settings-item:nth-child(5) {
+  animation-delay: 120ms;
+}
+.island-settings-items > .island-settings-item:nth-child(6) {
+  animation-delay: 150ms;
+}
+
 .island-settings-item {
   display: flex;
   align-items: center;
@@ -41,7 +65,8 @@
   cursor: pointer;
   transition:
     background 0.2s ease,
-    border-color 0.2s ease;
+    border-color 0.2s ease,
+    transform 0.12s ease-out;
 }
 
 .island-settings-item .island-ctl-svg {
@@ -51,6 +76,11 @@
 .island-settings-item:hover {
   background: rgba(255, 255, 255, 0.09);
   border-color: color-mix(in srgb, var(--state-color, #4ade80) 45%, transparent);
+}
+
+/* 按压反馈:设置入口按下轻微缩小 */
+.island-settings-item:active {
+  transform: scale(0.97);
 }
 
 /* ===== 字体设置视图(设置视图"字体"入口,岛内打开) =====
@@ -377,9 +407,17 @@
     box-shadow 0.2s ease;
 }
 
-.island-theme-swatch:hover {
-  transform: scale(1.12);
-  border-color: rgba(255, 255, 255, 0.6);
+/* 纯装饰 hover 放大仅对指针设备生效:触屏点击不触发粘滞缩放 */
+@media (hover: hover) and (pointer: fine) {
+  .island-theme-swatch:hover {
+    transform: scale(1.12);
+    border-color: rgba(255, 255, 255, 0.6);
+  }
+}
+
+/* 按压反馈:色板按下回缩,呼应 hover 放大 */
+.island-theme-swatch:active {
+  transform: scale(0.95);
 }
 
 .island-theme-swatch.active {
@@ -418,158 +456,9 @@
   color: var(--text-dim, rgba(255, 255, 255, 0.5));
 }
 
-/* ===== 主题色切换的涟漪动画 =====
-   轻柔的光晕涟漪从点击位置扩散(中心微光 → 主题色淡晕 → 透明),
-   低透明度、无额外色带,保持干净 */
-.island-ripple {
-  position: absolute;
-  inset: 0;
-  z-index: 6;
-  border-radius: inherit;
-  overflow: hidden;
-  pointer-events: none;
-}
-
-.island-ripple::before {
-  content: '';
-  position: absolute;
-  left: var(--rx, 50%);
-  top: var(--ry, 50%);
-  width: 120px;
-  height: 120px;
-  border-radius: 50%;
-  transform: translate(-50%, -50%) scale(0);
-  background: radial-gradient(
-    circle,
-    rgba(255, 255, 255, 0.4) 0%,
-    color-mix(in srgb, var(--ripple-color, #4ade80) 28%, transparent) 32%,
-    transparent 70%
-  );
-  animation: islandRippleSpread 0.8s cubic-bezier(0.22, 1, 0.36, 1) forwards;
-}
-
-@keyframes islandRippleSpread {
-  0% {
-    transform: translate(-50%, -50%) scale(0);
-    opacity: 0.5;
-  }
-  55% {
-    opacity: 0.3;
-  }
-  100% {
-    transform: translate(-50%, -50%) scale(13);
-    opacity: 0;
-  }
-}
-
-.island-ctl--mode:disabled {
-  opacity: 0.35;
-  cursor: not-allowed;
-}
-
-/* ===== 播放模式图标"线条重组"动画 =====
-   新旧图标双叠:旧图标线条擦除淡出,新图标线条逐笔画出 + 微旋转弹入,
-   视觉上像原图标线条重组成新图标 */
-.island-mode-icons {
-  position: relative;
-  width: 16px;
-  height: 16px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.island-mode-svg {
-  position: absolute;
-  inset: 0;
-  margin: auto;
-}
-
-.island-mode-svg :is(line, path, polyline) {
-  stroke-dasharray: 1;
-  stroke-dashoffset: 1;
-}
-
-.island-mode-svg--enter {
-  animation: modeIconIn 0.42s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
-}
-
-.island-mode-svg--enter :is(line, path, polyline) {
-  stroke-dashoffset: 1;
-  animation: lineDrawIn 0.42s cubic-bezier(0.4, 0, 0.2, 1) forwards;
-}
-
-.island-mode-svg--leave {
-  animation: modeIconOut 0.3s ease forwards;
-}
-
-.island-mode-svg--leave :is(line, path, polyline) {
-  stroke-dashoffset: 0;
-  animation: lineDrawOut 0.3s ease forwards;
-}
-
-@keyframes lineDrawIn {
-  from {
-    stroke-dashoffset: 1;
-  }
-  to {
-    stroke-dashoffset: 0;
-  }
-}
-
-@keyframes lineDrawOut {
-  from {
-    stroke-dashoffset: 0;
-  }
-  to {
-    stroke-dashoffset: 1;
-  }
-}
-
-@keyframes modeIconIn {
-  from {
-    opacity: 0;
-    transform: rotate(-15deg) scale(0.5);
-  }
-  to {
-    opacity: 1;
-    transform: rotate(0deg) scale(1);
-  }
-}
-
-@keyframes modeIconOut {
-  from {
-    opacity: 1;
-  }
-  to {
-    opacity: 0;
-    transform: scale(0.5);
-  }
-}
-
-/* ===== 上一首/下一首按压挤压动画 =====
-   按住:竖线略微变粗、三角向竖线方向挤压;松开:弹簧回弹 */
-.island-ctl--prev .island-ctl-svg line,
-.island-ctl--prev .island-ctl-svg polygon,
-.island-ctl--next .island-ctl-svg line,
-.island-ctl--next .island-ctl-svg polygon {
-  transition:
-    stroke-width 0.22s ease,
-    transform 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
-}
-
-.island-ctl--prev:active .island-ctl-svg line,
-.island-ctl--next:active .island-ctl-svg line {
-  stroke-width: 3.4; /* 竖线变粗 */
-}
-
-.island-ctl--prev:active .island-ctl-svg polygon {
-  transform: translateX(-2px); /* 三角向左挤压竖线 */
-}
-
-.island-ctl--next:active .island-ctl-svg polygon {
-  transform: translateX(2px); /* 三角向右挤压竖线 */
-}
+/* (2026-08-18 移除:本文件曾整段重复 base.css 的 ripple/mode-icons/
+   ctl--prev|next 主题色涟漪与播放模式图标动画,两处完全一致,统一由
+   base.css 提供——删除此副本避免维护漂移) */
 
 /* ===== 播放列表视图 =====
    双视图切换:列表从右侧滑入覆盖控制视图。
@@ -619,7 +508,7 @@
 
 .island-panel-list-count {
   font-size: 0.66rem;
-  color: var(--text-dim, rgba(255, 255, 255, 0.4));
+  color: var(--text-dim, rgba(255, 255, 255, 0.5));
   letter-spacing: 0.06em;
 }
 
@@ -673,7 +562,7 @@
   flex-shrink: 0;
   width: 20px;
   font-size: 0.62rem;
-  color: var(--text-dim, rgba(255, 255, 255, 0.35));
+  color: var(--text-dim, rgba(255, 255, 255, 0.5));
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.04em;
 }
@@ -704,7 +593,7 @@
 
 .island-track-artist {
   font-size: 0.64rem;
-  color: var(--text-dim, rgba(255, 255, 255, 0.45));
+  color: var(--text-dim, rgba(255, 255, 255, 0.55));
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -713,7 +602,7 @@
 .island-track-duration {
   flex-shrink: 0;
   font-size: 0.64rem;
-  color: var(--text-dim, rgba(255, 255, 255, 0.35));
+  color: var(--text-dim, rgba(255, 255, 255, 0.5));
   font-variant-numeric: tabular-nums;
 }
 
@@ -728,7 +617,7 @@
   border-radius: 999px;
   border: none;
   background: none;
-  color: var(--text-dim, rgba(255, 255, 255, 0.35));
+  color: var(--text-dim, rgba(255, 255, 255, 0.5));
   cursor: pointer;
   opacity: 0;
   transition:
@@ -749,7 +638,7 @@
 .island-track-empty {
   padding: 14px 10px;
   font-size: 0.72rem;
-  color: var(--text-dim, rgba(255, 255, 255, 0.3));
+  color: var(--text-dim, rgba(255, 255, 255, 0.5));
   text-align: center;
 }
 
@@ -1207,8 +1096,11 @@
   border-color: rgba(255, 255, 255, 0.32);
 }
 
-.island-lib-link:hover .island-lib-link-svg {
-  transform: scale(1.14);
+/* 纯装饰 hover 图标微动仅对指针设备生效:触屏点击不粘滞放大 */
+@media (hover: hover) and (pointer: fine) {
+  .island-lib-link:hover .island-lib-link-svg {
+    transform: scale(1.14);
+  }
 }
 
 /* 搜索框 */
@@ -1395,9 +1287,12 @@
     transform 0.15s ease;
 }
 
-.island-lib-card:hover {
-  border-color: rgba(255, 255, 255, 0.32);
-  transform: translateY(-1px);
+/* 纯装饰 hover 上浮仅对指针设备生效:触屏点击不粘滞位移 */
+@media (hover: hover) and (pointer: fine) {
+  .island-lib-card:hover {
+    border-color: rgba(255, 255, 255, 0.32);
+    transform: translateY(-1px);
+  }
 }
 
 .island-lib-card.applied {
@@ -1420,6 +1315,12 @@
   color: inherit;
   font-family: inherit;
   text-align: left;
+  transition: transform 0.12s ease-out;
+}
+
+/* 按压反馈:库卡片按下轻微缩小 */
+.island-lib-card-main:active {
+  transform: scale(0.98);
 }
 
 .island-lib-card-thumb {
@@ -1885,6 +1786,9 @@
   border: 1px solid rgba(255, 255, 255, 0.24);
   background: rgba(18, 22, 30, 0.96);
   box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
+  /* 从鼠标点击坐标(左上角)缩放展开,CSS 兜底(TSX 后续可注入
+     --ctx-x/--ctx-y 变量定位,此处固定为触发点缩放而非中心) */
+  transform-origin: top left;
   animation: island-ui-in 0.2s cubic-bezier(0.34, 1.56, 0.64, 1) both;
 }
 
@@ -1906,10 +1810,15 @@
   background: rgba(255, 255, 255, 0.1);
 }
 
+/* 按压反馈:右键菜单项按下加深背景 */
+.island-ctx-menu button:active {
+  background: rgba(255, 255, 255, 0.16);
+}
+
 .island-ctx-menu-hint {
   padding: 4px 14px 6px;
   font-size: 0.58rem;
-  color: var(--text-dim, rgba(255, 255, 255, 0.4));
+  color: var(--text-dim, rgba(255, 255, 255, 0.5));
   white-space: nowrap;
 }
 
@@ -1985,7 +1894,7 @@
 
 .island-media-lib-size {
   font-size: 0.6rem;
-  color: var(--text-dim, rgba(255, 255, 255, 0.4));
+  color: var(--text-dim, rgba(255, 255, 255, 0.5));
   flex: none;
 }
 

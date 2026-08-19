@@ -372,7 +372,17 @@ export function createEvolution(deps: {
       ): Promise<string> {
         onEvent({ type: 'evolution-progress', phase })
         const config = getConfig()
-        if (!config.apiKey.trim()) throw new Error('尚未配置 API Key,无法评估')
+        // LM Studio 本地端点免 Key 放行(2026-08-18,与 engine.ts 同款规则)
+        {
+          const u = (config.baseURL || '').toLowerCase()
+          const free =
+            config.apiKey.trim() ||
+            config.activeProvider === 'lmstudio' ||
+            u.includes('lmstudio') ||
+            u.includes('127.0.0.1:1234') ||
+            u.includes('localhost:1234')
+          if (!free) throw new Error('尚未配置 API Key,无法评估')
+        }
         const jsonMode = opts?.jsonMode !== false
         for (let retry = 0; retry < 2; retry++) {
           try {
