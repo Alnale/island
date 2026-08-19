@@ -793,6 +793,16 @@ function joinText(parts: AgentPart[]): string {
     .join('\n')
 }
 
+/** 最近一条 user 消息文本(上下文参数注入源:GLM-4-9B 漏填工具 query
+ * 时引擎据此回填 B站链接/BV号——见 glm4ParseBareCalls 的 context 参数) */
+function lastUserText(history: AgentMessage[]): string {
+  for (let i = history.length - 1; i >= 0; i--) {
+    const m = history[i]
+    if (m.role === 'user') return joinText(m.parts)
+  }
+  return ''
+}
+
 /**
  * 历史消息 → Chat Completions messages:
  * - user → {role:'user', content};**vision 模型且有图片 part 时**
@@ -1251,9 +1261,12 @@ export async function lmstudioStreamChatCompletion(params: {
   let finalText = out.texts.join('')
   let finalCalls = out.calls
   if (finalCalls.length === 0 && finalText && tools.length > 0) {
+    // GLM-4-9B 上下文参数注入源(2026-08-20):最近 user 消息文本,
+    // 供 glm4ParseBareCalls 在 bili 漏填 query 时回填链接/BV号
+    const bareContext = glm4BareNames ? lastUserText(history) : undefined
     const parsed =
       parseTextToolCalls(finalText, tools) ??
-      (glm4BareNames ? glm4ParseBareCalls(finalText, tools) : null)
+      (glm4BareNames ? glm4ParseBareCalls(finalText, tools, bareContext) : null)
     if (parsed) {
       finalText = parsed.text
       finalCalls = dedupeTextCalls(

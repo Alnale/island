@@ -341,6 +341,33 @@ check(true, `全部 ${p1Total} 个解析样本通过(逐工具 × 形态)`)
   check(s4.includes('<notify>'), '无工具名参数保留原样(兼容旧调用)', `输出:${JSON.stringify(s4)}`)
 }
 
+// 上下文参数注入单元测试(2026-08-20):bili download 漏填 query 时,
+// 引擎从用户话术里确定性回填链接/BV号("从上下文提取参数"兜底)
+{
+  const ctx = '帮我下载 https://www.bilibili.com/video/BV11pgH6AE9x/?spm_id_from=333'
+  // ① 模型漏 query → 注入用户消息里的视频链接
+  const p1 = glm4ParseBareCalls('好的,马上。bili(action="download")', toolObjs, ctx)
+  check(!!p1 && p1.calls[0]?.name === 'bili' && p1.calls[0]?.args.action === 'download', '注入:download 漏 query → 回填', `产出 ${JSON.stringify(p1?.calls[0] ?? null)}`)
+  check(!!p1 && (p1.calls[0]?.args.query as string).includes('BV11pgH6AE9x'), '注入:query 提取到 BV 号', `query=${JSON.stringify(p1?.calls[0]?.args.query)}`)
+  // ② 模型给空 query 串 → 同样回填
+  const p2 = glm4ParseBareCalls('bili(action="download", query="")', toolObjs, ctx)
+  check(!!p2 && (p2.calls[0]?.args.query as string).includes('BV11pgH6AE9x'), '注入:空串 query 回填', `query=${JSON.stringify(p2?.calls[0]?.args.query)}`)
+  // ③ 用户话术只给 BV 号
+  const p3 = glm4ParseBareCalls('bili(action="download")', toolObjs, '下载这个视频 BV1xx411c7mD')
+  check(!!p3 && p3.calls[0]?.args.query === 'BV1xx411c7mD', '注入:BV号上下文回填', `query=${JSON.stringify(p3?.calls[0]?.args.query)}`)
+  // ④ fav(纯列表,无需引用)不受注入影响
+  const p4 = glm4ParseBareCalls('bili(action="fav")', toolObjs, ctx)
+  check(!!p4 && p4.calls[0]?.args.query === undefined, '注入:fav 无需引用不注入', `args=${JSON.stringify(p4?.calls[0]?.args)}`)
+  // ⑤ 模型已带非空 query → 尊重模型不覆盖
+  const p5 = glm4ParseBareCalls('bili(action="download", query="BV1yy1234567")', toolObjs, ctx)
+  check(!!p5 && p5.calls[0]?.args.query === 'BV1yy1234567', '注入:已带 query 不覆盖', `query=${JSON.stringify(p5?.calls[0]?.args.query)}`)
+  // ⑥ 无上下文或上下文无 B站 引用 → 不注入
+  const p6 = glm4ParseBareCalls('bili(action="download")', toolObjs)
+  check(!!p6 && p6.calls[0]?.args.query === undefined, '注入:无上下文不注入', `args=${JSON.stringify(p6?.calls[0]?.args)}`)
+  const p7 = glm4ParseBareCalls('bili(action="download")', toolObjs, '帮我下载一个视频')
+  check(!!p7 && p7.calls[0]?.args.query === undefined, '注入:上下文无B站引用不注入', `args=${JSON.stringify(p7?.calls[0]?.args)}`)
+}
+
 // 反误伤:普通正文不触发(散文括号/未注册名/正文里的工具名提法)
 {
   const benign = [

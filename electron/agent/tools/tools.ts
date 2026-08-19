@@ -748,6 +748,7 @@ export function createTools(deps: {
         '查询:up_info 查 UP 主信息(粉丝/关注/投稿/获赞) / up_videos 查 UP 主视频列表 / ' +
         'search 搜索视频/用户/番剧 / open 搜索并直接打开第一个结果(用户说"搜索XX打开第一个"时用它,一次完成;type=user 打开 UP 空间页) / trending 查热门榜(分区 rid:0全站 1动画 3音乐 4游戏 5娱乐 36科技 ' +
         '119鬼畜 129舞蹈 155生活 160时尚 167知识 181影视) / comments 查视频评论区。' +
+        '**收藏夹(2026-08-19)**:fav 列出/下载**我(当前登录账号)的收藏夹**——fav 无 query 列出收藏夹列表(需登录);fav 带 query=收藏夹 id 下载该收藏夹全部视频(后台长任务);用户说"看/打开/播放我的收藏夹""收藏夹里有什么"时用 fav。' +
         '下载:download 下载单个视频 / download_up 批量下载 UP 主视频(**必须先经用户确认,引擎会弹出确认请求**——' +
         '用户拒绝就停止,改用 download 下载单个;可限最近 N 个/正则过滤,支持 --dry-run 先预览) / ' +
         'danmaku 下载弹幕(XML/ASS/TXT/JSON) / subtitle 下载 CC 字幕 / saved 查已下载记录。' +
@@ -778,6 +779,7 @@ export function createTools(deps: {
               'open',
               'trending',
               'comments',
+              'fav',
               'download',
               'download_up',
               'danmaku',
@@ -790,7 +792,7 @@ export function createTools(deps: {
               'config',
             ],
             description:
-              '操作:up_info/up_videos/search/open/trending/comments(查询)/download(单视频下载)/download_up(UP批量下载)/danmaku(弹幕)/subtitle(字幕)/saved(下载记录)/progress(查询进行中下载的实时进度,如"68%")/login(生成扫码登录二维码图片)/whoami(查询登录状态)/convert(把已有 HEVC/AV1 视频就地转码为 H.264——窗口内无法播放时的修复手段)/config(查看/修改 bili 默认配置,如清晰度 quality/codec/输出目录 outdir)',
+              '操作:up_info/up_videos/search/open/trending/comments(查询)/fav(收藏夹:无query列我的收藏夹,带query=收藏夹id下载)/download(单视频下载)/download_up(UP批量下载)/danmaku(弹幕)/subtitle(字幕)/saved(下载记录)/progress(查询进行中下载的实时进度,如"68%")/login(生成扫码登录二维码图片)/whoami(查询登录状态)/convert(把已有 HEVC/AV1 视频就地转码为 H.264——窗口内无法播放时的修复手段)/config(查看/修改 bili 默认配置,如清晰度 quality/codec/输出目录 outdir)',
           },
           query: {
             type: 'string',

@@ -89,6 +89,7 @@ remember(content="我是一只鲸鱼娘,温柔可爱", type="preference", tags=[
 - 媒体库(播放列表/音频库/视频库) → music_control / list_playlist / remove_playlist_item / list_audio_library / import_audio_library / add_audio_to_playlist / remove_background / rename_audio_library / remove_audio_library / list_video_library / import_video_library / rename_video_library / remove_video_library / play_library_video / set_video_config / set_audio_config;列表/管理图片库 → list_library_images / rename_library_image;调媒体窗口宽 → set_media_window_size
 - 提取图片/文档文字(OCR/解析) → glm_ocr / glm_file_parse;文档格式转换 → doc_convert
 - B 站(登录/搜索/下载/扫码)→ bili;超星答题 → xxt
+  **下载/查询时:把用户给的完整 B 站链接或 BV 号原样填进 bili 的 query 参数**(如 bili(action="download", query="https://www.bilibili.com/video/BV****"));不要自己去改格式,更不要因为"没提取到BV号"就拒绝——完整链接直接可用。观看/下载我收藏夹 → bili(action="fav");查登录状态 → bili(action="whoami")。**用户消息里已经出现 B 站链接或 BV号 时(如"帮我下载 https://www.bilibili.com/video/BV十一…"),直接把那条链接/BV号原样填进 download 的 query 再立即调用,永远不要反问"请提供BV号/链接"——用户给过的信息不要再要一遍**
 - **QQ/NapCat 相关 → napcat**——用户问"QQ 有消息吗/NapCat 连上没/之前和谁聊过/看看我QQ动态"或要**主动发私聊/群消息**(action=send/send_group)、撤消息、查群成员/好友、群管理、空间动态、会话管理时调用 napcat(action=...)**:QQ 消息自动回复是系统链路(收到自动进对话回复,无需调用);接入某群前先 napcat(action=groups) 拿真实群号**;会话订阅/静音/绑定 → manage_sessions(action=list/watch/unwatch/mute/unmute/bind)
 - 会话情况记录(说话风格/群特定要求)→ set_session_note;查/清 → get_session_note / clear_session_context;设定总结/心理揣测文风人格 → set_sub_agent_config;设主动陪伴开关/间隔 → set_proactive_config
 - 配置 MCP/技能/工具开关/输出目录/QQ → mcp_config / skills_config / tools_config / set_output_dir / set_napcat_config / set_owner_qq;设输出预算/查余额 → set_output_budget / get_deepseek_balance;介绍功能/如何用 → get_feature_guide
@@ -461,6 +462,43 @@ function rewriteBiliCli(call: Glm4ParsedCall, tools: AgentTool[]): Glm4ParsedCal
 }
 
 /**
+ * 从用户话术上下文中提取 B 站视频引用(BV号/av号/视频链接/UP 空间 mid)。
+ * GLM-4-9B 小模型常漏填 bili 的 query——用户已给链接却回"请提供 BV号/
+ * 链接"(实测),引擎层确定性回填,不依赖模型的指令遵循。
+ */
+function extractBiliRefFromContext(context?: string): string | null {
+  if (!context) return null
+  // 优先级:BV号 → av号 → 视频链接(去 query/hash) → UP 空间 mid
+  const bv = /BV[0-9A-Za-z]{10}/i.exec(context)
+  if (bv) return bv[0]
+  const av = /\b(av\d+)/i.exec(context)
+  if (av) return av[1]
+  const full = /https?:\/\/[^\s"'<>]*bilibili\.com\/[^\s"'<>]*/i.exec(context)
+  if (full) return full[0].split(/[?#]/)[0]
+  const mid = /https?:\/\/[^\s"'<>]*space\.bilibili\.com\/[A-Za-z]*\/?(\d+)/i.exec(context)
+  return mid ? mid[1] : null
+}
+
+/**
+ * bili 上下文参数注入:需要视频引用(链接/BV号)的 action(query 缺失或
+ * 空串)但用户话术里有 B 站引用时,确定性回填 query——"从上下文提取
+ * 参数"机制化兜底。fav/saved/login/whoami 等无需引用的 action 不动;
+ * 模型已带非空 query 时尊重模型(不覆盖,可能它有别的意图)。
+ */
+function injectBiliContext(call: Glm4ParsedCall, context?: string): Glm4ParsedCall {
+  if (call.name !== 'bili' || !context) return call
+  const action = String(call.args.action ?? '')
+  // 吃 B 站视频引用(链接/BV号)的 action;其余(fav 纯列表/saved/login 等)不动
+  if (!['download', 'comments', 'danmaku', 'subtitle'].includes(action)) return call
+  const cur = call.args.query
+  const missing = cur === undefined || cur === null || (typeof cur === 'string' && cur.trim() === '')
+  if (!missing) return call
+  const ref = extractBiliRefFromContext(context)
+  if (!ref) return call
+  return { ...call, args: { ...call.args, query: ref } }
+}
+
+/**
  * GLM-4-9B 裸调用解析主入口:从正文里提取裸 Python 风格调用。
  * 返回 null = 没有可识别的调用(原样交给上层);命中时返回
  * { calls, text }(text 截断到首个调用前——其后编造的"结果"段落
@@ -494,6 +532,7 @@ function rewriteBiliCli(call: Glm4ParsedCall, tools: AgentTool[]): Glm4ParsedCal
 export function glm4ParseBareCalls(
   text: string,
   tools: AgentTool[],
+  context?: string,
 ): { calls: Glm4ParsedCall[]; text: string } | null {
   if (!text || tools.length === 0) return null
   const calls: Glm4ParsedCall[] = []
@@ -571,8 +610,13 @@ export function glm4ParseBareCalls(
   }
 
   if (calls.length === 0) return null
+  // 上下文参数注入(2026-08-20):bili 下载/评论等需视频引用的 action 其
+  // query 缺失/空且用户话术里有 B站引用时,引擎确定性回填——GLM-4-9B
+  // 小模型常给链接却漏填 query,靠它兜底"从上下文提取参数"。注入在
+  // CLI 转写前做(先对已是 bili 的调用回填,再转写 exec_command 包装)
+  const injected = calls.map((c) => injectBiliContext(c, context))
   // 裸 bili-tool CLI(exec_command 包装)→ bili 工具调用转写(见 rewriteBiliCli)
-  const rewritten = calls.map((c) => rewriteBiliCli(c, tools))
+  const rewritten = injected.map((c) => rewriteBiliCli(c, tools))
   // 去重:同工具 + 同参数(稳定 JSON)只保留第一个——防"播放两次"
   const seen = new Set<string>()
   const uniq: Glm4ParsedCall[] = []

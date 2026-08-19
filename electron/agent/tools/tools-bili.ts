@@ -324,6 +324,36 @@ export async function biliQuery(params: ToolParams): Promise<string | { text: st
       args = ['comments', query, '--json']
       break
     }
+    case 'fav': {
+      // 收藏夹(2026-08-19):列表 = 先 whoami 拿当前登录 UID,再 fav <uid> --list;
+      // 下载 = 借助 whoami 拿 UID + fav <uid> --download <media_id> 后台启动。
+      // 未登录 → whoami 提示登录。
+      if (!query) {
+        // 只列出收藏夹
+        const whoami = await runBili(['whoami'], 15000)
+        const uidMatch = whoami.match(/UID\s+(\d+)/)
+        if (!uidMatch) {
+          return '无法获取当前登录账号(可能未登录)——请先调用 bili(action=login) 扫码登录后才能查看收藏夹。已登录账号才能看自己的收藏夹。'
+        }
+        return runBili(['fav', uidMatch[1]!, '--list'], 30000)
+      }
+      // 下载指定收藏夹(带 query=收藏夹 id 或含 media_id 的链接)
+      const whoami = await runBili(['whoami'], 15000)
+      const uidMatch = whoami.match(/UID\s+(\d+)/)
+      if (!uidMatch) {
+        return '无法获取当前登录账号(可能未登录)——请先 bili(action=login) 扫码登录后才能下载收藏夹。'
+      }
+      // 从 query 提取 media_id(纯数字 id 直接可用;链接里提取)
+      const mediaMatch = /(?:media_id=)?(\d{3,})/.exec(query)
+      const mediaId = mediaMatch ? mediaMatch[1]! : query
+      const dargs = ['fav', uidMatch[1]!, '--download', mediaId]
+      if (params.audio) dargs.push('--audio', String(params.audio))
+      if (params.quality) dargs.push('--quality', String(params.quality))
+      const biliOut = toolOutputDir('bili')
+      if (params.outdir) dargs.push('--outdir', String(params.outdir))
+      else if (biliOut) dargs.push('--outdir', biliOut)
+      return runBiliBackground(dargs)
+    }
     case 'download': {
       // 单视频下载:长任务后台启动(detached 独立进程),立即返回;
       // 完成情况用 saved action 查询
