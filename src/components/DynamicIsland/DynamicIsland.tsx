@@ -1575,10 +1575,21 @@ export const DynamicIsland = memo(function DynamicIsland({
 
   // 外部请求(托盘菜单"设置"/托盘"多媒体库")打开设置类视图:
   // seq 变化即展开并切换(帮助手册已移除 2026-08-10;多媒体库优先)
+  // 修复(2026-08-19):seq 是单调递增的常驻值,一旦触发就 ≥1。若用
+  // `requestMediaLibrarySeq ? media-library : settings` 判断来源,先开过
+  // 多媒体库(seq≥1)后,之后即使点的是"设置",mediaLibrarySeq 仍为真 →
+  // 永远误入多媒体库。改用两组 seq 的**增量**比较:本轮只有递增的那一组
+  // 才被兑现,另一组不视为新请求,互不干扰。
+  const prevSettingsSeqRef = useRef(requestSettingsSeq)
+  const prevMediaLibrarySeqRef = useRef(requestMediaLibrarySeq)
   useEffect(() => {
-    const seq = requestSettingsSeq || requestMediaLibrarySeq
-    if (!seq) return
-    setPanelView(requestMediaLibrarySeq ? 'media-library' : 'settings')
+    const settingsUp = requestSettingsSeq > prevSettingsSeqRef.current
+    const mediaUp = requestMediaLibrarySeq > prevMediaLibrarySeqRef.current
+    prevSettingsSeqRef.current = requestSettingsSeq
+    prevMediaLibrarySeqRef.current = requestMediaLibrarySeq
+    if (!settingsUp && !mediaUp) return
+    // 两组同帧递增时优先多媒体库(原"多媒体库优先"语义保留)
+    setPanelView(mediaUp ? 'media-library' : 'settings')
     setExpandedWidth(clampExpandedWidth())
     changeExpanded(true)
   }, [requestSettingsSeq, requestMediaLibrarySeq, changeExpanded])
