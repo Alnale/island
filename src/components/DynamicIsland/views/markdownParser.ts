@@ -121,7 +121,7 @@ function cleanUrl(raw: string): string {
 
 /** 常见媒体扩展名(2026-08-08 对话媒体窗口:图片/视频/音频按扩展名分派) */
 const MEDIA_EXT_RE =
-  /\.(png|jpe?g|gif|webp|bmp|mp4|m4v|mov|webm|mp3|wav|flac|ogg|oga|opus|m4a|aac)$/i
+  /\.(png|jpe?g|gif|webp|bmp|mp4|m4v|mov|webm|mp3|wav|flac|ogg|oga|opus|m4a|aac|amr|silk)$/i
 
 /** markdown 媒体链接 ![alt](url) 正则(匹配 URL 部分;媒体窗口分派用) */
 const MD_IMAGE_RE = /!\[[^\]]*\]\(([^)\s]+)\)/
@@ -147,7 +147,7 @@ export function mediaKindOf(url: string): 'img' | 'video' | 'audio' | null {
     // .webm 也可是音频(WebM 容器),按媒体窗口优先视频(常见场景)
     return 'video'
   }
-  if (ext === 'mp3' || ext === 'wav' || ext === 'flac' || ext === 'ogg' || ext === 'oga' || ext === 'opus' || ext === 'm4a' || ext === 'aac') {
+  if (ext === 'mp3' || ext === 'wav' || ext === 'flac' || ext === 'ogg' || ext === 'oga' || ext === 'opus' || ext === 'm4a' || ext === 'aac' || ext === 'amr' || ext === 'silk') {
     return 'audio'
   }
   return 'img'

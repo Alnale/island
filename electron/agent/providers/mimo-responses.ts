@@ -17,8 +17,14 @@
  *   response.function_call_arguments.delta → response.output_item.done →
  *   response.completed / .incomplete;
  * - 认证:支持 api-key 头(MiMo 原生)和 Authorization: Bearer(兼容 OpenAI);
- * - 模型:mimo-v2.5-pro / mimo-v2.5;
+ * - 模型:mimo-v2.6-pro / mimo-v2.6-flash / mimo-v2.6-pro-ultraspeed /
+ *   mimo-v2.5-pro / mimo-v2.5;
  * - 思考模式:reasoning.effort = none 关闭,其余均开启(无强度区分)。
+ * - **多模态原生(2026-09-22 用户定调 Responses 第一优先,Chat Completions
+ *   过旧)**:官网 Responses 文档明示 input 支持文本/图像/音频/视频
+ *   (ResponseInputText/Image/AudioContent/VideoContent),活体探针实证
+ *   input_image/input_audio/input_video 形状(mimo-media.ts)——历史带用户
+ *   侧媒体**原生进 input items,不退化 Chat 端点**。
  *
  * 错误码(https://mimo.mi.com/docs/zh-CN/api/guidance/error-codes):
  *   400 格式错误 / 401 认证失败 / 402 余额不足 / 403 拒绝访问(地区/风控)/
@@ -26,7 +32,8 @@
  */
 
 import { parseSse, sanitizeJsonStrings, truncateResult } from './sse'
-import { mimoErrorMessage } from './mimo-constants'
+import { mimoErrorMessage, MIMO_DEFAULT_MODEL } from './mimo-constants'
+import { mimoResponsesUserContent } from './mimo-media'
 import type { AgentConfig, AgentEvent, AgentMessage, AgentPart, AgentTool, ProviderOutcome } from '../types'
 
 /** 工具调用流式累积器(MiMo  Responses 格式:item_id + output_index 匹配) */
@@ -61,20 +68,28 @@ function mimoFindCall(d: Record<string, unknown>, calls: Map<string, MimoStreamC
 
 /**
  * 历史消息 → MiMo Responses API 的 input items(对齐官方 InputItemList):
- * - user → message(role=user, content=input_text 块);
+ * - user → message(role=user,content = input_text + 多模态 part
+ *   [input_image/input_audio/input_video],2026-09-22 Responses 第一优先——
+ *   编码见 mimo-media.ts,异步读盘转 data URI;纯文本保持 string 形态);
  * - system/developer → message(role=system 或 developer,content=input_text);
  * - assistant:reasoning 先输出(独立 reasoning item),再文本/工具调用;
  * - 工具调用 → function_call 项;工具结果 → function_call_output 项引用 call_id。
  */
-export function mimoHistoryToItems(history: AgentMessage[]): unknown[] {
+export async function mimoHistoryToItems(
+  history: AgentMessage[],
+  opts?: { model?: string },
+): Promise<unknown[]> {
   const items: unknown[] = []
   for (const msg of history) {
     if (msg.role === 'user') {
-      const text = msg.parts
-        .filter((p): p is Extract<AgentPart, { type: 'text' }> => p.type === 'text')
-        .map((p) => p.text)
-        .join('\n')
-      if (text) items.push({ type: 'message', role: 'user', content: [{ type: 'input_text', text }] })
+      const content = await mimoResponsesUserContent(msg.parts, opts)
+      if (!content) continue
+      // 纯文本历史:string content(最小化请求体积);附件历史:part 数组
+      items.push(
+        typeof content === 'string'
+          ? { type: 'message', role: 'user', content: [{ type: 'input_text', text: content }] }
+          : { type: 'message', role: 'user', content },
+      )
       continue
     }
     // system 角色:MiMo Responses 支持 system/developer 角色,追加在 input 中
@@ -149,11 +164,12 @@ export async function mimoStreamResponse(params: {
   const base = config.baseURL.trim().replace(/\/+$/, '')
   // 自动补全 /v1 前缀(用户可能只填到域名)
   const url = base.includes('/v1') ? `${base}/responses` : `${base}/v1/responses`
+  const model = config.model.trim() || MIMO_DEFAULT_MODEL
 
   const body: Record<string, unknown> = {
-    model: config.model.trim() || 'mimo-v2.5-pro',
+    model,
     instructions: system,
-    input: mimoHistoryToItems(history),
+    input: await mimoHistoryToItems(history, { model }),
     ...(tools.length > 0
       ? {
           tools: tools.map((t) => ({

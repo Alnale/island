@@ -459,12 +459,13 @@ export function readMediaWindowWidth(): number {
 export interface IslandMusicControl {
   /** 播放控制:play / pause / next / previous(切歌) */
   control(action: 'play' | 'pause' | 'next' | 'previous'): Promise<{ ok: boolean; action: string }>
-  /** 当前播放状态(LLM 回答"现在放什么"用) */
+  /** 当前播放状态(LLM 回答"现在放什么"用 + 歌曲卡片元数据,2026-09-22) */
   status(): {
     external: boolean
     playing: boolean
     title: string | null
     artist: string | null
+    album: string | null
     position: number
     duration: number
   }
@@ -477,7 +478,7 @@ export function registerMusicControlBridge(deps: {
    * 首次渲染值会读到旧状态) */
   getPlayer(): {
     phase: string
-    track: { title: string; artist: string } | null
+    track: { title: string; artist: string; album?: string | null } | null
     position: number
     duration: number
     play(): void
@@ -486,7 +487,7 @@ export function registerMusicControlBridge(deps: {
     previous(): void
   }
   getSystem(): {
-    track: { title: string; artist: string } | null
+    track: { title: string; artist: string; album?: string | null } | null
     playing: boolean
     position: number
     duration: number
@@ -514,6 +515,7 @@ export function registerMusicControlBridge(deps: {
         playing: external ? deps.getSystem().playing : deps.getPlayer().phase === 'playing',
         title: src.track?.title ?? null,
         artist: src.track?.artist ?? null,
+        album: src.track?.album ?? null,
         position: Math.round(src.position || 0),
         duration: Math.round(src.duration || 0),
       }

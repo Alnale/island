@@ -18,6 +18,9 @@ import { masterQQ } from '../privacy'
 export * from './napcat-message'
 export * from './napcat-store'
 export * from './napcat-client'
+// ---- 扫码登录(2026-09-22):WebUI 登录客户端 + 自动换码状态机 + 零依赖 QR ----
+export * from './napcat-login'
+export * from './qr'
 
 
 import type { NapcatClient } from './napcat-client'
@@ -28,6 +31,8 @@ export interface NapcatToolDeps {
   getSessionKey?(): string | null
   /** 危险操作确认回调(群管理/踢人/禁言等) */
   confirmDangerous?(action: string, detail: string): Promise<boolean>
+  /** 打开 QQ 扫码登录小窗(2026-09-22;未注入 = login 动作提示不可用) */
+  openLogin?(): void
 }
 
 export function createNapcatTools(deps: NapcatToolDeps): AgentTool[] {
@@ -37,15 +42,17 @@ export function createNapcatTools(deps: NapcatToolDeps): AgentTool[] {
     {
       name: 'napcat',
       description:
-        'NapCat QQ 机器人(2026-08-14):查询连接状态 / 最近 QQ 消息 / **机器人发出的消息(带 ID 可撤回)** / 联系人档案 / **聊天记录备份(工具记忆)** / 主动发私聊或群消息 / **图片收发** / 群成员好友查询 / 撤回消息 / 群管理(需主人确认) / **查看 QQ 空间动态** / 会话管理。' +
+        'NapCat QQ 机器人(2026-08-14):查询连接状态 / 最近 QQ 消息 / **机器人发出的消息(带 ID 可撤回)** / 联系人档案 / **聊天记录备份(工具记忆)** / 主动发私聊或群消息 / **图片收发** / 群成员好友查询 / 撤回消息 / 群管理(需主人确认) / **查看 QQ 空间动态** / 会话管理 / **QQ 扫码登录**。' +
         '**QQ 消息自动回复是系统链路**(收到私聊/群聊自动进入对话并回复——无需调用本工具);' +
         '**收到图片自动下载保存并进对话**(主人窗口可见图片,文本标注路径);' +
         '本工具适合:用户问"QQ 那边有消息吗""NapCat 连上没""之前和谁聊过什么""看看我的 QQ 动态"时查询;' +
         '**交流中认识新联系人/群成员时,用 contact_update 记录对方信息**;' +
         '或需要**主动**发消息时(action=send/send_group)。' +
+        'action=login **打开 QQ 扫码登录窗口**(未登录/掉线时用:实时二维码自动换新,手机 QQ 扫码确认即登录);' +
         'action=status 查连接状态;action=recent 最近收到的消息;action=sent 已发出消息(可撤回);' +
         'action=contacts/contact_update/chats/persona/persona_set 档案与人格管理;' +
         'action=send/send_group 发消息(image 发图;file 发文件/视频,大视频上传可达 3 分钟;' +
+        'voice 发语音条(本地音频路径或 URL,mp3/wav/amr/silk 均可,NapCat 自动转 QQ 语音编码);' +
         'send_group 成功后自动把该群加入监听名单,才能收到群友回复——未监听的群消息会被丢掉);action=recall 撤回;' +
         'action=zone QQ空间动态;action=members/friends/profile/group_info 查询;' +
         'action=groups 列出机器人已加入的所有群(群号+群名)——**监听/接入某群前先调它拿真实群号**,不要凭群名猜群号;' +
@@ -57,7 +64,7 @@ export function createNapcatTools(deps: NapcatToolDeps): AgentTool[] {
           action: {
             type: 'string',
             enum: [
-              'status', 'recent', 'sent', 'contacts', 'contact_update', 'chats', 'persona', 'persona_set', 'send',
+              'login', 'status', 'recent', 'sent', 'contacts', 'contact_update', 'chats', 'persona', 'persona_set', 'send',
               'send_group', 'recall', 'zone', 'members', 'friends', 'profile', 'group_info', 'group_manage',
               'sessions', 'session_mute', 'session_bind', 'groups',
             ],
@@ -68,6 +75,7 @@ export function createNapcatTools(deps: NapcatToolDeps): AgentTool[] {
           message: { type: 'string', description: 'send/send_group:消息文本' },
           image: { type: 'string', description: 'send/send_group:图片路径或URL(真正发图)' },
           file: { type: 'string', description: 'send/send_group:本地文件路径(真正上传文件/视频,如 .mp4)' },
+          voice: { type: 'string', description: 'send/send_group:语音文件路径或URL(真正发语音条,如 .mp3/.wav/.amr,自动转 QQ silk)' },
           message_id: { type: 'string', description: 'recall:要撤回的消息ID' },
           qq: { type: 'string', description: 'contact_update:联系人QQ;zone:查看谁的动态(缺省主人)' },
           num: { type: 'number', description: 'zone:条数(1-20,缺省10)' },
@@ -90,6 +98,16 @@ export function createNapcatTools(deps: NapcatToolDeps): AgentTool[] {
       timeoutMs: 200_000,
       async execute(params: ToolParams) {
         const action = String(params.action ?? '')
+        if (action === 'login') {
+          // QQ 扫码登录小窗(2026-09-22):实时二维码(失效前自动换新)+
+          // 秒级状态轮询——修复"一直显示过期/扫上了说没扫上"(扫的都是死码)
+          if (!deps.openLogin) return '本环境不支持打开登录窗口(宿主未注入)'
+          deps.openLogin()
+          return (
+            '已打开 QQ 扫码登录窗口:用手机 QQ「扫一扫」扫窗口里的二维码,扫完在手机上确认登录。' +
+            '二维码会在失效前**自动换新**,一直扫屏幕上这张即可(不要扫截图/旧图);登录成功窗口自动关闭,OneBot(3001)随即可用。'
+          )
+        }
         if (action === 'status') {
           const s = client.status()
           return (
@@ -181,12 +199,13 @@ export function createNapcatTools(deps: NapcatToolDeps): AgentTool[] {
           const text = String(params.message ?? '').trim()
           const image = String(params.image ?? '').trim()
           const file = String(params.file ?? '').trim()
-          if (!text && !image && !file) throw new Error('send 需要 message/image/file 至少一个')
+          const voice = String(params.voice ?? '').trim()
+          if (!text && !image && !file && !voice) throw new Error('send 需要 message/image/file/voice 至少一个')
           if (image && !/^https?:|^data:image\//.test(image) && !existsSync(image)) {
             throw new Error(`图片不存在:${image}`)
           }
-          const id = await client.sendToQQ(qq, text, { image: image || undefined, file: file || undefined })
-          return `已发送给 ${qq}(message_id ${id}${image ? ',含图片' : ''}${file ? ',含文件' : ''})`
+          const id = await client.sendToQQ(qq, text, { image: image || undefined, file: file || undefined, voice: voice || undefined })
+          return `已发送给 ${qq}(message_id ${id}${image ? ',含图片' : ''}${file ? ',含文件' : ''}${voice ? ',含语音' : ''})`
         }
         if (action === 'persona') {
           const personas = await client.getPersonas()
@@ -212,12 +231,13 @@ export function createNapcatTools(deps: NapcatToolDeps): AgentTool[] {
           const text = String(params.message ?? '').trim()
           const file = String(params.file ?? '').trim()
           const image = String(params.image ?? '').trim()
-          if (!text && !file && !image) throw new Error('send_group 需要 message/file/image 至少一个')
+          const voice = String(params.voice ?? '').trim()
+          if (!text && !file && !image && !voice) throw new Error('send_group 需要 message/file/image/voice 至少一个')
           if (image && !/^https?:|^data:image\//.test(image) && !existsSync(image)) {
             throw new Error(`图片不存在:${image}`)
           }
-          const id = await client.sendToGroup(groupId, text, file || undefined, image || undefined)
-          return `已发送到群 ${groupId}${file ? '(含文件)' : ''}${image ? '(含图片)' : ''}(message_id ${id})`
+          const id = await client.sendToGroup(groupId, text, { file: file || undefined, image: image || undefined, voice: voice || undefined })
+          return `已发送到群 ${groupId}${file ? '(含文件)' : ''}${image ? '(含图片)' : ''}${voice ? '(含语音)' : ''}(message_id ${id})`
         }
         if (action === 'recall') {
           const messageId = String(params.message_id ?? '').trim()

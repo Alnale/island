@@ -20,6 +20,7 @@ import type {
   AgentTool,
   MediaAttachment,
   ProviderOutcome,
+  SongInfo,
   ToolParams,
 } from '../types'
 
@@ -126,6 +127,7 @@ export async function executeToolBatch(
     durationMs: number
     image?: string
     media?: MediaAttachment[]
+    song?: SongInfo
   }>
 > {
   return Promise.all(
@@ -136,6 +138,7 @@ export async function executeToolBatch(
       let ok: boolean
       let image: string | undefined
       let media: MediaAttachment[] | undefined
+      let song: SongInfo | undefined
       let execArgs = args
       if (!tool) {
         out = `未知工具:${name}(可用工具:${list.map((t) => t.name).join('、')})`
@@ -168,6 +171,7 @@ export async function executeToolBatch(
                   out = raw.text
                   image = raw.image
                   media = raw.media
+                  song = raw.song
                 } else {
                   out = raw
                 }
@@ -186,7 +190,7 @@ export async function executeToolBatch(
           out = after.out
         }
       }
-      return { id, name, ok, out, media, image, durationMs: Date.now() - started }
+      return { id, name, ok, out, media, image, song, durationMs: Date.now() - started }
     }),
   )
 }

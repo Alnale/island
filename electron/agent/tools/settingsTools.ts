@@ -134,10 +134,35 @@ export function createSettingsTools(deps: SettingsToolsDeps): AgentTool[] {
 }
 
 
+/** 音乐控制桥返回的播放状态快照 */
+interface MusicStatusSnapshot {
+  ok?: boolean
+  external?: boolean
+  playing?: boolean
+  title?: string | null
+  artist?: string | null
+  album?: string | null
+  position?: number
+  duration?: number
+}
+
+/**
+ * 切歌后 SMTC 元数据跟随延迟(2026-09-22):QQ音乐等外部平台"接受但
+ * 未跳转"存在秒级滞后(岛内点击后 1.2s 检测跟随,同款窗口)——next/
+ * previous 后等一拍再查快照,歌曲卡片才不会打上**上一首**的歌名。
+ * 本地播放器切歌立即生效,等一拍无害。
+ */
+const MUSIC_TRACK_FOLLOW_MS = 1200
+
 /**
  * 音乐控制工具(2026-08-12,QQ 远程控制 / 后台对话:主进程经
  * __islandMusicControl 桥 → 外部平台(SMTC)优先,本地播放器兜底)。
- * 与设置工具分离——桥不同(runIslandSettings 调 __islandSettings)
+ * 与设置工具分离——桥不同(runIslandSettings 调 __islandSettings)。
+ *
+ * **歌曲卡片(2026-09-22 用户反馈"LLM 自主放歌,对话窗口里没有歌的
+ * 消息气泡")**:每次操作(含 status)后查询当前曲目,文本带歌名(LLM
+ * 回复可点名)+ 返回 song 附件——引擎注入歌曲卡片气泡(与 open_file
+ * 媒体拦截同思路:程序注入,不依赖 LLM 复述)。
  */
 export function createMusicControlTools(run: (op: string, args: unknown[]) => Promise<unknown>): AgentTool[] {
   return [
@@ -147,7 +172,8 @@ export function createMusicControlTools(run: (op: string, args: unknown[]) => Pr
         '控制灵动岛音乐播放(2026-08-12,QQ 远程控制 / 后台对话——即使当前是音乐模式也能用):' +
         'play 播放 / pause 暂停 / next 下一首 / previous 上一首 / status 查询当前播放状态。' +
         '外部平台(QQ音乐/网易云等,经 SMTC)与本地播放器自动适配。' +
-        '适合:用户(含 QQ 消息)说"暂停/播放/下一首/上一首/现在放的是什么"。' +
+        '工具会自动附上**歌曲卡片气泡**(歌名/歌手/播放状态),回复里自然提到歌名即可,无需重复长描述。' +
+        '适合:用户(含 QQ 消息)说"暂停/播放/下一首/上一首/现在放的是什么"或"放首歌"。' +
         '注意:切回音乐模式用 switch_to_music;调系统音量用 set_system_volume。',
       parameters: {
         type: 'object',
@@ -166,40 +192,49 @@ export function createMusicControlTools(run: (op: string, args: unknown[]) => Pr
         if (!actions.includes(action)) throw new Error(`action 仅支持:${actions.join('/')}`)
         // 桥操作:status 查状态,其余 action 走 control(白名单只有这两个)
         const op = action === 'status' ? 'status' : 'control'
-        const res = (await run(op, action === 'status' ? [] : [action])) as
-          | { ok?: boolean; action?: string; error?: string }
-          | {
-              ok?: boolean
-              external?: boolean
-              playing?: boolean
-              title?: string | null
-              artist?: string | null
-              position?: number
-              duration?: number
-            }
+        const res = (await run(op, action === 'status' ? [] : [action])) as MusicStatusSnapshot
         if (res && 'error' in res && typeof res.error === 'string') {
           throw new Error(res.error)
         }
+        // 曲目快照:status 直接就是;控制类动作**再查一次**(切歌后等
+        // SMTC 元数据跟随一拍,见 MUSIC_TRACK_FOLLOW_MS)
+        let s: MusicStatusSnapshot
         if (action === 'status') {
-          const s = res as {
-            external?: boolean
-            playing?: boolean
-            title?: string | null
-            artist?: string | null
-            position?: number
-            duration?: number
+          s = res
+        } else {
+          if (action === 'next' || action === 'previous') {
+            await new Promise((r) => setTimeout(r, MUSIC_TRACK_FOLLOW_MS))
           }
-          const title = s.title || '(无曲目)'
-          const artist = s.artist ? ` - ${s.artist}` : ''
-          const mode = s.external ? '外部平台(QQ音乐等)' : '本地播放器'
-          const playing = s.playing ? '播放中' : '已暂停'
-          const pos = s.position != null ? Math.round(s.position) : 0
-          const dur = s.duration != null ? Math.round(s.duration) : 0
-          const progress = dur > 0 ? ` ${Math.floor(pos / 60)}:${String(pos % 60).padStart(2, '0')}/${Math.floor(dur / 60)}:${String(dur % 60).padStart(2, '0')}` : ''
-          return `当前播放:${title}${artist}(${mode},${playing}${progress})`
+          s = (await run('status', [])) as MusicStatusSnapshot
         }
-        const label = action === 'play' ? '播放' : action === 'pause' ? '暂停' : action === 'next' ? '下一首' : '上一首'
-        return `已${label}`
+        const title = (s.title ?? '').trim()
+        const artist = (s.artist ?? '').trim()
+        const album = (s.album ?? '').trim()
+        const nameText = title ? `《${title}》${artist ? ` - ${artist}` : ''}` : '(无曲目)'
+        const mode = s.external ? '外部平台(QQ音乐等)' : '本地播放器'
+        const playing = s.playing ? '播放中' : '已暂停'
+        const pos = s.position != null ? Math.round(s.position) : 0
+        const dur = s.duration != null ? Math.round(s.duration) : 0
+        const progress = dur > 0 ? ` ${Math.floor(pos / 60)}:${String(pos % 60).padStart(2, '0')}/${Math.floor(dur / 60)}:${String(dur % 60).padStart(2, '0')}` : ''
+        const head =
+          action === 'status'
+            ? `当前播放:${nameText}`
+            : `已${action === 'play' ? '播放' : action === 'pause' ? '暂停' : action === 'next' ? '下一首' : '上一首'}:${nameText}`
+        return {
+          text: `${head}(${mode},${playing}${progress})`,
+          // 无曲目(空播放列表/未在播)不出卡片
+          ...(title
+            ? {
+                song: {
+                  title,
+                  ...(artist ? { artist } : {}),
+                  ...(album ? { album } : {}),
+                  playing: !!s.playing,
+                  external: !!s.external,
+                },
+              }
+            : {}),
+        }
       },
     },
   ]

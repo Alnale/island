@@ -11,11 +11,21 @@
  */
 
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
-import { createMemoryStore, createMemoryTools, formatMemoryBlock } from '../electron/agent/memory'
+import {
+  createMemoryStore,
+  createMemoryTools,
+  formatMemoryBlock,
+  migrateMemoryContent,
+  normalizeMemoryText,
+  memorySimilarity,
+  findNearDuplicate,
+} from '../electron/agent/memory'
+import { createBuiltinTools } from '../electron/agent/engine/engine-builtins'
 import { isProtectedEntry, PERSONA_TAGS } from '../electron/agent/constants'
 import { createMCPManager } from '../electron/agent/mcp'
 import { createSkillLoader } from '../electron/agent/skills'
@@ -53,23 +63,33 @@ import {
   fallbackTitle,
 } from '../electron/agent/engine/engine'
 import { buildToolsGuideBlock, createTools, toolOutputDir } from '../electron/agent/tools/tools'
+// bili 登录态整合(2026-09-22):凭据收编/键名规范化/nav 探针解析/未登录输出识别(纯函数)
+import {
+  parseBiliCookies,
+  parseNavProbe,
+  consolidateBiliCookies,
+  normalizeBiliCookieKeys,
+  biliOutputLooksLoggedOut,
+} from '../electron/agent/tools/tools-bili'
 import {
   buildProfileCard,
   createNapcatTools,
+  buildOutgoingMessage,
   extractImageRefs,
-  extractMasterFingerprint,
-  extractReplyToStranger,
-  extractTurnFingerprint,
+  classifyTurn,
   gtkFromCookie,
   isAskTurnToMaster,
+  isDirectedToBot,
+  isReplyInstruction,
   isValidSessionKey,
+  looksLikeMasterAddressed,
   napcatIncomingIsBlank,
   napcatMessageImages,
   napcatMessageSubTypeNoise,
   napcatMessageText,
+  napcatMessageVoices,
   shouldAdmitGroupMessage,
   newTurnFingerprint,
-  REPLY_TO_STRANGER_MARK,
   sessionKeyFor,
   stripFingerprintMarks,
   stripMasterNarration,
@@ -77,16 +97,24 @@ import {
   stripToolNarration,
   turnAlreadySentToPending,
   turnAlreadySentToTarget,
-  routeForClassifierIntent,
   looksLikeForwardInstruction,
   looksLikeGroupSendInstruction,
   shouldSendGroupPanelReply,
+  createNapcatLoginFlow,
+  webuiTokenHash,
+  encodeQr,
   type NapcatToolDeps,
   type NapcatClient,
 } from '../electron/agent/napcat/napcat'
 import { MASTER_WINDOW_MARK, masterIdentityLine, masterWindowTurnRule, tagMasterWindowText } from '../electron/agent/constants'
 import { streamResponse } from '../electron/agent/providers/deepseek'
-import { sanitizeUnpairedSurrogates } from '../electron/agent/providers/sse'
+import { parseSse, sanitizeUnpairedSurrogates } from '../electron/agent/providers/sse'
+// MiMo 专项适配(2026-09-22 官网多模态/Batch):编码器 + 工具簇
+import { mimoUserContent, mimoResponsesUserContent, mimoResponsesContentPart, mimoMediaPart, mimoMimeOf } from '../electron/agent/providers/mimo-media'
+import { mimoHistoryToMessages, mimoStreamChatCompletion } from '../electron/agent/providers/mimo-chat'
+import { mimoStreamResponse } from '../electron/agent/providers/mimo-responses'
+import { mimoSupportsMedia, mimoBatchBaseUrl, mimoErrorMessage } from '../electron/agent/providers/mimo-constants'
+import { createMimoTools, buildMimoBatchJsonl } from '../electron/agent/tools/tools-mimo'
 
 // 测试主人 QQ 夹具(2026-08-17 隐私配置化:主人 QQ 由 privacy.json 运行时
 // 提供,测试改用假号,源码不再出现任何真实 QQ)
@@ -103,7 +131,7 @@ function napcatTools(mockClient: Partial<NapcatClient>, opts?: Omit<NapcatToolDe
 import { createWsSocket, encodeWsFrame, parseWsUrl, WsFrameParser } from '../electron/agent/napcat/wsclient'
 import { snapshotWatchDirs, restoreUndoSnapshot, releaseUndoRef, type GitExec } from '../electron/agent/undo'
 import { runPluginKernelTests } from './plugin-kernel-tests'
-import { hasMasterTurnMark, isEmptyNapcatDisplayText, stripNapcatHistoryInstructions, stripNapcatInstructions, stripTurnMarks } from '../src/agent/text'
+import { isEmptyNapcatDisplayText, stripNapcatHistoryInstructions, stripNapcatInstructions, stripTurnMarks } from '../src/agent/text'
 import {
   getTasksStatusBlock,
   listTasks,
@@ -120,6 +148,34 @@ import { createSessionTools } from '../electron/agent/tools/sessionTools'
 import { applyChanges, createEvolution, evalOutputBudget, evalTimeoutMs, isCleanupChange, mapSeqToEntry, resolveRoundBudget } from '../electron/agent/evolution'
 import { invalidatePrivacyCache } from '../electron/agent/privacy'
 import type { AgentMessage, AgentTool, McpServerConfig, MemoryEntry } from '../electron/agent/types'
+// 米家智能家居(2026-09-22):协议纯层 + 存储(工具策略测试在 tools-mijia 接线后同文件追加)
+import {
+  makeNonce,
+  computeSignedNonce,
+  computeSignature,
+  rc4Crypt,
+  encryptParam,
+  decryptParam,
+  generateEncParams,
+  parsePrefixedJson,
+  createMijiaLoginFlow,
+  createMijiaCloud,
+} from '../electron/agent/tools/mijia/mijia-cloud'
+import { createMijiaStore, MIJIA_SECRET_PREFIX, type MijiaAuth } from '../electron/agent/tools/mijia/mijia-store'
+import {
+  deriveLanKey,
+  encryptLanPayload,
+  decryptLanPayload,
+  buildLanPacket,
+  parseLanPacket,
+} from '../electron/agent/tools/mijia/mijia-lan'
+import { createMijiaSpec, shortName, FALLBACK_LIGHT, type MiotInstanceSpec } from '../electron/agent/tools/mijia/mijia-spec'
+import {
+  createMijiaTools,
+  assertMijiaWriteAllowed,
+  assertMijiaDeviceAllowed,
+  classifyForbiddenDevice,
+} from '../electron/agent/tools/tools-mijia'
 
 // exec_command 的 shell stub(2026-08-14):测试里 `start "some title"`/`dir`
 // 等命令不再真起 cmd 进程——此前每次跑测试都弹一个标题为 some title
@@ -293,6 +349,24 @@ await test('add:相同内容去重', async () => {
   assert(r1.created === true && r2.created === false, '第二次应去重(created=false)')
   const list = await store.list()
   assert(list.filter((e) => e.content === '重复内容').length === 1, '不应重复出现')
+})
+
+await test('migrateMemoryContent:误导教训 load 迁移(修「反复重验/重开扫码窗」)', () => {
+  // ① no-permit→重扫码类旧教训:改写为正确排查路径(2026-09-22 实测:
+  //    LLM 据此在一轮里连开 5 个扫码窗让主人重复验证)
+  const old1 = '米家登录后调用 /v2/home/home_device_list 报 code=-1:no permit、缓存设备0台时，属登录态权限不足；带上 refresh=true 重试仍失败，应重新发起 mijia_login login 让主人扫码，再重查设备。'
+  const fixed1 = migrateMemoryContent(old1)
+  assert(fixed1 !== old1 && !/应重新|重新发起|让主人扫码|再扫一次/.test(fixed1), `no-permit 旧教训应改写且不再导向重扫码,实际:${fixed1}`)
+  assert(/refresh=true|与登录无关/.test(fixed1), '应给出正确排查路径')
+  // ② check 脚本实时验证 Credential 类:教出「重复验证十几次」死循环
+  const old2 = '执行NapCat/扫码类操作时,若遇到接口返回404或认证失败,应优先回查本机JS源码确认真实路径、并用check脚本实时验证Credential有效性,再重试,避免凭猜测重复调用。'
+  const fixed2 = migrateMemoryContent(old2)
+  assert(fixed2 !== old2 && /验证一次/.test(fixed2) && !/再重试/.test(fixed2), `实时验证类应改为验证一次即停,实际:${fixed2}`)
+  // ③ 无害内容原样返回(不误伤)
+  const benign = '主人喜欢简洁回答'
+  assert(migrateMemoryContent(benign) === benign, '无害内容应原样返回')
+  // 幂等:迁移后再迁移不改变
+  assert(migrateMemoryContent(fixed1) === fixed1, '迁移应幂等')
 })
 
 await test('上限 200 条:淘汰最旧', async () => {
@@ -1632,9 +1706,9 @@ await test('parseMemoriesJson:合法数组逐条校验,垃圾拒绝', () => {
   // Python 风格单引号 dict 可解析
   const py = parseMemoriesJson("{'memories': [{'content': '单引号内容', 'type': 'workflow'}]}")
   assert(py.length === 1 && py[0].type === 'workflow', 'Python 风格 dict 应解析')
-  // 超过 10 条截断
+  // 超上限截断(2026-09-22 从 10 收紧到 5,防自动记录泛滥)
   const many = parseMemoriesJson(`{"memories": ${JSON.stringify(Array.from({ length: 15 }, (_, i) => ({ content: `记忆${i}`, type: 'fact' })))}}`)
-  assert(many.length === 10, `单次最多 10 条,实际 ${many.length}`)
+  assert(many.length === 5, `单次最多 5 条,实际 ${many.length}`)
 })
 
 await test('parseStyleJson:合法 style 采信,空/垃圾拒绝', () => {
@@ -1719,36 +1793,283 @@ await test('createEvaluatorAgent:无 Key 上抛(进化不能空转)', async () =
 })
 
 // ---------------------------------------------------------------------------
-// 7.5 回复意图判定器(2026-08-16 兜底路由)——双指纹协议依赖主 Agent 服从性,
-// 忘带指纹 = 扣留(该发给主人的消息到不了主人)/ 误发(发给别人的话被发到
-// 主人 QQ,用户实测两病)。落定路由对指纹缺失/歧义的轮次调用独立意图判定
-// Sub Agent(master/other/hold)决定路由——判定器只做单一分类任务,比主
-// Agent 边生成边记指纹可靠;失败回退原行为(不引入新的错误路径)
+// 7.5 归属指纹(2026-09-22 重设计,用户定案四规则)——消息归属由触发来源
+// 在程序入口判定(窗口/主人QQ私聊/主人QQ群聊指向LLM = 主人信息;其余 =
+// 别人的信息),回复默认落点随归属走,LLM 不写任何文本标记;跨归属外发
+// 只走 send 工具,意图判定器降级为错配安全网(失败回退默认,不引入新
+// 错误路径)。旧双指纹文本协议(【指纹:xxx】/【主人指纹:xxx】)退役
 // ---------------------------------------------------------------------------
 
-await test('routeForClassifierIntent:意图判定路由矩阵(2026-08-16)', () => {
-  // 执行轮(pending 待回复对象存活):给主人的话发主人 / 发给对方的话发待
-  // 回复对象 / hold 扣留——修复"该发给主人的消息因忘带主人指纹没发出去"
-  assert(routeForClassifierIntent('exec', 'master') === 'send-master', 'exec+master 应发主人')
-  assert(routeForClassifierIntent('exec', 'other') === 'send-pending', 'exec+other 应发待回复对象')
-  assert(routeForClassifierIntent('exec', 'hold') === 'hold', 'exec+hold 应扣留')
-  // 主人日常轮:给主人的话发主人;发给别人的话没有可发目标(发别人必须用
-  // send 工具)→ 扣留防串台——修复"发给别人的消息被发到主人QQ"
-  assert(routeForClassifierIntent('master-daily', 'master') === 'send-master', 'daily+master 应发主人')
-  assert(routeForClassifierIntent('master-daily', 'other') === 'hold', 'daily+other 应扣留(无发送目标)')
-  assert(routeForClassifierIntent('master-daily', 'hold') === 'hold', 'daily+hold 应扣留')
-  // 群触发轮:汇报发主人 / 群友话发回群
-  assert(routeForClassifierIntent('group', 'master') === 'send-master', 'group+master 应发主人')
-  assert(routeForClassifierIntent('group', 'other') === 'send-group', 'group+other 应发回群')
-  assert(routeForClassifierIntent('group', 'hold') === 'hold', 'group+hold 应扣留')
-  // 扩展信任私聊轮:发给对方的话发回对方 / 汇报发主人
-  assert(routeForClassifierIntent('contact', 'master') === 'send-master', 'contact+master 应发主人')
-  assert(routeForClassifierIntent('contact', 'other') === 'send-target', 'contact+other 应发回对方')
-  assert(routeForClassifierIntent('contact', 'hold') === 'hold', 'contact+hold 应扣留')
-  // 面板轮:发给对方的话发回对方 / 给主人的话留在面板(主人正在面板查看)
-  assert(routeForClassifierIntent('panel', 'master') === 'hold', 'panel+master 应留面板')
-  assert(routeForClassifierIntent('panel', 'other') === 'send-target', 'panel+other 应发回对方')
-  assert(routeForClassifierIntent('panel', 'hold') === 'hold', 'panel+hold 应扣留')
+await test('classifyTurn:归属路由矩阵(2026-09-22 归属指纹,规则①②③)', () => {
+  const MQ = MASTER_QQ
+  // 规则① 对话窗口 = 主人信息 → 回复给主人(主对话留窗口/面板留窗口)
+  const winMain = classifyTurn({ source: 'window', sessionKey: 'main', masterQQ: MQ })
+  assert(winMain.kind === 'window' && winMain.replyOwner === 'master', '主对话窗口 = window/master')
+  const winPanel = classifyTurn({ source: 'window', sessionKey: 'private:222', masterQQ: MQ })
+  assert(winPanel.kind === 'panel' && winPanel.replyOwner === 'master', '外部面板 = panel/master(留窗口)')
+  // 规则② 主人 QQ 私聊 = 主人信息 → 回主人 QQ
+  const masterQq = classifyTurn({ source: 'qq', target: MQ, masterQQ: MQ })
+  assert(masterQq.kind === 'master-qq' && masterQq.replyOwner === 'master', '主人 QQ 私聊 = master-qq/master')
+  // 规则② 主人 QQ 群聊指向 LLM(owner 入口判定传入)= 主人信息 → 私发主人
+  const masterGroup = classifyTurn({ source: 'group', target: '20001', owner: 'master', masterQQ: MQ })
+  assert(masterGroup.kind === 'master-group' && masterGroup.replyOwner === 'master', '主人群聊指向 LLM = master-group/master')
+  // 规则③ 其余 = 别人的信息 → 回对方/群
+  const contact = classifyTurn({ source: 'qq', target: '222', masterQQ: MQ })
+  assert(contact.kind === 'contact' && contact.replyOwner === 'peer', '扩展信任私聊 = contact/peer')
+  const group = classifyTurn({ source: 'group', target: '20001', owner: 'peer', masterQQ: MQ })
+  assert(group.kind === 'group' && group.replyOwner === 'peer', '群友发言 = group/peer')
+  // 规则② 反面:主人群聊未指向 LLM(owner=peer)= 别人的信息(环境闲聊)
+  const masterChatter = classifyTurn({ source: 'group', target: '20001', owner: 'peer', masterQQ: MQ })
+  assert(masterChatter.kind === 'group' && masterChatter.replyOwner === 'peer', '主人群聊未指向 = group/peer')
+  // 群聊缺省 owner(未传)= 安全侧按别人处理(主人点名必须入口显式传)
+  const groupNoOwner = classifyTurn({ source: 'group', target: '20001', masterQQ: MQ })
+  assert(groupNoOwner.replyOwner === 'peer', '群聊缺省 owner 按别人(安全侧)')
+  // 陌生人询问轮:别人的信息但策略回复 = 询问主人
+  const ask = classifyTurn({ source: 'ask', target: '333', owner: 'peer', masterQQ: MQ })
+  assert(ask.kind === 'ask' && ask.replyOwner === 'master', '陌生人询问轮 = ask/master(询问主人)')
+  // 系统/主动轮:永不路由
+  const silent = classifyTurn({ source: 'system', masterQQ: MQ })
+  assert(silent.kind === 'silent' && silent.replyOwner === null, 'system 轮 = silent 不路由')
+  const empty = classifyTurn({ masterQQ: MQ })
+  assert(empty.kind === 'silent', '无来源 = silent')
+})
+
+await test('isDirectedToBot:主人群聊消息意图识别(2026-09-22 规则②,群聊主人发言不一定指向 LLM)', () => {
+  assert(isDirectedToBot('帮我查下天气', true) === true, '@机器人 显式指向')
+  assert(isDirectedToBot('岛灵在吗') === true, '称呼岛灵 = 指向')
+  assert(isDirectedToBot('鲸鱼娘看看这个') === true, '称呼鲸鱼娘 = 指向')
+  assert(isDirectedToBot('你觉得呢?') === true, '第二人称疑问 = 指向')
+  assert(isDirectedToBot('你说好不好') === true, '第二人称+好不好 = 指向')
+  assert(isDirectedToBot('帮我查一下B站排名') === true, '对助手式祈使 = 指向')
+  assert(isDirectedToBot('给我看看你的图') === true, '给我+动词 = 指向')
+  // 未指向(主人与群友闲聊 → 别人的信息)
+  assert(isDirectedToBot('哈哈今天好累') === false, '日常感慨未指向')
+  assert(isDirectedToBot('晚上开黑吗') === false, '问群友未指向(无疑问对象你)')
+  assert(isDirectedToBot('老王你来不来') === false, '问「你」但句式不含疑问词——保守判未指向(主人可 @/叫名字确保唤起)')
+  assert(isDirectedToBot('机器人真菜') === true, '提及名字 = 指向(宁宽:主人点名了)')
+  assert(isDirectedToBot('') === false && isDirectedToBot('   ') === false, '空输入未指向')
+})
+
+await test('isReplyInstruction:触发侧执行指令识别(2026-09-22 归属指纹——主人轮默认回复给主人,指示轮才可能外发)', () => {
+  // 转达/指示式(超集 looksLikeForwardInstruction)
+  assert(isReplyInstruction('帮我把"周末见"发给张三') === true, '把…发给…')
+  assert(isReplyInstruction('回他:没问题啊') === true, '回他:内容指示式')
+  assert(isReplyInstruction('回复他:就这样定了') === true, '回复他:式')
+  assert(isReplyInstruction('跟张三说我同意了') === true, '跟人名说')
+  assert(isReplyInstruction('就这么回他') === true, '就这么回')
+  assert(isReplyInstruction('按我说的回:好的') === true, '按我说的回')
+  assert(isReplyInstruction('【主人窗口】回他:好的') === true, '窗口前缀不挡')
+  // 日常对话(非指示 → 回复给主人)
+  assert(isReplyInstruction('嗯') === false, '应答非指示')
+  assert(isReplyInstruction('今天天气怎么样') === false, '日常提问非指示')
+  assert(isReplyInstruction('帮我查一下B站排名') === false, '查询非指示(无回复对象)')
+  assert(isReplyInstruction('') === false, '空输入')
+})
+
+// ---------------------------------------------------------------------------
+// NapCat 扫码登录(2026-09-22,修复"QQ 一直显示过期/扫上了说没扫上"):
+// 零依赖 QR 编码器(与 python qrcode 对拍过,见 tests/qr-crosscheck.mjs)+
+// WebUI 登录流自动换码状态机(到期前换新,秒级轮询)
+// ---------------------------------------------------------------------------
+
+await test('encodeQr:零依赖 QR 编码器(byte/EC-M,版本 1-10)', () => {
+  // 短文本 → 版本 1(21×21);登录链接(~68 字节)→ 版本 5(37×37)
+  const small = encodeQr('a')
+  assert(small.size === 21, `短文本应 21×21,实际 ${small.size}`)
+  const url = encodeQr('https://txz.qq.com/p?k=UloZ2aoikyaK4Z7CMpsoIpc4SuOmIEq3&f=1600001604')
+  assert(url.size === 37, `登录链接应 37×37(版本 5),实际 ${url.size}`)
+  // 定位图形:三角落 7×7 回字(外环黑 + 5×5 白 + 3×3 黑心)
+  const m = url.modules
+  const finderOk = (r0: number, c0: number) => {
+    for (let r = 0; r < 7; r++) {
+      for (let c = 0; c < 7; c++) {
+        const ring = r === 0 || r === 6 || c === 0 || c === 6
+        const core = r >= 2 && r <= 4 && c >= 2 && c <= 4
+        if (m[r0 + r][c0 + c] !== (ring || core)) return false
+      }
+    }
+    return true
+  }
+  assert(finderOk(0, 0) && finderOk(0, url.size - 7) && finderOk(url.size - 7, 0), '三角落定位图形应为回字')
+  assert(m[url.size - 8][8] === true, '固定黑格 (size-8,8) 应恒黑')
+  // 固定掩码下确定性 + 罚分自动选码下两枚不同文本应不同
+  assert(JSON.stringify(encodeQr('abc', { mask: 3 }).modules) === JSON.stringify(encodeQr('abc', { mask: 3 }).modules), '固定掩码输出应确定')
+  assert(JSON.stringify(url.modules) !== JSON.stringify(encodeQr('https://txz.qq.com/p?k=OTHERKEY&f=1600001604').modules), '不同内容矩阵应不同')
+  // 米家 loginUrl 实测 136 字节 → 版本 8(49×49;2026-09-22 修「QR 数据过长」)
+  const mi = encodeQr('x'.repeat(136))
+  assert(mi.size === 49, `136 字节应 49×49(版本 8),实际 ${mi.size}`)
+  // 版本信息块读回固定向量(右上副本 bit i @ (i/3, size-11+i%3),与 python qrcode 对拍值)
+  const verBitsOf = (q: { size: number; modules: boolean[][] }) => {
+    let bits = 0
+    for (let i = 0; i < 18; i++) if (q.modules[Math.floor(i / 3)][q.size - 11 + (i % 3)]) bits |= 1 << i
+    return bits
+  }
+  assert(verBitsOf(mi) === 0x085bc, `v8 版本信息应 0x085BC,实际 0x${verBitsOf(mi).toString(16)}`)
+  const v10 = encodeQr('y'.repeat(200))
+  assert(v10.size === 57 && verBitsOf(v10) === 0x0a4d3, `v10(200 字节)应 57×57 且版本信息 0x0A4D3,实际 ${v10.size}/0x${verBitsOf(v10).toString(16)}`)
+  // 超容量报错(版本 10 上限 213 字节)
+  let threw = false
+  try {
+    encodeQr('x'.repeat(214))
+  } catch {
+    threw = true
+  }
+  assert(threw, '214 字节应超出版本 10 容量并报错')
+})
+
+await test('napcat 扫码登录流:过期码不落屏 + 过期即换 + ttl 自动换码 + 成功收尾(2026-09-22)', async () => {
+  const sleep = (ms: number) => new Promise((res) => setTimeout(res, ms))
+  // mock WebUI 按**实测真实语义**建模(2026-09-22 活体探测):
+  //  - CheckLoginStatus.qrcodeurl = 登录任务跟踪码(唯一可扫的码);
+  //  - RefreshQRcode 铸新码 QRT*(本 mock 同步落地;真实为 ~1-2s 异步,
+  //    竞态窗口内状态接口回旧码 + loginError「已过期」);
+  //  - GetQQLoginQrcode 返回当前跟踪码(首铸兜底);
+  //  - 契约:**loginError 报过期的码绝不落屏**(初始即为过期死码 DEAD0,
+  //    模拟用户实测"一直显示过期")。
+  let mintSeq = 0
+  let tracked = 'https://txz.qq.com/p?k=DEAD0'
+  let trackedExpired = true
+  let refreshed = 0
+  let nowMs = 1_000_000
+  let loggedIn = false
+  const states: Array<{ phase: string; qrUrl: string; remainSec: number; message: string }> = []
+  const sha = (t: string) => createHash('sha256').update(t).digest('hex')
+  const fetchImpl = (async (url: string | URL | Request, opts?: RequestInit) => {
+    const u = String(url)
+    // 契约锁(2026-09-22):WebUI 前端 axios baseURL = '/api',漏前缀 /auth/login 404 = 小窗白板根因
+    assert(u.includes('/api/'), `请求应带 /api 前缀,实际 ${u}`)
+    const body = JSON.parse(String(opts?.body ?? '{}'))
+    if (u.endsWith('/auth/login')) {
+      assert(typeof body.hash === 'string' && body.hash.length === 64, '登录应带 sha256 hash')
+      return new Response(JSON.stringify({ code: 0, data: { Credential: 'CRED' } }))
+    }
+    if (u.endsWith('/QQLogin/GetQQLoginQrcode')) {
+      return new Response(JSON.stringify({ code: 0, data: { qrcode: tracked } }))
+    }
+    if (u.endsWith('/QQLogin/RefreshQRcode')) {
+      refreshed++
+      mintSeq++
+      tracked = `https://txz.qq.com/p?k=QRT${mintSeq}`
+      trackedExpired = false
+      return new Response(JSON.stringify({ code: 0, data: null }))
+    }
+    if (u.endsWith('/QQLogin/CheckLoginStatus')) {
+      return new Response(
+        JSON.stringify({
+          code: 0,
+          data: { isLogin: loggedIn, isOffline: false, qrcodeurl: tracked, loginError: trackedExpired ? '二维码已过期，请刷新' : '' },
+        }),
+      )
+    }
+    return new Response(JSON.stringify({ code: -1, message: '未知路径 ' + u }))
+  }) as typeof fetch
+  const flow = createNapcatLoginFlow({
+    token: 'tok',
+    fetchImpl,
+    sha256Hex: sha,
+    now: () => nowMs,
+    ttlSec: 60,
+    pollMs: 8,
+    onUpdate: (s) => states.push({ phase: s.phase, qrUrl: s.qrUrl, remainSec: s.remainSec, message: s.message }),
+  })
+  const refreshCount = () => refreshed // 经函数间接读,防 assert 断言窄化字面量类型
+  await flow.start()
+  assert(refreshCount() === 1, `启动遇过期死码应立即 RefreshQRcode 换码,实际 ${refreshed}`)
+  assert(states[0]?.phase === 'waiting', '取到码应进入 waiting')
+  assert((states[0]?.qrUrl ?? '').includes('QRT'), `应展示换新后的活码 QRT*,实际 ${states[0]?.qrUrl}`)
+  assert(states.every((s) => !s.qrUrl.includes('DEAD')), '过期死码绝不落屏')
+  // 运行中服务端报过期 → 立即换码(不等 ttl),过期码不再出现在后续状态里
+  const expiredUrl = tracked
+  const lenBefore = states.length
+  nowMs += 6000 // 越过 5s 换码冷却
+  trackedExpired = true
+  await sleep(60)
+  assert(refreshCount() === 2, `过期提示应立即触发换码,实际 refresh=${refreshed}`)
+  assert(states.slice(lenBefore).every((s) => s.qrUrl !== expiredUrl), '过期码不应再展示')
+  assert(states.slice(lenBefore).some((s) => s.qrUrl === `https://txz.qq.com/p?k=QRT2`), '应展示换新码 QRT2')
+  // ttl(60s)到点 → 自动换码(时钟从最后采用码起推进)
+  nowMs += 61_000
+  await sleep(60)
+  assert(refreshCount() === 3, `ttl 到期应自动换码,实际 refresh=${refreshed}`)
+  assert(states.some((s) => s.message.includes('已自动换新')), '换码后应有换新提示')
+  // remainSec 应随新码回满
+  assert([...states].reverse().some((s) => s.remainSec > 0), '新码倒计时应回满')
+  // 扫码成功 → done 且停止轮询
+  loggedIn = true
+  await sleep(60)
+  assert(states.some((s) => s.phase === 'done'), 'isLogin=true 应报 done')
+  const countBefore = states.length
+  await sleep(50)
+  assert(states.length === countBefore, 'done 后应停止轮询')
+  flow.stop()
+})
+
+await test('napcat 扫码登录流:错误态「换一张」应整体重试(2026-09-22)', async () => {
+  // start 认证失败 → stopped;此时 refresh(「换一张」)必须重启动,
+  // 原实现 if (stopped) return = 按钮点了没反应(用户实测)
+  let authCalls = 0
+  let failAuth = true
+  const phases: string[] = []
+  const fetchImpl = (async (url: string | URL | Request) => {
+    const u = String(url)
+    assert(u.includes('/api/'), `请求应带 /api 前缀,实际 ${u}`)
+    if (u.endsWith('/auth/login')) {
+      authCalls++
+      if (failAuth) return new Response(JSON.stringify({ code: -1, message: 'Unauthorized' }))
+      return new Response(JSON.stringify({ code: 0, data: { Credential: 'CRED' } }))
+    }
+    if (u.endsWith('/QQLogin/GetQQLoginQrcode')) {
+      return new Response(JSON.stringify({ code: 0, data: { qrcode: 'https://txz.qq.com/p?k=QRX' } }))
+    }
+    return new Response(
+      JSON.stringify({ code: 0, data: { isLogin: false, isOffline: false, qrcodeurl: 'https://txz.qq.com/p?k=QRX', loginError: '' } }),
+    )
+  }) as typeof fetch
+  const flow = createNapcatLoginFlow({
+    token: 'tok',
+    fetchImpl,
+    sha256Hex: (t) => createHash('sha256').update(t).digest('hex'),
+    pollMs: 50,
+    onUpdate: (s) => phases.push(s.phase),
+  })
+  const authCount = () => authCalls // 经函数间接读,防 assert 断言窄化字面量类型
+  await flow.start()
+  assert(phases.includes('error'), '认证失败应进 error 态')
+  assert(authCount() === 1, '失败一次应只调一次认证')
+  failAuth = false
+  await flow.refresh() // stopped → 应整体重试
+  assert(authCount() === 2, `refresh 应重试认证,实际 ${authCalls}`)
+  assert(phases.includes('waiting'), '重试成功应进入 waiting 并展示新码')
+  flow.stop()
+})
+
+await test('webuiTokenHash:WebUI 口令散列约定(token + ".napcat")', () => {
+  const sha2 = (t: string) => createHash('sha256').update(t).digest('hex')
+  assert(webuiTokenHash('2f901af2e1e0', sha2) === sha2('2f901af2e1e0.napcat'), '散列应与前端约定一致')
+})
+
+await test('napcat login 动作:打开扫码登录窗(2026-09-22)且未注入时不炸', async () => {
+  let opened = 0
+  const tool = napcatTools({}, { openLogin: () => { opened++ } }).find((t) => t.name === 'napcat')!
+  const out = String(await tool.execute({ action: 'login' }))
+  assert(opened === 1, 'login 应调 openLogin 打开登录窗')
+  assert(out.includes('扫码') && out.includes('自动换新'), '返回文本应引导扫码并说明自动换码')
+  const bare = napcatTools({}).find((t) => t.name === 'napcat')!
+  const bareOut = String(await bare.execute({ action: 'login' }))
+  assert(bareOut.includes('不支持'), '未注入 openLogin 应提示不可用')
+})
+
+await test('looksLikeMasterAddressed:别人轮对主人说话安全网(2026-09-22 归属指纹——防汇报泄露给对方)', () => {
+  assert(looksLikeMasterAddressed('主人,魔精问你明天有没有空~') === true, '开头称呼主人 = 对主人说')
+  assert(looksLikeMasterAddressed('主人:他想约你吃饭') === true, '主人:式')
+  assert(looksLikeMasterAddressed('给主人汇报一下,图已经发他了') === true, '汇报动词点名主人')
+  assert(looksLikeMasterAddressed('向主人请示要不要答应') === true, '请示动词点名主人')
+  // 普通回复不误伤
+  assert(looksLikeMasterAddressed('哈哈确实拉胯,心疼你一秒') === false, '对对方的回复不命中')
+  assert(looksLikeMasterAddressed('主人是谁啊') === false, '第三人称提及主人不命中(后跟非标点)')
+  assert(looksLikeMasterAddressed('我问主人一下') === false, '「我问主人」非开头称呼')
+  assert(looksLikeMasterAddressed('好的主人') === false, '非开头称呼(保守,宁漏)')
+  assert(looksLikeMasterAddressed('') === false, '空输入')
 })
 
 await test('parseClassifierJson:意图判定解析(2026-08-16)', () => {
@@ -1936,19 +2257,20 @@ await test('looksLikeGroupSendInstruction:群窗口发群指令识别(2026-09-03
   assert(looksLikeGroupSendInstruction('') === false, '空串不命中')
 })
 
-await test('shouldSendGroupPanelReply:群窗口默认不发群(2026-09-03)', () => {
+await test('shouldSendGroupPanelReply:群窗口默认不发群(2026-09-03;2026-09-22 归属指纹去指纹门——明确指示+判定确认才发)', () => {
   const stay = { alreadySent: false, isAsk: false }
-  // 根因:主人在群会话窗口说「你好」,LLM 误带指纹 → 原实现无条件发群
-  assert(shouldSendGroupPanelReply({ ...stay, hasFingerprint: true, triggerText: '【主人窗口】你好' }) === false, '未要求发群+指纹仍不发')
-  assert(shouldSendGroupPanelReply({ ...stay, hasFingerprint: true, triggerText: '这个群怎么样' }) === false, '问群况+指纹不发')
-  assert(shouldSendGroupPanelReply({ ...stay, hasFingerprint: false, triggerText: '你好', classifierIntent: 'other' }) === false, '判定器 other 但未要求发群不发')
+  // 根因(2026-09-03):主人在群会话窗口说「你好」被发到群——窗口 = 主人
+  // 信息(规则①),默认留窗口;只有明确指示 + 判定器确认 other 才发
+  assert(shouldSendGroupPanelReply({ ...stay, triggerText: '【主人窗口】你好' }) === false, '未要求发群不发')
+  assert(shouldSendGroupPanelReply({ ...stay, triggerText: '这个群怎么样' }) === false, '问群况不发')
+  assert(shouldSendGroupPanelReply({ ...stay, triggerText: '你好', classifierIntent: 'other' }) === false, '判定器 other 但未要求发群不发')
   // 主人明确要求发群
-  assert(shouldSendGroupPanelReply({ ...stay, hasFingerprint: true, triggerText: '【主人窗口】发到群里:我晚点到' }) === true, '要求发群+指纹应发')
-  assert(shouldSendGroupPanelReply({ ...stay, hasFingerprint: false, triggerText: '发到群里', classifierIntent: 'other' }) === true, '要求发群+判定 other 应发')
-  assert(shouldSendGroupPanelReply({ ...stay, hasFingerprint: false, triggerText: '发到群里', classifierIntent: 'master' }) === false, '要求发群但判定 master 不发')
-  assert(shouldSendGroupPanelReply({ ...stay, hasFingerprint: false, triggerText: '发到群里' }) === false, '要求发群无指纹无判定不发')
-  assert(shouldSendGroupPanelReply({ ...stay, hasFingerprint: true, triggerText: '发到群里', alreadySent: true }) === false, '本轮已用工具发过不重发')
-  assert(shouldSendGroupPanelReply({ ...stay, hasFingerprint: true, triggerText: '发到群里', isAsk: true }) === false, '询问轮不发群')
+  assert(shouldSendGroupPanelReply({ ...stay, triggerText: '【主人窗口】发到群里:我晚点到', classifierIntent: 'other' }) === true, '要求发群+判定 other 应发')
+  assert(shouldSendGroupPanelReply({ ...stay, triggerText: '发到群里', classifierIntent: 'other' }) === true, '要求发群+判定 other 应发')
+  assert(shouldSendGroupPanelReply({ ...stay, triggerText: '发到群里', classifierIntent: 'master' }) === false, '要求发群但判定 master 不发')
+  assert(shouldSendGroupPanelReply({ ...stay, triggerText: '发到群里' }) === false, '要求发群无判定不发(判定失败/缺失回默认留窗口)')
+  assert(shouldSendGroupPanelReply({ ...stay, triggerText: '发到群里', classifierIntent: 'other', alreadySent: true }) === false, '本轮已用工具发过不重发')
+  assert(shouldSendGroupPanelReply({ ...stay, triggerText: '发到群里', classifierIntent: 'other', isAsk: true }) === false, '询问轮不发群')
 })
 
 // ---------------------------------------------------------------------------
@@ -2261,28 +2583,207 @@ await test('设置工具:未注入桥时不注册;注入后 31 个工具齐', ()
   }
 })
 
-await test('music_control:action 校验与桥透传,status 格式化', async () => {
+await test('bili 登录态整合:凭据解析/键名规范化/遗留收编/nav 探针/未登录识别', async () => {
+  // cookie 解析:bili-tool 格式 + qr-helper 旧格式(无 _saved_at)+ 非法
+  const full = parseBiliCookies(JSON.stringify({ SESSDATA: 's', bili_jct: 'j', DedeUserID: '123', _saved_at: 100 }))
+  assert(full?.hasSessdata === true && full.uid === '123' && full.savedAt === 100, `完整凭据:${JSON.stringify(full)}`)
+  const legacy = parseBiliCookies(JSON.stringify({ SESSDATA: 's2', DedeUserID: '' }))
+  assert(legacy?.hasSessdata === true && legacy.uid === '' && legacy.savedAt === 0, `qr-helper 旧格式:${JSON.stringify(legacy)}`)
+  assert(parseBiliCookies('not json') === null && parseBiliCookies('[1,2]') === null, '非法 JSON → null')
+  assert(parseBiliCookies(JSON.stringify({ bili_jct: 'j' }))?.hasSessdata === false, '无 SESSDATA → hasSessdata false')
+  // 键名大小写(2026-09-22 实测真根因:登录链路 to_uppercase 落盘
+  // DEDEUSERID/BILI_JCT,Rust 读 DedeUserID/bili_jct 全 miss → "已登录 (UID )")
+  const caps = parseBiliCookies(JSON.stringify({ SESSDATA: 's', BILI_JCT: 'j', DEDEUSERID: '859' }))
+  assert(caps?.uid === '859', `全大写键也应解析出 UID:${JSON.stringify(caps)}`)
+  const norm = normalizeBiliCookieKeys({ SESSDATA: 's', BILI_JCT: 'j', DEDEUSERID: '859', first_domain: '.bilibili.com' })
+  assert(norm.changed && norm.obj.DedeUserID === '859' && norm.obj.bili_jct === 'j' && norm.obj.SESSDATA === 's', `规范化:${JSON.stringify(norm.obj)}`)
+  assert(norm.obj.first_domain === '.bilibili.com', '无关键原样保留')
+  assert(normalizeBiliCookieKeys({ SESSDATA: 's', bili_jct: 'j', DedeUserID: '1' }).changed === false, '已是规范键名 → 无变化')
+  // 遗留收编:规范位空 → 挑"有 SESSDATA 且 _saved_at 最新"的一份;幂等
+  const dir = path.join(tmp, 'bili-login-test')
+  const canonical = path.join(dir, 'config', 'cookies.json')
+  const legacyOld = path.join(dir, 'old', 'cookies.json')
+  const legacyNew = path.join(dir, 'webui', 'cookies.json')
+  const legacyEmpty = path.join(dir, 'empty', 'cookies.json')
+  await fs.mkdir(path.join(dir, 'old'), { recursive: true })
+  await fs.mkdir(path.join(dir, 'webui'), { recursive: true })
+  await fs.mkdir(path.join(dir, 'empty'), { recursive: true })
+  await fs.writeFile(legacyOld, JSON.stringify({ SESSDATA: 'old', _saved_at: 100 }))
+  await fs.writeFile(legacyNew, JSON.stringify({ SESSDATA: 'new', DEDEUSERID: '42', _saved_at: 200 }))
+  await fs.writeFile(legacyEmpty, JSON.stringify({ bili_jct: 'x' }))
+  const from = consolidateBiliCookies(canonical, [legacyOld, legacyEmpty, legacyNew])
+  assert(from === legacyNew, `应收编最新一份,实际:${from}`)
+  const imported = parseBiliCookies(await fs.readFile(canonical, 'utf8'))
+  assert(imported?.hasSessdata === true && imported.uid === '42' && imported.savedAt === 200, `收编结果:${JSON.stringify(imported)}`)
+  assert((await fs.readFile(canonical, 'utf8')).includes('"DedeUserID"'), '收编时键名应规范化(Rust 读取端认的大小写)')
+  assert(consolidateBiliCookies(canonical, [legacyOld, legacyNew]) === null, '幂等:规范位已有凭据不再收编')
+  // 规范位已有但键名全大写 → 就地规范化(用户实机场景)
+  const capsCanonical = path.join(dir, 'config2', 'cookies.json')
+  await fs.mkdir(path.join(dir, 'config2'), { recursive: true })
+  await fs.writeFile(capsCanonical, JSON.stringify({ SESSDATA: 's', DEDEUSERID: '859', BILI_JCT: 'j' }))
+  assert(consolidateBiliCookies(capsCanonical, []) === null, '已有凭据不触发收编')
+  assert((await fs.readFile(capsCanonical, 'utf8')).includes('"DedeUserID"'), '已有凭据就地规范化键名')
+  // nav 探针:-101 未登录 / 正常登录 / 结构异常
+  assert(parseNavProbe({ code: -101, data: {} })?.isLogin === false, '-101 → 未登录')
+  const probe = parseNavProbe({ code: 0, data: { isLogin: true, mid: 987, uname: '岛民' } })
+  assert(probe?.isLogin === true && probe.mid === '987' && probe.uname === '岛民', `nav 解析:${JSON.stringify(probe)}`)
+  assert(parseNavProbe({ code: 0 }) === null && parseNavProbe('x') === null, '结构异常 → null(未验证)')
+  // 未登录输出识别(含全角标点变体)
+  assert(biliOutputLooksLoggedOut('列出收藏夹需要登录，请先运行 login'), 'Rust 话术(全角逗号)')
+  assert(biliOutputLooksLoggedOut('获取收藏夹失败（可能需要登录）: -101 账号未登录'), 'API 错误话术')
+  assert(!biliOutputLooksLoggedOut('收藏夹:\n  ID 1 | 默认 | 3 个'), '正常输出不误判')
+})
+
+// ---------------------------------------------------------------------------
+// 记忆近重复合并 + 提取收紧 + 快捷记忆进化(2026-09-22)
+// ---------------------------------------------------------------------------
+
+await test('memory 近重复:归一化等价/信息超集合并/protected 不改写只补锁', async () => {
+  assert(normalizeMemoryText(' 喜欢 简洁·回答! ') === '喜欢简洁回答', `归一化:${normalizeMemoryText(' 喜欢 简洁·回答! ')}`)
+  assert(memorySimilarity('喜欢简洁回答', '用户喜欢简洁的回答') >= 0.85, '同义微调应达合并阈值')
+  assert(memorySimilarity('岛灵的名字叫鲸鱼', '岛灵名字叫鲸鱼') >= 0.85, '一字插删应达合并阈值(LCS-Dice)')
+  assert(memorySimilarity('岛灵的名字叫鲸鱼', '岛灵的名字叫海豚') < 0.85, '语义翻转(鲸鱼→海豚)不合并')
+  assert(memorySimilarity('用户喜欢猫', '用户喜欢狗') < 0.85, '语义翻转(猫→狗)不合并')
+  assert(memorySimilarity('喜欢猫', '下载视频') < 0.2, '无关主题相似度应极低')
+  const store = createMemoryStore(() => path.join(tmp, 'near-dup-memory.json'))
+  const a = await store.add({ content: '喜欢简洁的回答', type: 'preference' })
+  assert(a.created === true, '首条创建')
+  // ① 归一化等价(标点差)→ 不新增
+  const b = await store.add({ content: '喜欢简洁的回答。', type: 'preference' })
+  assert(b.created === false && b.entry.id === a.entry.id, `归一化等价合并:${JSON.stringify(b)}`)
+  // ② 信息超集(包含旧内容且更长)→ 升级现有条目措辞,不新增
+  const c = await store.add({ content: '喜欢简洁的回答,讨厌啰嗦和重复', type: 'preference' })
+  assert(c.created === false && c.entry.id === a.entry.id && c.entry.content.includes('讨厌啰嗦'), `超集升级:${c.entry.content}`)
+  assert((await store.list()).length === 1, '同主题不堆积')
+  // ③ 全新主题 → 新条目
+  const d = await store.add({ content: '项目在 D:/code/island 开发', type: 'fact' })
+  assert(d.created === true && (await store.list()).length === 2, '不同主题不合并')
+  // ④ 人设重申命中旧条目 → 补锁定;protected 条目内容永不改写
+  const e = await store.add({ content: '岛灵的名字叫鲸鱼', type: 'fact' })
+  const f = await store.add({ content: '岛灵名字叫鲸鱼', type: 'fact', protected: true })
+  assert(f.created === false && f.entry.id === e.entry.id && f.entry.protected === true, `人设重申补锁定:${JSON.stringify(f.entry)}`)
+  const g = await store.add({ content: '岛灵的名字叫鲸鱼,说话要俏皮', type: 'fact' })
+  assert(g.created === false && g.entry.content === '岛灵的名字叫鲸鱼', 'protected 超集也不改写')
+  // ⑤ 导入同样走近重复判定
+  const r = await store.importEntries([
+    { id: 'x1', type: 'fact', content: '喜欢简洁的回答!', createdAt: 1, updatedAt: 1 },
+    { id: 'x2', type: 'fact', content: '全新的主题内容', createdAt: 1, updatedAt: 1 },
+  ])
+  assert(r.imported === 1 && r.skipped === 1, `导入近重复跳过:${JSON.stringify(r)}`)
+  // findNearDuplicate 直测:包含关系(短串 ≥4)
+  assert(findNearDuplicate(await store.list(), '开发') === null, '过短片段不误判')
+  assert(findNearDuplicate(await store.list(), '项目在 D:/code/island 开发中')?.id === d.entry.id, '包含关系命中')
+})
+
+await test('记忆提取收紧:单次 ≤5 条 + 提示词"同义改写也算重复"', () => {
+  const many = JSON.stringify({
+    memories: Array.from({ length: 8 }, (_, i) => ({ content: `事实${i}`, type: 'fact' })),
+  })
+  assert(parseMemoriesJson(many).length === 5, '单次上限 5 条(原 10 收紧)')
+  const sys = buildMemoryExtractSystem(['系统提示词', '现有记忆块'])
+  assert(sys.includes('同义改写') && sys.includes('最多输出 5 条') && sys.includes('宁缺勿滥'), `提示词强化:${sys.slice(-200)}`)
+})
+
+await test('evolve_memory:quick/run/status(LLM 直接驱动快捷自我进化)', async () => {
+  const calls: string[] = []
+  const evo = {
+    requestEvolve: async (focus?: string, rounds?: number) => {
+      calls.push(`run:${focus ?? ''}:${rounds ?? ''}`)
+      return { started: true, message: '记忆进化已开始(后台)' }
+    },
+    getStatus: async () => {
+      calls.push('status')
+      return '【记忆进化】最近一轮:v1→v2'
+    },
+    runQuick: async (focus?: string) => {
+      calls.push(`quick:${focus ?? ''}`)
+      return { ok: true, message: '快捷记忆进化完成:v1→v2 评分 60 → 72' }
+    },
+  }
+  const cfg = { ...MOCK_PROVIDERS, apiKey: '', baseURL: '', model: '', systemPrompt: '', reasoningEffort: 'high', mcpServers: [], skillsDirs: [] }
+  const tools = createBuiltinTools({ get value() { return 8192 }, set value(_n: number) {} }, { getConfig: () => cfg, getEvolution: () => evo })
+  const t = tools.find((x) => x.name === 'evolve_memory')!
+  assert(!!t, 'evolve_memory 应注册')
+  const quick = String(await t.execute({}))
+  assert(quick.includes('快捷记忆进化完成') && calls[0] === 'quick:', `缺省走 quick:${quick}`)
+  const run = String(await t.execute({ action: 'run', rounds: 3 }))
+  assert(run.includes('后台') && calls.includes('run::3'), `run 动作:${run}`)
+  const st = String(await t.execute({ action: 'status' }))
+  assert(st.includes('最近一轮'), `status 动作:${st}`)
+  await assertRejects(() => t.execute({ action: 'nope' }), '仅支持 quick/run/status')
+  // 旧宿主 stub 无 runQuick → 回退 requestEvolve(focus, 1)
+  const evoOld = { requestEvolve: evo.requestEvolve, getStatus: evo.getStatus }
+  const toolsOld = createBuiltinTools({ get value() { return 8192 }, set value(_n: number) {} }, { getConfig: () => cfg, getEvolution: () => evoOld })
+  await toolsOld.find((x) => x.name === 'evolve_memory')!.execute({ focus: '去重' })
+  assert(calls.includes('run:去重:1'), `旧宿主回退:${calls.join()}`)
+})
+
+await test('evolution runQuick:同步单轮 评审→应用→复评→接受,当轮回填摘要', async () => {
+  const evoDir = path.join(tmp, 'evo-quick')
+  await fs.mkdir(evoDir, { recursive: true })
+  const store = createMemoryStore(() => path.join(evoDir, 'memory.json'))
+  await store.add({ content: '用户是学生', type: 'fact' })
+  // 每轮两答:评审(带假说改进)+ 复评;第二轮 runQuick 复用同款应答
+  const roundReplies = () => [
+    JSON.stringify({
+      total: 60,
+      issues: ['缺偏好'],
+      changes: [{ op: 'add', content: '用户喜欢蓝色主题', type: 'preference', hypothesis: '配色建议会考虑偏好' }],
+    }),
+    JSON.stringify({ total: 72 }),
+  ]
+  let replies = roundReplies()
+  const events: string[] = []
+  const evo = createEvolution({
+    getConfig: () => ({ ...MOCK_PROVIDERS, apiKey: 'sk-test', baseURL: '', model: '', systemPrompt: '提示词', reasoningEffort: 'high', mcpServers: [], skillsDirs: [] }),
+    getStore: () => store,
+    getMemoryDir: () => evoDir,
+    onEvent: (e) => events.push(e.type),
+    stream: async () => {
+      if (replies.length === 0) replies = roundReplies()
+      return { calls: [], text: replies.shift() ?? '{}', usage: null, aborted: false }
+    },
+  })
+  const r = await evo.runQuick('去重')
+  assert(r.ok && r.message.includes('快捷记忆进化完成') && r.message.includes('评分 60 → 72'), `摘要:${r.message}`)
+  assert((await store.list()).some((e) => e.content.includes('蓝色')), '评审改进已应用')
+  assert(events.includes('evolution-done'), '完成事件已发')
+  // busy 与后台 run 共用守卫:空闲可串行再跑
+  const again = await evo.runQuick()
+  assert(again.ok, `串行可再跑:${again.message}`)
+})
+
+await test('music_control:action 校验与桥透传,status 格式化 + 歌曲卡片', async () => {
   const calls: string[] = []
   const tools = createMusicControlTools(async (op, args) => {
     calls.push(`${op}:${args[0] ?? ''}`)
     if (op === 'status') {
-      return { ok: true, external: true, playing: true, title: '晴天', artist: '周杰伦', position: 90, duration: 270 }
+      return { ok: true, external: true, playing: true, title: '晴天', artist: '周杰伦', album: '叶惠美', position: 90, duration: 270 }
     }
-    if (op === 'control' && args[0] === 'next') {
-      return { ok: true, action: 'next', error: undefined }
-    }
-    return { ok: true, action: String(args[0]) }
+    return { ok: true, action: String(args[0] ?? '') }
   })
   const tool = tools.find((t) => t.name === 'music_control')!
   assert(tool !== undefined, 'music_control 应注册')
-  const status = String(await tool.execute({ action: 'status' }))
-  assert(status.includes('晴天') && status.includes('周杰伦') && status.includes('外部平台') && status.includes('播放中') && status.includes('1:30/4:30'), `status 应含曲目与进度,实际:${status}`)
-  const pause = String(await tool.execute({ action: 'pause' }))
+  type SongRes = { text: string; song?: { title: string; artist?: string; album?: string; playing?: boolean; external?: boolean } }
+  const status = (await tool.execute({ action: 'status' })) as SongRes
+  assert(status.text.includes('晴天') && status.text.includes('周杰伦') && status.text.includes('外部平台') && status.text.includes('播放中') && status.text.includes('1:30/4:30'), `status 应含曲目与进度,实际:${status.text}`)
+  // 歌曲卡片附件(2026-09-22 放歌可视化):结构化曲目快照进气泡,不靠 LLM 复述
+  assert(status.song?.title === '晴天' && status.song.artist === '周杰伦' && status.song.album === '叶惠美' && status.song.playing === true && status.song.external === true, `song 附件:${JSON.stringify(status.song)}`)
+  const pause = (await tool.execute({ action: 'pause' })) as SongRes
   assert(calls.includes('control:pause'), 'pause 应调桥 control')
-  assert(pause.includes('已暂停'), `pause 应回显,实际:${pause}`)
-  const next = String(await tool.execute({ action: 'next' }))
+  assert(calls.includes('status:'), '控制后应查曲目快照')
+  assert(pause.text.includes('已暂停') && pause.text.includes('《晴天》') && pause.song?.title === '晴天', `pause 应回显+卡片,实际:${pause.text}`)
+  const next = (await tool.execute({ action: 'next' })) as SongRes
   assert(calls.includes('control:next'), 'next 应调桥 control')
-  assert(next.includes('下一首'), `next 应回显,实际:${next}`)
+  assert(next.text.includes('下一首'), `next 应回显,实际:${next.text}`)
+  // 无曲目(空播放列表)不出卡片,文本仍可读
+  const tools2 = createMusicControlTools(async (op) =>
+    op === 'status'
+      ? { ok: true, external: false, playing: false, title: null, artist: null, position: 0, duration: 0 }
+      : { ok: true, action: 'play' },
+  )
+  const empty = (await tools2[0].execute({ action: 'play' })) as SongRes
+  assert(!empty.song && empty.text.includes('(无曲目)'), `无曲目不出卡片:${empty.text}`)
   await assertRejects(() => tool.execute({ action: 'nope' }), 'action 仅支持')
 })
 
@@ -3965,29 +4466,31 @@ await test('napcat 工具:send/send_group 缺省目标 = 当前会话对象(2026
   await tool.execute({ action: 'send', user_id: '333', message: '显式目标' })
   const n3: number = calls.length
   assert(n3 === 3 && calls[2].target === '333', '显式 user_id 应优先于会话缺省')
-  await assertRejects(() => tool.execute({ action: 'send_group', group_id: '1' }), 'send_group 需要 message/file/image 至少一个')
+  await assertRejects(() => tool.execute({ action: 'send_group', group_id: '1' }), 'send_group 需要 message/file/image/voice 至少一个')
   await assertRejects(() => tool.execute({ action: 'nope' }), '未知action')
 })
 
-await test('napcat 工具:send/send_group 带图片与私聊文件透传', async () => {
+await test('napcat 工具:send/send_group 带图片、文件与语音透传', async () => {
   // 工具层会校验本地路径存在——用临时目录里真实创建的文件测透传
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'napcat-img-'))
   const imgPath = path.join(tmpDir, 'x.png')
   const imgPath2 = path.join(tmpDir, 'y.png')
   const filePath = path.join(tmpDir, 'x.mp3')
+  const voicePath = path.join(tmpDir, 'hi.amr')
   await fs.writeFile(imgPath, 'i')
   await fs.writeFile(imgPath2, 'i')
   await fs.writeFile(filePath, 'm')
-  const qqCalls: Array<{ qq: string; text: string; image?: string; file?: string }> = []
-  const groupCalls: Array<{ groupId: string; text: string; file?: string; image?: string }> = []
+  await fs.writeFile(voicePath, 'v')
+  const qqCalls: Array<{ qq: string; text: string; image?: string; file?: string; voice?: string }> = []
+  const groupCalls: Array<{ groupId: string; text: string; file?: string; image?: string; voice?: string }> = []
   const tools = napcatTools({
     status: () => ({ connected: true, url: 'ws://127.0.0.1:3001', lastError: '', receivedCount: 0, repliedCount: 0 }),
     sendToQQ: async (qq, text, opts) => {
-      qqCalls.push({ qq, text, image: opts?.image, file: opts?.file })
+      qqCalls.push({ qq, text, image: opts?.image, file: opts?.file, voice: opts?.voice })
       return 'qq-img'
     },
-    sendToGroup: async (groupId, text, filePath2, image) => {
-      groupCalls.push({ groupId, text, file: filePath2, image })
+    sendToGroup: async (groupId, text, opts) => {
+      groupCalls.push({ groupId, text, file: opts?.file, image: opts?.image, voice: opts?.voice })
       return 'group-img'
     },
     getRecentMessages: () => [],
@@ -4010,11 +4513,21 @@ await test('napcat 工具:send/send_group 带图片与私聊文件透传', async
   const n3: number = qqCalls.length
   assert(n3 === 3 && qqCalls[2].file === filePath, 'send 应透传 file')
   assert(r3.includes('含文件'), `send 带文件应回显,实际:${r3}`)
+  // send 带语音(2026-09-22:record 段,发语音条)
+  const rV = String(await tool.execute({ action: 'send', user_id: '10001', message: '听我说', voice: voicePath }))
+  const nV: number = qqCalls.length
+  assert(nV === 4 && qqCalls[3].voice === voicePath, `send 应透传 voice,实际:${JSON.stringify(qqCalls[3])}`)
+  assert(rV.includes('含语音'), `send 带语音应回显,实际:${rV}`)
   // send_group 带图片
   const r4 = String(await tool.execute({ action: 'send_group', group_id: '20000', message: '群图', image: imgPath2 }))
   const n4: number = groupCalls.length
   assert(n4 === 1 && groupCalls[0].image === imgPath2, 'send_group 应透传 image')
   assert(r4.includes('含图片'), `send_group 带图应回显,实际:${r4}`)
+  // send_group 带语音
+  const rGv = String(await tool.execute({ action: 'send_group', group_id: '20000', voice: 'https://example.com/a.mp3' }))
+  const nGv: number = groupCalls.length
+  assert(nGv === 2 && groupCalls[1].voice === 'https://example.com/a.mp3', 'send_group 应透传 voice(URL)')
+  assert(rGv.includes('含语音'), `send_group 带语音应回显,实际:${rGv}`)
   // 本地路径图片不存在 → 报错(LLM 可自纠)
   await assertRejects(() => tool.execute({ action: 'send', user_id: '10001', image: path.join(tmpDir, 'missing.png') }), '图片不存在')
   // send_group 本地路径图片不存在 → 同样报错
@@ -4128,6 +4641,21 @@ await test('napcatMessageImages:图片段提取(收图链路)', () => {
   assert(napcatMessageImages([{ type: 'text', data: { text: 'x' } }]).length === 0, '纯文本段无图片')
 })
 
+await test('napcatMessageVoices:语音段提取(收语音链路)', () => {
+  assert(napcatMessageVoices(null).length === 0, 'null 无语音')
+  assert(napcatMessageVoices('文本').length === 0, 'string 无语音')
+  const vs = napcatMessageVoices([
+    { type: 'text', data: { text: '听这段' } },
+    { type: 'record', data: { file: 'abc.voice', url: 'https://gchat.qpic.cn/x.amr' } },
+    { type: 'image', data: { file: 'x.png' } },
+    { type: 'record', data: { file: 'def.voice' } },
+  ])
+  assert(vs.length === 2, `应提取 2 条语音,实际 ${vs.length}`)
+  assert(vs[0].file === 'abc.voice' && vs[0].url === 'https://gchat.qpic.cn/x.amr', '第一条应带 file 与 url')
+  assert(vs[1].file === 'def.voice' && vs[1].url === undefined, '第二条应只带 file')
+  assert(napcatMessageVoices([{ type: 'text', data: { text: 'x' } }]).length === 0, '纯文本段无语音')
+})
+
 await test('stripNapcat 双通道:显示剥离档案卡/历史保留档案卡(消息隔离)', () => {
   // 2026-08-13 用户澄清"档案卡与消息分类是给历史消息隔离的":
   // 显示层剥离一切指令段(档案卡经 profileCard 字段展示,不重复);
@@ -4165,17 +4693,9 @@ await test('stripNapcat 双通道:显示剥离档案卡/历史保留档案卡(�
   assert(isEmptyNapcatDisplayText('') === true, '空串应判空')
 })
 
-await test('extractReplyToStranger:执行回复标记判定(串台根治,2026-08-13 回归)', () => {
-  // 用户实测"串台后陌生人收不到消息":只有带标记的回复才路由给
-  // 待回复陌生人并消费 pending;无标记回复留在主人侧且 pending 保留
-  const marked = extractReplyToStranger('【回复对方】哼,刚认识就要赶人家走')
-  assert(marked === '哼,刚认识就要赶人家走', `标记应剥离且保留正文,实际:${marked}`)
-  assert(extractReplyToStranger('【回复对方】') === '', '仅标记无正文应返回空串')
-  assert(extractReplyToStranger('好的主人,我知道了') === null, '无标记回复应返回 null(留在主人侧)')
-  assert(extractReplyToStranger('嗯,让我想想') === null, '主人应答不应触发路由')
-  assert(extractReplyToStranger('回复对方:你好') === null, '不含标记格式(缺【】)不触发')
-  assert(REPLY_TO_STRANGER_MARK === '【回复对方】', '标记常量一致')
-})
+// (2026-09-22 归属指纹:extractReplyToStranger/REPLY_TO_STRANGER_MARK 随
+// 旧文本协议退役——执行回复的路由由触发侧指令判定 + 判定器安全网决定,
+// 【回复对方】残留由 stripFingerprintMarks/stripTurnMarks 剥离)
 
 await test('sessionKeyFor / isValidSessionKey:会话键(会话隔离,2026-08-13)', () => {
   assert(sessionKeyFor('10000') === 'private:10000', '私聊键')
@@ -4801,37 +5321,76 @@ await test('newTurnFingerprint:轮次指纹生成(2026-08-13,每个轮唯一)', 
   assert(seen.size === 30, '30 次生成应全唯一')
 })
 
-await test('extractTurnFingerprint:指纹提取与匹配(2026-08-13 指纹协议,对不上就不发送)', () => {
-  const fp = 'A1B2C3'
-  const ok = extractTurnFingerprint(`【指纹:${fp}】哈哈确实拉胯,心疼你一秒`, fp)
-  assert(ok !== null && ok.content === '哈哈确实拉胯,心疼你一秒', '指纹开头应提取并剥离')
-  assert(extractTurnFingerprint('哈哈确实拉胯,心疼你一秒', fp) === null, '无指纹 = 给主人的话,不发送')
-  assert(extractTurnFingerprint(`【指纹:XXXXXX】哈哈确实拉胯`, fp) === null, '指纹对不上 = 不发送')
-  assert(extractTurnFingerprint(`  【指纹:${fp}】哈哈`, fp) !== null, '容忍先导空白')
-  assert(extractTurnFingerprint(`【回复对方】【指纹:${fp}】哈哈`, fp) !== null, '容忍先导旧【回复对方】标记')
-  assert(extractTurnFingerprint(`【指纹:${fp}】`, fp)?.content === '', '仅指纹返回空正文')
-  assert(extractTurnFingerprint('', fp) === null && extractTurnFingerprint('  ', fp) === null, '空输入')
-  // ---- 语气词前缀容忍(2026-08-14 修复"偶现没发出去"——LLM 偶发在
-  // 指纹前加语气词,严格开头匹配被扣留;白名单词 + ≤2 标点/空白后仍
-  // 紧跟本轮指纹才提取,指纹值验证不变)----
-  assert(extractTurnFingerprint(`好的~【指纹:${fp}】哈哈`, fp)?.content === '哈哈', '容忍语气词+~')
-  assert(extractTurnFingerprint(`好的,【指纹:${fp}】哈哈`, fp)?.content === '哈哈', '容忍好的+逗号')
-  assert(extractTurnFingerprint(`收到 【指纹:${fp}】哈哈`, fp)?.content === '哈哈', '容忍收到+空格')
-  assert(extractTurnFingerprint(`回复:【指纹:${fp}】哈哈`, fp)?.content === '哈哈', '容忍回复:')
-  assert(extractTurnFingerprint(`好的,已按【指纹:${fp}】回复他`, fp) === null, '汇报引用指纹(白名单词后是"已"非标点)不误提取')
-  assert(extractTurnFingerprint(`知道了【指纹:${fp}】哈哈`, fp) === null, '非白名单语气词不匹配')
-  // ---- 严格性对抗用例(2026-08-13 二轮)----
-  // 指纹必须在开头:非白名单内容前置 = 不发送(规则明确"指纹前面不要加任何话")
-  assert(extractTurnFingerprint(`哈哈【指纹:${fp}】哈哈`, fp) === null, '指纹在中间不应匹配')
-  // 旧轮次指纹对不上本轮(历史里抄来的 = 不发送)
-  assert(extractTurnFingerprint('【指纹:OLDOLD】哈哈', fp) === null, '旧轮次指纹对不上本轮')
-  // 指纹行后换行:正文保留(多行回复)
-  const multi = extractTurnFingerprint(`【指纹:${fp}】\n哈哈确实拉胯`, fp)
-  assert(multi !== null && multi.content === '哈哈确实拉胯', '指纹后换行正文应保留')
-  // 指纹重复出现:取第一个指纹后的内容(第二个属正文)
-  const twice = extractTurnFingerprint(`【指纹:${fp}】哈哈【指纹:${fp}】x`, fp)
-  assert(twice !== null && twice.content === `哈哈【指纹:${fp}】x`, '第二个指纹应留在正文')
+await test('归属指纹:engine.send 带 turnTag → 本轮全部事件附轮次标签(2026-09-22,「指纹对不上就不发送」程序侧基础)', async () => {
+  const captured: Array<Record<string, unknown>> = []
+  const events: Array<{ type?: string; turnTag?: string }> = []
+  const engine = createAgentEngine({
+    getConfig: () => ({
+      ...MOCK_PROVIDERS,
+      apiKey: 'k',
+      baseURL: 'https://api.deepseek.com',
+      model: 'deepseek-v4-flash',
+      systemPrompt: '',
+      reasoningEffort: 'high',
+      mcpServers: [],
+      skillsDirs: [],
+    }),
+    onEvent: (e) => events.push(e as { type?: string; turnTag?: string }),
+    onSwitchToMusic: () => {},
+    getMemoryStore: () => null,
+  })
+  const origFetch = globalThis.fetch
+  globalThis.fetch = budgetSseServer(captured, null)
+  try {
+    engine.send('你好', [], 's-test', 'private:222', 'TAG123')
+    await waitFor(() => events.some((e) => e.type === 'message'), 8000, '回复应落定')
+    const landed = events.filter((e) => e.type === 'message')
+    assert(landed.length > 0 && landed.every((e) => e.turnTag === 'TAG123'), `message 事件应带 turnTag=TAG123,实际:${JSON.stringify(landed.map((e) => e.turnTag))}`)
+    assert(events.some((e) => e.type === 'text-delta' && e.turnTag === 'TAG123'), '流式事件同附 turnTag')
+    assert(events.some((e) => e.type === 'status' && e.turnTag === 'TAG123'), 'status 事件同附 turnTag')
+  } finally {
+    globalThis.fetch = origFetch
+    engine.dispose()
+  }
 })
+
+await test('归属指纹:proactiveTurn 不带 turnTag + 无标签 send 事件标签为空(系统轮永不路由)', async () => {
+  const events: Array<{ type?: string; turnTag?: string }> = []
+  const engine = createAgentEngine({
+    getConfig: () => ({
+      ...MOCK_PROVIDERS,
+      apiKey: 'k',
+      baseURL: 'https://api.deepseek.com',
+      model: 'deepseek-v4-flash',
+      systemPrompt: '',
+      reasoningEffort: 'high',
+      mcpServers: [],
+      skillsDirs: [],
+    }),
+    onEvent: (e) => events.push(e as { type?: string; turnTag?: string }),
+    onSwitchToMusic: () => {},
+    getMemoryStore: () => null,
+  })
+  const origFetch = globalThis.fetch
+  globalThis.fetch = budgetSseServer([], null)
+  try {
+    engine.send('你好', [], undefined, 'main')
+    await waitFor(() => events.some((e) => e.type === 'message'), 8000, '回复应落定')
+    assert(events.filter((e) => e.type === 'message').every((e) => !e.turnTag), '无标签 send 的事件不应带 turnTag')
+    events.length = 0
+    engine.proactiveTurn([], { hint: '测试' })
+    await waitFor(() => events.some((e) => e.type === 'message'), 8000, '主动轮应落定')
+    assert(events.every((e) => !e.turnTag), '主动轮事件不应带 turnTag(永不路由)')
+  } finally {
+    globalThis.fetch = origFetch
+    engine.dispose()
+  }
+})
+
+// (extractTurnFingerprint 文本门控 2026-09-22 随旧协议退役——「指纹对不上
+// 就不发送」语义迁到程序侧 turnTag 核对:事件元数据 turnTag 与 route
+// 不符 = 陈旧/跨轮投递,handleEngineMessageForNapcat 直接扣留,LLM
+// 不写不读标记;见 newTurnFingerprint 与主进程落定路由)
 
 await test('stripTurnMarks:轮次标记剥离(2026-08-13,指纹不进历史/显示)', () => {
   // 指纹前缀剥离(旧指纹残留进上下文会被 LLM 抄到 → 验证对不上 → 发不出去)
@@ -4846,34 +5405,13 @@ await test('stripTurnMarks:轮次标记剥离(2026-08-13,指纹不进历史/显�
   assert(stripTurnMarks('') === '' && stripTurnMarks('  ') === '', '空输入')
 })
 
-await test('extractMasterFingerprint:主人指纹提取与匹配(2026-08-15 双指纹机制,不再以没有指纹为主人消息)', () => {
-  const fp = 'A1B2C3'
-  const ok = extractMasterFingerprint(`【主人指纹:${fp}】好的,已帮他发了`, fp)
-  assert(ok !== null && ok.content === '好的,已帮他发了', '主人指纹开头应提取并剥离')
-  assert(extractMasterFingerprint('好的,已帮他发了', fp) === null, '无主人指纹 = 不发送(不再当主人消息)')
-  assert(extractMasterFingerprint(`【主人指纹:XXXXXX】好的`, fp) === null, '主人指纹对不上本轮 = 不发送')
-  assert(extractMasterFingerprint(`  【主人指纹:${fp}】好的`, fp) !== null, '容忍先导空白')
-  assert(extractMasterFingerprint(`【回复对方】【主人指纹:${fp}】好的`, fp) !== null, '容忍先导旧【回复对方】标记')
-  assert(extractMasterFingerprint(`【主人指纹:${fp}】`, fp)?.content === '', '仅主人指纹返回空正文')
-  assert(extractMasterFingerprint('', fp) === null && extractMasterFingerprint('  ', fp) === null, '空输入')
-  // 语气词前缀容忍(与他人指纹同款,LLM 偶发在指纹前加语气词)
-  assert(extractMasterFingerprint(`好的~【主人指纹:${fp}】好的`, fp)?.content === '好的', '容忍语气词+~')
-  assert(extractMasterFingerprint(`收到 【主人指纹:${fp}】好的`, fp)?.content === '好的', '容忍收到+空格')
-  // 双通道互斥:他人指纹【指纹:xxx】不被主人指纹提取命中,反之亦然——
-  // 同一条回复带哪个指纹由开头标记唯一决定
-  assert(extractMasterFingerprint(`【指纹:${fp}】好的`, fp) === null, '他人指纹不被主人指纹提取命中(双通道互斥)')
-  assert(extractTurnFingerprint(`【主人指纹:${fp}】好的`, fp) === null, '主人指纹不被他人指纹提取命中(双通道互斥)')
-  // 汇报引用主人指纹(白名单词后是"已"非标点)不误提取
-  assert(extractMasterFingerprint(`好的,已按【主人指纹:${fp}】回复他`, fp) === null, '汇报引用主人指纹不误提取')
-  // 主人指纹在中间不匹配(规则明确"指纹前面不要加任何话");
-  // 非白名单语气词不匹配(「好的」是白名单容忍形态,剥后紧跟指纹 = 合法)
-  assert(extractMasterFingerprint(`中间【主人指纹:${fp}】好的`, fp) === null, '主人指纹在中间不应匹配')
-  assert(extractMasterFingerprint(`知道了【主人指纹:${fp}】好的`, fp) === null, '非白名单语气词不匹配')
-})
+// (extractMasterFingerprint 主人文本门控 2026-09-22 随双指纹协议退役——
+// 回复归属由触发来源决定,不再要求 LLM 带【主人指纹:xxx】)
 
-await test('stripFingerprintMarks:发送边界双剥(2026-08-15 主人指纹+他人指纹,任一标记到不了聊天对象)', () => {
+await test('stripFingerprintMarks:发送边界残留标记清洗(2026-09-22 归属指纹——旧协议标记物理上到不了任何聊天对象)', () => {
   assert(stripFingerprintMarks('【指纹:A2B3C4】哈哈') === '哈哈', '他人指纹应剥')
   assert(stripFingerprintMarks('【主人指纹:A2B3C4】好的') === '好的', '主人指纹应剥')
+  assert(stripFingerprintMarks('【回复对方】哼,刚认识就要赶人家走') === '哼,刚认识就要赶人家走', '旧【回复对方】标记应剥')
   assert(stripFingerprintMarks('哈哈【指纹:A2B3C4】【主人指纹:A2B3C4】') === '哈哈', '正文内两种标记都应剥')
   assert(stripFingerprintMarks('【指纹:A2B3C4】【主人指纹:A2B3C4】好的') === '好的', '连续两种标记都应剥')
   assert(stripFingerprintMarks('哈哈') === '哈哈' && stripFingerprintMarks('') === '', '无标记原样')
@@ -4887,18 +5425,9 @@ await test('stripTurnMarks:主人指纹剥离(2026-08-15 双指纹,主人指纹�
   assert(stripTurnMarks('好的【主人指纹:A2B3C4】') === '好的【主人指纹:A2B3C4】', '正文中间的主人指纹不剥离')
 })
 
-await test('hasMasterTurnMark:主人指纹 UI 检测(2026-08-15,与 hasTurnMark 双通道互斥)', () => {
-  assert(hasMasterTurnMark('【主人指纹:A2B3C4】好的') === true, '主人指纹开头命中')
-  assert(hasMasterTurnMark('  【主人指纹:A2B3C4】好的') === true, '容忍先导空白')
-  // 双通道互斥:他人指纹/旧标记不是主人指纹
-  assert(hasMasterTurnMark('【指纹:A2B3C4】哈哈') === false, '他人指纹不命中主人检测(互斥)')
-  assert(hasMasterTurnMark('【回复对方】哈哈') === false, '旧【回复对方】标记不命中')
-  // 非安全字母表 / 中间位置 / 普通文本 / 空
-  assert(hasMasterTurnMark('【主人指纹:0O1IlA】好的') === false, '非安全字母表不命中')
-  assert(hasMasterTurnMark('好的【主人指纹:A2B3C4】') === false, '中间位置不命中')
-  assert(hasMasterTurnMark('哈哈确实拉胯') === false, '普通文本不命中')
-  assert(hasMasterTurnMark('') === false && hasMasterTurnMark('  ') === false, '空输入不命中')
-})
+// (hasTurnMark/hasMasterTurnMark 文本嗅探 2026-09-22 随旧协议退役——
+// "发给对方/发给主人"气泡标签由 message-routed 事件按实际送达目的地补标,
+// 不再从回复文本检测指纹标记)
 
 await test('会话管理工具:get/set_session_note + clear_session_context(2026-08-13 LLM 自己管理会话)', async () => {
   const notes = new Map<string, string>()
@@ -4970,6 +5499,26 @@ await test('extractImageRefs:文本夹带的图片路径自动提取转 image �
   assert(r5.images.length === 0, '非图片扩展名不应提取')
   // 空输入
   assert(extractImageRefs('').images.length === 0 && extractImageRefs('  ').text === '', '空输入')
+})
+
+await test('buildOutgoingMessage:出站消息段组装(text/image/record,语音走 record 段)', () => {
+  // 纯文本 → 字符串(零段开销)
+  assert(buildOutgoingMessage('你好', []) === '你好', '纯文本应返回字符串')
+  // 图文混合 → 段数组,text 在前 image 在后
+  const segs = buildOutgoingMessage('看图', ['D:/a.png', 'https://x.com/b.jpg']) as Array<{ type: string; data: Record<string, unknown> }>
+  assert(segs.length === 3 && segs[0].type === 'text' && segs[1].type === 'image' && segs[2].type === 'image', `图文段序,实际:${JSON.stringify(segs)}`)
+  assert(segs[0].data.text === '看图' && segs[1].data.file === 'D:/a.png', '段内容应透传')
+  // 语音 → record 段(file 字段给 NapCat 转 silk)
+  const v1 = buildOutgoingMessage('听我说', [], 'D:/hi.amr') as Array<{ type: string; data: Record<string, unknown> }>
+  assert(v1.length === 2 && v1[1].type === 'record' && v1[1].data.file === 'D:/hi.amr', `语音应为 record 段,实际:${JSON.stringify(v1)}`)
+  // 纯语音(无文本无图)→ 单 record 段
+  const v2 = buildOutgoingMessage('', [], 'https://x.com/a.mp3') as Array<{ type: string; data: Record<string, unknown> }>
+  assert(v2.length === 1 && v2[0].type === 'record' && v2[0].data.file === 'https://x.com/a.mp3', `纯语音单段,实际:${JSON.stringify(v2)}`)
+  // 全混合:段序 text → image → record
+  const all = buildOutgoingMessage('来', ['D:/i.png'], 'D:/v.mp3') as Array<{ type: string }>
+  assert(all.map((s) => s.type).join(',') === 'text,image,record', `混合段序,实际:${all.map((s) => s.type).join(',')}`)
+  // 空 voice 视为无
+  assert(Array.isArray(buildOutgoingMessage('x', ['D:/i.png'], '  ')), '空白 voice 应被忽略')
 })
 
 // ---------------------------------------------------------------------------
@@ -5879,6 +6428,897 @@ await test('glm_file_parse:async 服务端 failed → 报错;expert 仅 PDF', as
     await fs.rm(path.join(tmp, 'ex.pdf'), { force: true }).catch(() => {})
     await fs.rm(path.join(tmp, 'ex.txt'), { force: true }).catch(() => {})
     restore()
+  }
+})
+
+// ---------------------------------------------------------------------------
+// 米家智能家居(2026-09-22):协议字节向量 / 友名映射 / 凭证存储
+// ---------------------------------------------------------------------------
+
+await test('mijia 云签名:nonce / signed_nonce / signature 固定向量', () => {
+  // 向量自算钉回归(rand=01..08、nowMs=1758508800000 → 分钟数 29308480)
+  const nonce = makeNonce(new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]), 1758508800000)
+  assert(nonce === 'AQIDBAUGBwgBvzZA', `nonce 应为固定向量,实际 ${nonce}`)
+  const ssecurity = 'ABEiM0RVZneImaq7zN3u/w==' // 00112233445566778899aabbccddeeff 的 base64
+  const sn = computeSignedNonce(ssecurity, nonce)
+  assert(sn === 'n2XFg+iVssDlZdRRdhMmgjjUBnZv/5y5DjTGqVAFT/g=', `signed_nonce 不符,实际 ${sn}`)
+  const sig = computeSignature(sn, 'POST', 'https://api.io.mi.com/app/v2/home/home_device_list', { data: '{"fg":true}' })
+  assert(sig === 'N2dlh72+cgQcocsvk/MsY9xgeuo=', `signature 不符,实际 ${sig}`)
+  // path 变换:去 /app/(region 域名同样适用)
+  const sig2 = computeSignature(sn, 'post', 'https://de.api.io.mi.com/app/v2/x', {})
+  assert(typeof sig2 === 'string' && sig2.length === 28, 'region URL 签名应可用')
+})
+
+await test('mijia RC4:经典向量 + 1024 跳流往返', () => {
+  // 经典 RC4 已知答案(Wikipedia RC4 条目;跳流 = 0)独立验证手写实现
+  const hex = (s: string) => Buffer.from(s, 'utf8')
+  const k1 = Buffer.from(rc4Crypt(hex('Key'), hex('Plaintext'))).toString('hex').toUpperCase()
+  assert(k1 === 'BBF316E8D940AF0AD3', `RC4(Key,Plaintext) 应为 BBF316E8D940AF0AD3,实际 ${k1}`)
+  const k2 = Buffer.from(rc4Crypt(hex('Wiki'), hex('pedia'))).toString('hex').toUpperCase()
+  assert(k2 === '1021BF0420', `RC4(Wiki,pedia) 应为 1021BF0420,实际 ${k2}`)
+  // 云 API 语义:密钥 = b64d(signed_nonce),丢 1024 密钥流,加解密对称
+  const sn = 'n2XFg+iVssDlZdRRdhMmgjjUBnZv/5y5DjTGqVAFT/g='
+  const cipher = encryptParam(sn, '米家 hello 云 ✓')
+  assert(!cipher.includes('米家'), '密文不应含明文')
+  assert(decryptParam(sn, cipher) === '米家 hello 云 ✓', 'RC4 跳流往返应还原')
+})
+
+await test('mijia generateEncParams:字段齐全 + rc4_hash__ 双签顺序', () => {
+  const url = 'https://api.io.mi.com/app/v2/home/home_device_list'
+  const ssecurity = 'ABEiM0RVZneImaq7zN3u/w=='
+  const nonce = 'AQIDBAUGBwgBvzZA'
+  const sn = computeSignedNonce(ssecurity, nonce)
+  const dataJson = '{"fg":true}'
+  const fields = generateEncParams({ url, method: 'POST', signedNonce: sn, nonce, dataJson, ssecurity })
+  assert(fields.data && fields.rc4_hash__ && fields.signature && fields.ssecurity && fields._nonce, '五字段齐全')
+  assert(fields.ssecurity === ssecurity, 'ssecurity 原样发送')
+  assert(fields._nonce === nonce, '_nonce 原样发送')
+  assert(!('signed_nonce' in fields), 'signed_nonce 本体不发送')
+  assert(decryptParam(sn, fields.data) === dataJson, 'data 解密应回原文')
+  // ① rc4_hash__ 明文 = 仅对明文 data 的签名(双签第一段)
+  const firstSig = computeSignature(sn, 'POST', url, { data: dataJson })
+  assert(decryptParam(sn, fields.rc4_hash__) === firstSig, `rc4_hash__ 应为明文签名,实际 ${decryptParam(sn, fields.rc4_hash__)}`)
+  // ② signature = 对密文 data + 密文 rc4_hash__(插入序)的签名(双签第二段)
+  const secondSig = computeSignature(sn, 'POST', url, { data: fields.data, rc4_hash__: fields.rc4_hash__ })
+  assert(fields.signature === secondSig, `signature 应为密文签名,实际 ${fields.signature}`)
+})
+
+await test('mijia getHome/home_device_list:home_owner 取 uid 字段(空串=云 no permit 根因)', async () => {
+  // mock 云:从请求 query 复算 signed_nonce 加密响应,并解开 data 记录载荷
+  const requests: Array<{ path: string; data: Record<string, unknown> }> = []
+  const fetchImpl = (async (url: string) => {
+    const u = new URL(String(url))
+    const p = u.pathname.replace('/app', '')
+    const sn = computeSignedNonce(u.searchParams.get('ssecurity')!, u.searchParams.get('_nonce')!)
+    requests.push({ path: p, data: JSON.parse(decryptParam(sn, u.searchParams.get('data')!)) })
+    const body =
+      p === '/v2/homeroom/gethome'
+        ? {
+            code: 0,
+            result: {
+              // 实测真实字段名:主人 UID 在 `uid`(无 owner_uid/owner)
+              homelist: [{ id: '340001811966', name: '爱炸鱼的小御坂的家', uid: 2934418197, roomlist: [{ id: 1, name: '客厅' }] }],
+              share_home: [],
+            },
+          }
+        : { code: 0, result: { device_info: [{ did: 'd1', model: 'dmaker.fan.p28', name: '循环扇', isOnline: true }] } }
+    return { ok: true, status: 200, text: async () => encryptParam(sn, JSON.stringify(body)) }
+  }) as unknown as typeof fetch
+  const cloud = createMijiaCloud({ fetchImpl })
+  const creds = {
+    userId: '2934418197',
+    cUserId: 'c1',
+    ssecurity: 'ABEiM0RVZneImaq7zN3u/w==',
+    serviceToken: 'svc',
+    deviceId: 'aabbccddeeff0011',
+    region: 'cn' as const,
+  }
+  const homes = await cloud.getHome(creds)
+  assert(homes.length === 1 && homes[0].id === '340001811966', `应解析出 1 个家:${JSON.stringify(homes)}`)
+  assert(homes[0].owner === '2934418197', `owner 应取 uid 字段(回归:no owner → home_owner 空串 → 云 no permit),实际「${homes[0].owner}」`)
+  assert(homes[0].rooms.length === 1 && homes[0].rooms[0].name === '客厅', 'roomlist 应解析为房间')
+  const devs = await cloud.homeDeviceList(creds, { id: homes[0].id, owner: homes[0].owner })
+  assert(devs.length === 1 && devs[0].did === 'd1', `应解析出设备:${JSON.stringify(devs)}`)
+  const devReq = requests.find((r) => r.path === '/v2/home/home_device_list')!
+  assert(devReq.data.home_owner === '2934418197' && devReq.data.home_id === '340001811966', `home_owner/home_id 应为 uid 串,实际:${JSON.stringify(devReq.data)}`)
+  // owner 解析不到时兜底登录 userId(空串会判 no permit)
+  await cloud.homeDeviceList(creds, { id: 'h9', owner: '' })
+  const last = requests[requests.length - 1]
+  assert(last.data.home_owner === '2934418197', `owner 空应兜底 userId,实际:${JSON.stringify(last.data)}`)
+})
+
+await test('mijia LAN:key/iv/cipher/checksum 固定向量 + 组包解析往返', () => {
+  const token = Buffer.from('00112233445566778899aabbccddeeff', 'hex')
+  const { key, iv } = deriveLanKey(token)
+  assert(key.toString('hex') === '6e8311168ee16d6aa1aa48c64145003c', `lan key 不符,实际 ${key.toString('hex')}`)
+  assert(iv.toString('hex') === '6f434fa9acd75da73e5fb999f641cda2', `lan iv 不符,实际 ${iv.toString('hex')}`)
+  const json = '{"id":1,"method":"miIO.info","params":[]}'
+  const cipher = encryptLanPayload(token, json)
+  assert(
+    cipher.toString('hex') === 'a5516ec6151955dc2bb2d43e7c84c18352a39a7f22fd2903d282a5783c6d56acd8b5de0116c0ebf35983dd023f849c97',
+    `lan cipher 不符,实际 ${cipher.toString('hex')}`,
+  )
+  assert(decryptLanPayload(token, cipher) === json, 'lan payload 往返应还原(含 NUL 终结符语义)')
+  const pkt = buildLanPacket(token, 0x11223344, 1758508800, cipher)
+  assert(pkt.length === 80 && pkt.readUInt16BE(0) === 0x2131 && pkt.readUInt16BE(2) === 80, '包头 magic/len')
+  const md5 = createHash('md5').update(pkt.subarray(0, 16)).update(token).update(cipher).digest('hex')
+  assert(md5 === '1c8b243a921e1150cbae78b71dfd006f', `checksum 公式回归失败,实际 ${md5}`)
+  assert(pkt.subarray(16, 32).toString('hex') === md5, 'checksum 应写回头 16..31')
+  // 解析往返 + hello 形态
+  const parsed = parseLanPacket(pkt)
+  assert(parsed?.deviceId === 0x11223344 && parsed.stamp === 1758508800 && parsed.cipher?.length === 48, '数据包解析')
+  const hello = Buffer.alloc(32, 0xff)
+  hello.writeUInt16BE(0x2131, 0)
+  hello.writeUInt16BE(0x0020, 2)
+  const helloReply = Buffer.alloc(32, 0)
+  helloReply.writeUInt16BE(0x2131, 0)
+  helloReply.writeUInt16BE(0x0020, 2)
+  helloReply.writeUInt32BE(0x01020304, 8)
+  token.copy(helloReply, 16)
+  const hp = parseLanPacket(helloReply)
+  assert(hp?.token && Buffer.from(hp.token).toString('hex') === token.toString('hex'), 'hello 应答 token @0x10')
+  assert(parseLanPacket(Buffer.from('ff00', 'hex')) === null, 'magic 不符应拒')
+})
+
+await test('mijia spec:友名映射 精确/裸名/多义/别名/fallback/access', () => {
+  const spec: import('../electron/agent/tools/mijia/mijia-spec').MiotInstanceSpec = {
+    type: 'urn:miot-spec-v2:device:light:00000000:test-light:1',
+    description: 'Test Light',
+    services: [
+      {
+        iid: 2,
+        type: 'urn:miot-spec-v2:service:light:00007802:test-light:1',
+        description: 'Light',
+        properties: [
+          { piid: 1, type: 'urn:miot-spec-v2:property:on:00000006:test-light:1', description: 'Switch Status', format: 'bool', access: ['read', 'write', 'notify'] },
+          { piid: 2, type: 'urn:miot-spec-v2:property:brightness:0000000D:test-light:1', description: 'Brightness', format: 'uint8', access: ['read', 'write'], valueRange: [1, 100, 1] },
+          { piid: 3, type: 'urn:miot-spec-v2:property:temperature:00000020:test-light:1', description: 'Temperature', format: 'float', access: ['read'] },
+        ],
+        actions: [{ aiid: 1, type: 'urn:miot-spec-v2:action:toggle:00002801:test-light:1', description: 'Toggle', in: [], out: [] }],
+      },
+      {
+        iid: 3,
+        type: 'urn:miot-spec-v2:service:environment:0000780A:test-light:1',
+        description: 'Environment',
+        properties: [
+          { piid: 1, type: 'urn:miot-spec-v2:property:temperature:00000020:test-light:1', description: 'Temperature', format: 'float', access: ['read'] },
+        ],
+        actions: [],
+      },
+    ],
+  }
+  const svc = createMijiaSpec()
+  // ① service:member 精确
+  const r1 = svc.resolve(spec, 'light:on', 'write')
+  assert(!('error' in r1) && r1.kind === 'property' && r1.siid === 2 && r1.piid === 1, `light:on 应命中 siid2/piid1,实际 ${JSON.stringify(r1)}`)
+  // ② 别名:power|开关 → on;亮度 → brightness
+  const r2 = svc.resolve(spec, 'power', 'write')
+  assert(!('error' in r2) && r2.kind === 'property' && r2.piid === 1, 'power 应归一到 on')
+  const r3 = svc.resolve(spec, '亮度', 'write')
+  assert(!('error' in r3) && r3.kind === 'property' && r3.piid === 2, '亮度应归一到 brightness')
+  // ③ 裸名唯一命中 vs 多义报错
+  const r4 = svc.resolve(spec, 'brightness', 'read')
+  assert(!('error' in r4) && r4.kind === 'property' && r4.piid === 2, '裸名唯一命中')
+  const r5 = svc.resolve(spec, 'temperature', 'read')
+  assert('error' in r5 && r5.error.includes('多个含义'), `temperature 多义应报错,实际 ${JSON.stringify(r5)}`)
+  // ④ 动作 / 错配
+  const r6 = svc.resolve(spec, 'light:toggle', 'invoke')
+  assert(!('error' in r6) && r6.kind === 'action' && r6.siid === 2 && r6.aiid === 1, '动作应命中')
+  const r7 = svc.resolve(spec, 'light:on', 'invoke')
+  assert('error' in r7, '属性当动作应报错')
+  const r8 = svc.resolve(spec, 'light:temperature', 'write')
+  assert('error' in r8 && r8.error.includes('只读'), '只读属性写应报错')
+  // ⑤ fallback:model 含 light 才有;成员受限
+  assert(svc.fallbackFor('yeelink.light.lamp1', 'brightness', 'write') != null, 'light fallback 应可用')
+  assert(svc.fallbackFor('zhimi.fan.za4', 'on', 'write') === null, '非 light 无 fallback')
+  const fb = svc.fallbackFor('yeelink.light.lamp1', 'nosuch', 'write')
+  assert(fb != null && 'error' in fb, 'fallback 未知名应报错')
+  assert(FALLBACK_LIGHT.on.siid === 2 && shortName(spec.services[0].type, '') === 'light', '短名解析')
+})
+
+await test('mijia store:加密往返 + 不可加密绝不落明文', async () => {
+  const dir = path.join(tmp, 'mijia-store-test')
+  await fs.mkdir(dir, { recursive: true })
+  const b64 = (s: string) => MIJIA_SECRET_PREFIX + Buffer.from(s, 'utf8').toString('base64')
+  const unb64 = (s: string) =>
+    s.startsWith(MIJIA_SECRET_PREFIX) ? Buffer.from(s.slice(MIJIA_SECRET_PREFIX.length), 'base64').toString('utf8') : null
+  const store = createMijiaStore({
+    encrypt: b64,
+    decrypt: unb64,
+    userDataPath: () => dir,
+    now: () => 42,
+  })
+  const auth: MijiaAuth = {
+    userId: 'u1',
+    cUserId: 'c1',
+    ssecurity: 'SUPER-SECRET-SSEC',
+    passToken: 'SUPER-SECRET-PASS',
+    serviceToken: 'SUPER-SECRET-SVC',
+    region: 'cn',
+    deviceId: 'aabbccddeeff0011',
+    updatedAt: 0,
+  }
+  await store.saveAuth(auth)
+  const raw = await fs.readFile(path.join(dir, 'mijia-auth.json'), 'utf8')
+  assert(!raw.includes('SUPER-SECRET'), '密文文件不得含任何明文密钥')
+  assert(raw.includes(MIJIA_SECRET_PREFIX), '密钥字段应带 enc:v1: 前缀')
+  const loaded = await store.loadAuth()
+  assert(loaded?.ssecurity === 'SUPER-SECRET-SSEC' && loaded.serviceToken === 'SUPER-SECRET-SVC' && loaded.updatedAt === 42, '解密往返')
+  // 设备 token 同款加密
+  await store.saveDevices([
+    { did: 'd1', model: 'yeelink.light.lamp1', name: '台灯', localip: '192.168.1.5', token: 'LAN-TOKEN-SECRET', room: '卧室' },
+  ])
+  const rawD = await fs.readFile(path.join(dir, 'mijia-devices.json'), 'utf8')
+  assert(!rawD.includes('LAN-TOKEN-SECRET'), '设备 token 不得明文落盘')
+  const devs = await store.loadDevices()
+  assert(devs[0]?.token === 'LAN-TOKEN-SECRET' && devs[0].room === '卧室', '设备缓存往返')
+  // 不可加密:密钥字段整个丢弃(文件无明文),本次运行内存保留可用;
+  // 重启(重置缓存重读磁盘)后 = 半套凭证 → 视为未登录引导重登
+  const store2 = createMijiaStore({
+    encrypt: () => null,
+    decrypt: unb64,
+    userDataPath: () => dir,
+    now: () => 42,
+  })
+  await store2.saveAuth(auth)
+  const raw2 = await fs.readFile(path.join(dir, 'mijia-auth.json'), 'utf8')
+  assert(!raw2.includes('SUPER-SECRET') && !raw2.includes(MIJIA_SECRET_PREFIX), '不可加密时密钥字段应丢弃')
+  assert(store2.didSecretPersist() === false, 'didSecretPersist 应报 false')
+  const memAuth = await store2.loadAuth()
+  assert(memAuth?.ssecurity === 'SUPER-SECRET-SSEC', '本次运行内存应保留可用')
+  store2.resetMijiaStore()
+  assert((await store2.loadAuth()) === null, '重启后半套凭证应视为未登录')
+})
+
+await test('mijia cloud:登录流 pending→done 落凭证 + 过期换码不落屏', async () => {
+  // mock 云:第一次取码 → 长轮询 pending → 第二次取码后 done
+  let codeSeq = 0
+  let pollSeq = 0
+  const updates: Array<{ phase: string; qrText: string; message: string }> = []
+  let saved: unknown = null
+  const cloud = {
+    beginQrLogin: async () => {
+      codeSeq++
+      return {
+        qrImage: `https://account.xiaomi.com/qr/img/${codeSeq}`,
+        loginUrl: `https://account.xiaomi.com/qr/login?c=${codeSeq}`,
+        lpUrl: `https://account.xiaomi.com/longPolling/p/${codeSeq}`,
+        timeoutSec: 300,
+      }
+    },
+    pollQrLogin: async () => {
+      pollSeq++
+      if (pollSeq === 1) return { status: 'error' as const, message: '二维码已过期:expired' }
+      return {
+        status: 'done' as const,
+        userId: 'u1',
+        cUserId: 'c1',
+        ssecurity: 's',
+        passToken: 'p',
+        location: 'https://sts.api.io.mi.com/sts',
+      }
+    },
+    exchangeServiceToken: async () => ({ serviceToken: 'svc-token' }),
+    refreshServiceToken: async () => 'svc-token',
+    call: async () => ({}),
+    homeDeviceList: async () => [],
+    getHome: async () => [],
+    sceneList: async () => [],
+    sceneRun: async () => {},
+  }
+  const flow = createMijiaLoginFlow({
+    cloud: cloud as never,
+    onUpdate: (s) => updates.push({ phase: s.phase, qrText: s.qrText, message: s.message }),
+    onCredentials: (a) => {
+      saved = a
+    },
+    pollMs: 5,
+    ttlSec: 300,
+  })
+  await flow.start()
+  assert(updates[0]?.phase === 'waiting' && updates[0].qrText.includes('c=1'), '首码应展示')
+  await waitFor(() => saved != null, 3000, '登录凭证落盘回调')
+  const auth = saved as { serviceToken: string; userId: string }
+  assert(auth.serviceToken === 'svc-token' && auth.userId === 'u1', '凭证回调内容')
+  assert(updates.some((u) => u.phase === 'done'), '应有 done 态')
+  // 过期路径:过期码不落屏(占位"正在换新"),随后自动换码
+  const expiredShown = updates.some((u) => u.phase === 'waiting' && u.qrText === '' && u.message.includes('换新'))
+  assert(expiredShown, `过期码不应落屏,updates=${JSON.stringify(updates)}`)
+  flow.stop()
+})
+
+await test('mijia cloud:parsePrefixedJson 剥 &&&START&&& 前缀', () => {
+  assert(parsePrefixedJson('&&&START&&&{"a":1}')?.a === 1, '前缀应剥离')
+  assert(parsePrefixedJson('not json') === null, '非 JSON 应 null')
+})
+
+// ---- 米家工具策略(阶段 B):schema 形状 / 来源守卫 / 硬禁 / 未登录话术 ----
+
+await test('mijia 工具 schema:四工具命名/描述/超时档位', () => {
+  const tools = createMijiaTools({})
+  assert(tools.length === 4, `应 4 个工具,实际 ${tools.length}`)
+  const names = tools.map((t) => t.name).join(',')
+  assert(names === 'mijia_devices,mijia_control,mijia_scene,mijia_login', `工具名/顺序不符:${names}`)
+  const timeouts: Record<string, number> = {}
+  for (const t of tools) {
+    assert(/^[a-z][a-z0-9_]*$/.test(t.name), `工具名须全小写下划线:${t.name}`)
+    assert(/[一-鿿]/.test(t.description), `${t.name} 描述须含中文`)
+    assert(t.parameters.type === 'object', `${t.name} parameters 须为 object`)
+    timeouts[t.name] = t.timeoutMs ?? 0
+  }
+  assert(
+    timeouts.mijia_devices === 45_000 && timeouts.mijia_control === 30_000 && timeouts.mijia_scene === 30_000 && timeouts.mijia_login === 20_000,
+    `超时档位应为 45k/30k/30k/20k,实际 ${JSON.stringify(timeouts)}`,
+  )
+})
+
+await test('mijia 写守卫:turnKind 八值矩阵 + getTurnSource 兜底', () => {
+  // 放行:window/panel/master-qq/master-group(主人 QQ 远程可控)
+  for (const k of ['window', 'panel', 'master-qq', 'master-group']) {
+    assertMijiaWriteAllowed(k, null) // 不抛即过
+  }
+  // 拒:别人的轮/系统轮
+  for (const k of ['contact', 'group', 'ask', 'silent']) {
+    let thrown = ''
+    try {
+      assertMijiaWriteAllowed(k, 'window')
+    } catch (e) {
+      thrown = (e as Error).message
+    }
+    assert(thrown.includes('无权操作米家设备'), `kind=${k} 应拒写,实际:${thrown || '(未抛)'}`)
+  }
+  // 无 turnKind 时 source 兜底:window/panel 过;qq/group(分不了主人)安全侧拒
+  assertMijiaWriteAllowed(null, 'window')
+  for (const s of ['qq', 'group', null, undefined]) {
+    let thrown = ''
+    try {
+      assertMijiaWriteAllowed(null, s as string | null)
+    } catch (e) {
+      thrown = (e as Error).message
+    }
+    assert(thrown.includes('无权操作米家设备'), `source=${String(s)} 应拒写兜底,实际:${thrown || '(未抛)'}`)
+  }
+})
+
+await test('mijia 硬禁名单:门锁/摄像头拒写拒动作,开锁类动作名双保险', () => {
+  const lockDev = { did: 'l1', model: 'loock.lock.v1' }
+  const camDev = { did: 'c1', model: 'chuangmi.camera.ipc019' }
+  const lightDev = { did: 'd1', model: 'yeelink.light.lamp1' }
+  assert(classifyForbiddenDevice(lockDev) === 'lock', '门锁分类')
+  assert(classifyForbiddenDevice(camDev) === 'camera', '摄像头分类')
+  assert(classifyForbiddenDevice(lightDev) === null, '灯无禁控')
+  assertMijiaDeviceAllowed(lockDev, 'read') // 读放行
+  assertMijiaDeviceAllowed(lightDev, 'write')
+  let msg = ''
+  try {
+    assertMijiaDeviceAllowed(lockDev, 'invoke', 'open')
+  } catch (e) {
+    msg = (e as Error).message
+  }
+  assert(msg.includes('门锁'), `门锁动作应拒:${msg}`)
+  msg = ''
+  try {
+    assertMijiaDeviceAllowed(camDev, 'write')
+  } catch (e) {
+    msg = (e as Error).message
+  }
+  assert(msg.includes('摄像头'), `摄像头写应拒:${msg}`)
+  // 动作名含开锁/unlock:即使设备未标注也拒(双保险)
+  for (const name of ['unlock', '开锁', '开门', 'door-open-unlock']) {
+    msg = ''
+    try {
+      assertMijiaDeviceAllowed(lightDev, 'invoke', name)
+    } catch (e) {
+      msg = (e as Error).message
+    }
+    assert(msg.includes('开锁/开门类动作'), `动作名 ${name} 应拒:${msg}`)
+  }
+})
+
+await test('mijia 工具执行:未登录话术含 mijia_login;login 写守卫;logout 清凭证', async () => {
+  let cleared = 0
+  let opened = 0
+  const emptyStore = {
+    loadAuth: async () => null,
+    saveAuth: async () => {},
+    clearAuth: async () => {
+      cleared++
+    },
+    loadDevices: async () => [],
+    saveDevices: async () => {},
+    resetMijiaStore: () => {},
+    didSecretPersist: () => true,
+  }
+  const tools = createMijiaTools({
+    store: emptyStore as never,
+    getTurnKind: () => 'window',
+    openLogin: () => {
+      opened++
+    },
+  })
+  const login = tools.find((t) => t.name === 'mijia_login')!
+  const devices = tools.find((t) => t.name === 'mijia_devices')!
+  const outStatus = String(await login.execute({ action: 'status' }))
+  assert(outStatus.includes('未登录') && outStatus.includes('mijia_login'), `未登录话术应引导 mijia_login:${outStatus}`)
+  const outDevices = String(await devices.execute({ action: 'list' }))
+  assert(outDevices.includes('mijia_login'), `devices 未登录话术:${outDevices}`)
+  // login 过写守卫并触发窗口
+  const outLogin = String(await login.execute({ action: 'login' }))
+  assert(outLogin.includes('已打开') && opened === 1, `login 应开窗:${outLogin}`)
+  // logout 清凭证
+  const outLogout = String(await login.execute({ action: 'logout' }))
+  assert(outLogout.includes('退出') && cleared === 1, 'logout 应清凭证')
+  // 别人的轮 login 应拒
+  const tools2 = createMijiaTools({ store: emptyStore as never, getTurnKind: () => 'contact', openLogin: () => {} })
+  await assertRejects(() => tools2.find((t) => t.name === 'mijia_login')!.execute({ action: 'login' }), '无权操作米家设备', 'contact 轮 login 应拒')
+  // status 读全放(contact 轮可查)
+  const out2 = String(await tools2.find((t) => t.name === 'mijia_login')!.execute({ action: 'status' }))
+  assert(out2.includes('未登录'), 'contact 轮 status 应放行')
+})
+
+await test('mijia_control:miotspec 响应 result 数组解析(修「成功误报 code=- 失败」)', async () => {
+  // 实测响应结构(2026-09-22):result **直接是数组** [{did,iid,siid,piid,value,code}]
+  // ——旧解析读 result.props 恒空,成功也报「设置失败 code=-」→ LLM 误判登录失效反复重验
+  const specFixture: MiotInstanceSpec = {
+    type: 'urn:miot-spec-v2:device:fan:0000A005:dmaker-p28:1',
+    description: 'Fan',
+    services: [
+      {
+        iid: 2,
+        type: 'urn:miot-spec-v2:service:fan:00007808:dmaker-p28:1',
+        description: 'Fan',
+        properties: [
+          { piid: 1, type: 'urn:miot-spec-v2:property:on:00000006:dmaker-p28:1', description: 'Switch Status', format: 'bool', access: ['read', 'write'] },
+          { piid: 2, type: 'urn:miot-spec-v2:property:fan-level:00000021:dmaker-p28:1', description: 'Fan Level', format: 'uint8', access: ['read', 'write'], valueRange: [1, 4, 1] },
+        ],
+        actions: [],
+      },
+    ],
+  }
+  const auth = {
+    userId: 'u1', cUserId: 'c1', ssecurity: 's', passToken: 'p', serviceToken: 'svc',
+    region: 'cn' as const, deviceId: 'aabbccddeeff0011', updatedAt: 1,
+  }
+  const fanDev = { did: '921838861', model: 'dmaker.fan.p28', name: '循环扇', isOnline: true }
+  const storeStub = {
+    loadAuth: async () => auth, saveAuth: async () => {}, clearAuth: async () => {},
+    loadDevices: async () => [fanDev], saveDevices: async () => {},
+    resetMijiaStore: () => {}, didSecretPersist: () => true,
+  }
+  const calls: Array<{ path: string; data: Record<string, unknown> }> = []
+  const cloudStub = {
+    beginQrLogin: async () => ({ qrImage: '', loginUrl: '', lpUrl: '', timeoutSec: 300 }),
+    pollQrLogin: async () => ({ status: 'pending' as const }),
+    exchangeServiceToken: async () => ({ serviceToken: '' }),
+    refreshServiceToken: async () => '',
+    call: async (_c: unknown, path: string, data: Record<string, unknown>) => {
+      calls.push({ path, data })
+      if (path === '/miotspec/prop/set') {
+        return { code: 0, message: 'ok', result: [{ did: '921838861', iid: '0.2.2', siid: 2, piid: 2, code: 0, exe_time: 0 }] }
+      }
+      // prop/get 按请求顺序逐项返回(顺序对齐 props 数组)
+      const req = (data.params ?? []) as Array<{ siid: number; piid: number }>
+      return {
+        code: 0,
+        message: 'ok',
+        result: req.map((p) => ({ did: '921838861', iid: `0.${p.siid}.${p.piid}`, siid: p.siid, piid: p.piid, value: p.piid === 2 ? 4 : false, code: 0 })),
+      }
+    },
+    homeDeviceList: async () => [], getHome: async () => [], sceneList: async () => [], sceneRun: async () => {},
+  }
+  const tools = createMijiaTools({
+    store: storeStub as never,
+    cloud: cloudStub as never,
+    spec: { ...createMijiaSpec(), getInstance: async () => specFixture } as never,
+    getTurnKind: () => 'window',
+  })
+  const control = tools.find((t) => t.name === 'mijia_control')!
+  // set 走云(无 LAN):result 数组 code=0 应报成功
+  const out = String(await control.execute({ action: 'set', device: '循环扇', set: [{ prop: 'fan-level', value: 4 }] }))
+  assert(out.includes('已设置') && out.includes('fan-level=4') && out.includes('通道 cloud'), `result 数组应解析成功:${out}`)
+  assert(!out.includes('code=-') && !out.includes('设置均失败'), `不应误报失败:${out}`)
+  // get 同样按数组解析
+  const status = String(await tools.find((t) => t.name === 'mijia_devices')!.execute({ action: 'status', query: '循环扇' }))
+  assert(status.includes('fan-level=4'), `get result 数组应解析:${status}`)
+  // 逐项失败码应如实报「设备拒绝 code=…」而非空 code=-,且明示与登录无关
+  const cloudStub2 = { ...cloudStub, call: async () => ({ code: 0, message: 'ok', result: [{ siid: 2, piid: 2, code: -704220043 }] }) }
+  const tools2 = createMijiaTools({
+    store: storeStub as never, cloud: cloudStub2 as never,
+    spec: { ...createMijiaSpec(), getInstance: async () => specFixture } as never,
+    getTurnKind: () => 'window',
+  })
+  const out2 = String(await tools2.find((t) => t.name === 'mijia_control')!.execute({ action: 'set', device: '循环扇', set: [{ prop: 'fan-level', value: 4 }] }))
+  assert(out2.includes('设备拒绝 code=-704220043') && out2.includes('与登录无关'), `失败码应透出且标注非登录问题:${out2}`)
+})
+
+await test('mijia_login:已登录时 login 拦下重开扫码窗(修「反复重复验证」),force=true 才放行', async () => {
+  const auth = {
+    userId: '2934418197', cUserId: 'c1', ssecurity: 's', passToken: 'p', serviceToken: 'svc',
+    region: 'cn' as const, deviceId: 'aabbccddeeff0011', updatedAt: 1,
+  }
+  const open: { n: number } = { n: 0 }
+  const storeStub = {
+    loadAuth: async () => auth, saveAuth: async () => {}, clearAuth: async () => {},
+    loadDevices: async () => [{ did: 'd1', model: 'm', name: '风扇', isOnline: true }], saveDevices: async () => {},
+    resetMijiaStore: () => {}, didSecretPersist: () => true,
+  }
+  const tools = createMijiaTools({
+    store: storeStub as never,
+    getTurnKind: () => 'window',
+    openLogin: () => {
+      open.n++
+    },
+  })
+  const login = tools.find((t) => t.name === 'mijia_login')!
+  const out = String(await login.execute({ action: 'login' }))
+  const n1: number = open.n
+  assert(n1 === 0, '已登录时缺省 login 不应开窗')
+  assert(out.includes('无需重新扫码') && out.includes('force=true'), `应引导不重验:${out}`)
+  const out2 = String(await login.execute({ action: 'login', force: true }))
+  const n2: number = open.n
+  assert(n2 === 1 && out2.includes('已打开'), 'force=true 应开窗')
+  // 未登录时缺省放行
+  const storeEmpty = { ...storeStub, loadAuth: async () => null }
+  const tools3 = createMijiaTools({ store: storeEmpty as never, getTurnKind: () => 'window', openLogin: () => { open.n++ } })
+  const out3 = String(await tools3.find((t) => t.name === 'mijia_login')!.execute({ action: 'login' }))
+  const n3: number = open.n
+  assert(n3 === 2 && out3.includes('已打开'), '未登录 login 应直接开窗')
+})
+
+await test('mijia_control:门锁硬禁/场景开锁名拒 + 灯 set 走 LAN 成功路径', async () => {
+  // spec 夹具(与上方 spec 测试同构)
+  const specFixture: MiotInstanceSpec = {
+    type: 'urn:miot-spec-v2:device:light:00000000:test-light:1',
+    description: 'Test Light',
+    services: [
+      {
+        iid: 2,
+        type: 'urn:miot-spec-v2:service:light:00007802:test-light:1',
+        description: 'Light',
+        properties: [
+          { piid: 1, type: 'urn:miot-spec-v2:property:on:00000006:test-light:1', description: 'Switch Status', format: 'bool', access: ['read', 'write'] },
+          { piid: 2, type: 'urn:miot-spec-v2:property:brightness:0000000D:test-light:1', description: 'Brightness', format: 'uint8', access: ['read', 'write'], valueRange: [1, 100, 1] },
+        ],
+        actions: [],
+      },
+    ],
+  }
+  const realSpec = createMijiaSpec()
+  const specStub = { ...realSpec, getInstance: async () => specFixture }
+  const auth = {
+    userId: 'u1',
+    cUserId: 'c1',
+    ssecurity: 's',
+    passToken: 'p',
+    serviceToken: 'svc',
+    region: 'cn' as const,
+    deviceId: 'aabbccddeeff0011',
+    updatedAt: 1,
+  }
+  const lightDev = { did: 'd1', model: 'yeelink.light.lamp1', name: '台灯', localip: '192.168.1.5', token: '00112233445566778899aabbccddeeff', isOnline: true, room: '卧室' }
+  const lockDev = { did: 'l1', model: 'loock.lock.v1', name: '大门锁', isOnline: true }
+  const storeStub = {
+    loadAuth: async () => auth,
+    saveAuth: async () => {},
+    clearAuth: async () => {},
+    loadDevices: async () => [lightDev, lockDev],
+    saveDevices: async () => {},
+    resetMijiaStore: () => {},
+    didSecretPersist: () => true,
+  }
+  const setCalls: Array<{ siid: number; piid: number; value: unknown }> = []
+  const lanStub = {
+    hello: async () => ({ token: new Uint8Array(16), deviceId: 42, stamp: 0 }),
+    rpc: async () => ({}),
+    getProperties: async () => [{ code: 0, value: true }],
+    setProperties: async (_ip: string, _t: string, _d: number, props: Array<{ siid: number; piid: number; value: unknown }>) => {
+      setCalls.push(...props)
+      return props.map(() => ({ code: 0 }))
+    },
+    invokeAction: async () => ({ code: 0, out: [] }),
+  }
+  const cloudStub = {
+    beginQrLogin: async () => ({ qrImage: '', loginUrl: '', lpUrl: '', timeoutSec: 300 }),
+    pollQrLogin: async () => ({ status: 'pending' as const }),
+    exchangeServiceToken: async () => ({ serviceToken: '' }),
+    refreshServiceToken: async () => '',
+    call: async () => ({ code: 0, result: {} }),
+    homeDeviceList: async () => [],
+    getHome: async () => [],
+    sceneList: async () => [{ id: 's1', name: '回家模式', enable: true, kind: 'manual' as const }, { id: 's2', name: '回家开锁', enable: true, kind: 'manual' as const }],
+    sceneRun: async () => {},
+  }
+  const tools = createMijiaTools({
+    store: storeStub as never,
+    lan: lanStub as never,
+    cloud: cloudStub as never,
+    spec: specStub as never,
+    getTurnKind: () => 'master-qq', // 主人 QQ 远程
+  })
+  const control = tools.find((t) => t.name === 'mijia_control')!
+  const scene = tools.find((t) => t.name === 'mijia_scene')!
+  // 灯 set LAN 成功路径(主人 QQ 远程可控)
+  const out = String(await control.execute({ action: 'set', device: '台灯', set: [{ prop: 'on', value: true }, { prop: 'brightness', value: 80 }] }))
+  assert(out.includes('已设置') && out.includes('通道 lan'), `灯 set 应走 LAN 成功:${out}`)
+  assert(setCalls.length === 2 && setCalls[0].siid === 2 && setCalls[0].piid === 1 && setCalls[0].value === true && setCalls[1].value === 80, `LAN set 参数:${JSON.stringify(setCalls)}`)
+  // 门锁 set 硬禁
+  await assertRejects(() => control.execute({ action: 'set', device: '大门锁', set: [{ prop: 'on', value: true }] }), '门锁', '门锁 set 应硬禁')
+  // 开锁类动作名双保险(灯设备 + unlock 动作名)
+  await assertRejects(() => control.execute({ action: 'invoke', device: '台灯', invoke: { prop: 'unlock' } }), '开锁/开门类动作', 'unlock 动作应拒')
+  // 亮度超范围报错(LLM 自纠)
+  const outBad = await control.execute({ action: 'set', device: '台灯', set: [{ prop: 'brightness', value: 200 }] }).catch((e: Error) => e.message)
+  assert(String(outBad).includes('超出范围'), `超范围应报错:${String(outBad)}`)
+  // 场景:开锁名拒;正常名过
+  await assertRejects(() => scene.execute({ action: 'run', scene: '回家开锁' }), '开锁/开门', '开锁场景名应拒')
+  const outScene = String(await scene.execute({ action: 'run', scene: '回家模式' }))
+  assert(outScene.includes('已运行场景「回家模式」'), `场景运行:${outScene}`)
+})
+
+// ---------------------------------------------------------------------------
+// MiMo 专项适配(2026-09-22 官网接入文档:多模态理解 + Batch API)
+// ---------------------------------------------------------------------------
+
+await test('sse:Chat Completions 无 type 帧照常产出(2026-09-22 修复回归)', async () => {
+  // 实测 MiMo Chat SSE 帧无顶层 type 字段——此前被 parseSse 整帧丢弃,
+  // chat 类协议流式恒空文本;修复后无 type 帧以空串事件名产出
+  const sseText =
+    'data: {"choices":[{"delta":{"content":"你好"}}]}\n\n' +
+    'data: {"type":"response.output_text.delta","delta":"!"}\n\n' +
+    'data: [DONE]\n\n'
+  const body = new ReadableStream<Uint8Array>({
+    start(c) {
+      c.enqueue(new TextEncoder().encode(sseText))
+      c.close()
+    },
+  })
+  const frames: Array<{ type: string; data: Record<string, unknown> }> = []
+  for await (const f of parseSse(body, new AbortController().signal)) frames.push(f)
+  assert(frames.length === 2, `应产出 2 帧(无 type 帧不再丢弃),实际 ${frames.length}`)
+  assert(frames[0].type === '' && Array.isArray(frames[0].data.choices), `chat 帧形状:${JSON.stringify(frames[0])}`)
+  assert(frames[1].type === 'response.output_text.delta', `typed 帧事件名透传:${frames[1].type}`)
+})
+
+await test('mimo-media:Responses 原生多模态编码(第一优先形状,活体对拍)', async () => {
+  const audioPath = path.join(tmp, 'mm-a.mp3')
+  const videoPath = path.join(tmp, 'mm-v.mp4')
+  await fs.writeFile(audioPath, Buffer.from('fake-mp3'))
+  await fs.writeFile(videoPath, Buffer.from('fake-mp4'))
+  const dataUrl = 'data:image/png;base64,AAAA'
+  const parts = [
+    { type: 'text', text: '这是什么' },
+    { type: 'media', kind: 'audio', url: audioPath, name: '语音' },
+    { type: 'media', kind: 'video', url: videoPath, name: '视频' },
+    { type: 'image', dataUrl },
+  ] as const
+  // Responses 形状(官网 ResponseInputImage/AudioContent/VideoContent,活体实证)
+  const content = await mimoResponsesUserContent([...parts], { model: 'mimo-v2.6-pro' })
+  assert(Array.isArray(content), '含附件应为 part 数组')
+  const items = content as Array<Record<string, unknown>>
+  assert(items.length === 4 && items[0].type === 'input_text', `顺序与条数:${JSON.stringify(items.map((i) => i.type))}`)
+  const audio = items[1] as { type: string; input_audio: { data: string } }
+  assert(audio.type === 'input_audio' && audio.input_audio.data.startsWith('data:audio/mpeg;base64,'), `音频 data URI:${audio.input_audio?.data?.slice(0, 30)}`)
+  const video = items[2] as { type: string; input_video: { data?: string; url?: string }; fps: number; media_resolution: string }
+  assert(video.type === 'input_video' && String(video.input_video.data ?? '').startsWith('data:video/mp4;base64,'), `视频 input_video.data:${JSON.stringify(video.input_video).slice(0, 40)}`)
+  assert(video.fps === 2 && video.media_resolution === 'default', `视频参数(官网默认,活体 Q1 实证):${video.fps}/${video.media_resolution}`)
+  const img = items[3] as { type: string; image_url: string }
+  assert(img.type === 'input_image' && img.image_url === dataUrl, `图片 image_url 字符串透传:${img.image_url}`)
+  // 公网 URL 视频挂 url 字段(活体 P2 实证)
+  const urlVideo = (await mimoResponsesContentPart({ type: 'media', kind: 'video', url: 'https://x.cn/a.mp4' })) as { type: string; input_video: { url?: string } }
+  assert(urlVideo.type === 'input_video' && urlVideo.input_video.url === 'https://x.cn/a.mp4', `URL 视频挂 url 字段:${JSON.stringify(urlVideo)}`)
+  // Chat 兼容形状(显式 chat 地址路径)
+  const chatContent = (await mimoUserContent([...parts], { model: 'mimo-v2.6-pro' })) as Array<Record<string, unknown>>
+  assert(chatContent[0].type === 'text' && chatContent[2].type === 'video_url', `chat 形状:${JSON.stringify(chatContent.map((i) => i.type))}`)
+  // 纯文本历史 → string content(旧形态)
+  const textOnly = await mimoUserContent([{ type: 'text', text: '你好' }, { type: 'text', text: '世界' }], { model: 'mimo-v2.6-pro' })
+  assert(textOnly === '你好\n世界', `纯文本 string 形态:${JSON.stringify(textOnly)}`)
+  assert((await mimoResponsesUserContent([], { model: 'mimo-v2.6-pro' })) === '', '空 parts → 空串')
+})
+
+await test('mimo-media:附件降级占位(缺失/格式/模型不支持)+ strict 硬错误', async () => {
+  const badExt = path.join(tmp, 'mm-x.xyz')
+  await fs.writeFile(badExt, Buffer.from('x'))
+  // 文件缺失 → 占位不断整轮(历史韧性)
+  const missing = await mimoUserContent(
+    [{ type: 'text', text: '听' }, { type: 'media', kind: 'audio', url: path.join(tmp, 'nope.mp3'), name: '语音' }],
+    { model: 'mimo-v2.6-pro' },
+  )
+  assert(typeof missing === 'string' || Array.isArray(missing), '占位仍返回 content')
+  assert(JSON.stringify(missing).includes('文件不存在'), `缺失占位原因:${JSON.stringify(missing)}`)
+  // 未知格式 → 占位
+  const bad = await mimoUserContent([{ type: 'media', kind: 'video', url: badExt }], { model: 'mimo-v2.6-pro' })
+  assert(JSON.stringify(bad).includes('不支持的文件格式'), `格式占位原因:${JSON.stringify(bad)}`)
+  // 模型不支持多模态(mimo-v2.5-pro 不在官网支持清单)→ 占位,不带媒体 part
+  const noCap = await mimoUserContent(
+    [{ type: 'media', kind: 'audio', url: path.join(tmp, 'nope.mp3'), name: '语音' }],
+    { model: 'mimo-v2.5-pro' },
+  )
+  assert(JSON.stringify(noCap).includes('不支持多模态') && !JSON.stringify(noCap).includes('input_audio'), `模型能力占位:${JSON.stringify(noCap)}`)
+  assert(!mimoSupportsMedia('mimo-v2.5-pro') && mimoSupportsMedia('mimo-v2.6-pro') && mimoSupportsMedia('mimo-v2.5') && mimoSupportsMedia('mimo-v2.7-x'), '多模态能力判定')
+  // strict(工具路径)→ 硬错误自纠
+  await assertRejects(
+    () => mimoMediaPart({ type: 'media', kind: 'audio', url: path.join(tmp, 'nope.mp3'), name: '语音' }, { strict: true }),
+    '文件不存在',
+  )
+  assert(mimoMimeOf('audio', 'a.flac') === 'audio/flac' && mimoMimeOf('video', 'b.webm') === 'video/webm' && mimoMimeOf('img', 'c.txt') === null, 'MIME 判定')
+})
+
+await test('mimo-chat:多模态 messages + reasoning/tool 回传(官网多轮规则)', async () => {
+  const audioPath = path.join(tmp, 'mm-b.mp3')
+  await fs.writeFile(audioPath, Buffer.from('x'))
+  const history: AgentMessage[] = [
+    {
+      id: 'u1',
+      role: 'user',
+      parts: [{ type: 'text', text: '这是什么声音' }, { type: 'media', kind: 'audio', url: audioPath, name: '语音' }],
+    },
+    {
+      id: 'a1',
+      role: 'assistant',
+      parts: [
+        { type: 'reasoning', text: '思考中' },
+        { type: 'text', text: '我听听' },
+        { type: 'tool-call', id: 'c1', name: 'exec_command', args: { command: 'dir' } },
+        { type: 'tool-result', id: 'c1', name: 'exec_command', ok: true, result: 'ok', durationMs: 5 },
+      ],
+    },
+    { id: 'u2', role: 'user', parts: [{ type: 'text', text: '继续' }] },
+  ]
+  const msgs = await mimoHistoryToMessages(history, { model: 'mimo-v2.6-pro' })
+  assert(msgs.length === 4, `消息条数(user/assistant/tool/user):${msgs.length}`)
+  const user = msgs[0] as { role: string; content: unknown }
+  assert(user.role === 'user' && Array.isArray(user.content) && (user.content as Array<{ type: string }>)[1].type === 'input_audio', `多模态 user content:${JSON.stringify(user.content).slice(0, 120)}`)
+  const assistant = msgs[1] as Record<string, unknown>
+  assert(assistant.reasoning_content === '思考中' && assistant.content === '我听听', `reasoning 回传(官网:缺失 400):${JSON.stringify(assistant)}`)
+  const toolCalls = assistant.tool_calls as Array<Record<string, unknown>>
+  assert(Array.isArray(toolCalls) && toolCalls.length === 1, 'tool_calls 展开')
+  assert(msgs[2].role === 'tool' && (msgs[2] as Record<string, unknown>).tool_call_id === 'c1', 'tool 结果消息紧跟')
+  assert(msgs[3].role === 'user' && msgs[3].content === '继续', '后续纯文本 user')
+})
+
+await test('mimo-responses:历史带用户媒体 → Responses 原生多模态 items(不退化 chat)', async () => {
+  const audioPath = path.join(tmp, 'mm-c.mp3')
+  await fs.writeFile(audioPath, Buffer.from('x'))
+  const captured: Array<{ url: string; body: Record<string, unknown> }> = []
+  const origFetch = globalThis.fetch
+  globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+    captured.push({ url: String(url), body: JSON.parse(String(init?.body ?? '{}')) })
+    return new Response('data: {"choices":[{"delta":{"content":"好"}}]}\n\ndata: [DONE]\n\n', { status: 200 })
+  }) as typeof fetch
+  try {
+    const config = {
+      ...MOCK_PROVIDERS,
+      apiKey: 'k',
+      baseURL: 'https://api.xiaomimimo.com',
+      model: 'mimo-v2.6-flash',
+      systemPrompt: '',
+      reasoningEffort: 'high',
+      mcpServers: [],
+      skillsDirs: [],
+    } as unknown as Parameters<typeof mimoStreamResponse>[0]['config']
+    const signal = new AbortController().signal
+    // 带媒体 → 仍走 /v1/responses,input items 原生多模态(2026-09-22 Responses 第一优先)
+    await mimoStreamResponse({
+      config,
+      system: '',
+      history: [{ id: 'u1', role: 'user', parts: [{ type: 'text', text: '听听' }, { type: 'media', kind: 'audio', url: audioPath, name: '语音' }] }],
+      tools: [],
+      signal,
+      onEvent: () => {},
+    })
+    assert(captured.length === 1 && captured[0].url.endsWith('/v1/responses'), `带媒体应走 responses 端点(不退化 chat):${captured.map((c) => c.url)}`)
+    const input = captured[0].body.input as Array<Record<string, unknown>>
+    const content = input[0].content as Array<Record<string, unknown>>
+    assert(content[1].type === 'input_audio' && String((content[1].input_audio as Record<string, unknown>).data).startsWith('data:audio/mpeg'), `Responses 原生 items:${JSON.stringify(content).slice(0, 120)}`)
+    // 纯文本 → 同端点
+    captured.length = 0
+    await mimoStreamResponse({
+      config,
+      system: '',
+      history: [{ id: 'u2', role: 'user', parts: [{ type: 'text', text: 'hi' }] }],
+      tools: [],
+      signal,
+      onEvent: () => {},
+    })
+    assert(captured.length === 1 && captured[0].url.endsWith('/v1/responses'), `纯文本同端点:${captured.map((c) => c.url)}`)
+    // chat 协议直测(显式 chat 地址兼容路径):无 type 帧经修复后的 parseSse 出文本
+    const out = await mimoStreamChatCompletion({
+      config,
+      system: '',
+      history: [{ id: 'u3', role: 'user', parts: [{ type: 'text', text: 'hi' }] }],
+      tools: [],
+      signal,
+      onEvent: () => {},
+    })
+    assert(out.text === '好', `chat 流式文本(无 type 帧回归):${JSON.stringify(out.text)}`)
+  } finally {
+    globalThis.fetch = origFetch
+  }
+})
+
+await test('mimo_batch:JSONL 构建 / region 校验 / 错误码映射', () => {
+  const jsonl = buildMimoBatchJsonl(
+    [{ prompt: '你好' }, { prompt: '总结:abc', system: '你是助手', custom_id: 'x' }],
+    { model: 'mimo-v2.6-flash' },
+  )
+  const lines = jsonl.trim().split('\n').map((l) => JSON.parse(l) as {
+    custom_id: string
+    method: string
+    url: string
+    body: { model: string; instructions?: string; input: string; reasoning: { effort: string }; max_output_tokens: number }
+  })
+  assert(lines.length === 2 && jsonl.endsWith('\n'), 'JSONL 一行一请求')
+  // Responses 格式(第一优先,url:/v1/responses,body 与实时请求体一致)
+  assert(lines[0].custom_id === 'request-1' && lines[0].method === 'POST' && lines[0].url === '/v1/responses', `请求行形状:${JSON.stringify(lines[0])}`)
+  assert(lines[0].body.model === 'mimo-v2.6-flash' && lines[0].body.reasoning.effort === 'none' && lines[0].body.max_output_tokens === 2048 && lines[0].body.input === '你好', `body 缺省:${JSON.stringify(lines[0].body)}`)
+  assert(lines[1].custom_id === 'x' && lines[1].body.instructions === '你是助手' && lines[1].body.input === '总结:abc', `instructions 提示:${JSON.stringify(lines[1].body)}`)
+  // 校验:重复 custom_id / 空 prompt / region / window
+  let threw = ''
+  try {
+    buildMimoBatchJsonl([{ prompt: 'a', custom_id: 'd' }, { prompt: 'b', custom_id: 'd' }], { model: 'mimo-v2.6-flash' })
+  } catch (e) {
+    threw = String((e as Error).message)
+  }
+  assert(threw.includes('custom_id 重复'), `重复 id 报错:${threw}`)
+  assert(mimoBatchBaseUrl('cn') === 'https://batch-api-cn.xiaomimimo.com', 'region → 批量主机(实测 DNS 可解析)')
+  threw = ''
+  try {
+    mimoBatchBaseUrl('bad.region!')
+  } catch (e) {
+    threw = String((e as Error).message)
+  }
+  assert(threw.includes('region 不合法'), `非法 region 报错:${threw}`)
+  assert(mimoErrorMessage(421, '').includes('内容拦截') && mimoErrorMessage(402, '').includes('余额不足'), '错误码映射')
+})
+
+await test('mimo_batch:create 提交链路 + mimo_media 理解链路(fetch 桩)', async () => {
+  const calls: Array<{ url: string; body: unknown }> = []
+  const origFetch = globalThis.fetch
+  globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+    const u = String(url)
+    calls.push({ url: u, body: init?.body ? String(init.body).slice(0, 200) : null })
+    if (u.endsWith('/v1/files')) return new Response(JSON.stringify({ id: 'file-1', status: 'active' }), { status: 200 })
+    if (u.endsWith('/v1/batches')) {
+      return new Response(
+        JSON.stringify({ id: 'batch_9', status: 'validating', request_counts: { total: 1, completed: 0, failed: 0 }, input_file_id: 'file-1' }),
+        { status: 200 },
+      )
+    }
+    // mimo_media 非流式理解(Responses output items 形状)
+    return new Response(
+      JSON.stringify({
+        output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: '一段提示音' }] }],
+        usage: { input_tokens: 20, output_tokens: 5, input_tokens_details: { cached_tokens: 0 }, output_tokens_details: { reasoning_tokens: 3 } },
+      }),
+      { status: 200 },
+    )
+  }) as typeof fetch
+  try {
+    const tools = createMimoTools(() => ({ apiKey: 'k', baseURL: 'https://api.xiaomimimo.com', model: 'mimo-v2.6-pro' }))
+    const batch = tools.find((t) => t.name === 'mimo_batch')!
+    const media = tools.find((t) => t.name === 'mimo_media')!
+    assert(!!batch && !!media, '两工具注册')
+    const out = String(await batch.execute({ action: 'create', requests: [{ prompt: '你好' }] }))
+    assert(out.includes('batch_9') && out.includes('validating'), `create 返回:${out.slice(0, 120)}`)
+    assert(calls[0].url.endsWith('/v1/files') && calls[1].url.endsWith('/v1/batches'), `上传→建任务顺序:${calls.map((c) => c.url)}`)
+    assert(String(calls[1].body).includes('completion_window') && String(calls[1].body).includes('"/v1/responses"'), `建任务 body(Responses endpoint):${String(calls[1].body)}`)
+    // window / model 自纠报错
+    await assertRejects(() => batch.execute({ action: 'create', requests: [{ prompt: 'x' }], completion_window: '1h' }), '1-14 天')
+    await assertRejects(() => batch.execute({ action: 'create', requests: [{ prompt: 'x' }], model: 'mimo-v2.5' }), '仅支持')
+    await assertRejects(() => batch.execute({ action: 'status' }), 'batch_id 不能为空')
+    // mimo_media:严格链路(桩返回 '一段提示音')
+    const wavPath = path.join(tmp, 'mm-d.wav')
+    await fs.writeFile(wavPath, Buffer.from('RIFFfake'))
+    calls.length = 0
+    const mout = String(await media.execute({ path: wavPath, question: '这是什么' }))
+    assert(mout.includes('一段提示音') && mout.includes('输入 20') && mout.includes('思考 3'), `理解返回:${mout.slice(0, 120)}`)
+    assert(calls.length === 1 && calls[0].url.endsWith('/v1/responses'), `理解端点(Responses 第一优先):${calls.map((c) => c.url)}`)
+    await assertRejects(() => media.execute({ path: path.join(tmp, 'nope.mp3') }), '文件不存在')
+    await assertRejects(() => media.execute({ path: path.join(tmp, 'mm-x.xyz') }), '无法从路径判断媒体类型')
+    // 未配 Key 报错引导(不隐藏工具)
+    const tools2 = createMimoTools(() => null)
+    await assertRejects(() => tools2[1].execute({ action: 'status', batch_id: 'b' }), 'API Key 未配置')
+  } finally {
+    globalThis.fetch = origFetch
   }
 })
 

@@ -36,6 +36,8 @@ import { toolsRoot, userDataDir, toolOutputDir, setOutputEnv } from './tools-env
 import { biliQuery, BILI_CWD, setBiliConfirmAction, setBiliSessionKey } from './tools-bili'
 import { docConvert, disposeDocflow } from './tools-docflow'
 import { createGlmTools, type GlmCreds } from './tools-glm'
+import { createMimoTools, type MimoCreds } from './tools-mimo'
+import { createMijiaTools } from './tools-mijia'
 
 // ---- 已拆出簇 barrel 兼容 re-export(engine.ts/测试既有路径不变) ----
 export * from './tools-search'
@@ -44,6 +46,7 @@ export * from './tools-env'
 export * from './tools-bili'
 export * from './tools-docflow'
 export * from './tools-glm'
+export * from './tools-mijia'
 
 
 /**
@@ -101,6 +104,7 @@ export function buildToolsGuideBlock(): string {
     `- NapCat 配置文件(QQ 机器人引擎,位于 NapCat 安装目录的 config/napcat.json):监听群/信任人管理一律用 manage_sessions / set_napcat_config 工具,` +
       `**禁止用 write_file / exec_command 直接修改它**——手改易写坏配置导致 NapCat 无法启动、QQ 消息全部失联;` +
       `监听某群前先调 napcat 工具 action=groups 拿机器人已加入的真实群号,再 manage_sessions watch,不要凭群名猜/编造群号。`,
+    `- 米家智能家居:用 mijia_devices/mijia_control/mijia_scene/mijia_login 工具;**禁止用 read_file/write_file/exec_command 改 userData/mijia-*.json**(凭证密文,手改会丢登录态)。`,
   ]
   return lines.join('\n')
 }
@@ -326,6 +330,20 @@ export function createTools(deps: {
    * 用 DeepSeek 也能调 GLM 文档工具,只要 glm 桶配了 Key);null = 未配置
    */
   getGlmCreds?(): GlmCreds | null
+  /**
+   * 小米 MiMo 云端凭据(2026-09-22 专项工具:mimo_media / mimo_batch):
+   * 每次执行实时读取 providers.mimo 桶(与当前激活供应商无关,同 GLM
+   * 先例);null = 未配置
+   */
+  getMimoCreds?(): MimoCreds | null
+  /**
+   * 米家写守卫来源(2026-09-22):getTurnKind = classifyTurn 八值
+   * (window/panel/master-qq/master-group 可写);getTurnSource 三值兜底
+   */
+  getTurnKind?(): string | null
+  getTurnSource?(): string | null
+  /** 米家扫码登录窗(mijia_login action=login) */
+  openMijiaLogin?(region?: string): void
 }): AgentTool[] {
   // 工具输出目录环境注入(tools-env 模块级,工具执行时读取)
   setOutputEnv({
@@ -349,6 +367,16 @@ export function createTools(deps: {
   // 智谱 GLM 云端文档工具(2026-08-19:glm_ocr / glm_file_parse;
   // 凭据实时读取,未配置时工具执行报错引导,不隐藏工具)
   const glmTools = createGlmTools(deps.getGlmCreds ?? (() => null))
+  // 小米 MiMo 专项工具(2026-09-22:mimo_media 多模态理解 / mimo_batch
+  // 批量推理;同 GLM 先例,凭据实时读 providers.mimo 桶)
+  const mimoTools = createMimoTools(deps.getMimoCreds ?? (() => null))
+  // 米家智能家居工具簇(2026-09-22):mijia_devices/mijia_control/mijia_scene/
+  // mijia_login——写守卫 + 门锁/摄像头硬禁见 tools-mijia.ts
+  const mijiaTools = createMijiaTools({
+    getTurnKind: deps.getTurnKind,
+    getTurnSource: deps.getTurnSource,
+    openLogin: deps.openMijiaLogin,
+  })
   return [
     {
       name: 'exec_command',
@@ -788,11 +816,12 @@ export function createTools(deps: {
               'progress',
               'login',
               'whoami',
+              'logout',
               'convert',
               'config',
             ],
             description:
-              '操作:up_info/up_videos/search/open/trending/comments(查询)/fav(收藏夹:无query列我的收藏夹,带query=收藏夹id下载)/download(单视频下载)/download_up(UP批量下载)/danmaku(弹幕)/subtitle(字幕)/saved(下载记录)/progress(查询进行中下载的实时进度,如"68%")/login(生成扫码登录二维码图片)/whoami(查询登录状态)/convert(把已有 HEVC/AV1 视频就地转码为 H.264——窗口内无法播放时的修复手段)/config(查看/修改 bili 默认配置,如清晰度 quality/codec/输出目录 outdir)',
+              '操作:up_info/up_videos/search/open/trending/comments(查询)/fav(收藏夹:无query列我的收藏夹,带query=收藏夹id下载)/download(单视频下载)/download_up(UP批量下载)/danmaku(弹幕)/subtitle(字幕)/saved(下载记录)/progress(查询进行中下载的实时进度,如"68%")/login(生成扫码登录二维码图片)/whoami(查询登录状态——已登录/已过期/未登录精确区分,登录态全工具统一)/logout(退出登录并清除全部本地凭据)/convert(把已有 HEVC/AV1 视频就地转码为 H.264——窗口内无法播放时的修复手段)/config(查看/修改 bili 默认配置,如清晰度 quality/codec/输出目录 outdir)',
           },
           query: {
             type: 'string',
@@ -830,5 +859,7 @@ export function createTools(deps: {
       },
     },
     ...glmTools,
+    ...mimoTools,
+    ...mijiaTools,
   ]
 }

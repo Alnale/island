@@ -57,10 +57,13 @@ export function hostBridgePlugin(
               setOwnerQQ:
                 deps.setOwnerQQ ??
                 (() => ({ ok: false, error: '未注入 setOwnerQQ(宿主未提供)' })),
+              getTurnKind: deps.getTurnKind,
             }
           : undefined,
       )
       ctx.register('napcatClient', deps.napcat as never)
+      ctx.register('napcatLogin', deps.openNapcatLogin)
+      ctx.register('mijiaLogin', deps.openMijiaLogin)
       ctx.register('memoryStore', deps.getMemoryStore?.() ?? null)
       ctx.register('evolution', deps.getEvolution?.() ?? null)
       ctx.register('subagents', deps.getSubAgents?.() ?? null)

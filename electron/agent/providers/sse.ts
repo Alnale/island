@@ -3,7 +3,8 @@
  * anthropic 三处逐字重复,仅 yield 形态不同——收敛为单一实现)
  */
 
-/** 单个 SSE 事件(OpenAI 兼容格式:data: JSON 帧,type 字段作事件名) */
+/** 单个 SSE 事件(OpenAI 兼容格式:data: JSON 帧,type 字段作事件名;
+ * Chat Completions 帧无 type 字段 → 空串,消费端按 data.choices 取增量) */
 export interface SseFrame {
   type: string
   data: Record<string, unknown>
@@ -48,9 +49,14 @@ async function readOrAborted(
 
 /**
  * 解析 SSE 字节流:按空行分帧,取 data: 行的 JSON(OpenAI 兼容格式)。
- * 非 JSON 帧 / 无 type 字段 / 注释心跳跳过;中止时在安全点取消读取并
- * 正常结束(不再抛 AbortError——调用方按 signal.aborted 判定中止)。
- * 三个 provider(deepseek / chat / anthropic)共用
+ * 非 JSON 帧 / 注释心跳跳过;顶层 type 字段作事件名(Responses/Anthropic
+ * 事件流),**无 type 字段的 Chat Completions 帧(object='chat.completion
+ * .chunk')以空串事件名照常产出**(2026-09-22 修复:此前无 type 帧被整帧
+ * 丢弃——chat/mimo-chat/lmstudio/glm-cloud 流式恒空文本,实测 MiMo Chat
+ * SSE 全部帧均无 type 字段;消费端按 data.choices 取增量,不受影响)。
+ * 中止时在安全点取消读取并正常结束(不再抛 AbortError——调用方按
+ * signal.aborted 判定中止)。全部 provider(deepseek / chat / anthropic /
+ * mimo / lmstudio / glm)共用
  *
  * **中止安全点(2026-08-13,Electron 43 内置 Node 22 llhttp UAF 规避)**:
  * Node 的 llhttp HTTP 解析器存在 use-after-free(nodejs/node#62095,
@@ -98,11 +104,16 @@ export async function* parseSse(
         if (!payload || payload === '[DONE]') continue
         try {
           const parsed = JSON.parse(payload) as Record<string, unknown>
-          if (parsed && typeof parsed === 'object' && typeof parsed.type === 'string') {
+          if (parsed && typeof parsed === 'object') {
             // 帧数据深度清洗孤立代理(2026-08-11):流式回复在 emoji 代理对
             // 中间被截断(max_output_tokens)时,delta 会含孤立代理——不清洗
             // 就进历史,下轮回传触发 400 unexpected end of hex escape
-            yield { type: parsed.type, data: sanitizeJsonStrings(parsed) }
+            // 事件名:顶层 type(Responses/Anthropic)或空串(Chat Completions
+            // chunk 无 type 字段,消费端按 d.choices 取增量)
+            yield {
+              type: typeof parsed.type === 'string' ? parsed.type : '',
+              data: sanitizeJsonStrings(parsed),
+            }
           }
         } catch {
           // 非 JSON 帧(注释/心跳)跳过

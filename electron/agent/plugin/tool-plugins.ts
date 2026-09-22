@@ -49,6 +49,20 @@ export function coreToolsPlugin(): Plugin {
             const glm = ctx.get('config').getConfig().providers?.glm
             return glm && glm.apiKey.trim() ? { apiKey: glm.apiKey, baseURL: glm.baseURL } : null
           },
+          // 小米 MiMo 专项工具凭据(2026-09-22:mimo_media / mimo_batch):
+          // 实时读 providers.mimo 桶,与激活供应商无关;Key 空返回 null
+          getMimoCreds: () => {
+            const mimo = ctx.get('config').getConfig().providers?.mimo
+            return mimo && mimo.apiKey.trim()
+              ? { apiKey: mimo.apiKey, baseURL: mimo.baseURL, model: mimo.model }
+              : null
+          },
+          // 米家写守卫来源(2026-09-22):turnKind 八值优先(window/panel/
+          // master-qq/master-group 可写),getTurnSource 三值兜底
+          getTurnKind: () => ctx.get('ownerConfig')?.getTurnKind?.() ?? null,
+          getTurnSource: () => ctx.get('ownerConfig')?.getTurnSource?.() ?? null,
+          // 米家扫码登录窗(2026-09-22)
+          openMijiaLogin: (region) => ctx.get('mijiaLogin')?.(region),
         }),
       )
       // docflow 常驻子进程随引擎销毁回收;**doneHandler 恢复链
@@ -90,6 +104,7 @@ export function napcatToolsPlugin(): Plugin {
           client,
           getSessionKey: () => ctx.get('sessionState').getSessionKey(),
           confirmDangerous: ctx.get('confirm').confirmAction,
+          openLogin: () => ctx.get('napcatLogin')?.(),
         }),
       )
     },

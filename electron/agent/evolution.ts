@@ -85,6 +85,12 @@ export function evalTimeoutMs(entryCount: number): number {
 export interface EvolutionHandle {
   /** 触发一次进化(已在进化中则忽略,返回说明);立即返回,后台执行 */
   requestEvolve(focus?: string, rounds?: number): Promise<{ started: boolean; message: string }>
+  /**
+   * 快捷单轮进化(2026-09-22 用户要求"LLM 直接进行快捷自我进化,运行
+   * 记忆进化"):同步跑恰好一轮,等待完成后返回人话摘要——LLM 当轮把
+   * 进化结果讲给用户(后台 run 是 fire-and-forget + 通知,拿不到当轮结果)
+   */
+  runQuick(focus?: string): Promise<{ ok: boolean; message: string }>
   /** 系统提示状态注入块(进行中/最近结果;无历史返回空串) */
   getStatus(): Promise<string>
   /** 进化日志(设置界面展示) */
@@ -555,6 +561,32 @@ export function createEvolution(deps: {
   }
 
   return {
+    /**
+     * 快捷单轮进化(2026-09-22 用户要求"LLM 直接进行快捷自我进化,运行
+     * 记忆进化"):同步跑**恰好一轮**(不走 resolveRoundBudget 的条目数
+     * 放大——快捷就是轻量),评审→应用→复评→棘轮,等结果回来给人话摘要,
+     * LLM 当轮转述。busy 与后台 run 共用同一守卫(两路互斥)。
+     */
+    async runQuick(focus?: string) {
+      await initPromise
+      if (busy) return { ok: false, message: '记忆进化已在运行中,请稍候' }
+      busy = true
+      onEvent({ type: 'evolution-progress', phase: '快捷记忆进化(单轮)' })
+      try {
+        const r = await runRound(focus, 1, 1)
+        return {
+          ok: true,
+          message:
+            `快捷记忆进化完成:${r.summary}` +
+            (r.applied ? '(已接受,新版本已存档)' : '(未应用,记忆已恢复原样)'),
+        }
+      } catch (err) {
+        return { ok: false, message: `快捷记忆进化失败:${(err as Error).message}` }
+      } finally {
+        busy = false
+        onEvent({ type: 'evolution-done' })
+      }
+    },
     async requestEvolve(focus?: string, rounds = 2) {
       await initPromise
       if (busy) return { started: false, message: '记忆进化已在运行中,请稍候' }

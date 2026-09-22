@@ -12,6 +12,43 @@ import { stripNapcatInstructions, stripTurnMarks, textFromMessage, textFromParts
 import { firstMediaKindInText } from './markdownParser'
 import { AgentImage, CopyButton, Markdown, MediaFrame } from './Markdown'
 
+/**
+ * 歌曲卡片气泡(2026-09-22 用户反馈"LLM 自主放歌,对话窗口里没有歌的
+ * 消息气泡"):唱片图标(播放中旋转)+ 歌名/歌手/专辑 + 状态/来源徽章。
+ * 播放走岛内播放器(SMTC/本地),卡片只展示**不在气泡内播**——避免与
+ * 播放器双响;与 open_file 媒体拦截同思路:程序注入,不依赖 LLM 复述。
+ */
+function SongBubble({
+  title,
+  artist,
+  album,
+  playing,
+  external,
+}: {
+  title: string
+  artist?: string
+  album?: string
+  playing?: boolean
+  external?: boolean
+}) {
+  const sub = [artist, album].filter(Boolean).join(' · ')
+  return (
+    <div className="island-song-card">
+      <div className={`island-song-disc${playing ? ' spinning' : ''}`} aria-hidden>
+        ♪
+      </div>
+      <div className="island-song-meta">
+        <div className="island-song-title">《{title}》</div>
+        {sub && <div className="island-song-sub">{sub}</div>}
+      </div>
+      <div className="island-song-badges">
+        <span className={`island-song-badge${playing ? ' live' : ''}`}>{playing ? '正在播放' : '已暂停'}</span>
+        <span className="island-song-badge">{external ? '外部平台' : '本地播放器'}</span>
+      </div>
+    </div>
+  )
+}
+
 /** 用户消息气泡:右侧强调色,Markdown 文本(plainMermaid:用户贴的
  * mermaid 源码按普通代码块显示,图表深色主题进浅色气泡不可读) + 复制按钮。
  * memo:已落定消息引用不变,流式期间不再重建 */
@@ -540,8 +577,12 @@ export const AssistantBlock = memo(function AssistantBlock({
   })
   // 媒体附件(带原 parts 索引,自动播权分派用)
   const mediaParts: Array<{ p: Extract<AgentPart, { type: 'media' }>; idx: number }> = []
+  // 歌曲卡片(2026-09-22 music_control 放歌可视化):非可播媒体,不参与
+  // 自动播权分派/媒体小窗,只作信息卡片渲染
+  const songParts: Extract<AgentPart, { type: 'song' }>[] = []
   parts.forEach((part, i) => {
     if (part.type === 'media') mediaParts.push({ p: part, idx: i })
+    else if (part.type === 'song') songParts.push(part)
   })
   // 自动播权分派(2026-08-10 三轮修复"LLM 找歌来听没自动播放"):按原
   // parts 顺序找**第一个**音频/视频媒体——markdown 内嵌 ![歌名](路径)
@@ -595,6 +636,10 @@ export const AssistantBlock = memo(function AssistantBlock({
           // (mediaAutoPlay)才自动播——历史/重挂载不播
           autoPlay={mediaAutoPlay && idx === grantMediaIdx}
         />
+      ))}
+      {/* 歌曲卡片(2026-09-22):music_control 放歌注入,展示曲目快照 */}
+      {songParts.map((p, i) => (
+        <SongBubble key={`song-${i}`} title={p.title} artist={p.artist} album={p.album} playing={p.playing} external={p.external} />
       ))}
       {toolCalls.length > 0 && <ToolSummary items={toolCalls} />}
       {/* 气泡脚注:复制按钮(复制本条回复文本)+ token 用量 */}

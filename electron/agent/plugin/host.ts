@@ -42,6 +42,8 @@ export interface OwnerConfigService {
   getTurnSource(): string | null
   /** 写入 privacy.json masterQQ 并刷新双端缓存 */
   setOwnerQQ(qq: string): { ok: boolean; error?: string }
+  /** 轮次种类(classifyTurn 八值;mijia 写守卫区分主人/别人;getTurnSource 仅兜底) */
+  getTurnKind?(): string | null
 }
 
 declare module './kernel' {
@@ -78,6 +80,10 @@ declare module './kernel' {
     ownerConfig: OwnerConfigService | undefined
     /** NapCat QQ 客户端(未注入 = 不注册 napcat 工具) */
     napcatClient: NapcatClient | undefined
+    /** NapCat 扫码登录窗口(2026-09-22;未注入 = napcat login 提示不可用) */
+    napcatLogin: (() => void) | undefined
+    /** 米家扫码登录窗口(2026-09-22;未注入 = mijia login 提示不可用) */
+    mijiaLogin: ((region?: string) => void) | undefined
     /** 记忆存储(null = 记忆工具/记忆提示块不可用) */
     memoryStore: MemoryStoreLike | null
     /** 自我进化 harness(null = evolve 工具不可用) */

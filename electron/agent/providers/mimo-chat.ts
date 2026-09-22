@@ -16,15 +16,22 @@
  * - response_format:{type:'text'/'json_object'};
  * - 流式:SSE 格式(OpenAI 兼容),data: {...} 帧,最后 data: [DONE];
  *   delta 字段:content / reasoning_content / tool_calls;
- * - 模型:mimo-v2.5-pro(默认 max 131072 tokens) / mimo-v2.5(默认 32768);
+ * - 模型:mimo-v2.6-pro(默认)/ mimo-v2.6-flash / mimo-v2.6-pro-ultraspeed /
+ *   mimo-v2.5 / mimo-v2.5-pro(文本生成 max 131072 / 32768);
  * - thinking 模式下不支持自定义 temperature/top_p(强制 1.0/0.95)。
+ * - **多模态(2026-09-22)**:user content 可为 part 数组——Chat 官方形状
+ *   image_url / input_audio / video_url(编码与限制见 mimo-media.ts)。
+ *   **Responses API 是第一优先**(用户定调,Chat Completions 过旧)——多模态
+ *   在 /v1/responses 原生支持(input_image/input_audio/input_video),本协议
+ *   仅在用户显式配置 chat 地址时启用(兼容路径)。
  *
  * 错误码(https://mimo.mi.com/docs/zh-CN/api/guidance/error-codes):
  *   400/401/402/403/404/421/429/500/503(421 = 内容拦截,403 = 地区/风控)
  */
 
 import { parseSse, sanitizeJsonStrings, truncateResult } from './sse'
-import { mimoErrorMessage } from './mimo-constants'
+import { mimoErrorMessage, MIMO_DEFAULT_MODEL } from './mimo-constants'
+import { mimoUserContent } from './mimo-media'
 import type { AgentConfig, AgentEvent, AgentMessage, AgentPart, AgentTool, ProviderOutcome } from '../types'
 
 /** 工具 → MiMo Chat Completions tools(function 嵌套格式) */
@@ -53,17 +60,22 @@ function mimoJoinReasoning(parts: AgentPart[]): string {
 
 /**
  * 历史消息 → MiMo Chat Completions messages:
- * - user → {role:'user', content};
+ * - user → {role:'user', content}——纯文本 = string;含附件 = 多模态 part
+ *   数组(image_url / input_audio / video_url,2026-09-22 官网专项适配,
+ *   编码见 mimo-media.ts,异步读盘转 data URI);
  * - system → {role:'system', content}(MiMo 也支持 developer 角色,统一用 system);
  * - assistant → reasoning_content(思考模式回传) + content + tool_calls;
  * - 工具结果 → 独立的 {role:'tool', tool_call_id, content} 消息,紧跟对应 assistant。
  */
-export function mimoHistoryToMessages(history: AgentMessage[]): Array<Record<string, unknown>> {
+export async function mimoHistoryToMessages(
+  history: AgentMessage[],
+  opts?: { model?: string },
+): Promise<Array<Record<string, unknown>>> {
   const out: Array<Record<string, unknown>> = []
   for (const msg of history) {
     if (msg.role === 'user') {
-      const text = mimoJoinText(msg.parts)
-      if (text) out.push({ role: 'user', content: text })
+      const content = await mimoUserContent(msg.parts, opts)
+      if (content) out.push({ role: 'user', content })
       continue
     }
     if (msg.role === 'system') {
@@ -122,12 +134,13 @@ export async function mimoStreamChatCompletion(params: {
   const url = base.includes('/v1') ? `${base}/chat/completions` : `${base}/v1/chat/completions`
 
   const thinkingEnabled = !noThinking && config.reasoningEffort !== 'none'
+  const model = config.model.trim() || MIMO_DEFAULT_MODEL
 
   const body: Record<string, unknown> = {
-    model: config.model.trim() || 'mimo-v2.5-pro',
+    model,
     messages: [
       ...(system ? [{ role: 'system', content: system }] : []),
-      ...mimoHistoryToMessages(history),
+      ...(await mimoHistoryToMessages(history, { model })),
     ],
     ...(tools.length > 0 ? { tools: mimoChatTools(tools), tool_choice: 'auto' } : {}),
     // MiMo 用 thinking:{type:enabled/disabled} 控制思考模式

@@ -30,6 +30,7 @@ import { masterQQ } from '../privacy'
 import { createWsSocket, type WsConn } from './wsclient'
 import { stripFingerprintMarks } from './napcat-session'
 import {
+  buildOutgoingMessage,
   extractImageRefs,
   gtkFromCookie,
   stripMasterNarration,
@@ -42,11 +43,13 @@ import {
   napcatMessageImages,
   napcatMessageSubTypeNoise,
   napcatMessageText,
+  napcatMessageVoices,
   shouldAdmitGroupMessage,
   type NapcatGroupMessage,
   type NapcatImage,
   type NapcatMessage,
   type NapcatSentMessage,
+  type NapcatVoice,
 } from './napcat-message'
 import {
   appendNapcatChat,
@@ -127,7 +130,7 @@ export interface NapcatDeps {
    * 渲染端会话面板立即建条目 */
   watchSession?(kind: 'private' | 'group', id: string): void
   unwatchSession?(kind: 'private' | 'group', id: string): void
-  onSent?(msg: { type: 'private' | 'group'; target: string; text: string; images?: string[] }): void
+  onSent?(msg: { type: 'private' | 'group'; target: string; text: string; images?: string[]; voice?: string }): void
   /** 错误上报(不再静默catch——发送失败/API错误经此回调通知主进程) */
   onError?(message: string): void
   /** 通知事件(撤回/好友请求等) */
@@ -159,9 +162,13 @@ export interface NapcatClient {
   stop(): void
   status(): NapcatStatus
   downloadImages(images?: NapcatImage[]): Promise<string[]>
+  /** 语音下载(2026-09-22 收语音链路):get_record 转 mp3(QQ 语音多为
+   * silk/amr,浏览器 audio 播不了)→ 落 napcat-media/,作 audio media
+   * part 气泡 VoiceBubble 播放;转码失败回退直下原文件 */
+  downloadVoices(voices?: NapcatVoice[]): Promise<string[]>
   appendChat(record: Omit<NapcatChatRecord, 'time'> & { time?: number }): void
-  sendToQQ(qq: string, text: string, opts?: { image?: string; file?: string }): Promise<string>
-  sendToGroup(groupId: string, text: string, filePath?: string, image?: string): Promise<string>
+  sendToQQ(qq: string, text: string, opts?: { image?: string; file?: string; voice?: string }): Promise<string>
+  sendToGroup(groupId: string, text: string, opts?: { file?: string; image?: string; voice?: string }): Promise<string>
   recallMessage(messageId: string): Promise<void>
   getRecentMessages(): NapcatMessage[]
   getSentMessages(): NapcatSentMessage[]
@@ -402,6 +409,7 @@ export function createNapcatClient(deps: NapcatDeps): NapcatClient {
             const raw = obj.message ?? obj.raw_message
             const text = extractText(raw)
             const images = napcatMessageImages(raw)
+            const voices = napcatMessageVoices(raw)
             // 空包不进对话(2026-08-31:偶现空消息气泡,实际无人说话)
             if (napcatIncomingIsBlank(text, images)) return
             if (dedupKey) seenAdd(dedupKey)
@@ -411,6 +419,7 @@ export function createNapcatClient(deps: NapcatDeps): NapcatClient {
               messageId,
               time: Number(obj.time ?? Math.floor(Date.now() / 1000)),
               images,
+              voices: voices.length > 0 ? voices : undefined,
             }
             pushRecent(msg)
             receivedCount++
@@ -434,6 +443,7 @@ export function createNapcatClient(deps: NapcatDeps): NapcatClient {
             const raw = obj.message ?? obj.raw_message
             const text = extractText(raw)
             const images = napcatMessageImages(raw)
+            const voices = napcatMessageVoices(raw)
             if (napcatIncomingIsBlank(text, images)) return
             if (dedupKey) seenAdd(dedupKey)
             // @ 机器人检测:段数组 + CQ码字符串
@@ -451,6 +461,7 @@ export function createNapcatClient(deps: NapcatDeps): NapcatClient {
               messageId,
               time: Number(obj.time ?? Math.floor(Date.now() / 1000)),
               images,
+              voices: voices.length > 0 ? voices : undefined,
             }
             pushRecent({
               qq,
@@ -648,6 +659,62 @@ export function createNapcatClient(deps: NapcatDeps): NapcatClient {
     }
   }
 
+  /** 语音下载(2026-09-22 收语音链路):get_record(out_format=mp3)转码
+   * 落地——QQ 语音多为 silk/amr,浏览器 <audio> 播不了;转码失败回退
+   * 直下 url/file(扩展名保留,能否播看浏览器)。产出 .mp3 → 渲染端
+   * inferMediaKind 判 audio → MediaFrame VoiceBubble 播放 */
+  async function downloadVoice(voice: NapcatVoice): Promise<string | null> {
+    try {
+      await fs.mkdir(mediaDir(), { recursive: true })
+      let localPath = ''
+      const ref = voice.file || voice.url || ''
+      if (ref) {
+        try {
+          const res = await callAction<{ data?: { file?: string } }>('get_record', {
+            file: ref,
+            out_format: 'mp3',
+          }, FILE_UPLOAD_TIMEOUT_MS) as { status?: string; retcode?: number; data?: { file?: string } }
+          const p = res?.data?.file
+          if (p && existsSync(p)) localPath = p
+        } catch {
+          // get_record 失败走直下兜底
+        }
+      }
+      if (!localPath && voice.file && existsSync(voice.file)) localPath = voice.file
+      if (!localPath && voice.url) {
+        try {
+          const controller = new AbortController()
+          const timer = setTimeout(() => controller.abort(), IMAGE_DOWNLOAD_TIMEOUT_MS)
+          const resp = await fetch(voice.url, { signal: controller.signal })
+          clearTimeout(timer)
+          if (resp.ok) {
+            const buf = Buffer.from(await resp.arrayBuffer())
+            if (buf.length > MAX_IMAGE_SIZE) {
+              reportError(`语音过大(${Math.round(buf.length / 1024 / 1024)}MB>20MB),跳过下载`)
+              return null
+            }
+            const ct = String(resp.headers.get('content-type') ?? '')
+            const ext = /audio\/(mp[eE]g|mp3|mpeg|wav|x-wav)/.exec(ct)?.[1]?.replace(/mp[eE]g|mpeg/i, 'mp3').replace(/wav|x-wav/i, 'wav') ?? 'mp3'
+            localPath = path.join(mediaDir(), `${Date.now()}-${randomInt(1 << 24).toString(36)}.${ext}`)
+            await fs.writeFile(localPath, buf)
+            return localPath
+          }
+        } catch (e) {
+          reportError(`语音下载失败:${(e as Error).message}`)
+          return null
+        }
+      }
+      if (!localPath) return null
+      const ext = path.extname(localPath) || '.mp3'
+      const dest = path.join(mediaDir(), `${Date.now()}-${randomInt(1 << 24).toString(36)}${ext}`)
+      await fs.copyFile(localPath, dest)
+      return dest
+    } catch (e) {
+      reportError(`语音处理失败:${(e as Error).message}`)
+      return null
+    }
+  }
+
   function prepareOutgoingText(text: string, isMaster: boolean): string {
     let t = text
     if (!isMaster) {
@@ -667,6 +734,15 @@ export function createNapcatClient(deps: NapcatDeps): NapcatClient {
       const out: string[] = []
       for (const img of images) {
         const p = await downloadImage(img)
+        if (p) out.push(p)
+      }
+      return out
+    },
+    async downloadVoices(voices?: NapcatVoice[]): Promise<string[]> {
+      if (!voices || voices.length === 0) return []
+      const out: string[] = []
+      for (const v of voices) {
+        const p = await downloadVoice(v)
         if (p) out.push(p)
       }
       return out
@@ -697,13 +773,14 @@ export function createNapcatClient(deps: NapcatDeps): NapcatClient {
       try { ws?.close() } catch { /* 已关闭 */ }
       ws = null
     },
-    async sendToQQ(qq: string, text: string, opts?: { image?: string; file?: string }): Promise<string> {
+    async sendToQQ(qq: string, text: string, opts?: { image?: string; file?: string; voice?: string }): Promise<string> {
       const isMaster = qq === masterQQ()
       const cleaned = prepareOutgoingText(text, isMaster)
       const paramImage = typeof opts?.image === 'string' && opts.image.trim() ? opts.image.trim() : ''
       const file = typeof opts?.file === 'string' && opts.file.trim() ? opts.file.trim() : ''
+      const voice = typeof opts?.voice === 'string' && opts.voice.trim() ? opts.voice.trim() : ''
       const { text: cleanText, images: refImages } = extractImageRefs(cleaned)
-      if (!cleanText.trim() && refImages.length === 0 && !paramImage && !file) return ''
+      if (!cleanText.trim() && refImages.length === 0 && !paramImage && !file && !voice) return ''
       if (file) {
         if (!existsSync(file)) throw new Error(`文件不存在:${file}(send 的 file 需要本地绝对路径)`)
         try {
@@ -729,15 +806,13 @@ export function createNapcatClient(deps: NapcatDeps): NapcatClient {
         else finalImages.push(p)
       }
       const finalText = [cleanText, ...backToText].join(' ').trim()
+      // 语音条校验(2026-09-22):record 段走消息本体(非文件柜),本地路径须存在
+      if (voice && !/^https?:|^base64:|^data:audio\//.test(voice) && !existsSync(voice)) {
+        throw new Error(`语音文件不存在:${voice}(voice 需要本地绝对路径或 http(s)/base64/data:audio 链接)`)
+      }
       // 发送频率限制检查(2026-08-14 防刷屏;等待重试,见 waitSendSlot)
       await waitSendSlot(`private:${qq}`)
-      let message: unknown = finalText
-      if (finalImages.length > 0) {
-        const segs: unknown[] = []
-        if (finalText) segs.push({ type: 'text', data: { text: finalText } })
-        for (const img of finalImages) segs.push({ type: 'image', data: { file: img } })
-        message = segs
-      }
+      const message: unknown = buildOutgoingMessage(finalText, finalImages, voice)
       try {
         const res = await callAction<{ status?: string; data?: { message_id?: number } }>('send_private_msg', {
           user_id: qq, message,
@@ -745,9 +820,9 @@ export function createNapcatClient(deps: NapcatDeps): NapcatClient {
         if (res?.status !== 'ok' && res?.retcode !== 0) throw new Error(`QQ 发送失败(${res?.retcode ?? '未知'})`)
         recordSend(`private:${qq}`)
         const id = String(res?.data?.message_id ?? '')
-        recordSent({ messageId: id, type: 'private', target: qq, text: finalText.slice(0, 100) || '(图片/文件)' })
+        recordSent({ messageId: id, type: 'private', target: qq, text: finalText.slice(0, 100) || '(图片/文件/语音)' })
         repliedCount++
-        deps.onSent?.({ type: 'private', target: qq, text: finalText, images: finalImages })
+        deps.onSent?.({ type: 'private', target: qq, text: finalText, images: finalImages, voice: voice || undefined })
         return id
       } catch (e) {
         reportError(`私聊消息发送失败(QQ ${qq}):${(e as Error).message}`)
@@ -780,12 +855,13 @@ export function createNapcatClient(deps: NapcatDeps): NapcatClient {
       await saveNapcatContacts(contacts)
       return next
     },
-    async sendToGroup(groupId: string, text: string, filePath?: string, image?: string): Promise<string> {
+    async sendToGroup(groupId: string, text: string, opts?: { file?: string; image?: string; voice?: string }): Promise<string> {
       const cleaned = prepareOutgoingText(text, false)
-      const paramImage = typeof image === 'string' && image.trim() ? image.trim() : ''
-      const file = typeof filePath === 'string' && filePath.trim() ? filePath.trim() : ''
+      const paramImage = typeof opts?.image === 'string' && opts.image.trim() ? opts.image.trim() : ''
+      const file = typeof opts?.file === 'string' && opts.file.trim() ? opts.file.trim() : ''
+      const voice = typeof opts?.voice === 'string' && opts.voice.trim() ? opts.voice.trim() : ''
       const { text: cleanText, images: refImages } = extractImageRefs(cleaned)
-      if (!cleanText.trim() && refImages.length === 0 && !file && !paramImage) return ''
+      if (!cleanText.trim() && refImages.length === 0 && !file && !paramImage && !voice) return ''
       if (file) {
         if (!existsSync(file)) throw new Error(`文件不存在:${file}(send_group 的 file 需要本地绝对路径)`)
         try {
@@ -811,18 +887,16 @@ export function createNapcatClient(deps: NapcatDeps): NapcatClient {
         else finalImages.push(p)
       }
       const finalText = [cleanText, ...backToText].join(' ').trim()
+      // 语音条校验(同 sendToQQ):record 段走消息本体
+      if (voice && !/^https?:|^base64:|^data:audio\//.test(voice) && !existsSync(voice)) {
+        throw new Error(`语音文件不存在:${voice}(voice 需要本地绝对路径或 http(s)/base64/data:audio 链接)`)
+      }
       // 发送频率限制检查(2026-08-14 防刷屏;等待重试,见 waitSendSlot)
       const rateKey = `group:${groupId}`
       await waitSendSlot(rateKey)
-      let message: unknown = finalText
-      if (finalImages.length > 0) {
-        const segs: unknown[] = []
-        if (finalText) segs.push({ type: 'text', data: { text: finalText } })
-        for (const img of finalImages) segs.push({ type: 'image', data: { file: img } })
-        message = segs
-      }
+      const message: unknown = buildOutgoingMessage(finalText, finalImages, voice)
       let messageId = ''
-      if (finalText.trim() || finalImages.length > 0) {
+      if (finalText.trim() || finalImages.length > 0 || voice) {
         try {
           const res = await callAction<{ status?: string; data?: { message_id?: number } }>('send_group_msg', {
             group_id: groupId, message,
@@ -835,8 +909,8 @@ export function createNapcatClient(deps: NapcatDeps): NapcatClient {
           throw e
         }
       }
-      recordSent({ messageId, type: 'group', target: groupId, text: finalText.slice(0, 100) || '(图片/文件)' })
-      deps.onSent?.({ type: 'group', target: groupId, text: finalText, images: finalImages })
+      recordSent({ messageId, type: 'group', target: groupId, text: finalText.slice(0, 100) || '(图片/文件/语音)' })
+      deps.onSent?.({ type: 'group', target: groupId, text: finalText, images: finalImages, voice: voice || undefined })
       // 发到某群 = 正在对话,必须能收到回复(2026-09-03:白名单过滤会把
       // 未 watch 的群消息整段丢掉,LLM send_group 后以为群里没人回)
       extraListenGroups.add(groupId)

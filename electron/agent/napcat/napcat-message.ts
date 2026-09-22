@@ -54,6 +54,9 @@ export interface NapcatMessage {
   time: number
   replied?: boolean
   images?: NapcatImage[]
+  /** 语音段(2026-09-22 收语音链路:get_record 转 mp3 后作 audio media
+   * part,气泡 VoiceBubble 可播放,不再只显示 [语音] 占位) */
+  voices?: NapcatVoice[]
   /** 群号(有值 = 群消息,无值 = 私聊) */
   groupId?: string
 }
@@ -67,10 +70,17 @@ export interface NapcatGroupMessage {
   messageId: string
   time: number
   images?: NapcatImage[]
+  voices?: NapcatVoice[]
 }
 
 /** 消息中的图片段 */
 export interface NapcatImage {
+  file?: string
+  url?: string
+}
+
+/** 消息中的语音段(record;file = 文件标识/路径,url = 直链) */
+export interface NapcatVoice {
   file?: string
   url?: string
 }
@@ -91,6 +101,22 @@ export function napcatMessageImages(msg: unknown): NapcatImage[] {
   for (const seg of msg) {
     const s = seg as { type?: string; data?: Record<string, unknown> }
     if (s?.type === 'image') {
+      out.push({
+        file: s.data?.file !== undefined ? String(s.data.file) : undefined,
+        url: s.data?.url !== undefined ? String(s.data.url) : undefined,
+      })
+    }
+  }
+  return out
+}
+
+/** 提取消息中的语音段(record,2026-09-22 收语音链路;与图片提取同构) */
+export function napcatMessageVoices(msg: unknown): NapcatVoice[] {
+  if (!Array.isArray(msg)) return []
+  const out: NapcatVoice[] = []
+  for (const seg of msg) {
+    const s = seg as { type?: string; data?: Record<string, unknown> }
+    if (s?.type === 'record') {
       out.push({
         file: s.data?.file !== undefined ? String(s.data.file) : undefined,
         url: s.data?.url !== undefined ? String(s.data.url) : undefined,

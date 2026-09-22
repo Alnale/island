@@ -17,7 +17,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { MASTER_WINDOW_MARK, tagMasterWindowText } from '../../electron/agent/constants'
-import { hasMasterTurnMark, hasTurnMark, isEmptyNapcatDisplayText, stripNapcatHistoryInstructions, stripTurnMarks } from '../agent/text'
+import { isEmptyNapcatDisplayText, stripNapcatHistoryInstructions, stripTurnMarks } from '../agent/text'
 import type {
   AgentConfig,
   AgentEvent,
@@ -40,7 +40,7 @@ function truncateCodepoints(value: string | null | undefined, max: number): stri
 function inferMediaKind(p: string): 'img' | 'video' | 'audio' {
   const ext = p.split('.').pop()?.toLowerCase() ?? ''
   if (['mp4', 'webm', 'mov', 'mkv', 'avi', 'flv', 'm4v', 'ts', 'mpeg', 'mpg'].includes(ext)) return 'video'
-  if (['mp3', 'wav', 'flac', 'aac', 'ogg', 'm4a', 'opus', 'wma'].includes(ext)) return 'audio'
+  if (['mp3', 'wav', 'flac', 'aac', 'ogg', 'm4a', 'opus', 'wma', 'amr', 'silk'].includes(ext)) return 'audio'
   return 'img'
 }
 
@@ -262,7 +262,7 @@ export interface AgentController {
    * 对应会话要有相关消息"):发送成功的正文/图片注入本会话窗口作
    * 助手消息(与引擎 message 事件同文本去重,防同一回复显示两次;
    * 回显带 sentToPeer 指纹风格) */
-  ingestSentMessage(msg: { text?: string; images?: string[] }): void
+  ingestSentMessage(msg: { text?: string; images?: string[]; voice?: string }): void
   /** 仅显示注入(2026-08-14 ask 自动建会话):陌生人消息只作 user 消息
    * 显示在本会话窗口,不触发引擎(ask 流由当前活跃实例处理) */
   ingestDisplayUserMessage(msg: { text?: string; profileCard?: string }): void
@@ -462,22 +462,12 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
           // 2026-08-10 自动播放:落定的消息 id 入"可自动播放"集合——
           // 本轮渲染时首条媒体附件自动播放;消费后移除(见 consumeMediaAutoPlay)
           mediaAutoPlayRef.current.add(event.message.id)
-          // **轮次标记剥离(2026-08-13 指纹协议)**:【回复对方】/【指纹:xx】
-          // 前缀是给主进程路由层验证用的——进历史/显示前剥掉,残留旧指纹
-          // 会被下一轮 LLM 从上下文"抄"到,指纹验证对不上 = 回复发不出去
-          // **剥离前检测(2026-08-14 指纹 UI;2026-08-15 双指纹扩展)**:
-          // 首段命中他人指纹【指纹:xx】= 路由发给对方的话 → sentToPeer;
-          // 命中主人指纹【主人指纹:xx】= 路由发回主人 → sentToMaster——
-          // 气泡分别挂"发给对方"/"发给主人"标签区分(指纹剥掉后信息
-          // 就丢了,必须先检测;开头标记唯一,两标记互斥)
-          const firstTextPart = event.message.parts.find(
-            (p): p is Extract<AgentPart, { type: 'text' }> => p.type === 'text',
-          )
-          const sentToPeer = firstTextPart ? hasTurnMark(firstTextPart.text) : false
-          const sentToMaster = firstTextPart ? hasMasterTurnMark(firstTextPart.text) : false
-          // 2026-08-17:message-routed 补标时序兜底——判定器路由异步,补标
-          // 事件可能先于本消息落定到达;应用缓存的 routed 标记(权威来源优先,
-          // 未命中文本指纹检测时兜底)
+          // **残留轮次标记剥离(2026-09-22 归属指纹)**:旧双指纹文本协议已
+          // 退役,但历史里可能残留【指纹:xxx】/【主人指纹:xxx】(LLM 会从
+          // 上下文"抄")——进历史/显示前剥掉(发送边界另有剥除,标记不参与
+          // 路由)。**路由标签(发给对方/发给主人)不再从文本嗅探**,由
+          // message-routed 事件按实际送达目的地补标(程序侧权威)
+          // 2026-08-17 时序兜底:补标事件可能先于本消息落定到达,应用缓存
           const cachedRouted = pendingRoutedRef.current.get(event.message.id)
           if (cachedRouted) pendingRoutedRef.current.delete(event.message.id)
           const landed: AgentMessage = {
@@ -487,8 +477,8 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
             ),
             usage: event.usage,
             sentToPeer:
-              (sentToPeer || cachedRouted === 'peer' || cachedRouted === 'group') || undefined,
-            sentToMaster: (sentToMaster || cachedRouted === 'master') || undefined,
+              (cachedRouted === 'peer' || cachedRouted === 'group') || undefined,
+            sentToMaster: (cachedRouted === 'master') || undefined,
           }
           setMessages((prev) => {
             // **回显对称去重(2026-08-14)**:session-activity 回显可能先于
@@ -948,7 +938,7 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
   }, [config?.proactiveEnabled, config?.proactiveInterval, config?.proactiveIntervalUnit, opts?.allowProactive, myKey])
 
   const send = useCallback(
-    async (text: string, opts?: { silent?: boolean; source?: 'qq' | 'group' | 'ask'; target?: string; media?: string[]; paths?: string[]; profileCard?: string }) => {
+    async (text: string, opts?: { silent?: boolean; source?: 'qq' | 'group' | 'ask'; target?: string; media?: string[]; paths?: string[]; profileCard?: string; owner?: 'master' | 'peer' }) => {
     const trimmed = text.trim()
     // 2026-08-17 拖拽上传:无文字也可发送(纯附件上传——附件路径标注
     // 就是本轮输入;空文本 + 无附件才拦截)
@@ -1087,6 +1077,9 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
       routed ? opts?.target : undefined,
       myKey,
       getSessionNote(myKey) || undefined,
+      // 消息归属(2026-09-22 归属指纹,规则①②③):窗口输入 = master;
+      // QQ 来源按 payload 的 owner(入口判定);缺省让主进程按来源推
+      opts?.owner ?? (!routed ? 'master' : undefined),
     )
   },
     [myKey],
@@ -1102,7 +1095,7 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
   //   先问主人】"前缀,本侧**不带 source**——LLM 先询问主人,主人
   //   指示后的回复由主进程 pendingQQReply 链路发回;
   // - 群接话 = 带 source='group'(回复发回群)
-  const napcatQueueRef = useRef<Array<{ text: string; source?: 'qq' | 'group' | 'ask'; target?: string; media?: string[]; profileCard?: string }>>([])
+  const napcatQueueRef = useRef<Array<{ text: string; source?: 'qq' | 'group' | 'ask'; target?: string; media?: string[]; profileCard?: string; owner?: 'master' | 'peer' }>>([])
   const MAX_NAPCAT_QUEUE = 50 // 队列最大长度(防LLM长时间busy时消息无限堆积)
   // 系统通知队列(2026-08-13:background-done busy 时入队,idle 后逐条
   // 补发——防"下载太快通知被吞")
@@ -1150,7 +1143,7 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
   // 私聊消息处理(订阅与父级补投共用,2026-08-13 三轮:首条消息到达时
   // 外部会话实例可能尚未挂载,父级暂存后经 ingestNapcatMessage 补投)
   const processNapcatMessage = useCallback(
-    (msg: { text?: string; qq?: string; trusted?: boolean; media?: string[]; profileCard?: string; muted?: boolean; sessionKey?: string; messageId?: string }) => {
+    (msg: { text?: string; qq?: string; trusted?: boolean; media?: string[]; profileCard?: string; muted?: boolean; sessionKey?: string; messageId?: string; owner?: 'master' | 'peer' }) => {
       if (!msg || typeof msg.text !== 'string') return
       if ((!msg.media || msg.media.length === 0) && isEmptyNapcatDisplayText(msg.text)) return
       // 双通道去重(2026-08-13):实例订阅 + 父级 ingest 会各送一次;
@@ -1179,17 +1172,17 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
       }
       if (statusRef.current === 'thinking' || statusRef.current === 'running') {
         const queue = napcatQueueRef.current
-        queue.push({ text: msg.text, source: msg.trusted === false ? 'ask' : 'qq', target: msg.qq, media: msg.media, profileCard: msg.profileCard })
+        queue.push({ text: msg.text, source: msg.trusted === false ? 'ask' : 'qq', target: msg.qq, media: msg.media, profileCard: msg.profileCard, owner: msg.owner })
         // 队列溢出保护:超过最大长度时丢弃最旧的消息
         if (queue.length > MAX_NAPCAT_QUEUE) queue.shift()
         return
       }
-      send(msg.text, { source: msg.trusted === false ? 'ask' : 'qq', target: msg.qq, media: msg.media, profileCard: msg.profileCard })
+      send(msg.text, { source: msg.trusted === false ? 'ask' : 'qq', target: msg.qq, media: msg.media, profileCard: msg.profileCard, owner: msg.owner })
     },
     [send, myKey, dedupNapcatMsg],
   )
   const processNapcatGroupMessage = useCallback(
-    (msg: { text?: string; qq?: string; groupId?: string; media?: string[]; profileCard?: string; muted?: boolean; sessionKey?: string; messageId?: string }) => {
+    (msg: { text?: string; qq?: string; groupId?: string; media?: string[]; profileCard?: string; muted?: boolean; sessionKey?: string; messageId?: string; owner?: 'master' | 'peer' }) => {
       if (!msg || typeof msg.text !== 'string') return
       if ((!msg.media || msg.media.length === 0) && isEmptyNapcatDisplayText(msg.text)) return
       // 双通道去重(2026-08-13):实例订阅 + 父级 ingest 会各送一次;
@@ -1207,12 +1200,12 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
       }
       if (statusRef.current === 'thinking' || statusRef.current === 'running') {
         const queue = napcatQueueRef.current
-        queue.push({ text: msg.text, source: 'group', target: msg.groupId, media: msg.media, profileCard: msg.profileCard })
+        queue.push({ text: msg.text, source: 'group', target: msg.groupId, media: msg.media, profileCard: msg.profileCard, owner: msg.owner })
         // 队列溢出保护:超过最大长度时丢弃最旧的消息
         if (queue.length > MAX_NAPCAT_QUEUE) queue.shift()
         return
       }
-      send(msg.text, { source: 'group', target: msg.groupId, media: msg.media, profileCard: msg.profileCard })
+      send(msg.text, { source: 'group', target: msg.groupId, media: msg.media, profileCard: msg.profileCard, owner: msg.owner })
     },
     [send, myKey, dedupNapcatMsg],
   )
@@ -1222,15 +1215,19 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
   // 去重:外部会话面板输入 → 引擎回复 → sendToQQ 路由与引擎 message
   // 事件是同一条回复——末尾已有同文本助手消息则跳过(两者经不同 IPC
   // 竞态到达,消息事件通常先到;向后看 2 条防竞态)
-  const ingestSentMessage = useCallback((msg: { text?: string; images?: string[] }) => {
+  const ingestSentMessage = useCallback((msg: { text?: string; images?: string[]; voice?: string }) => {
     const text = (msg?.text ?? '').trim()
     const images = Array.isArray(msg?.images)
       ? msg.images.filter((p): p is string => typeof p === 'string' && p.trim().length > 0)
       : []
-    if (!text && images.length === 0) return
+    // 发送的语音(2026-09-22 发语音链路):session-activity 带 voice 路径
+    // → audio media part,气泡 VoiceBubble 可播放
+    const voice = typeof msg?.voice === 'string' && msg.voice.trim() ? msg.voice.trim() : ''
+    if (!text && images.length === 0 && !voice) return
     const parts: AgentPart[] = []
     if (text) parts.push({ type: 'text', text })
     for (const url of images) parts.push({ type: 'media', kind: 'img', url, name: '发送的图片' })
+    if (voice) parts.push({ type: 'media', kind: 'audio', url: voice, name: '语音' })
     setMessages((prev) => {
       if (text) {
         const tail = prev.slice(-2)
@@ -1291,7 +1288,7 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
     if (status !== 'idle') return
     const napcat = napcatQueueRef.current.shift()
     if (napcat) {
-      send(napcat.text, napcat.source && napcat.target ? { source: napcat.source, target: napcat.target, media: napcat.media, profileCard: napcat.profileCard } : { media: napcat.media, profileCard: napcat.profileCard })
+      send(napcat.text, napcat.source && napcat.target ? { source: napcat.source, target: napcat.target, media: napcat.media, profileCard: napcat.profileCard, owner: napcat.owner } : { media: napcat.media, profileCard: napcat.profileCard })
       return
     }
     const silent = silentQueueRef.current.shift()

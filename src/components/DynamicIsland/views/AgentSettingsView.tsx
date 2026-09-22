@@ -1524,9 +1524,9 @@ export function AgentSettingsView({
                   : protocol === '智谱 GLM 云端'
                     ? '智谱 GLM 云端协议:官方 Chat Completions 端点(默认 glm-4.7-flash;旗舰 glm-5.2 / glm-4.7 可手填),支持工具调用/深度思考'
                     : protocol === 'MiMo Chat'
-                      ? 'MiMo Chat 协议:小米 MiMo 官方 Chat Completions 端点,模型 mimo-v2.5-pro(推荐)或 mimo-v2.5'
+                      ? 'MiMo Chat 协议:官方 Chat Completions 兼容端点(显式 chat 地址;推荐 Responses 协议),模型 mimo-v2.6 系,深度思考/工具调用/多模态'
                       : protocol === 'MiMo Responses'
-                        ? 'MiMo Responses 协议(推荐):小米 MiMo 官方 Responses API 端点,模型 mimo-v2.5-pro,支持深度思考/联网搜索/多模态'
+                        ? 'MiMo Responses 协议(优先):小米 MiMo 官方 Responses API 端点,深度思考/工具调用/多模态原生(音频·视频·图片理解,附件直接进 input)'
                         : protocol === 'DeepSeek Chat'
                           ? 'DeepSeek Chat 协议:地址含 chat 自动切换'
                           : 'DeepSeek Responses 协议(默认):DeepSeek 官方端点,模型 deepseek-v4-flash'}
@@ -1585,7 +1585,9 @@ export function AgentSettingsView({
                     ? '从下方「模型挂载管理」选用,或手填已加载模型 key'
                     : isGlm
                       ? 'glm-5.2(旗舰)/ glm-4.7 / glm-4.7-flash(默认)/ glm-4.6 …'
-                      : ''
+                      : isMimo
+                        ? 'mimo-v2.6-pro(默认)/ mimo-v2.6-flash / mimo-v2.6-pro-ultraspeed / mimo-v2.5 …'
+                        : ''
                 }
                 spellCheck={false}
                 onChange={(event) => patchActiveCred({ model: event.target.value })}

@@ -97,29 +97,52 @@ export function createBuiltinTools(
     updateAgentConfig?(patch: Partial<AgentConfig>): void
   },
 ): AgentTool[] {
-  /** 记忆自我进化工具 */
+  /** 记忆自我进化工具(2026-09-22 快捷化:action=quick 同步单轮当轮报结果) */
   const evolveTool: AgentTool = {
     name: 'evolve_memory',
     description:
-      '触发记忆系统的版本化自我进化(后台,多轮候选循环):每轮 评估记忆质量 → 生成带假说的改进 → ' +
-      '复评 → 只接受评分严格更高的候选(接受 = 新版本存档,拒绝 = 恢复原版本),最多 rounds 轮,达标提前停。' +
-      '适合:用户说"整理一下记忆""进化一下"、或对话沉淀多后主动触发。完成后有系统通知。',
+      '运行记忆系统的版本化自我进化(2026-09-22 起支持**快捷自我进化**):每轮 评估记忆质量 → 生成带假说的改进 → ' +
+      '复评 → 只接受评分严格更高的候选(接受 = 新版本存档,拒绝 = 恢复原版本)。' +
+      'action=quick(缺省)= **快捷单轮,同步等待完成,进化结果直接返回**——用户说"进化一下""整理/去重记忆""运行记忆进化"就用它,' +
+      '把返回的摘要如实转述即可;action=run = 后台多轮深度整理(记忆条目多/很乱时用,完成有系统通知);' +
+      'action=status = 查询进化状态与最近结果。受保护条目(人设)进化永不改动,放心运行。',
+    // quick 同步轮含评审+复评各最多 2 次 LLM 调用(评估超时随条目数放大,
+    // 单次上限 180s)——工具兜底超时须盖过最坏链路
+    timeoutMs: 600_000,
     parameters: {
       type: 'object',
       properties: {
+        action: {
+          type: 'string',
+          enum: ['quick', 'run', 'status'],
+          description: 'quick = 快捷单轮同步进化(缺省);run = 后台多轮;status = 查询状态',
+        },
         focus: { type: 'string', description: '可选:本次进化的关注点(如"去重""补充偏好")' },
-        rounds: { type: 'number', description: '候选轮数,缺省 2,最大 6(记忆条目多时会按需自动放大,约每 15 条一轮)' },
+        rounds: { type: 'number', description: 'action=run 的候选轮数,缺省 2,最大 6(条目多时按需自动放大,约每 15 条一轮)' },
       },
     },
     async execute(params: ToolParams) {
       const evolution = deps.getEvolution?.() ?? null
       if (!evolution) throw new Error('自我进化不可用(未启用)')
-      return (
-        await evolution.requestEvolve(
-          params.focus ? String(params.focus) : undefined,
-          params.rounds ? Number(params.rounds) : undefined,
-        )
-      ).message
+      const action = String(params.action ?? 'quick') || 'quick'
+      const focus = params.focus ? String(params.focus) : undefined
+      if (action === 'status') {
+        const s = await evolution.getStatus()
+        return s || '(暂无进化记录——可 action=quick 立即运行一次快捷记忆进化)'
+      }
+      if (action === 'run') {
+        return (
+          await evolution.requestEvolve(focus, params.rounds ? Number(params.rounds) : undefined)
+        ).message
+      }
+      if (action === 'quick') {
+        // runQuick 为 2026-09-22 新接口;旧宿主 stub 未注入时回退后台 run
+        if (evolution.runQuick) return (await evolution.runQuick(focus)).message
+        return (
+          await evolution.requestEvolve(focus, 1)
+        ).message
+      }
+      throw new Error(`未知 action:${action}(仅支持 quick/run/status)`)
     },
   }
 

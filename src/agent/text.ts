@@ -6,12 +6,18 @@
 
 import type { AgentMessage, AgentPart } from './types'
 
-/** parts 的纯文本内容(跳过 reasoning/工具调用/结果);无文本返回空串 */
+/**
+ * parts 的纯文本内容(跳过 reasoning/工具调用/结果);无文本返回空串。
+ * 歌曲卡片(2026-09-22)折一行 `🎵《歌名》- 歌手` 进文本——复制/预览/
+ * 紧凑态文字区都能看到放了什么歌,不依赖 LLM 复述。
+ */
 export function textFromParts(parts: AgentPart[], separator = '\n'): string {
-  return parts
-    .filter((p): p is Extract<AgentPart, { type: 'text' }> => p.type === 'text')
-    .map((p) => p.text)
-    .join(separator)
+  const lines: string[] = []
+  for (const p of parts) {
+    if (p.type === 'text') lines.push(p.text)
+    else if (p.type === 'song') lines.push(`🎵《${p.title}》${p.artist ? ` - ${p.artist}` : ''}`)
+  }
+  return lines.join(separator)
 }
 
 /** 消息的纯文本内容(跳过 reasoning/工具调用/结果);无文本返回空串 */
@@ -56,38 +62,15 @@ export function isEmptyNapcatDisplayText(text: string): boolean {
 }
 
 /**
- * 剥离执行回复的轮次标记(2026-08-13 指纹协议):【回复对方】(旧静态
- * 标记,兼容)与【指纹:xxxxxx】(每轮随机指纹)——这两个前缀是给路由层
- * 验证用的(指纹对不上就不发送),**进历史/显示前必须剥掉**:残留的旧
- * 指纹会出现在 LLM 上下文里,下一轮可能被"抄"到过期指纹,指纹验证
- * 对不上 = 回复发不出去(实测);显示层一并使用,气泡不露标记。
- * 2026-08-15 双指纹机制:主人指纹【主人指纹:xxxxxx】同剥(主人 QQ 轮
- * 回复 = 给主人的话带主人指纹,历史/显示同样不能残留——LLM 从上下文
- * "抄"到旧主人指纹,验证对不上 = 回复发不回主人)
+ * 剥离执行回复的轮次标记(2026-09-22 归属指纹:**旧双指纹文本协议已退役**
+ * ——路由由触发来源决定,LLM 不写标记;本函数仅作**历史残留清洗**保留:
+ * 用户历史里可能残留旧版【回复对方】/【指纹:xxx】/【主人指纹:xxx】(LLM
+ * 会从上下文"抄"到输出),进历史/显示前剥掉,气泡不露标记。发送边界
+ * (napcat-client)另有同款剥除——标记物理上到不了任何聊天对象
  */
 export function stripTurnMarks(text: string): string {
   return String(text ?? '')
     .replace(/^\s*/, '')
     .replace(/^【回复对方】\s*/, '')
     .replace(/^【(?:指纹|主人指纹):[2-9A-HJ-NP-Z]{6}】\s*/, '')
-}
-
-/**
- * 文本开头是否命中轮次标记(2026-08-14 指纹 UI):必须在**剥离前**检测——
- * 命中【指纹:xxxx】/【回复对方】= 该回复会被路由层发给 QQ 对方,
- * 显示层据此给消息打 sentToPeer 标记,气泡用"发给对方"风格与普通
- * 回复区分(见 AgentMessages 的 PeerTurnTag)
- */
-export function hasTurnMark(text: string): boolean {
-  return /^\s*(?:【回复对方】|【指纹:[2-9A-HJ-NP-Z]{6}】)/.test(String(text ?? ''))
-}
-
-/**
- * 文本开头是否命中**主人指纹**(2026-08-15 双指纹机制 UI):【主人指纹:xx】
- * = 该回复会路由发回主人 QQ(与【指纹:xx】= 发给对方的双通道并存,开头
- * 标记互斥——一条回复不可能同时命中两者)。显示层据此打 sentToMaster
- * 标记,气泡挂"发给主人"标签与"发给对方"/普通回复区分
- */
-export function hasMasterTurnMark(text: string): boolean {
-  return /^\s*【主人指纹:[2-9A-HJ-NP-Z]{6}】/.test(String(text ?? ''))
 }

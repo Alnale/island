@@ -33,9 +33,9 @@ import { useLeavingList } from '../../../hooks/useLeavingList'
 import { getSessionNote, setSessionNote } from '../../../hooks/useAgent'
 import { QuickMenu } from './QuickMenu'
 import { Markdown, type AgentMediaReport } from './Markdown'
-import { AssistantBlock, MasterTurnTag, PeerTurnTag, ToolSummary, UserBubble } from './AgentMessages'
+import { AssistantBlock, ToolSummary, UserBubble } from './AgentMessages'
 import type { AgentMessage } from '../../../agent/types'
-import { hasMasterTurnMark, hasTurnMark, stripTurnMarks, textFromParts } from '../../../agent/text'
+import { stripTurnMarks, textFromParts } from '../../../agent/text'
 import {
   AGENT_PANEL_FIXED_H,
   AGENT_PANEL_HEIGHT_SLACK,
@@ -1748,9 +1748,10 @@ export function AgentView({
                   只有一行,执行中脉冲/成功失败计数实时更新;展开可
                   看各卡状态,卡片 key 稳定 → open 状态跨事件保留) */}
               {streaming && (streaming.text || streaming.tools.length > 0) && (
-                <div className={`island-agent-msg-assistant${hasTurnMark(streaming.text) ? ' qq-peer' : ''}`}>
-                  {hasTurnMark(streaming.text) && <PeerTurnTag />}
-                  {hasMasterTurnMark(streaming.text) && <MasterTurnTag />}
+                <div className="island-agent-msg-assistant">
+                  {/* 路由标签(发给对方/发给主人)由 message-routed 事件在
+                      落定后补标(2026-09-22 归属指纹:文本标记协议退役,
+                      流式期间不再从文本嗅探标签) */}
                   {streaming.text && (
                     <div className="island-agent-text">
                       {/* 流式前缀可能先到指纹标记(未凑齐时 strip 不命中,

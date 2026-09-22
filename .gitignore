@@ -54,6 +54,16 @@ tools/bili/config/login-qrcode.png
 # bili-tool 登录态与本地配置(含敏感 cookie,严禁入库)
 tools/bili/config/
 
-# NapCat ��¼��ά��(��ʱ�����ļ�,��ֹ���)
+# NapCat ��¼��ά��(��ʱ�����ļ�,��ֹ���)
 *login-qrcode*
 
+
+# QR 对拍临时构建产物(qr-crosscheck.mjs 生成,自清理)
+tests/.qr-bundle.cjs
+
+# 米家实探脚本产物(test-mijia-home-live.cjs 生成;log 含设备信息,不入库)
+tests/.mijia-probe-bundle.cjs
+tests/mijia-home-live.log
+
+# NapCat 登录窗预览截图(登录调试产物,含二维码画面,不入库)
+tests/napcat-login-preview.png

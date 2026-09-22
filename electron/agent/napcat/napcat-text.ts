@@ -91,6 +91,31 @@ export function extractImageRefs(text: string): { text: string; images: string[]
   return { text: cleaned.replace(/\(\)|（）|\[]|【】/g, '').replace(/\s+/g, ' ').trim(), images }
 }
 
+// ---- 出站消息段组装(纯函数;2026-09-22 加 record 语音段) ----
+export interface OutgoingSeg {
+  type: string
+  data: Record<string, unknown>
+}
+
+/**
+ * 组装 OneBot 11 出站消息:纯文本 → 字符串;含图/语音 → 段数组
+ * (text 段在前 → image 段 → record 段;record.data.file = 路径/URL/base64,
+ * NapCat 侧自动转 QQ silk 语音编码)。纯函数,单测钉段形状。
+ */
+export function buildOutgoingMessage(
+  text: string,
+  images: string[],
+  voice?: string,
+): string | OutgoingSeg[] {
+  const v = typeof voice === 'string' && voice.trim() ? voice.trim() : ''
+  if (images.length === 0 && !v) return text
+  const segs: OutgoingSeg[] = []
+  if (text) segs.push({ type: 'text', data: { text } })
+  for (const img of images) segs.push({ type: 'image', data: { file: img } })
+  if (v) segs.push({ type: 'record', data: { file: v } })
+  return segs
+}
+
 /** 内部独白/思维链泄漏**疑似**粗筛(2026-08-17):只返回是否疑似,**
  * 不删除任何内容**——真正判定交给 main.cjs 的审核 Sub Agent
  * (ReplyIntentClassifier.judgeMonologue,见 subagents.ts)。正则宽召回

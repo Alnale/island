@@ -6,7 +6,7 @@
  */
 
 import { spawn } from 'node:child_process'
-import { mkdirSync, promises as fs } from 'node:fs'
+import { mkdirSync, promises as fs, readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { shell } from 'electron'
 import { showNotify } from '../notify'
@@ -40,6 +40,277 @@ try {
   mkdirSync(BILI_CWD, { recursive: true })
 } catch {
   // 目录创建失败不致命:后续 spawn 会给出真实错误
+}
+
+// ---------------------------------------------------------------------------
+// 登录态整合(2026-09-22 用户反馈"明明登录了,查询收藏夹又说没有登录信息")
+//
+// 根因三处,统一到本层:
+// ① **凭据位置分裂**:挂件内 login 写 userData/bili/config/cookies.json
+//    (BILI_BASE_DIR);双击 exe 的 WebUI / qr-login-helper.py 写 **exe 旁
+//    config/cookies.json**——挂件看不见,"明明登录了"却处处未登录;
+// ② **判定各自为政**:fav 用 whoami 人话正则 `UID\s+(\d+)`(cookie 缺
+//    DedeUserID 时 Rust 输出"已登录 (UID )",正则失败被误报"可能未登录")、
+//    download 用 `includes('已登录')`、Rust is_logged_in 只查文件有无
+//    SESSDATA(**不验有效期**——过期后仍报已登录,API 调用被拒);
+// ③ **过期无感知**:SESSDATA 失效后所有提示都含糊("可能未登录")。
+//
+// 整合:BILI_COOKIE_FILE 单一来源(遗留位置自动收编/退出一并清除)+
+// nav 实时探针(isLogin/mid/uname,不解析 whoami 人话)区分 未登录/
+// 已过期/缺 UID,全部 action 共用 biliLoginState() 与统一话术。
+// ---------------------------------------------------------------------------
+
+/** 登录凭据唯一权威位置(bili-tool 在 BILI_ENV 下读写的同一文件) */
+export const BILI_COOKIE_FILE = path.join(BILI_CWD, 'config', 'cookies.json')
+
+/**
+ * 历史遗留凭据位置:exe 旁 config/(双击 exe 的 WebUI 登录 /
+ * qr-login-helper.py 默认输出目录)与 BILI_CWD 根(早期实验)。
+ * 规范位缺 SESSDATA 时自动收编(importBiliCookies)
+ */
+export const BILI_LEGACY_COOKIE_FILES = [
+  path.join(path.dirname(BILI_BIN), 'config', 'cookies.json'),
+  path.join(BILI_CWD, 'cookies.json'),
+]
+
+/** cookie 文件解析结果(bili-tool / qr-helper 同款扁平 map 格式) */
+export interface BiliCookieInfo {
+  hasSessdata: boolean
+  /** DedeUserID(qr-helper/旧版可能缺失) */
+  uid: string
+  /** _saved_at 秒级时间戳(qr-helper 旧格式无此字段 → 0) */
+  savedAt: number
+}
+
+/**
+ * cookie 键名规范大小写(2026-09-22 实测**真根因**):登录链路
+ * (login.rs crossDomain 合并 / serve.rs WebUI)把 Set-Cookie 键
+ * `to_uppercase` 后落盘——文件里是 `DEDEUSERID`/`BILI_JCT`,而 bili-tool
+ * 读取端按**精确键名**找 `DedeUserID`/`bili_jct`(login_info/auth_cookie):
+ * 全部 miss → whoami 输出"已登录 (UID )"、API 请求缺身份/CSRF 字段。
+ * 整合:落盘前把这三个键规范成读取端认的大小写(其余键原样保留)。
+ */
+const CANONICAL_COOKIE_KEYS = new Map([
+  ['sessdata', 'SESSDATA'],
+  ['bili_jct', 'bili_jct'],
+  ['dedeuserid', 'DedeUserID'],
+  ['dedeuserid__ckmd5', 'DedeUserID__ckMd5'],
+])
+
+/** 键名大小写规范化(纯函数;返回新对象 + 是否有变化) */
+export function normalizeBiliCookieKeys(obj: Record<string, unknown>): {
+  obj: Record<string, unknown>
+  changed: boolean
+} {
+  const out: Record<string, unknown> = {}
+  let changed = false
+  for (const [k, v] of Object.entries(obj)) {
+    const canon = CANONICAL_COOKIE_KEYS.get(k.toLowerCase())
+    const key = canon ?? k
+    if (key !== k) changed = true
+    // 同名多大小写变体并存时规范键优先(先到先得,规范化后不再新增变体)
+    if (out[key] === undefined) out[key] = v
+    else changed = true
+  }
+  return { obj: out, changed }
+}
+
+/** 解析 cookies.json 文本(纯函数;键名大小写不敏感;非法 JSON → null) */
+export function parseBiliCookies(raw: string): BiliCookieInfo | null {
+  try {
+    const v = JSON.parse(raw) as Record<string, unknown>
+    if (!v || typeof v !== 'object' || Array.isArray(v)) return null
+    const lower = new Map(Object.entries(v).map(([k, val]) => [k.toLowerCase(), val]))
+    const get = (k: string) => {
+      const val = lower.get(k.toLowerCase())
+      return typeof val === 'string' ? val.trim() : ''
+    }
+    const savedAt = lower.get('_saved_at')
+    return {
+      hasSessdata: !!get('SESSDATA'),
+      uid: get('DedeUserID'),
+      savedAt: typeof savedAt === 'number' ? savedAt : 0,
+    }
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 登录凭据整合(同步,幂等):
+ * ① 规范位已有凭据 → **就地规范化键名大小写**(修"已登录 (UID )"根因);
+ * ② 规范位缺失 → 从 legacyPaths 挑**有 SESSDATA 且 _saved_at 最新**的一份
+ *    收编进来(补 _saved_at 兼容 qr-helper 旧格式),同样规范化。
+ * 返回被收编的来源路径(仅迁移时非 null)。
+ */
+export function consolidateBiliCookies(canonicalPath: string, legacyPaths: string[]): string | null {
+  const write = (obj: Record<string, unknown>) => {
+    mkdirSync(path.dirname(canonicalPath), { recursive: true })
+    writeFileSync(canonicalPath, JSON.stringify(obj, null, 2), 'utf8')
+  }
+  const read = (p: string) => {
+    try {
+      const raw = readFileSync(p, 'utf8')
+      const info = parseBiliCookies(raw)
+      return info && info.hasSessdata ? { p, raw, info } : null
+    } catch {
+      return null
+    }
+  }
+  const cur = read(canonicalPath)
+  if (cur) {
+    // ① 就地规范化(幂等:无变化不重写)
+    try {
+      const { obj, changed } = normalizeBiliCookieKeys(JSON.parse(cur.raw) as Record<string, unknown>)
+      if (changed) write(obj)
+    } catch {
+      // 内容异常:保持原样,由 nav 探针/提示语兜底
+    }
+    return null
+  }
+  // ② 遗留收编
+  let best: ReturnType<typeof read> = null
+  for (const p of legacyPaths) {
+    const c = read(p)
+    if (c && (!best || c.info.savedAt > best.info.savedAt)) best = c
+  }
+  if (!best) return null
+  let obj: Record<string, unknown>
+  try {
+    obj = JSON.parse(best.raw) as Record<string, unknown>
+  } catch {
+    return null
+  }
+  if (typeof obj._saved_at !== 'number') obj._saved_at = best.info.savedAt || Math.floor(Date.now() / 1000)
+  try {
+    write(normalizeBiliCookieKeys(obj).obj)
+    return best.p
+  } catch {
+    return null
+  }
+}
+
+// 模块加载即整合一次(键名规范化 + 遗留位置收编;用户此前的凭据立刻可用)
+try {
+  consolidateBiliCookies(BILI_COOKIE_FILE, BILI_LEGACY_COOKIE_FILES)
+} catch {
+  // 整合失败不致命:biliLoginState 每次还会重试
+}
+
+/** nav 探针结果(bilibili x/web-interface/nav) */
+export interface BiliNavProbe {
+  isLogin: boolean
+  /** 登录用户的 UID(权威;未登录为空) */
+  mid: string
+  uname: string
+}
+
+/** 解析 nav 探针响应(纯函数;结构异常 → null = 未验证) */
+export function parseNavProbe(value: unknown): BiliNavProbe | null {
+  const root = (value ?? {}) as Record<string, unknown>
+  const data = root.data as Record<string, unknown> | undefined
+  if (!data || typeof data !== 'object') return null
+  const isLogin = data.isLogin === true
+  const mid =
+    typeof data.mid === 'number' ? String(data.mid) : typeof data.mid === 'string' ? data.mid.trim() : ''
+  const uname = typeof data.uname === 'string' ? data.uname : ''
+  // -101(账号未登录)也带 data 壳 → 明确按未登录
+  if (root.code === -101) return { isLogin: false, mid, uname }
+  return { isLogin, mid, uname }
+}
+
+/** bili-tool/API 输出是否在说"未登录"(统一识别,含全角标点变体) */
+export function biliOutputLooksLoggedOut(text: string): boolean {
+  return /未登录|需要登录|请先(?:运行\s*)?login|请先登录|-101/.test(String(text ?? ''))
+}
+
+/** 统一登录态快照(全部 bili action 共用) */
+export interface BiliLoginState {
+  /** 本地有 SESSDATA 凭据 */
+  credentialed: boolean
+  /** cookie 文件里的 DedeUserID(可能缺) */
+  fileUid: string
+  /** nav 实时验证:true/false;undefined = 网络失败未验证 */
+  live?: boolean
+  /** 权威 UID(nav mid 优先,fileUid 兜底;空 = 无法定位"我的收藏夹") */
+  uid: string
+  uname: string
+  /** 统一提示(未登录/已过期/缺 UID);空 = 正常 */
+  hint: string
+}
+
+/** nav 实时探针(带 SESSDATA 请求;网络失败/解析失败 → null = 未验证) */
+async function navProbe(lower: Map<string, string>): Promise<BiliNavProbe | null> {
+  try {
+    const cookie = [
+      `SESSDATA=${lower.get('sessdata') ?? ''}`,
+      lower.get('bili_jct') ? `bili_jct=${lower.get('bili_jct')}` : '',
+      lower.get('dedeuserid') ? `DedeUserID=${lower.get('dedeuserid')}` : '',
+    ]
+      .filter(Boolean)
+      .join('; ')
+    const res = await fetch('https://api.bilibili.com/x/web-interface/nav', {
+      headers: {
+        Cookie: cookie,
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+        Referer: 'https://www.bilibili.com/',
+      },
+      signal: AbortSignal.timeout(8000),
+    })
+    return parseNavProbe(await res.json())
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 统一登录态:收编遗留凭据 → 读 cookie 文件 → nav 实时探针。
+ * 判定语义:credentialed = 本地有 SESSDATA;live = 服务端真实登录态
+ * (区分"没登录"与"登录已过期");uid = nav mid ∥ DedeUserID。
+ */
+export async function biliLoginState(): Promise<BiliLoginState> {
+  consolidateBiliCookies(BILI_COOKIE_FILE, BILI_LEGACY_COOKIE_FILES)
+  const lower = new Map<string, string>()
+  try {
+    const v = JSON.parse(await fs.readFile(BILI_COOKIE_FILE, 'utf8')) as Record<string, unknown>
+    for (const [k, val] of Object.entries(v ?? {})) {
+      if (typeof val === 'string') lower.set(k.toLowerCase(), val.trim())
+    }
+  } catch {
+    // 无凭据文件
+  }
+  const credentialed = !!lower.get('sessdata')
+  const fileUid = lower.get('dedeuserid') ?? ''
+  if (!credentialed) {
+    return {
+      credentialed: false,
+      fileUid: '',
+      uid: '',
+      uname: '',
+      hint: 'B站未登录(无本地凭据):请先 bili(action=login) 扫码登录——登录后解锁收藏夹/高清画质/AI 字幕。',
+    }
+  }
+  const probe = await navProbe(lower)
+  const live = probe ? probe.isLogin : undefined
+  const uid = probe?.mid || fileUid
+  const uname = probe?.uname ?? ''
+  let hint = ''
+  if (live === false) {
+    hint = 'B站登录已失效(本地有凭据但服务端验证未登录,SESSDATA 过期或被风控):请重新 bili(action=login) 扫码登录。'
+  } else if (!uid) {
+    hint = 'B站登录凭据缺少用户 ID(DedeUserID),无法定位"我的收藏夹":请重新 bili(action=login) 扫码登录(会覆盖现有凭据)。'
+  }
+  return { credentialed: true, fileUid, live, uid, uname, hint }
+}
+
+/** bili 输出被判定未登录时补统一引导(带过期/未登录精确话术) */
+function withLoginGuide(out: string, st: BiliLoginState): string {
+  if (!biliOutputLooksLoggedOut(out)) return out
+  const guide =
+    st.live === false
+      ? '登录已失效,请重新 bili(action=login) 扫码登录。'
+      : '需要有效登录态,请先 bili(action=login) 扫码登录。'
+  return `${out}\n提示:${guide}`
 }
 
 /** 解析任务的输出目录(--outdir 参数,相对 BILI_CWD 解析;缺省默认目录);
@@ -325,28 +596,21 @@ export async function biliQuery(params: ToolParams): Promise<string | { text: st
       break
     }
     case 'fav': {
-      // 收藏夹(2026-08-19):列表 = 先 whoami 拿当前登录 UID,再 fav <uid> --list;
-      // 下载 = 借助 whoami 拿 UID + fav <uid> --download <media_id> 后台启动。
-      // 未登录 → whoami 提示登录。
+      // 收藏夹(2026-08-19;2026-09-22 登录态整合):UID 不再解析 whoami
+      // 人话正则(cookie 缺 DedeUserID 时"已登录 (UID )"会误报未登录)——
+      // 统一走 biliLoginState(nav mid ∥ DedeUserID),未登录/过期/缺 UID
+      // 三种情况各给精确话术;输出若仍被判未登录补统一引导。
+      const st = await biliLoginState()
+      if (!st.uid || st.live === false) return st.hint
       if (!query) {
         // 只列出收藏夹
-        const whoami = await runBili(['whoami'], 15000)
-        const uidMatch = whoami.match(/UID\s+(\d+)/)
-        if (!uidMatch) {
-          return '无法获取当前登录账号(可能未登录)——请先调用 bili(action=login) 扫码登录后才能查看收藏夹。已登录账号才能看自己的收藏夹。'
-        }
-        return runBili(['fav', uidMatch[1]!, '--list'], 30000)
+        return withLoginGuide(await runBili(['fav', st.uid, '--list'], 30000), st)
       }
       // 下载指定收藏夹(带 query=收藏夹 id 或含 media_id 的链接)
-      const whoami = await runBili(['whoami'], 15000)
-      const uidMatch = whoami.match(/UID\s+(\d+)/)
-      if (!uidMatch) {
-        return '无法获取当前登录账号(可能未登录)——请先 bili(action=login) 扫码登录后才能下载收藏夹。'
-      }
       // 从 query 提取 media_id(纯数字 id 直接可用;链接里提取)
       const mediaMatch = /(?:media_id=)?(\d{3,})/.exec(query)
       const mediaId = mediaMatch ? mediaMatch[1]! : query
-      const dargs = ['fav', uidMatch[1]!, '--download', mediaId]
+      const dargs = ['fav', st.uid, '--download', mediaId]
       if (params.audio) dargs.push('--audio', String(params.audio))
       if (params.quality) dargs.push('--quality', String(params.quality))
       const biliOut = toolOutputDir('bili')
@@ -358,13 +622,15 @@ export async function biliQuery(params: ToolParams): Promise<string | { text: st
       // 单视频下载:长任务后台启动(detached 独立进程),立即返回;
       // 完成情况用 saved action 查询
       if (!query) throw new Error('download 需要视频 BV 号或链接')
-      // 未登录提示(2026-08-11):未登录时高清受限(通常只能 360p/480p),
-      // 返回文本附提示让用户知情(不阻塞下载)
+      // 登录提示(2026-08-11;2026-09-22 整合):未登录/已过期高清受限
+      // (通常只能 360p/480p),返回文本附精确提示(不阻塞下载)
       let loginHint = ''
       try {
-        const whoami = await runBili(['whoami'], 15000)
-        if (!whoami.includes('已登录')) {
-          loginHint = '当前未登录,高清画质受限(可能只能下 360p/480p);需要高清可先 login 扫码登录。'
+        const st = await biliLoginState()
+        if (!st.credentialed) {
+          loginHint = '当前未登录,高清画质受限(可能只能下 360p/480p);需要高清可先 bili(action=login) 扫码登录。'
+        } else if (st.live === false) {
+          loginHint = '登录已失效(SESSDATA 过期),高清画质受限(可能只能下 360p/480p);请重新 bili(action=login) 扫码登录。'
         }
       } catch {
         // 登录态查询失败不阻塞下载
@@ -460,7 +726,17 @@ export async function biliQuery(params: ToolParams): Promise<string | { text: st
       // **后台自动轮询确认**(2026-08-07 修复:原实现只生成二维码,
       // 扫码后无人 poll 写登录态,whoami 永远未登录)——解析 no-wait
       // 输出的 qrcode key,spawn --resume 轮询,成功写 cookies.json 并
-      // 通知 + background-done 触发自动对话告知,失败通知重扫
+      // 通知 + background-done 触发自动对话告知,失败通知重扫。
+      // 2026-09-22 整合:已登录时先提示(防误覆盖),凭据落规范位单一来源
+      let alreadyNote = ''
+      try {
+        const st = await biliLoginState()
+        if (st.live === true) {
+          alreadyNote = `当前已登录 (UID ${st.uid}${st.uname ? ` · ${st.uname}` : ''}),无需重复扫码;继续扫码将覆盖现有登录。`
+        }
+      } catch {
+        // 状态查询失败不影响扫码
+      }
       const qrPath = path.join(BILI_CWD, 'login-qrcode.png')
       await fs.mkdir(path.dirname(qrPath), { recursive: true })
       const genOut = await runBili(['login', '--qrcode-img', qrPath, '--no-wait'], 30000)
@@ -471,6 +747,7 @@ export async function biliQuery(params: ToolParams): Promise<string | { text: st
       if (key) startBiliLoginPoll(key)
       return {
         text:
+          (alreadyNote ? `${alreadyNote}\n` : '') +
           'B站扫码登录二维码已生成(2 分钟内有效),二维码图片已随本消息展示给用户。' +
           '请用户用 B 站手机 App「扫一扫」扫码并确认。' +
           (key ? '引擎正在后台等待扫码确认,扫码成功/失败都会自动通知并在对话里告知结果。' : ''),
@@ -478,9 +755,22 @@ export async function biliQuery(params: ToolParams): Promise<string | { text: st
       }
     }
     case 'whoami': {
-      // 登录状态确认(扫码后调用;已登录显示 UID,未登录提示)
-      const out = await runBili(['whoami'], 15000)
-      return out.trim()
+      // 登录状态(2026-09-22 整合):不再裸贴 bili-tool 人话——统一
+      // biliLoginState(nav 实时验证),精确区分 已登录/已过期/未登录
+      const st = await biliLoginState()
+      if (!st.credentialed) return st.hint
+      if (st.live === false) return st.hint
+      const verify = st.live === true ? '实时验证通过' : '本地凭据有效(离线未能实时验证)'
+      return `已登录 (UID ${st.uid})${st.uname ? ` · ${st.uname}` : ''}——${verify};凭据 ${BILI_COOKIE_FILE}`
+    }
+    case 'logout': {
+      // 退出登录(2026-09-22 整合):规范位 + 全部遗留位置一并清除
+      // (防 exe 旁旧凭据下次又被收编回来)
+      const out = await runBili(['logout'], 15000).catch(() => '')
+      for (const p of BILI_LEGACY_COOKIE_FILES) {
+        await fs.rm(p, { force: true }).catch(() => {})
+      }
+      return `${out.trim() || '已退出登录'}(本地凭据已清除,含历史遗留位置)——需要时 bili(action=login) 重新扫码。`
     }
     case 'config': {
       // 查看/修改 bili-tool 默认配置(2026-08-11):quality/codec/outdir/
@@ -541,7 +831,7 @@ export async function biliQuery(params: ToolParams): Promise<string | { text: st
     }
     default:
       throw new Error(
-        `未知 action:${action}(支持 up_info/up_videos/search/open/trending/comments/download/download_up/danmaku/subtitle/saved)`,
+        `未知 action:${action}(支持 up_info/up_videos/search/open/trending/comments/fav/download/download_up/danmaku/subtitle/saved/progress/login/whoami/logout/convert/config)`,
       )
   }
   return runBili(args, 30000)

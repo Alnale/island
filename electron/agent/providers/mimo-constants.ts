@@ -7,10 +7,46 @@
 
 /** MiMo 默认 Base URL(小米 MiMo 官方端点) */
 export const MIMO_DEFAULT_BASE_URL = 'https://api.xiaomimimo.com'
-/** MiMo 默认模型(功能最全,推荐) */
-export const MIMO_DEFAULT_MODEL = 'mimo-v2.5-pro'
-/** MiMo 备选模型 */
+/** MiMo 默认模型(2026-09-22 官网现行旗舰,多模态可用) */
+export const MIMO_DEFAULT_MODEL = 'mimo-v2.6-pro'
+/** MiMo 模型清单(2026-09-22 官网:文本生成 + 图/音频/视频理解) */
+export const MIMO_MODEL_V26_PRO = 'mimo-v2.6-pro'
+/** v2.6 快档(批量推理两支持模型之一,价格减半档) */
+export const MIMO_MODEL_V26_FLASH = 'mimo-v2.6-flash'
+/** v2.6 极速档 */
+export const MIMO_MODEL_V26_ULTRASPEED = 'mimo-v2.6-pro-ultraspeed'
+/** v2.5 多模态可用(图/音频/视频理解支持清单内) */
 export const MIMO_MODEL_V25 = 'mimo-v2.5'
+/** v2.5 旧旗舰(文本生成仍可用;**多模态支持清单不含本模型**,见 mimoSupportsMedia) */
+export const MIMO_MODEL_V25_PRO = 'mimo-v2.5-pro'
+
+/**
+ * 多模态(图/音频/视频)理解能力判定(2026-09-22 官网多模态文档 + 活体实证):
+ * 三篇多模态文档(图片/音频/视频理解)的支持清单一致——mimo-v2.6-flash /
+ * mimo-v2.6-pro / mimo-v2.6-pro-ultraspeed / mimo-v2.5,不含 mimo-v2.5-pro。
+ * 活体探针实证(2026-09-22):mimo-v2.5-pro + input_image → 404
+ * "No endpoints found that support image input"——拦截为占位防断整轮。
+ * 未知新模型缺省**放行**(防误杀未来型号),能力不符由 404 错误映射兜底提示。
+ */
+export function mimoSupportsMedia(model: string): boolean {
+  return !/^mimo-v2\.5-pro\b/i.test(model.trim())
+}
+
+/** 批量推理 region 缺省(真实值以 MiMo 控制台「批量推理」页为准) */
+export const MIMO_BATCH_DEFAULT_REGION = 'cn'
+
+/**
+ * 批量推理 Base URL(官网 Batch API 文档:https://batch-api-${region}.xiaomimimo.com,
+ * region 从控制台批量推理页面获取)。与实时对话端点(api.xiaomimimo.com)是
+ * **不同主机**;非法 region 直接抛错(防拼出怪异主机名)。
+ */
+export function mimoBatchBaseUrl(region: string): string {
+  const r = String(region ?? '').trim().toLowerCase()
+  if (!/^[a-z0-9][a-z0-9-]{0,30}$/.test(r)) {
+    throw new Error(`MiMo 批量推理 region 不合法:"${region}"(从 MiMo 控制台「批量推理」页面获取,如 cn;也可直接传 batch_base_url 完整地址)`)
+  }
+  return `https://batch-api-${r}.xiaomimimo.com`
+}
 
 /**
  * 判断是否为 MiMo 供应商(地址含 xiaomimimo / mimo.mi.com / mimo 关键词,且非 deepseek)

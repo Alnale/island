@@ -28,6 +28,13 @@ const APP_DATA_ENTRIES = Object.freeze([
   'napcat-media',
   'undo-snapshots.json',
   'napcat-sessions.json',
+  // 米家智能家居(2026-09-22):凭证/设备缓存/spec 缓存(.tmp 一并清理)
+  'mijia-auth.json',
+  'mijia-auth.json.tmp',
+  'mijia-devices.json',
+  'mijia-devices.json.tmp',
+  'mijia-spec-cache.json',
+  'mijia-spec-cache.json.tmp',
 ])
 
 /** 渲染端 IndexedDB；主进程在 prepare-reset 时把这份名单发给页面。 */

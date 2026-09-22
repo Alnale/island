@@ -27,6 +27,11 @@
   多供应商:DeepSeek / 小米 MiMo / Anthropic / **智谱 GLM** 云端 +
   **LM Studio 本地部署**(免 Key、模型挂载管理、GLM-4-9B 专属适配),
   主 Agent 与 Sub Agent 可分工用不同供应商。
+  **MiMo 专项适配**(2026-09-22,对照官网接入文档;Responses API 第一
+  优先):切到 MiMo 后对话附件**原生多模态理解**(QQ 语音/图片、拖入的
+  音视频——听懂语音、看懂画面,原生进 /v1/responses input);`mimo_media`
+  指定路径/URL 媒体理解;`mimo_batch` 批量文本生成(官网 Batch API,
+  实时 50% 价,离线批量跑 N 条提示词)。
 - **QQ 机器人**:NapCat 接入后私聊/群聊消息进入对话窗口,LLM 按人区分、
   调用长期记忆与当次对话上下文自主回复;主人身份经 privacy.json 配置,
   外人消息分级(自主回复 / 先询问主人),信息隔离防泄露。
@@ -179,7 +184,7 @@ electron/agent/
 ├── plugin/       # ★ 插件内核与接缝(14 文件):kernel/composition/host/
 │                 # host-bridge/llm/tool-registry/tool-plugins/prompt-plugins/
 │                 # tool-events/lifecycle-events/session-log/prompt/errors/index
-├── providers/    # LLM 供应商(14 文件):deepseek/chat/anthropic/mimo-*/
+├── providers/    # LLM 供应商(15 文件):deepseek/chat/anthropic/mimo-*(含 mimo-media 多模态编码)/
 │                 # lmstudio-* / glm-cloud-* + sse 公共层 + provider 分发入口
 ├── tools/        # 工具族(14 文件):tools.ts 主入口 + env/bili/docflow/
 │                 # search/media/glm 分簇 + settingsTools 四文件 + session/config
@@ -311,6 +316,23 @@ V2.0 把提示词当作**工程对象**管理——分层拼装、逐条身份�
 - `masterQQ` 为空 = 未配置,QQ 主人相关能力不启用(身份判定恒为"非主人");
 - `allowed` / `allowedGroups` / `botQQ` 缺省回填到 Agent 配置,也可在设置/
   `set_napcat_config` 中另行修改。
+
+## 米家智能家居(2026-09-22)
+
+岛灵可直接控制米家(小米)智能家居设备:说"把卧室灯打开/调暗一点/开扫地
+机器人/执行回家模式"即可。
+
+1. 登录:托盘「米家登录…」或对话里说"米家登录"→ 弹出扫码小窗,用**米家
+   App** 扫码并在手机上确认(不用输密码;凭证经系统加密保存在本机);
+2. 查询:"家里有哪些设备""客厅灯开着吗"(mijia_devices,任何会话可用);
+3. 控制:开关/亮度/温度/模式/动作/场景(mijia_control / mijia_scene)——
+   **本机窗口与主人 QQ 远程可控**,其他人的消息只读;
+4. 安全:**门锁开锁/开门、摄像头控制/视频流一律禁止**(代码层硬禁,状态
+   查询可用);WiFi 设备走局域网直控(响应快、可离线),蓝牙设备/远程自动
+   走小米云;
+5. 限制:v1 不做中枢网关本地 MQTT/蓝牙本地/摄像头流;设备需在米家 App
+   可见;局域网直控需电脑与设备同一网络(米家 App 设备页可开「局域网通信
+   协议」提升离线可用性)。
 
 ## 多媒体库
 

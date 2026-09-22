@@ -30,6 +30,130 @@ const TYPE_LABEL: Record<MemoryEntry['type'], string> = {
   lesson: '教训',
 }
 
+/**
+ * 误导教训修正(2026-09-22 两轮用户实测,load 迁移):旧教训教 LLM
+ * 「no permit→重新扫码/重开登录窗」和「用 check 脚本实时验证 Credential
+ * 再重试」——前者导致明明指令完成却反复开扫码窗让主人重验(一轮连开 5
+ * 个),后者教出"重复验证个十几次"的死循环。文件外手改会被运行中缓存
+ * 覆盖,必须在 load() 里迁移(与人设补锁迁移同款)。纯函数,单测钉死。
+ * 返回改写后内容;无匹配原样返回。
+ */
+export function migrateMemoryContent(content: string): string {
+  const t = String(content ?? '')
+  // ① no-permit → 重扫码/重开登录窗类:根因是 home_owner 字段解析
+  //   (2026-09-22 已修复),与登录态无关——改写为正确排查路径
+  if (/no permit/i.test(t) && /(重新扫码|重新发起|重开扫码|重登)/.test(t)) {
+    return '米家「no permit」/权限类报错**与登录无关**(status 显示已登录时禁止 mijia_login 重开扫码窗——login 已加 force 守卫):根因是 home_owner 字段解析,2026-09-22 已修复。正确排查 = mijia_devices refresh=true 重查,或按错误文案具体提示处理(规格不可用=规格侧、设备拒绝 code=设备侧);不要重复验证、不要反复查 status。'
+  }
+  // ② check 脚本实时验证 Credential 类:教出"重复验证十几次"死循环
+  if (/实时验证Credential有效性|实时验证 Credential/.test(t)) {
+    return '接口 404/认证失败:回查本机 JS 源码确认真实路径后**验证一次**凭证即可——禁止反复验证/多次重试(2026-09-22 实测"重复验证个十几次"根源);验证失败就停下报告主人,不要凭猜测重复调用。'
+  }
+  return t
+}
+
+// ---------------------------------------------------------------------------
+// 近重复判定(2026-09-22 用户反馈"自动记录了特别多重复的"):
+// 提取 Sub Agent 每轮沉淀 + 同一事实换措辞,原 add() 只做**全等**比对
+// 拦不住同义改写 → 重复堆积。三层判定(归一化等价 / 包含 / 二元组相似)
+// 命中即合并进已有条目,不新增。
+// ---------------------------------------------------------------------------
+
+/**
+ * 记忆文本归一化(比对用):拉丁小写 + 剥全部空白/标点/符号 + 剥虚词「的」
+ * (保留文字本体)。「的」是提取端最高频的措辞漂移("岛灵的名字叫鲸鱼" vs
+ * "岛灵名字叫鲸鱼"、"喜欢简洁的回答" vs "用户喜欢简洁回答")——剥掉后
+ * 等价/包含/相似度三层判定都稳;语义词(猫/狗、鲸鱼/海豚)不受影响。
+ */
+export function normalizeMemoryText(s: string): string {
+  return String(s ?? '')
+    .toLowerCase()
+    .replace(/[\s\p{P}\p{S}]/gu, '')
+    .replace(/的/g, '')
+}
+
+/** 字符二元组集合(相似度用;单字串返回空集) */
+function bigrams(s: string): Set<string> {
+  const set = new Set<string>()
+  for (let i = 0; i < s.length - 1; i++) set.add(s.slice(i, i + 2))
+  return set
+}
+
+/** 最长公共子序列长度(DP;仅短串启用,见 memorySimilarity) */
+function lcsLen(a: string, b: string): number {
+  const n = a.length
+  const m = b.length
+  const dp = new Array<number>(m + 1).fill(0)
+  for (let i = 1; i <= n; i++) {
+    let prev = 0
+    for (let j = 1; j <= m; j++) {
+      const tmp = dp[j]!
+      dp[j] = a[i - 1] === b[j - 1] ? prev + 1 : Math.max(dp[j]!, dp[j - 1]!)
+      prev = tmp
+    }
+  }
+  return dp[m]!
+}
+
+/**
+ * 归一化相似度(0-1,完全等价 = 1)= max(二元组 Jaccard, LCS-Dice):
+ * - Jaccard 抓措辞集合重叠;LCS-Dice(2·LCS/(lenA+lenB))抓**一字级插删**
+ *   ("岛灵名字叫鲸鱼" vs "岛灵的名字叫鲸鱼" = 0.93,单靠 Jaccard 仅 0.63
+ *   会漏——用户实测"自动记录特别多重复"的一类);
+ * - 语义翻转("…叫海豚" vs "…叫鲸鱼" = 0.75、"喜欢猫" vs "喜欢狗" =
+ *   0.80)低于 0.85 阈值,不误合并;
+ * - LCS 仅在两串归一化后各 ≤200 字且长度比 ≥0.5 时计算(防 O(n·m)
+ *   在长条目上发热;200 条 × 500 字的最坏集由提取上限与进化清理兜底)。
+ */
+export function memorySimilarity(a: string, b: string): number {
+  const na = normalizeMemoryText(a)
+  const nb = normalizeMemoryText(b)
+  if (!na || !nb) return 0
+  if (na === nb) return 1
+  let jac = 0
+  const A = bigrams(na)
+  const B = bigrams(nb)
+  if (A.size > 0 && B.size > 0) {
+    let inter = 0
+    for (const g of A) if (B.has(g)) inter++
+    jac = inter / (A.size + B.size - inter)
+  }
+  let dice = 0
+  const [short, long] = na.length <= nb.length ? [na, nb] : [nb, na]
+  if (long.length <= 200 && short.length / long.length >= 0.5) {
+    dice = (2 * lcsLen(na, nb)) / (na.length + nb.length)
+  }
+  return Math.max(jac, dice)
+}
+
+/** 归一化文本中的数字串(QQ/编号/数量是身份的一部分,不同即不同条目) */
+function digitSeq(s: string): string {
+  return s.replace(/\D+/g, '')
+}
+
+/**
+ * 在已有条目里找近重复(纯函数,测试用导出):
+ * ⓪ 数字串硬门——QQ/编号/数量不同的绝不算重复("条目 1" ≠ "条目 10");
+ * ① 归一化等价(标点/空白/大小写差异);② 一方完整包含另一方(短串 ≥4
+ * 字符防误伤);③ 相似度 ≥0.85(二元组 Jaccard / LCS-Dice,抓一字级改写)。
+ */
+export function findNearDuplicate(entries: MemoryEntry[], content: string): MemoryEntry | null {
+  const n = normalizeMemoryText(content)
+  if (!n) return null
+  const nDigits = digitSeq(n)
+  for (const e of entries) {
+    const m = normalizeMemoryText(e.content)
+    if (!m) continue
+    if (digitSeq(m) !== nDigits) continue
+    if (m === n) return e
+    const short = m.length <= n.length ? m : n
+    const long = m.length <= n.length ? n : m
+    if (short.length >= 4 && long.includes(short)) return e
+    if (memorySimilarity(e.content, content) >= 0.85) return e
+  }
+  return null
+}
+
 /** 记忆存储:内存态 + 串行写盘 */
 export function createMemoryStore(getPath: () => string) {
   let entries: MemoryEntry[] = []
@@ -61,6 +185,14 @@ export function createMemoryStore(getPath: () => string) {
           for (const e of entries) {
             if (!e.protected && isProtectedEntry(e)) {
               e.protected = true
+              migrated = true
+            }
+            // 误导教训修正迁移(2026-09-22):no-permit→重扫码 / 反复验证
+            // Credential 类旧教训教出"重复开扫码窗、重复验证十几次"循环,
+            // 加载即改写为正确结论(纯函数 migrateMemoryContent,单测钉死)
+            const fixed = migrateMemoryContent(e.content)
+            if (fixed !== e.content) {
+              e.content = fixed
               migrated = true
             }
           }
@@ -104,9 +236,32 @@ export function createMemoryStore(getPath: () => string) {
       await ensureLoaded()
       const content = input.content.trim().slice(0, MAX_CONTENT_CHARS)
       if (!content) throw new Error('记忆内容不能为空')
-      // 去重:完全相同的已有条目不重复添加
-      const dup = entries.find((e) => e.content === content)
-      if (dup) return { entry: dup, created: false }
+      // 近重复合并(2026-09-22):归一化等价/包含/高相似都算重复——
+      // 提取的同义改写不再堆积;新内容是旧内容的**信息超集**(归一化后
+      // 包含且明显更长)才升级现有条目措辞,否则原样返回(防措辞来回翻烙)
+      const near = findNearDuplicate(entries, content)
+      if (near) {
+        const locked =
+          typeof input.protected === 'boolean' ? input.protected : isProtectedEntry({ content, tags: input.tags })
+        const nNew = normalizeMemoryText(content)
+        const nOld = normalizeMemoryText(near.content)
+        const superset = nNew.length >= nOld.length + 4 && nNew.includes(nOld)
+        if (superset && !near.protected && !locked) {
+          near.content = content
+          if (input.type) near.type = input.type
+          near.updatedAt = Date.now()
+          scheduleWrite()
+          return { entry: { ...near }, created: false }
+        }
+        // 主人重申人设且命中旧条目:把锁定补上(人设自动锁定语义,别因
+        // 近重复合并漏锁);内容不动(protected 条目永不改写)
+        if (!near.protected && locked) {
+          near.protected = true
+          near.updatedAt = Date.now()
+          scheduleWrite()
+        }
+        return { entry: near, created: false }
+      }
       if (entries.length >= MAX_ENTRIES) {
         // 超限:删最旧(按 createdAt),保持总量上限
         const oldest = entries.find((e) => e.createdAt === Math.min(...entries.map((e) => e.createdAt)))
@@ -170,24 +325,27 @@ export function createMemoryStore(getPath: () => string) {
       scheduleWrite()
       return [...entries]
     },
-    /** 导入合并(设置界面"导入"按钮):按 id 与内容去重(已存在跳过);
+    /** 导入合并(设置界面"导入"按钮):按 id 与内容去重(已存在跳过,
+     * 2026-09-22 起内容去重用近重复判定——同义改写也算重复);
      * 导入的条目 updatedAt 置为当前(列表按更新时间倒序 → 置顶可见);
      * 总量超 MAX_ENTRIES 时淘汰最旧(与 add 一致,新导入总是保留)。
      * 返回导入/跳过计数 */
     async importEntries(next: MemoryEntry[]): Promise<{ imported: number; skipped: number }> {
       await ensureLoaded()
       const seenIds = new Set(entries.map((e) => e.id))
-      const seenContents = new Set(entries.map((e) => e.content))
+      const pool: MemoryEntry[] = [...entries]
       const fresh: MemoryEntry[] = []
       let skipped = 0
       for (const e of next) {
-        if (seenIds.has(e.id) || seenContents.has(e.content)) {
+        const content = String(e.content ?? '').trim().slice(0, MAX_CONTENT_CHARS)
+        if (!content || seenIds.has(e.id) || findNearDuplicate(pool, content)) {
           skipped += 1
           continue
         }
         seenIds.add(e.id)
-        seenContents.add(e.content)
-        fresh.push({ ...e, updatedAt: Date.now() })
+        const item = { ...e, content, updatedAt: Date.now() }
+        pool.push(item)
+        fresh.push(item)
       }
       const existingSorted = [...entries].sort((a, b) => b.updatedAt - a.updatedAt)
       entries = [...fresh, ...existingSorted].slice(0, MAX_ENTRIES)
@@ -236,7 +394,7 @@ export function createMemoryTools(getStore: () => MemoryStore | null): AgentTool
       description:
         '把用户偏好/事实/工作流/教训写入长期记忆(永久生效,后续所有对话都遵守)。' +
         '适合:用户表达的偏好("我喜欢简洁回答")、重要事实("我的项目在 D:/xxx")、' +
-        '学到的教训。注意:可复用的规律才记,一次性信息不要记;已有相同内容不会重复添加。' +
+        '学到的教训。注意:可复用的规律才记,一次性信息不要记;**内容相同或高度相似会自动合并进已有记忆,不会重复堆积**——记之前先看现有记忆里是否已有同一主题。' +
         '**会话级行为要求禁止写入**:某个会话里提出的说话量/风格/是否回复要求' +
         '("在这个群闭嘴""这边活跃一点")只对该会话有效——长期记忆会注入所有会话,' +
         '写入即跨会话污染(A 群闭嘴导致 B 群也不说话);此类要求用 set_session_note ' +

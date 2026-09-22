@@ -84,12 +84,17 @@ function redactValue(value: unknown, inheritedSecret = false): unknown {
     return value
       .replace(/(authorization\s*[:=]\s*)([^\s,;]+)/gi, '$1[REDACTED]')
       .replace(/(bearer\s+)[^\s,;]+/gi, '$1[REDACTED]')
+      .replace(/((?:serviceToken|passToken|ssecurity)\s*[:=]\s*)([^\s,;&]+)/gi, '$1[REDACTED]')
   }
   if (Array.isArray(value)) return value.map((item) => redactValue(item, inheritedSecret))
   if (!value || typeof value !== 'object') return value
   const out: Record<string, unknown> = {}
   for (const [key, item] of Object.entries(value)) {
-    const secret = inheritedSecret || /^(apiKey|authorization|cookie|token|secret|password)$/i.test(key) || /^(env|headers)$/i.test(key)
+    // 2026-09-22 米家凭证:serviceToken/ssecurity/passToken/signed_nonce 等
+    // 一律按密钥字段整棵脱敏(审计日志永不含云登录凭证)
+    const secret = inheritedSecret
+      || /^(apiKey|authorization|cookie|token|secret|password|ssecurity|passToken|serviceToken|signedNonce|signed_nonce|nonce)$/i.test(key)
+      || /^(env|headers)$/i.test(key)
     out[key] = redactValue(item, secret)
   }
   return out

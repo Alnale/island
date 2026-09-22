@@ -46,6 +46,7 @@ import type {
   AgentMessage,
   AgentPart,
   MediaAttachment,
+  SongInfo,
 } from '../types'
 
 interface TurnCtx {
@@ -153,6 +154,7 @@ export function createRunTurn(ctx: AgentContext) {
       let out = ''
       let outImage: string | undefined
       let outMedia: MediaAttachment[] | undefined
+      let outSong: SongInfo | undefined
       try {
         const argError = validateRequiredArgs(found.tool, args)
         if (argError) throw new Error(argError)
@@ -166,6 +168,7 @@ export function createRunTurn(ctx: AgentContext) {
           out = raw.text
           outImage = raw.image
           outMedia = raw.media
+          outSong = raw.song
         } else {
           out = raw
         }
@@ -179,6 +182,8 @@ export function createRunTurn(ctx: AgentContext) {
       if (outMedia && outMedia.length > 0) {
         for (const m of outMedia) msgParts.push({ type: 'media', kind: m.kind, url: m.url, name: m.name })
       }
+      // 歌曲卡片(2026-09-22 music_control 放歌可视化,见 SongInfo 注释)
+      if (outSong) msgParts.push({ type: 'song', ...outSong })
       if (detectProvider(config.baseURL) !== 'anthropic') {
         msgParts.unshift({ type: 'reasoning', text: `(手动调用工具:${found.tool.name})` })
       }
@@ -274,6 +279,7 @@ export function createRunTurn(ctx: AgentContext) {
         durationMs: number
         image?: string
         media?: MediaAttachment[]
+        song?: SongInfo
       }> = []
       if (calls.length > 0) {
         emit({ type: 'status', status: 'running' })
@@ -308,6 +314,8 @@ export function createRunTurn(ctx: AgentContext) {
         if (r.media && r.media.length > 0) {
           for (const m of r.media) msgParts.push({ type: 'media', kind: m.kind, url: m.url, name: m.name })
         }
+        // 歌曲卡片(2026-09-22 music_control 放歌可视化,见 SongInfo 注释)
+        if (r.song) msgParts.push({ type: 'song', ...r.song })
       }
       historyIn.push({ id: randomUUID(), role: 'assistant', parts: msgParts.slice(pushedParts) })
       pushedParts = msgParts.length

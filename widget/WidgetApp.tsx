@@ -189,7 +189,7 @@ export default function WidgetApp() {
         pendingSessionMsgsRef.current.delete(key)
         for (const m of pending) {
           const msg = m as { text?: string; groupId?: string; qq?: string; kind?: string }
-          if (msg && msg.kind === 'sent') ctl.ingestSentMessage(msg as { text?: string; images?: string[] })
+          if (msg && msg.kind === 'sent') ctl.ingestSentMessage(msg as { text?: string; images?: string[]; voice?: string })
           else if (msg && msg.kind === 'display-user') ctl.ingestDisplayUserMessage(msg as { text?: string; profileCard?: string })
           else if (msg && typeof msg.groupId === 'string') ctl.ingestNapcatGroupMessage(m)
           else ctl.ingestNapcatMessage(m)
@@ -446,12 +446,12 @@ export default function WidgetApp() {
         reg(payload.key, payload.title || payload.key, payload.kind === 'group' ? 'group' : 'private', payload.caption || '')
         const ctl = extControllersRef.current.get(payload.key)
         if (ctl) {
-          ctl.ingestSentMessage({ text: payload.text, images: payload.images })
+          ctl.ingestSentMessage({ text: payload.text, images: payload.images, voice: payload.voice })
         } else {
           // 实例未挂载:暂存,挂载后补投(与收消息首条不丢同款)
           pendingSessionMsgsRef.current.set(payload.key, [
             ...(pendingSessionMsgsRef.current.get(payload.key) ?? []),
-            { kind: 'sent', text: payload.text, images: payload.images },
+            { kind: 'sent', text: payload.text, images: payload.images, voice: payload.voice },
           ])
         }
       }
@@ -788,7 +788,8 @@ export default function WidgetApp() {
       getExternalActive: () => musicControlStateRef.current.externalActive,
       systemControl: (action) => musicControlStateRef.current.system.control(action),
       getPlayer: () => musicControlStateRef.current.player,
-      // system 的公开播放状态字段是 isPlaying(意图驱动),映射到桥的 playing
+      // system 的公开播放状态字段是 isPlaying(意图驱动),映射到桥的 playing;
+      // album 随曲目透传(2026-09-22 歌曲卡片元数据)
       getSystem: () => {
         const s = musicControlStateRef.current.system
         return {

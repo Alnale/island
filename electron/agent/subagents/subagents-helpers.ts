@@ -272,8 +272,9 @@ export function parseJudgeJson(raw: string): { should: boolean; hint?: string } 
 
 /**
  * 记忆提取 JSON 解析(测试用导出):必须解析出合法 {memories: [...]} 数组,
- * 逐条校验(只收 content/type,非法条目丢弃),单次最多 10 条;解析失败/
- * 垃圾输出返回空数组(安全侧:不污染记忆)
+ * 逐条校验(只收 content/type,非法条目丢弃),单次最多 5 条(2026-09-22
+ * 从 10 收紧——提取端每轮少灌一半,配合 store.add 近重复合并双防堆积);
+ * 解析失败/垃圾输出返回空数组(安全侧:不污染记忆)
  */
 export function parseMemoriesJson(
   raw: string,
@@ -292,7 +293,7 @@ export function parseMemoriesJson(
       type: type === 'preference' || type === 'workflow' || type === 'lesson' ? type : 'fact',
     })
   }
-  return out.slice(0, 10)
+  return out.slice(0, 5)
 }
 
 /** 用户风格 JSON 解析(测试用导出):解析出合法 {style: string} 才采信,
@@ -319,7 +320,10 @@ const MEMORY_EXTRACT_PROMPT = (memoryBlock: string) =>
   '**严禁提取会话级行为要求**:某个会话里的说话量/风格/是否回复要求' +
   '(「闭嘴」「安静」「活跃一点」「别回复」等)只对该会话有效——长期记忆对所有会话全局生效,' +
   '沉淀此类内容会跨会话污染(如 A 群让闭嘴导致 B 群也不说话,2026-08-14 用户实测);一律跳过。' +
-  (memoryBlock ? `现有记忆(不要重复,只提取新增):\n${memoryBlock}` : '') +
+  (memoryBlock ? `现有记忆(主题对照表——**只提取确有必要的新增**):\n${memoryBlock}` : '') +
+  '**重复判定(2026-09-22,最重要)**:主题相同、同义改写、只是措辞不同都算重复——' +
+  '现有记忆里已有的主题(哪怕换了说法)一律不再提取;一次最多输出 5 条,' +
+  '通常 0-2 条,宁缺勿滥(反复沉淀同一批事实正是自动记忆被用户投诉的根因)。' +
   '每条 content 不超过 200 字,独立可理解(不依赖对话上下文)。' +
   '只输出 JSON 对象:{"memories": [{"content": "<记忆内容>", "type": "preference|fact|workflow|lesson"}]}。' +
   '没有值得记的输出 {"memories": []}。不要解释,不要照抄示例文字。'

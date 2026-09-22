@@ -74,6 +74,7 @@
 - [第 43 章 安装器与发行(V3.1 重点)](#第-43-章-安装器与发行v31-重点)
 - [第 44 章 2026-08-18 动画与交互优化专题](#第-44-章-2026-08-18-动画与交互优化专题)
 - [第 45 章 智谱 GLM 云端供应商与 GLM 工具族(2026-08-19)](#第-45-章-智谱-glm-云端供应商与-glm-工具族2026-08-19)
+- [第 46 章 米家智能家居工具簇(2026-09-22)](#第-46-章-米家智能家居工具簇2026-09-22)
 - [结语](#结语)
 - [附录 A:Agent 事件一览](#附录-aagent-事件一览)
 - [附录 B:常量与阈值表](#附录-b常量与阈值表)
@@ -630,8 +631,10 @@ MiMo Responses / MiMo Chat / LM Studio Chat / GLM Chat 云端)同构返回
 #### 5.3.4 公共层
 
 - `parseSse`(electron/agent/providers/sse.ts)单一实现(yield SseFrame {type, data}),
-  deepseek/chat/anthropic/mimo-responses/mimo-chat 五处共用;8000 截断 ×5 →
-  `truncateResult`。
+  全部 provider(deepseek/chat/anthropic/mimo/lmstudio/glm)共用;8000 截断 →
+  `truncateResult`。**帧语义(2026-09-22 修复)**:顶层 type 字段作事件名
+  (Responses/Anthropic 事件流);无 type 的 Chat Completions 帧以空串事件名
+  照常产出(此前被整帧丢弃,chat 类协议流式恒空文本,见 5.3.5)。
 - **上下文硬盘缓存(DeepSeek 自动开启)**:请求前缀**完整匹配缓存前缀单元**
   才命中;多轮对话天然命中(完整历史回传 = 前缀递增);**前缀必须稳定**——
   instructions 与历史序列化幂等、tools 顺序固定、reasoning item 固定回传,
@@ -658,23 +661,79 @@ MiMo Responses / MiMo Chat / LM Studio Chat / GLM Chat 云端)同构返回
   = 独立 reasoning item;Chat = assistant 消息 reasoning_content 字段;
   Anthropic 路径 thinking 块需 signature 不可回放,已丢弃。
 
-#### 5.3.5 MiMo 大模型(小米,第三供应商)
+#### 5.3.5 MiMo 大模型(小米,第三供应商;2026-09-22 官网接入文档专项适配)
 
 - **判定**:`isMimoProvider`(地址含 xiaomimimo / mimo.mi.com / mimo,且非
-  deepseek);默认端点 `https://api.xiaomimimo.com`,默认模型 `mimo-v2.5-pro`
-  (备选 `mimo-v2.5`);平台/充值页 https://mimo.mi.com。
+  deepseek);默认端点 `https://api.xiaomimimo.com`,默认模型 `mimo-v2.6-pro`
+  (2026-09-22 官网现行清单:mimo-v2.6-pro / mimo-v2.6-flash /
+  mimo-v2.6-pro-ultraspeed / mimo-v2.5 / 旧旗舰 mimo-v2.5-pro 文本档);
+  平台/充值页 https://mimo.mi.com。
 - **协议细分**(`detectMimoProtocol`):地址含 "chat" → MiMo Chat Completions;
   含 "anthropic" → Anthropic Messages 兼容(走 anthropic.ts);否则 → MiMo
-  Responses API(`/v1/responses`,推荐)。
+  Responses API(`/v1/responses`)。
 - **实现**:`mimo-responses.ts`(mimoStreamResponse)与 `mimo-chat.ts`
-  (mimoStreamChatCompletion)各自独立(零互相 import,也不引用
-  deepseek/anthropic 业务代码),共用 sse.ts 公共层(parseSse /
-  sanitizeJsonStrings / truncateResult),同构返回 `ProviderOutcome`;
-  `mimo-constants.ts` 提供 MiMo 错误码映射(403 地区/风控、404 资源未找到、
-  421 内容拦截等)与展示名。
+  (mimoStreamChatCompletion)独立实现(零互相 import,不引用 deepseek/
+  anthropic 业务代码),共用 sse.ts 公共层(parseSse / sanitizeJsonStrings /
+  truncateResult),同构返回 `ProviderOutcome`;`mimo-constants.ts` 提供 MiMo
+  错误码映射(403 地区/风控、404 资源未找到、421 内容拦截等)、模型清单、
+  `mimoSupportsMedia` 多模态能力判定、`mimoBatchBaseUrl` 批量主机拼装。
+- **多模态理解(2026-09-22,providers/mimo-media.ts;Responses API 第一
+  优先——用户定调,Chat Completions 过旧)**:官网 Responses 文档明示
+  `input` 支持文本/图像/音频/视频(ResponseInputText/Image/AudioContent/
+  VideoContent),**活体探针实证**(`/v1/responses`)原生 part 形状——
+  `input_text{text}` / `input_image{image_url: <URL|data URI 字符串>}` /
+  `input_audio{input_audio:{data}}` / `input_video{input_video:{data(数据
+  URI)|url(公网 URL)}}` + 同级 `fps`(缺省 2,0.1-10)+ `media_resolution`
+  (default|max);历史带用户侧媒体**原生进 input items,不退化 Chat 端点**。
+  Chat 形状(image_url{url}/input_audio/video_url{url}+fps)仅保留在
+  mimo-chat.ts(用户显式配置 chat 地址时的兼容路径)。输入限制(官网,
+  两协议一致):**不支持本地文件上传** → 本地路径读盘转 `data:{MIME};
+  base64,`(base64 编码后 ≤50MB → 本地原始上限 36MB;URL 侧官网上限音频
+  100MB / 视频 300MB / 图片 50MB,无法预检由 API 校验);格式:音频 MP3/
+  WAV/FLAC/M4A/OGG、视频 MP4/MOV/AVI/WMV、图片 JPEG/PNG/GIF/WebP/BMP
+  (相邻常见格式宽容放行,官网明示"不能保证所有文件都能被识别")。
+  **历史韧性**:附件缺失/超限/格式不明 → 降级为文本占位(写明原因)不断
+  整轮;`mimo-v2.5-pro` 无多模态能力(活体实证:404 "No endpoints found
+  that support image input",多模态清单 = v2.6 三型号 + mimo-v2.5)——
+  `mimoSupportsMedia` 拦截为占位防 404 断整轮,未知新型号缺省放行。
+  用户消息带附件(QQ 图/语音 get_record 转 mp3/拖拽文件)在 MiMo 协议下
+  **原生理解**;纯文本历史保持 string input 旧形态(最小化请求体积)。
+- **批量推理(官网 Batch API,tools/tools-mimo.ts `mimo_batch`,2026-09-22)**:
+  独立主机 `https://batch-api-<region>.xiaomimimo.com`(region 从控制台
+  「批量推理」页获取,缺省 cn——DNS 实测 batch-api-cn 可解析;`batch_base_url`
+  参数可覆盖完整地址)。链路:/v1/files 上传 JSONL(`purpose=batch`,
+  **Responses 格式**行 `custom_id/method/url/body`——`url:/v1/responses`,
+  body `{model, instructions?, input, max_output_tokens, reasoning:{effort}}`,
+  与实时请求体一致;Chat completions 格式过旧不再使用)
+  → POST /v1/batches(input_file_id + endpoint `/v1/responses` +
+  completion_window 1-14 天,缺省 24h)→ GET /v1/batches/{id} 轮询(无
+  webhook;状态 validating/in_progress/completed/failed/cancelling/cancelled/
+  expired,request_counts 计数)→ GET /v1/files/{output|error}_file_id/content
+  下载结果 JSONL(custom_id 对齐;成功/失败分行,失败文件仅失败时生成;
+  结果解析 Responses output items 优先、chat choices 兜底兼容旧批)。
+  语义:价格 = 实时 50%、闲时调度、**只消耗现金余额**(不与 Token Plan 互通,
+  需实名认证);仅 mimo-v2.6-flash / mimo-v2.6-pro(小写);只计成功请求;
+  文件保留 30 天;单次 create ≤500 条、JSONL ≤48MB(官网 128MB 留 OOM
+  余量);结果全文落盘 `toolOutputDir('mimo_batch')`(<根>/mimo_batch/
+  [<会话ID>]),摘要(前 N 条 × 600 字)回填 LLM。
+- **专项工具簇(`mimo_media` / `mimo_batch`,凭据走 providers.mimo 桶
+  惰性实时读取)**:与激活供应商无关(同 GLM 先例,主 Agent 用 DeepSeek
+  也能调,Key 空报错引导不隐藏工具);`mimo_media` = 指定路径/URL 的任意
+  媒体理解(**POST /v1/responses** 非流式,Responses 原生 part,strict 硬
+  错误自纠,max_output_tokens 2048,usage 带缓存/思考 token 明细)——对话
+  直接发/拖的附件在 MiMo 协议下已原生理解不需要本工具;图片只想抄文字用
+  glm_ocr 更准。
 - **接入**:MiMo 适配器(mimoResponsesAdapter / mimoChatAdapter)注册进
   ctx.llm 接缝(`plugin/llm.ts` 的 ALL_LLM_ADAPTERS),执行时按 Base URL 经
   `protocolOf` 解析分发;设置界面协议提示行走 `mimoProviderLabel`。
+- **parseSse 修复(2026-09-22,连带全部 chat 类协议)**:Chat Completions
+  SSE 帧(object=`chat.completion.chunk`)**无顶层 type 字段**(MiMo Chat
+  实测帧全无 type),原 parseSse「无 type 字段跳过」把整帧丢弃 → chat /
+  mimo-chat / lmstudio-chat / glm-cloud 流式恒空文本(LM Studio 靠 runChain
+  非流式降级兜底掩盖了症状)。修复:无 type 帧以**空串事件名**照常产出,
+  消费端按 `data.choices` 取增量(Responses/Anthropic 帧自带 type 不受影响);
+  回归测试 tests/test-agent-core.ts「sse:Chat Completions 无 type 帧照常产出」
+  + 「mimo-responses:历史带用户媒体 → 自动改走 Chat Completions 端点」。
 
 #### 5.3.6 LM Studio 本地模型(第四供应商,2026-08-18 本地部署接入)
 
@@ -881,6 +940,28 @@ MiMo Responses / MiMo Chat / LM Studio Chat / GLM Chat 云端)同构返回
   code 恒为 0,真正状态在 data.code(86101 等待/86090 已扫码/86038 失效/
   0 成功);② 成功响应的 url 是 crossDomain?ticket= 中转地址,SESSDATA 在
   请求该地址的 Set-Cookie 里(login.rs 走 fetch_cookies_chain)。
+- **登录态整合(2026-09-22,用户反馈"明明登录了,查询收藏夹又说没有登录
+  信息";tools-bili.ts 登录态层)**:根因三处——① **cookie 键名大小写分裂
+  (实测真根因)**:登录链路(login.rs crossDomain 合并 / serve.rs WebUI)
+  把 Set-Cookie 键 `to_uppercase` 落盘(`DEDEUSERID`/`BILI_JCT`),bili-tool
+  读取端按**精确键名**找 `DedeUserID`/`bili_jct`(login_info/auth_cookie)
+  全 miss → whoami 输出"已登录 (UID )"、API 请求缺身份/CSRF 字段;
+  ② **凭据位置分裂**:挂件 login 写 userData/bili/config/cookies.json,
+  双击 exe 的 WebUI / qr-login-helper.py 写 exe 旁 config/——挂件看不见;
+  ③ **判定各自为政**:fav 解析 whoami 人话正则 `UID\s+(\d+)`(UID 空即
+  误报"可能未登录")、download 用 `includes('已登录')`、is_logged_in 只查
+  文件不验过期。整合(`consolidateBiliCookies` + `biliLoginState`,全
+  action 共用):**规范位单一来源** = userData/bili/config/cookies.json,
+  模块加载即 ①就地规范化键名大小写(Normalize 到读取端认的
+  SESSDATA/bili_jct/DedeUserID,无关键不动;实测 whoami 从"已登录 ( UID )"
+  恢复"已登录 (UID 85900351)")②遗留位置(exe 旁 config/、BILI_CWD 根)
+  自动收编(挑有 SESSDATA 且 _saved_at 最新,补 _saved_at 兼容 qr-helper);
+  **nav 实时探针**(x/web-interface/nav 带凭据)拿权威 UID(mid)/昵称并
+  区分 未登录/已过期(live=false)/缺 UID 三种精确话术(不再猜"可能");
+  fav/download/whoami/login 全走 biliLoginState,输出被判定未登录时补统一
+  引导;新增 `logout`(规范位 + 全部遗留位置一并清除,防旧凭据被收编回来);
+  纯函数(parseBiliCookies/normalizeBiliCookieKeys/consolidateBiliCookies/
+  parseNavProbe/biliOutputLooksLoggedOut)有单测。
 - **下载 cwd 固定 BILI_CWD = userData/bili**(config 的 outdir=downloads
   相对此解析;不固定会落在 Electron 启动目录,用户和 LLM 都找不到,实测);
   启动返回文本带输出目录、后台任务状态注入列输出文件绝对路径、`bili saved`
@@ -1097,6 +1178,19 @@ running(detail 带进程与输出目录),完成/失败进终态——**顺带修
   (记忆块按类型分组、截 6000,静态段——变更才断缓存前缀)。
 - **LLM 记忆工具**:remember(沉淀,自动去重)/ forget / list_memory /
   update_memory——对话中"记住:…"即写长期记忆。
+- **近重复合并(2026-09-22 用户反馈"自动记录了特别多重复的")**:原 add()
+  只做全等比对,提取 Sub Agent 的同义改写拦不住 → 重复堆积。现 add()/
+  importEntries 走三层近重复判定(`findNearDuplicate`,纯函数有单测):
+  ⓪ **数字串硬门**——归一化后数字序列不同绝不算重复(QQ/编号/数量是身份,
+  "条目 1" ≠ "条目 10");① 归一化等价(`normalizeMemoryText`:拉丁小写 +
+  剥空白/标点/符号 + 剥虚词「的」——「的」是提取端最高频措辞漂移);
+  ② 一方完整包含另一方(短串 ≥4);③ 相似度 ≥0.85
+  (`memorySimilarity` = max(二元组 Jaccard, LCS-Dice),抓一字级插删;
+  "…叫鲸鱼" vs "…叫海豚"、"喜欢猫" vs "喜欢狗"在阈下不误合并)。命中合并:
+  新内容是旧内容**信息超集**(归一化包含且长 ≥+4)才升级现有条目措辞,
+  否则原样返回防翻烙;**protected 条目内容永不改写**(主人重申人设命中旧
+  条目只补锁定)。提取端同步收紧:单次上限 10 → **5** 条,提示词明示
+  "主题相同/同义改写/只是措辞不同都算重复……宁缺勿滥"。
 - 设置视图记忆管理器:条目列表(类型徽标 + 内容省略 + 改/删)、添加行
   (类型选择 + 内容);**记忆类型定制下拉**(QuickMenu 化,默认选中偏好,
   滚轮逐格循环切换 + WheelSwap 内容动画,`.tick` 类仅在滚轮触发后加)。
@@ -1135,6 +1229,15 @@ running(detail 带进程与输出目录),完成/失败进终态——**顺带修
   ——轮数预算 rounds(evolve_memory 工具参数,默认 2,按记忆规模自适应
   放大,见下「可扩展性」),评分 ≥92 达标提前停,LLM 调用失败不消耗轮数;
   被拒结果作 evidence 记录日志。
+- **快捷自我进化(2026-09-22 用户要求"LLM 直接进行快捷自我进化,运行
+  记忆进化")**:`runQuick(focus?)` **同步恰好一轮**(不经 resolveRoundBudget
+  放大——快捷就是轻量),等评审→应用→复评→棘轮走完返回人话摘要,LLM
+  当轮转述进化结果(后台 requestEvolve 是 fire-and-forget + 系统通知,拿不
+  到当轮结果);busy 与后台 run 共用同一守卫互斥。`evolve_memory` 工具升级
+  三动作:**action=quick(缺省,同步单轮)/ run(后台多轮深度整理)/
+  status(查状态与最近结果)**,工具超时 600s(quick 最坏链路 = 评审/复评
+  各 2 次调用 × 评估超时上限 180s);旧宿主 stub 无 runQuick 时回退
+  requestEvolve(focus, 1)。
 - **垂直细分整合(2026-08-11 用户"明明很多冗余记忆但没有整合,关键词
   不能散落重复出现在那么多记忆里"——后台探针 probe-evolve 实测定位三个
   结构性根因并修复)**:
@@ -1863,7 +1966,20 @@ direction?('right'|'left'), wheelWhenOpen?}>`,四处复用:Agent 设置菜单 /
 - **群消息**:全部进对话(不预判断),LLM 看场合决定是否回复(@/提到/主人被贬低必回,回护找回场子;普通闲聊只汇报);带群上下文注入(最近 8 条);
 - **记忆**:QQ 轮强制记忆提取(`lastQQTurnAt` 标记,不受主动陪伴开关限制);联系人档案 `napcat-contacts.json` + 聊天记录备份 `napcat-chats.json`(appendNapcatChat 串行写队列,上限 500)+ 会话人格 `napcat-personas.json`(scope = private:<QQ>|group:<群号>);
 - **文件发送**:`send/send_group` 带 file → `upload_private_file`/`upload_group_file` **上传文件本体**(非路径文本,中文名 JSON 直传无编码问题,视频 .mp4 同走此通道),文件存在校验;**上传超时独立 180s**(2026-08-14 修复:大视频上传动辄几十秒,原统一 ACTION_TIMEOUT_MS=15s 先触发超时——QQ 实际收到了视频但工具报失败,LLM 误报没发成功;callAction 支持逐调用超时,napcat 工具另声明 timeoutMs=200s 覆盖引擎 60s 兜底);
-- **音乐控制**:`music_control` 工具经 `window.__islandMusicControl` 桥(WidgetApp registerMusicControlBridge,外部 SMTC 优先/本地播放器兜底,惰性 getter)控制播放——QQ 里说"暂停音乐"即可;
+- **语音发送**(2026-09-22):`send/send_group` 带 voice → 消息体 **`record` 段**
+  `{type:'record',data:{file}}`(不是文件柜上传),file 收本地路径/
+  http(s)/base64:/data:audio/(后三类免存在校验),NapCat 侧自动转 QQ silk
+  语音编码;段组装纯函数 `buildOutgoingMessage`(napcat-text.ts,单测钉段
+  序 text→image→record)。收语音早已有(napcat-message record 段 →「语音」
+  标注),发语音此轮补齐,双向打通。
+- **语音接收/气泡播放**(2026-09-22 二轮,用户实测「消息气泡只显示
+  [语音]」):`napcatMessageVoices` 提取 record 段 → `downloadVoices`
+  (`get_record` out_format=mp3 转码落 napcat-media/——QQ 语音多为
+  silk/amr,浏览器 audio 播不了;失败回退直下原文件)→ 与图片合流进
+  media payload → 渲染端 inferMediaKind 判 audio → **VoiceBubble 可播放**
+  气泡,占位文本不再是唯一呈现;发语音的 session-activity 回显同带
+  voice(ingestSentMessage 注入 audio media part)。
+- **音乐控制**:`music_control` 工具经 `window.__islandMusicControl` 桥(WidgetApp registerMusicControlBridge,外部 SMTC 优先/本地播放器兜底,惰性 getter)控制播放——QQ 里说"暂停音乐"即可;**歌曲卡片气泡(2026-09-22 用户反馈"LLM 自主放歌,对话窗口里没有歌的消息气泡")**:play/pause/next/previous/status 每次操作后查询曲目快照,工具返回 `song` 附件(新 AgentPart `type:'song'`,types.ts SongInfo)→ 引擎注入歌曲卡片(与 open_file 媒体拦截同思路:程序注入,不依赖 LLM 复述)→ 渲染端 SongBubble(AgentMessages,唱片图标播放中旋转 + 歌名/歌手/专辑 + 状态/来源徽章;**只展示不在气泡内播**,防与播放器双响);文本同时带 `《歌名》- 歌手`(textFromParts 折 `🎵《…》` 行,复制/预览/紧凑态可见);next/previous 后等 1.2s(SMTC 元数据跟随窗口,同岛内点击 1.2s 检测)再取快照,防卡片打上**上一首**歌名;无曲目不出卡片;
 - **白名单(隐私配置化,2026-08-17)**:`agent.napcatAllowed`(私聊扩展信任)/ `napcatAllowedGroups`(群)/ `napcatBotQQ`(自己发的消息过滤,防循环)缺省由 `userData/privacy.json` 的 `allowed` / `allowedGroups` / `botQQ` 回填,安装器/源码不携带任何个人 QQ。
 - **主人配置化(2026-08-17 替代原硬编码)**:主人 QQ 由 `userData/privacy.json` 的 `masterQQ` 运行时提供(main.cjs 与 agent/privacy.ts 同源同值读取;为空 = 未配置,QQ 主人能力不启用)。主人身份**不受任何配置影响**:
   - **trusted 判定** = `msg.qq === masterQQ() || napcatAllowed.includes(msg.qq)`——napcatAllowed 降级为**扩展信任**;**空数组不再 = 全部信任**(原语义 allowed 为空 → 全部私聊自主回复,LLM 清空列表后陌生人被当主人处理,用户实测担忧;现空列表 = 只信任主人,其余全走"先询问主人"链路);
@@ -2662,7 +2778,7 @@ config.systemPrompt(自定义提示词,用户可改)
 
 ```
 【QQ私聊/QQ群聊 · QQ 号 · 称呼】        ← 类别行(历史保留、显示保留)
-原文 + 【图片已下载】路径列表
+原文 + 【媒体已下载】路径列表(图片/语音)
 【档案卡】称呼/已知/会话人格/记忆相关/最近发言
 【回复规则】编号规则(见下)
 ```
@@ -2833,6 +2949,88 @@ global.__fpGate 可归因;F4 各轮指纹互不相同(7 轮全唯一)。mock 标
 `shouldSendGroupPanelReply`(未明确要求发群 → 一律留窗口,带指纹也不发);
 ② 群窗口专用指纹指令 + `masterWindowTurnRule` 声明「回复默认不发群」;
 ③ 判定器面板轮倾向改为 master。群友消息触发轮语义不变。
+
+**七轮(2026-09-22 归属指纹重设计,用户定案四规则——指纹协议整体换代)**:
+用户四规则:① 对话窗口发给 LLM 的信息永远是主人信息;② 主人 QQ 私聊/
+群聊发给 LLM 的信息永远是主人信息(群聊需意图识别——主人发言不一定
+指向 LLM);③ 其它信息都是别人的信息;④ 据此设计新指纹机制。旧双指纹
+文本协议(【指纹:xxx】= 发对方 / 【主人指纹:xxx】= 发主人)把路由押在
+LLM 服从性上(真实 API 实测 ~50%),忘带扣留丢消息、误带/抄旧指纹串台,
+一至二十一轮补丁叠加(判定器兜底/语气词容忍/复核……)修不完。
+
+**新机制三件套**:
+
+1. **归属判定在程序入口**(napcat-session.ts 纯函数):
+   - `isDirectedToBot(text, atMe)`(规则②意图识别):atMe @机器人 / 称呼
+     (岛灵/鲸鱼娘/鲸鱼/机器人)/第二人称疑问句/对助手式祈使(帮我查…)→
+     指向 LLM;主人群聊未指向 = 别人的信息(环境闲聊);缺省安全侧按别人;
+   - 归属随消息传递(payload.owner → useAgent → `agent:send` 第 8 参
+     msgOwner)→ `classifyTurn` 推轮次种类(window/panel/master-qq/
+     master-group/contact/group/ask/silent)+ 回复归属;
+   - **默认路由表**:窗口/面板→留窗口(2026-09-22 用户决策,改变旧
+     "私聊面板自动发对方"行为);主人 QQ 私聊/群点名→私发主人 QQ(用户
+     决策);扩展信任→对方;陌生人 ask→私发主人(询问,pending 流程保留);
+     群友→回群(【不回复群消息】保留)。
+2. **轮次指纹 turnTag 程序侧**(「指纹对不上就不发送」语义迁移):agent:send
+   签发 nonce 存 route + 传 engine.send,emit 附本轮事件元数据(AgentEvent
+   `turnTag` 字段),落定核对 `event.turnTag === route.turnTag`——陈旧/跨轮
+   投递不发送(stale-turn)。LLM 不写不读任何标记,服从性归零。
+3. **跨归属 = 工具 + 判定器安全网**(用户决策:零文本标记):转达/汇报只走
+   napcat send/send_group;安全网启发式优先、判定器只走稀有路径(日常零
+   LLM 开销)——A 执行内容兜底(主人指示轮 `isReplyInstruction`(触发侧,
+   looksLikeForwardInstruction 超集:回他:/跟X说/就这么回)+ pending 存活
+   + 工具没发过 → 判定 other 发 pending 对象);B 转达草稿扣留(无 pending
+   指示轮短回复 ≤60 码元 → master-other-no-target);C 别人轮泄露网
+   (isAskTurnToMaster / `looksLikeMasterAddressed` 开头称呼「主人,」→
+   转交主人);D 防重发(工具已发过 → 回复=汇报发主人/留窗口);E 群面板
+   外发硬门(shouldSendGroupPanelReply,去指纹门参数)。
+
+**踩坑**:① 触发侧启发式必须用 `triggerRaw`——QQ/群触发文本是注入模板
+(含「回复对方/发给」字样),直接喂 isReplyInstruction 会误命中,剥
+【QQxx】类别行 + 【档案卡】后正文再判;② panel 轮 replyOwner=master,
+面板外发分支必须放在主人信息轮分支**内部**(放尾部 = 死代码,实测写码
+时踩过一次);③ UI 路由标签(发给对方/发给主人)改由 message-routed 事件
+按实际送达目的地补标(唯一来源),文本嗅探(hasTurnMark 等)退役。
+
+**退役**:extractTurnFingerprint/extractMasterFingerprint/fingerprintMark/
+routeForClassifierIntent/turnFingerprint 七注入函数/hasTurnMark/
+hasMasterTurnMark/extractReplyToStranger;stripFingerprintMarks 降级为历史
+残留清洗(发送边界剥除,旧 localStorage 历史里的标记 LLM 会"抄")。
+**行为变化**:群触发轮自动私发主人汇报取消(单归属制);无标记回复不再
+扣留(默认落点必达);私聊面板回复不再自动发对方。session-debug 巡检
+mock/场景 E/F/J 重写为归属语义(F 场景语义翻转:无标记照常送达);主
+人指纹 live 服从性测试退役留桩(tests/test-master-fp-live.cjs)。
+
+### 16.7b QQ 扫码登录小窗(2026-09-22,登录码时效修复)
+
+用户实测:「扫码登录 QQ 一直显示过期,且扫上了,也说没扫上」。根因 =
+登录码是一次性时效凭证(~2 分钟),NapCat WebUI 的轮询只透传服务端
+qrcodeurl,**过期不换新、不提示**(实测同一码 6 分钟原样返回、loginError
+恒空)——扫到的都是死码:手机报"二维码已过期",偶发扫到活码确认后桌面
+又显示"没扫上";截图/转发的码落地即死。
+
+三层修复(全部在灵动岛侧,NapCat 本体不动——更新免覆盖):
+
+1. **登录流**(`electron/agent/napcat/napcat-login.ts`):WebUI 客户端
+   (auth 散列 SHA256(token+'.napcat') + Bearer Credential;GetQQLoginQrcode /
+   CheckLoginStatus / RefreshQRcode)+ 状态机两条硬规则——**到期前自动换码**
+   (ttlSec 105s)+ **秒级轮询跟随**(服务端换码即重置计时);纯逻辑注入
+   fetch/sha256/now,单测全覆盖(自动换码/成功收尾停轮询)。
+2. **零依赖 QR 编码器**(`electron/agent/napcat/qr.ts`,byte/EC-M/版本 1-10
+   ——2026-09-22 扩表:米家 loginUrl 实测 136 字节超 v6 上限 106 报「QR 数据
+   过长」,v7+ 补版本信息块 BCH(18,6)+ 多校正图形,v10 起计数指示器 16bit):
+   GF(256) RS + 8 掩码罚分择优 + BCH 格式位;与 python qrcode 锁
+   MODE_8BIT_BYTE 逐格对拍(tests/qr-crosscheck.mjs,7 样例 × 8 掩码一致,
+   含 136/200 字节长样钉版本信息块与非等长块交织;python 对纯大写文本自动
+   选字母数字模式,对拍不锁模式会误报)。
+3. **登录小窗**(napcat-login.html/preload/napcat-login.cjs):实时码 canvas
+   + 倒计时 + 状态行,托盘「QQ 扫码登录…」与 LLM 工具 `napcat login` 双入口;
+   WebUI token 自动发现(env NAPCAT_WEBUI_TOKEN → 常见 NapCat 目录 webui.json,
+   页面可手填);成功自动关窗 + 通知,OneBot 3001 随即可用。
+
+快捷登录现状(实测 GetQuickLoginListNew):本机缓存只有 1178821869 /
+59781796,机器人 108724305 需先扫码登录一次落快捷凭据,start-napcat.vbs
+裸参快捷登录才有效。
 
 ### 16.8 受保护记忆(人设锁定)
 
@@ -4064,6 +4262,11 @@ remember / forget / list_memory / update_memory / evolve_memory
 | 2026-08-13 | **受保护记忆条目**(进化丢失岛灵设定修复:protected 标记 + 人设自动锁定/加载迁移/applyChanges 硬拦截/forget 拒删/设置界面 🔒)、**NapCat 主人视角叙述剥离**(私聊窗口泄露修复:stripMasterNarration + 回他「…」引号回复提取 + 三处注入指令补人称约束)、**补丁版段错误根治**(toast 迁移托盘气泡 showNotify 统一出口 + fetch 移除 AbortSignal(llhttp UAF 规避,中止移 parseSse 安全点)+ NapCat 手写 WS 传输 wsclient.ts;补丁版 + 真流量 3×3 轮 90s 全稳定)、**恢复硬件加速**(roundedCorners:false 等透明窗口硬化,GPU 合成 + 视频硬解)、**图标优化**(make-icon 产出多尺寸 icon.ico(16-256 PNG-in-ICO)+ brand-electron-icon.mjs rcedit 烙进自编译 exe,弹窗/托盘/进程图标 256 高清;托盘与窗口图标 32→256)、**视频岛边缘裁切加固**(内层容器 + 视频/图片自身 22px 圆角 + isolation,GPU 合成层逃逸父级裁剪的四角矩形残留根治;全屏态重置圆角;mini 巡检增小窗截图 + 前后 DOM 几何诊断)、**QQ 提示词约束与窗口布局重构**(统一注入模板:类别行 QQ私聊/群聊·QQ号·称呼 + 原文 + 档案卡 + 编号回复规则[含安全红线:拒绝教唆操控主人电脑];buildProfileCard 按 QQ 号聚合联系人/人格/记忆 = 档案卡;UserBubble 分层显示 QQ→私聊/群聊→QQ号→可展开档案卡;Sub Agent 提示词精简:标题降级链 3→2、揣测四条规则;**档案卡 UI 动画化**(受控展开 + 0fr↔1fr 高度过渡与工具卡同款曲线,箭头旋转 180°,标签行轻强调,内容随高度渐入/收起淡出;历史剥离双通道:历史保留档案卡做消息隔离)、**档案卡称呼实时更新 + 唯一主人称呼**(主人缺名兜底「主人」,LLM 经 contact_update 实时更新档案下次生效,「主人」称呼只属于 主人账号)、**群聊冒泡**(主动陪伴判断注入群聊状态块,群里安静超陪伴间隔时偶尔 send_group 活跃气氛)、**bili 完成通知防吞**(background-done busy 时入队,idle 后逐条补发)、**QQ 回复路由泄露根治**(2026-08-13 用户实测:询问内容与后台下载完成的窗口回复被发给了陌生人——轮次来源三分类 qq/group/ask/window/system,只有主人窗口直发或主人 QQ 轮才消费陌生人 pending 且一次性,主动陪伴/系统轮永不路由;陌生人规则补"执行回复只写发给对方的话")、**陌生人执行轮防重发与防串线**(规则:执行轮禁止调 send/send_group 工具[回复文字即消息],禁止给主人发 QQ 消息;代码:agent:send 快照已发给该陌生人的私聊消息数,落定路由时对比——本轮已用工具发过则跳过 pending 路由,对方不再收到 2-3 条重复)、**媒体消息常驻**(MessageWindow 窗口化渲染扩范围覆盖全部媒体消息——新消息插入把播放中的视频顶出 overscan 不再卸载,进度/音量/倍速/播放态不丢)、**执行回复标记化串台根治**(「【回复对方】」标记:只有带标记的回复才路由给待回复陌生人并消费 pending——主人先回"嗯/让我想想"这类应答不再串台给陌生人也不清空 pending,真正指示轮的回复必达对方;无标记回复留在主人侧;气泡显示层剥离标记)、**主人权限显式化**(MASTER_IDENTITY_LINE 拼进主引擎系统提示:**逐条按标记判定身份**——带 QQ 来源标注 = 外部消息(只有 主人账号 是主人,不继承主人权限)、无来源标注窗口直发 = 主人最高权限、系统通知 = 系统事件;QQ 四处回复规则同步声明;档案卡增「最近发言」段(聊天记录备份按 QQ 过滤计入,群聊发言归到各人卡内,当前消息排除)) |、**会话隔离三 bug 联修**(17.6,用户实测:① 外部会话消息 LLM 完全不知道——agent:send 对 {engine,route} 条目直接 .send 是 undefined 抛 uncaughtException,改 .engine.send;② 会话首条消息回复不回发——routeFor 在引擎创建前回退 mainRoute,来源标记写进主对话路由,先取条目再取路由;③ 主对话让 LLM 发的消息切会话看不到——onSent → session-activity 回显链路 + 去重空白归一;stripToolNarration/stripMasterNarration 保留段尾换行,多行回复不再粘连;④ 单消息会话收起面板后消息被截断——岛体高度预算零余量,AGENT_PANEL_HEIGHT_SLACK 6px 计入;新增 session-debug 巡检(mock LLM 回显 + 假 OneBot 服务器 14 断言全链路复现,设置侧备份崩溃安全)) |
 | **V3.0**(2026-08-14) | **插件化架构重构十四期收官**(详见第 42 章):① 自研插件内核 kernel.ts(服务容器 + 可逆效果 + emit/waterfall/serial 类型化四通道,零外部依赖,per-engine ctx);② 能力接缝 ctx.llm(五适配器:DeepSeek Responses/Chat、Anthropic、MiMo Responses/Chat,执行时解析 + 专属错误码)与 ctx.tools(静态注册 + 动态源);③ 能力事件 tools/pre-execute/post-execute(瀑布可改写/否决)与生命周期事件 agent/turn-start/end、step-start/end(turn-end finally 全出口);④ 会话日志约束 Model-visible⟺Logged(session-log.ts,JSONL sink 可替换 + 图片清洗);⑤ 声明式组合层 composition.ts(PLUGIN_REGISTRY 18 工厂 + defaultProfile/applyPatch/dump,缺省装配与既往硬编码逐位一致);⑥ **域目录化整合**:electron/agent 扁平文件收编为 engine/plugin/providers/tools/napcat/subagents 六域,构建入口改 engine/engine.ts;验证基线 tsc 0 错、221/221 通过、build + smoke 全绿;**文档 V3.0 重写**:README/TECH.md 升级 V3.0(第 42 章插件化架构重构专章)|
 | **V3.1**(2026-08-17/18/19) | **安装器与发行(V3.1 主线,第 43 章)**:自绘安装向导 installer/ + 绿色发布 build-release + 独立安装器 build-installer + original-fs 修 asar 复制坑 + 可写性兜底 + 权限降级;→ **LM Studio 本地接入(第 5.3.6 章)**:第六适配器 lmstudio-chat(免 Key 模型挂载管理、instance_id 权威卸载、小模型文本工具调用解析、StreamCallFilter 流式过滤、格式全家福回归)→ **模型分工页**:主/Sub 不同供应商、本地模型下拉选用持久化 → **动画交互专题(第 44 章)**:会话滚动重写/手势/进度动量/工具面板 FLIP 等 → **供应商快捷切换(8-19)**:QuickMenu 化 + 凭据独立桶同步 → **智谱 GLM 云端(第 45 章,8-19)**:第七适配器 glm-chat(独立模块零相互导入、protocolOf 顺序 anthropic→mimo→lmstudio→glm→deepseek、错误码映射)+ GLM 文档工具簇(glm_ocr/glm_file_parse,工具总数 68→70)→ **LM Studio GLM-4-9B 专属档位**(第 45.3 章):裸调用第五解析通道/流式防护/残片清洗/多模型并存|
+| 2026-09-22(5) | **记忆自动记录去重 + 快捷自我进化**(用户反馈"自动记录特别多重复的;工具支持 LLM 直接快捷自我进化"):add/importEntries 近重复合并(findNearDuplicate 三层判定:数字串硬门/归一化等价含剥「的」/包含/LCS-Dice·Jaccard 0.85——同义改写不再堆积,protected 只补锁不改写)+ 提取收紧(单次 10→5 条 + 提示词"同义改写也算重复")+ evolve_memory 三动作(quick 同步单轮当轮回填摘要/run 后台多轮/status,runQuick busy 互斥) |
+| 2026-09-22(4) | **图片库/多媒体库滚动修复**(用户反馈"图片很多时无法上下滚动翻寻图片并返回"):根因 = `.island-panel-list.island-lib-view { position: relative }`(2026-08-08 右键菜单定位所加、收窄版残留)废掉 inset:0 高度约束 → 面板被内容撑高 → flex:1 滚动容器永不超高 → 图片越多越滚不动、底部「‹ 返回」被顶出 overflow:hidden——与 2026-08-10「记忆与进化无法滚动」同根因;修复 = 删除该 relative 覆盖(absolute 面板本就是右键菜单定位祖先)+ `.island-media-lib-list`(音频/视频)补 `min-height: 0`;CLAUDE.md 布局陷阱指引同步改正 |
+| 2026-09-22(3) | **B站登录态整合**(用户反馈"明明登录了,查询收藏夹又说没有登录信息"):根因 = cookie 键名 to_uppercase 落盘(DEDEUSERID)而 Rust 按 DedeUserID 精确查找全 miss(实测 whoami"已登录 (UID )")+ 凭据位置分裂(exe 旁 WebUI/qr-helper 与 userData)+ 三套判定各自为政——consolidateBiliCookies 键名规范化 + 遗留收编(单一来源 userData/bili/config/cookies.json)+ nav 实时探针(权威 UID/过期判定)biliLoginState 全 action 统一话术 + logout 全位置清除;实测 whoami 恢复"已登录 (UID 85900351)" |
+| 2026-09-22(2) | **歌曲卡片气泡**(用户反馈"LLM 自主放歌,对话窗口里没有歌的消息气泡"):music_control 每次操作附 song 附件(新 `type:'song'` part,SongInfo)→ 引擎注入 → SongBubble 唱片卡(歌名/歌手/专辑/状态/来源,播放中旋转;只展示不内播防双响);工具文本带歌名 + textFromParts 折 🎵 行;next/previous 后 1.2s 再取快照防打上上一首歌名;无曲目不出卡片 |
+| 2026-09-22 | **MiMo 官网接入文档专项适配(第 5.3.5 章)**:**Responses API 第一优先**(用户定调,Chat Completions 过旧)——多模态原生进 /v1/responses input items(input_image/input_audio/input_video+fps/media_resolution,活体探针实证;本地文件→data URI,历史韧性占位,mimo-v2.5-pro 能力拦截 404 实证)+ Batch API 工具簇(mimo_media/mimo_batch 均走 /v1/responses,批量 JSONL Responses 格式→批任务→轮询→结果落盘,实时 50% 价)+ 模型清单 v2.6 化(缺省 mimo-v2.6-pro);**parseSse 修复**:Chat Completions 无 type 帧原被整帧丢弃(chat/mimo-chat/lmstudio/glm-cloud 流式恒空文本,LM Studio 靠非流式降级掩盖)→ 无 type 帧以空串事件名产出;工具总数 74→76|
 
 
 ---
@@ -4293,7 +4496,7 @@ Profile 加一行——不改 loop、不改其他插件;装配清单在 defaultP
 | --- | --- | --- |
 | `engine/` | 8 | engine.ts 装配入口 + loop/builtins/tool-execution/confirm-gate/history/manual-call/turn-text |
 | `plugin/` | 14 | 内核与接缝:kernel/composition/host/host-bridge/llm/tool-registry/tool-plugins/prompt-plugins/tool-events/lifecycle-events/session-log/prompt/errors/index |
-| `providers/` | 9 | deepseek/chat/anthropic/mimo-chat/mimo-constants/mimo-responses/deepseek-constants + sse 公共层 + provider 分发 |
+| `providers/` | 15 | deepseek/chat/anthropic/mimo-chat/mimo-responses/mimo-media(多模态编码)/mimo-constants/lmstudio-chat/lmstudio-glm4/lmstudio-constants/glm-cloud/glm-cloud-constants/deepseek-constants + sse 公共层 + provider 分发 |
 | `tools/` | 13 | tools.ts 主入口 + env/bili/docflow/search/media 分簇 + settingsTools 四文件 + sessionTools/configTools/tool-args |
 | `napcat/` | 7 | napcat.ts 入口 + client/message/session/store/text + wsclient(QQ 通道五期拆分) |
 | `subagents/` | 4 | runtime 内核 + host 装配 + subagents 工厂 + helpers |
@@ -4607,12 +4810,13 @@ provider/工具/任务/总结/揣测/主动陪伴/记忆/进化/MCP/技能/预�
 | 消息气泡 Markdown 渲染 | 解析器细节 | 6.3 |
 | 关键约束(提示文本/透明窗口/歌词折叠/竞态/悬停校准) | 踩坑 | 第 10 章 |
 | 双岛并存模式(设计文档) | 未实现设计 | 22.1 |
+| 米家智能家居(工具簇/登录/协议/安全边界) | 米家接入 | 第 46 章 |
 
 ---
 
 ## 附录 I:全部工具一览
 
-引擎注册的全部工具(**70 个** `name:` 定义,按域分组;`createSettingsTools` 注入设置桥后注册
+引擎注册的全部工具(**76 个** `name:` 定义,按域分组;`createSettingsTools` 注入设置桥后注册
 **31 个**设置工具 + `music_control` 走独立音乐控制桥 `createMusicControlTools`,测试断言见
 tests/test-agent-core.ts「注入后 31 个工具齐」)。
 
@@ -4632,7 +4836,7 @@ tests/test-agent-core.ts「注入后 31 个工具齐」)。
 | switch_to_music | 切回音乐模式(play 参数) |
 | doc_convert | 文档转换(DocFlow 服务) |
 | xxt | 超星学习通自动答题 |
-| bili | B站查询/下载(内置 bili-tool,HEVC 自动转码/convert) |
+| bili | B站查询/下载(内置 bili-tool,HEVC 自动转码/convert;登录态整合——凭据单源收编 + 键名规范化 + nav 探针,login/whoami/logout,见 5.4.1) |
 | glm_ocr | 图片文字识别 OCR(智谱 GLM 云端,含手写体/多语言;见 45.2) |
 | glm_file_parse | 文档解析提取文本(智谱 GLM 云端,sync/async;见 45.2) |
 
@@ -4652,16 +4856,32 @@ tests/test-agent-core.ts「注入后 31 个工具齐」)。
 
 get_session_note / set_session_note / clear_session_context
 
+### MiMo 专项工具族(tools/tools-mimo.ts,2;见 5.3.5)
+
+| 工具 | 一句话 |
+| --- | --- |
+| mimo_media | 多模态理解:听音频/看视频/看图(路径或 URL,走 /v1/responses 原生 input;MiMo 协议对话附件原生理解,不需本工具;抄文字用 glm_ocr) |
+| mimo_batch | 批量文本生成(官网 Batch API,Responses 格式 JSONL:上传→批任务→轮询→结果落盘;实时 50% 价,action=create/status/result/cancel) |
+
+### 米家智能家居工具族(tools/tools-mijia.ts,4;见 46 章)
+
+| 工具 | 一句话 |
+| --- | --- |
+| mijia_devices | 设备清单/单设备状态(只读全来源;通道 lan\|cloud 标注) |
+| mijia_control | 设属性/执行动作(友名 light:on 等;写守卫 + 门锁/摄像头硬禁) |
+| mijia_scene | 智能场景列表/执行(run 写守卫 + 开锁场景名拒) |
+| mijia_login | 米家账号登录管理(status/login/logout;login 开扫码窗) |
+
 ### 引擎内置工具(engine/,4)
 
-- engine-builtins.ts(3):evolve_memory(记忆进化) / set_output_budget(输出预算动态调整) /
+- engine-builtins.ts(3):evolve_memory(记忆进化,action=quick 同步单轮/run 后台多轮/status) / set_output_budget(输出预算动态调整) /
   get_deepseek_balance(DeepSeek 余额查询)
 - engine-tool-execution.ts(1):delegate(子代理,嵌套 agent 循环)
 
 ### 记忆与 QQ 通道
 
 - memory.ts(4):remember / forget / list_memory / update_memory
-- napcat.ts(2):napcat(发消息/发图/发文件/撤回/查成员/群管理等) / manage_sessions(会话绑定/静音)
+- napcat.ts(2):napcat(发消息/发图/发文件/发语音条/撤回/查成员/群管理等) / manage_sessions(会话绑定/静音)
 
 ### 灵动岛设置工具族(31 + 1)
 
@@ -4673,9 +4893,9 @@ get_session_note / set_session_note / clear_session_context
   import_audio_library / add_audio_to_playlist / remove_background / rename_audio_library /
   remove_audio_library / list_video_library / import_video_library / rename_video_library /
   remove_video_library / play_library_video / set_video_config / set_audio_config
-- **createMusicControlTools**(独立音乐控制桥,1):music_control(播放/暂停/切歌/进度/音量)
+- **createMusicControlTools**(独立音乐控制桥,1):music_control(播放/暂停/切歌/查状态;放歌自动附**歌曲卡片气泡**——歌名/歌手/播放状态,2026-09-22)
 
-合计:18 + 7 + 3 + 4 + 4 + 2 + 31 + 1 = **70 个工具定义**。
+合计:18 + 7 + 3 + 4 + 4 + 4 + 2 + 31 + 1 = **74 个工具定义**。
 
 ---
 
@@ -5109,3 +5329,122 @@ LM Studio 挂载管理(`action:load`)不再自动卸载其他已加载模型(202
 (如南北阁4.2)分工可同时挂多个模型。显存/内存由 LM Studio 自行调度,资源不足
 时加载请求本身失败报错;卸载仍可在挂载管理里逐个手动执行。建模分工页(第三列)
 Sub 本地下拉列出已加载模型选用即持久化。
+## 第 46 章 米家智能家居工具簇(2026-09-22)
+
+2026-09-22 完成**米家智能家居接入**(自研工具簇,零第三方依赖):岛灵可
+查询/控制米家设备、执行智能场景。WiFi 设备优先 **miio 局域网 UDP 直控**
+(快、可离线),蓝牙(blt.)/远程/局域网不通自动走**小米云 API**;能力以
+MIoT-Spec-V2 友名(`light:on`/`brightness`)寻址,工具层翻译到 siid/piid/aiid。
+
+### 46.1 安全边界(用户拍板,代码层硬约束)
+
+- **门锁 unlock/开门类动作、摄像头任何写入/动作/视频流:硬禁**——
+  `classifyForbiddenDevice`/`assertMijiaDeviceAllowed`(tools/tools-mijia.ts)
+  代码层拒绝,动作名 `/unlock|开锁|开门/` 双保险(设备未标注也拒);门锁/
+  摄像头只读查询可用。**场景残余风险**:场景内容无法逐设备审计,run 仅做
+  场景名开锁/开门拒 + 写守卫;含开锁步骤的手动场景请勿创建。
+- **确认门:全部免确认**(用户选择;不接 confirmAction/createTurnConfirmGate
+  ——后者硬编码 exec_command 且 confirmCommand 现状未接线,勿踩)。
+- **来源守卫**:写操作(control set/invoke、scene run、login/logout)仅
+  `window/panel/master-qq/master-group` 放行(= 主人 QQ 远程可控);
+  **判定用 `route.turnKind`(classifyTurn 八值)**,`getTurnSource` 三值
+  (window/qq/group,main.cjs:3115 归一)分不了 master-qq 与 contact,只作兜底
+  (兜底仅 window/panel 放行)。读(devices/status/scene list/login status)全放。
+- **凭证边界**:serviceToken/ssecurity/passToken/设备 LAN token 一律
+  `enc:v1:` DPAPI 密文落盘(mijia-store,语义对齐 settings-store:不可加密
+  绝不落明文、解密失败引导重登);工具返回/提示词/会话审计(session-log
+  redact 扩展字段名)永不含凭证;`buildToolsGuideBlock` 稳定文案禁止
+  read_file/write_file/exec_command 改 `userData/mijia-*.json`。
+
+### 46.2 协议层(干净室自写;MIT 参考 = PiotrMachowski/Xiaomi-cloud-tokens-extractor,GPL 代码禁复制)
+
+- **mijia-cloud.ts**:QR 登录(`GET account.xiaomi.com/longPolling/loginUrl`
+  → qr 图源/loginUrl/lp → 长轮询 → location → serviceToken;**弃密码登录**
+  ——captcha + 邮件 2FA 泥潭)+ 云请求 ENCRYPT-RC4 签名:
+  `nonce = base64(8rand‖4B BE 分钟数)`、`signed_nonce = base64(SHA256(b64d
+  (ssecurity)‖b64d(nonce)))`、`rc4_hash__ = 签名(明文 data)`→与 data 一起
+  RC4 加密(密钥 = b64d(signed_nonce),**丢 1024 字节密钥流**;OpenSSL3 无
+  RC4,手写 `rc4Crypt`,有经典向量单测)→ `signature = 签名(密文 data+
+  rc4_hash__ 插入序)` → 全字段以 **query string** 发出(signed_nonce 本体
+  不发,ssecurity 原样发);响应 = 整包 base64 → RC4 解密。签名串 =
+  `METHOD&url去/app/&k=v…&signed_nonce` SHA1 后 base64。登录流状态机三契约
+  同款 napcat-login(过期码不落屏/轮询驱动换码/错误态「换一张」= 整体重试)。
+  serviceToken 失效(code=3)自动 passToken 刷新一次,再败引导 mijia_login。
+  **gethome 字段实测(2026-09-22 活体探针 tests/test-mijia-home-live.cjs)**:
+  家庭条目主人 UID 字段名是 `uid`(无 owner_uid/owner)——按旧名解析落空
+  → `home_device_list` 的 `home_owner` 发空串 → 云回 `code=-1:no permit`、
+  0 设备(登录本身完好,易误判「登录授权不完整」);修复 = getHome 取
+  `owner_uid‖uid‖owner‖user_id`,homeDeviceList 对空 owner 兜底登录
+  userId。载荷形状(str/num、support_smart_home true/2)服务端均接受。
+  **miotspec 响应结构实测(2026-09-22 二轮复盘)**:`/miotspec/prop/get|set`
+  的 `result` **直接是逐项数组** `[{did,iid,siid,piid,value?,code}]`,不是
+  `result.props`——旧解析恒取空 → **设置成功也报「设置失败 code=-」**(空值
+  文案),LLM 联想成「登录态失效」反复开扫码窗重验(实测连开 5 次);修复 =
+  `resultItems()` 兼容数组/props 两形态,失败码如实透出「设备拒绝 code=…
+  (与登录无关)」。**规格端点同日下线**:`home.miot-spec.com/spec/instance`
+  404 整站消失(致「规格不可用」),现行端点 `miot-spec.org/miot-spec-v2/
+  instance?type=<spec URN>` **只收 URN 不收 model**——URN 取 home_device_list
+  的 `spec_type`(设备记录 specType 字段,store 持久化)。
+  **login 防重开守卫**:已登录时 `mijia_login login` 缺省拒绝开窗(返回
+  「无需重新扫码」+ 引导排查),`force=true` 才放行;工具描述明示「规格/设备
+  拒绝/写守卫」类错误禁用重扫。错误教训 4 条(no permit→重扫码)已从
+  memory.json 纠正为新结论。
+- **mijia-lan.ts**(全仓首例 node:dgram,纪律仿 wsclient.ts):UDP 54321;
+  Hello 32B(magic 0x2131 + len 0x0020 + 其余 0xFF),应答 token @0x10-0x1F
+  (**全 0 = 设备未开局域网控制**,报错引导米家 App 开启「局域网通信协议」);
+  数据包 checksum = `MD5(header[0..16] ‖ token ‖ cipher)`(PROTOCOL.md 表述
+  含糊,以实测可用实现公式为准,字节向量单测钉死);payload =
+  AES-128-CBC-PKCS7(utf8 JSON + 0x00 终结符),key=MD5(token),
+  iv=MD5(key‖token)。一调用一 socket finally 必 close;Hello 3s/RPC 5s
+  超时 + Hello 重试 1 次。
+- **mijia-spec.ts**:`GET miot-spec.org/miot-spec-v2/instance?type=<spec URN>`
+  (端点只收 URN;旧 home.miot-spec.com 已 404 下线)+
+  友名映射(`service:member` 精确/裸名唯一/多义报错列候选/FRIEND_ALIASES
+  别名/`FALLBACK_LIGHT` 兜底);缓存 = 内存 Map + `mijia-spec-cache.json`。
+- **mijia-store.ts**:`mijia-auth.json`/`mijia-devices.json`;缓存 + 串行
+  写队列 + tmp+rename(仿 napcat-store);加密/路径经 deps 注入(生产缺省
+  electron safeStorage;**Electron 43 safeStorage 与 userData 路径绑定**,
+  外部脚本解密须先 `app.setPath('userData')` 同路径)。三文件登记
+  data-manifest(APP_DATA_ENTRIES),工厂重置一并清。
+
+### 46.3 四工具与传输选择
+
+| 工具 | 职责 | timeoutMs |
+| --- | --- | --- |
+| `mijia_devices` | list/status:设备清单(did/房间/在线/通道/禁控标记)/ 查属性 | 45000 |
+| `mijia_control` | set/invoke:友名或显式 siid/piid 设属性、动作调用 | 30000 |
+| `mijia_scene` | list/run:手动场景列表/执行(自动化 v1 只读) | 30000 |
+| `mijia_login` | status/login/logout:登录态/开扫码窗/清凭证 | 20000 |
+
+传输选择:did 含 `blt.` → 仅云;WiFi 且有 localip+token → LAN 优先(hello
+结果 60s 短缓存),失败/超时自动降级云 miotspec 端点(` /miotspec/prop/get|
+set`、`/miotspec/action`);设备行标注 `通道=lan|cloud`。云端点(设备清单
+`/v2/home/home_device_list` 明文返回 token、`/v2/homeroom/gethome`、场景
+`/v2/scene/list|start`)字段名以实现期实测为准,失败错误体回带原始 body
+前 200 字便于钉。
+
+### 46.4 登录小窗与入口
+
+`electron/mijia-login.{cjs,html}` + `mijia-login-preload.cjs`(骨架照抄
+napcat-login 家族:frame:false/sandbox、六通道 `mijia-login:*`、done →
+showNotify + 自动关窗);窗口优先展示**服务端 QR 图源**(权威码源),图源
+失败回退 `encodeQr(loginUrl)` 手编矩阵(loginUrl 最长实测 136 字节 →
+QR v8;编码器 v1-10 见 16.7);区域下拉(cn/de/us/ru/tw/sg/in/i2)
+重起流。入口双挂:托盘「米家登录…」+ LLM `mijia_login action=login`
+(EngineDeps.openMijiaLogin)。纯逻辑 `createMijiaLoginFlow` 经 engine.ts
+re-export,主进程经 `agentEngineModule` 取用(createMijiaStore/createMijiaCloud
+同款)。
+
+### 46.5 已知限制与降级
+
+- **场景端点 `/v2/scene/*` 为实现期占位**,若服务端不认 → 工具返回
+  「端点研究中,可用 mijia_control 手动操作」;devices/control 不受影响。
+- UDP 不通(路由器 AP 隔离/Windows 首次防火墙弹窗/设备未开局域网协议)→
+  自动云端;LAN 直控需电脑与设备同一局域网。
+- 旧 miio 专有协议设备(非 MIoT-Spec)云侧 miotspec 端点不覆盖,LAN 的
+  get_properties/set_properties/action 可用;规格拉取失败时灯类有
+  FALLBACK_LIGHT 兜底。
+- 蓝牙设备、中枢网关子设备走云;中枢本地 MQTT / 蓝牙 beaconkey 本地 /
+  摄像头音视频流 v1 不做(ha_xiaomi_home 同口径)。
+- 登录风控(异地拦截等)原样透出服务端文案,不自动打码;凭证仅存本机
+  DPAPI 密文,换机/重装系统需重新扫码。

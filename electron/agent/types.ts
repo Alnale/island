@@ -45,6 +45,22 @@ export interface MediaAttachment {
   name?: string
 }
 
+/**
+ * 歌曲卡片信息(2026-09-22 用户反馈"LLM 自主放歌,对话窗口里没有歌的
+ * 消息气泡"):music_control 放歌后程序注入歌曲卡片气泡——与 open_file
+ * 媒体拦截同思路,不依赖 LLM 复述。播放走岛内播放器(SMTC/本地),卡片
+ * 只展示**不在气泡内播**(避免与播放器双响/双控件)。
+ */
+export interface SongInfo {
+  title: string
+  artist?: string
+  album?: string
+  /** 卡片落定时的播放状态快照(true = 播放中) */
+  playing?: boolean
+  /** 来源:true = 外部平台(QQ音乐等,SMTC);false = 本地播放器 */
+  external?: boolean
+}
+
 /** 消息 part(opencode MessagePart 的子集) */
 export type AgentPart =
   | { type: 'text'; text: string }
@@ -53,6 +69,8 @@ export type AgentPart =
   | ToolResultPart
   | { type: 'image'; dataUrl: string }
   | { type: 'media'; kind: 'img' | 'video' | 'audio'; url: string; name?: string }
+  /** 歌曲卡片(2026-09-22):music_control 放歌注入,渲染端 SongBubble 展示 */
+  | ({ type: 'song' } & SongInfo)
 
 /** 一条消息:user(整条文本)或 assistant(parts 序列) */
 export interface AgentMessage {
@@ -75,8 +93,12 @@ export interface AgentMessage {
 /** 引擎 → 渲染端的事件流(经主进程转发) */
 /** 会话隔离并发(2026-08-13):事件统一携带 sessionKey('main' = 主人
  * 主对话;'private:<QQ>' / 'group:<群号>' = 外部会话),渲染端按会话路由
- * 到对应状态机。交叉类型对联合分布,所有成员都带可选会话键 */
-export type AgentEvent = { sessionKey?: string } & (
+ * 到对应状态机。交叉类型对联合分布,所有成员都带可选会话键。
+ * **turnTag(2026-09-22 归属指纹)**:轮次认证 nonce——agent:send 签发
+ * 随 send 进引擎,emit 给本轮全部事件附上;主进程落定路由核对
+ * event.turnTag === route.turnTag,对不上(陈旧/跨轮投递)不发送
+ * (「指纹对不上就不发送」语义的程序侧实现,LLM 不写不读标记) */
+export type AgentEvent = { sessionKey?: string; turnTag?: string } & (
   | { type: 'status'; status: 'thinking' | 'running' | 'idle' }
   | { type: 'text-delta'; text: string }
   | { type: 'reasoning-delta'; text: string }
@@ -96,13 +118,12 @@ export type AgentEvent = { sessionKey?: string } & (
    */
   | { type: 'background-done'; title: string; message: string }
   /**
-   * 判定器路由结果补标(2026-08-16 二轮修复"私聊消息正常发送但指纹 UI
-   * 标识丢失"):意图判定器兜底路由成功的回复**文本没有指纹**(指纹缺失
-   * 才走判定器)——渲染端 hasTurnMark/hasMasterTurnMark 检测不到 →
-   * sentToPeer/sentToMaster 标签丢失。主进程在判定器路由发送成功后补发
-   * 本事件(messageId = 该轮落定的引擎消息 id),渲染端按 id 给已落定
-   * 消息补打标签。to:'master' = 发给主人 / 'peer' = 发给对方(私聊)/
-   * 'group' = 发到群
+   * 路由结果补标(2026-08-16 建;2026-09-22 归属指纹后成为标签**唯一
+   * 来源**):主进程把回复实际送达目的地后补发本事件(messageId = 该轮
+   * 落定的引擎消息 id),渲染端按 id 给已落定消息打 sentToPeer/
+   * sentToMaster 标签(气泡"发给对方/发给主人"风格)——路由由触发来源
+   * 程序判定,标签不再从文本指纹嗅探。to:'master' = 发给主人 /
+   * 'peer' = 发给对方(私聊)/ 'group' = 发到群
    */
   | { type: 'message-routed'; messageId: string; to: 'master' | 'peer' | 'group' }
   /** 确认门:引擎请求用户确认(主进程转发;渲染端允许/拒绝后经
@@ -342,7 +363,7 @@ export interface AgentTool {
   execute(
     params: Record<string, unknown>,
     ctx?: ToolExecCtx,
-  ): Promise<string | { text: string; image?: string; media?: MediaAttachment[] }>
+  ): Promise<string | { text: string; image?: string; media?: MediaAttachment[]; song?: SongInfo }>
   /**
    * 技能来源分区(设置界面三区展示):
    * created = 灵动岛创建(引擎 create / 自然语言,userData/skills 无导入标记);
@@ -422,6 +443,17 @@ export interface EngineDeps {
    */
   runMusicControl?(op: string, args: unknown[]): Promise<unknown>
   /**
+   * 打开 QQ 扫码登录小窗(2026-09-22,napcat login 工具):实时二维码
+   * 自动换新 + 秒级状态轮询。未注入则 login 动作提示不可用
+   */
+  openNapcatLogin?(): void
+  /**
+   * 打开米家扫码登录小窗(2026-09-22,mijia_login 工具):小米 passport
+   * QR 登录流(避开密码登录的 captcha/2FA)。region 缺省 cn。
+   * 未注入则 login 动作提示不可用
+   */
+  openMijiaLogin?(region?: string): void
+  /**
    * 会话管理工具(2026-08-13,用户要求"LLM 自己生成记录,自己清空当前
    * 会话上下文"):set_session_note / clear_session_context 的桥——主进程
    * 经 executeJavaScript 读写渲染端 localStorage + 派发
@@ -440,6 +472,13 @@ export interface EngineDeps {
   getTurnSource?(): string | null
   setOwnerQQ?(qq: string): { ok: boolean; error?: string }
   /**
+   * 轮次种类(2026-09-22 归属指纹,classifyTurn 八值:window/panel/
+   * master-qq/master-group/contact/group/ask/silent)——mijia 写守卫据此
+   * 区分主人(master-qq 可写)与别人(contact 拒写);getTurnSource 三值
+   * (window/qq/group)分不了,只作兜底
+   */
+  getTurnKind?(): string | null
+  /**
    * Sub Agent 能力宿主:主进程一份单例,引擎插件经 ctx.subagents
    * 取同一实例。未注入时插件自行建本地工厂(测试环境)
    */
@@ -451,8 +490,8 @@ export interface EngineDeps {
    */
   napcat?: {
     status(): { connected: boolean; url: string; lastError: string; receivedCount: number; repliedCount: number }
-    sendToQQ(qq: string, text: string): Promise<string>
-    sendToGroup(groupId: string, text: string): Promise<string>
+    sendToQQ(qq: string, text: string, opts?: { image?: string; file?: string; voice?: string }): Promise<string>
+    sendToGroup(groupId: string, text: string, opts?: { file?: string; image?: string; voice?: string }): Promise<string>
     getRecentMessages(): Array<{ qq: string; text: string; messageId: string; time: number; replied?: boolean }>
     /** 联系人档案(2026-08-12:napcat 工具 contacts/contact_update) */
     getContacts(): Promise<
@@ -516,6 +555,13 @@ export interface MemoryStoreLike {
 export interface EvolutionLike {
   requestEvolve(focus?: string, rounds?: number): Promise<{ started: boolean; message: string }>
   getStatus(): Promise<string>
+  /**
+   * 快捷单轮进化(2026-09-22 用户要求"LLM 直接进行快捷自我进化,运行
+   * 记忆进化"):同步跑一轮 评审→应用→复评→接受/回滚,**等待完成后返回
+   * 人话摘要**——LLM 当轮就能把进化结果讲给用户;未注入(旧宿主)时
+   * 工具层回退 requestEvolve
+   */
+  runQuick?(focus?: string): Promise<{ ok: boolean; message: string }>
 }
 
 /** 工具参数名 → 值的开放对象(工具 execute 收到的参数) */

@@ -84,7 +84,7 @@ try {
       parts: [{ type: 'text', text: '你好' }]
     }
   ]
-  const messages = mimoHistoryToMessages(history)
+  const messages = await mimoHistoryToMessages(history)
   console.log('转换结果:', JSON.stringify(messages, null, 2))
   if (messages.length === 1 && messages[0].role === 'user') {
     ok('mimoHistoryToMessages 格式正确')

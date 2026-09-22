@@ -98,28 +98,45 @@ export {
   isSuspectedMonologue,
   sessionKeyFor,
   isValidSessionKey,
-  extractReplyToStranger,
   turnAlreadySentToPending,
   turnAlreadySentToTarget,
   isAskTurnToMaster,
   newTurnFingerprint,
-  fingerprintMark,
-  extractTurnFingerprint,
-  extractMasterFingerprint,
   stripFingerprintMarks,
-  routeForClassifierIntent,
+  classifyTurn,
+  isDirectedToBot,
+  isReplyInstruction,
+  looksLikeMasterAddressed,
   looksLikeForwardInstruction,
   looksLikeGroupSendInstruction,
   shouldSendGroupPanelReply,
-  REPLY_TO_STRANGER_MARK,
+  createNapcatLoginFlow,
+  webuiTokenHash,
+  encodeQr,
 } from '../napcat/napcat'
-export type {
-  ReplyIntent,
-  ClassifierTurnKind,
-  ClassifierRouteAction,
-} from '../napcat/napcat'
+export type { ReplyOwner, TurnKind, ReplyIntent } from '../napcat/napcat'
 // NapCat 持久化域工具(2026-08-18 会话删除 / 清除数据补全,供主进程调用)
 export { deleteNapcatChatsFor, resetNapcatStore } from '../napcat/napcat'
+// 米家智能家居(2026-09-22):工具簇/登录流/签名纯函数/存储(登录小窗与测试用)
+export {
+  createMijiaTools,
+  assertMijiaWriteAllowed,
+  classifyForbiddenDevice,
+  assertMijiaDeviceAllowed,
+  resetMijiaRuntime,
+} from '../tools/tools-mijia'
+export {
+  createMijiaLoginFlow,
+  createMijiaCloud,
+  makeNonce,
+  computeSignedNonce,
+  computeSignature,
+  rc4Crypt,
+  parsePrefixedJson,
+} from '../tools/mijia/mijia-cloud'
+export { createMijiaStore } from '../tools/mijia/mijia-store'
+export { createMijiaLan } from '../tools/mijia/mijia-lan'
+export { createMijiaSpec } from '../tools/mijia/mijia-spec'
 
 // 供测试使用的辅助函数(从 engine-loop 重新导出)
 export {
@@ -146,7 +163,7 @@ export { napcatIncomingIsBlank, napcatMessageSubTypeNoise, shouldAdmitGroupMessa
 export interface AgentEngine {
   readonly busy: boolean
   readonly outputBudget: number
-  send(text: string, history: AgentMessage[], sessionId?: string, sessionKey?: string): void
+  send(text: string, history: AgentMessage[], sessionId?: string, sessionKey?: string, turnTag?: string): void
   proactiveTurn(history: AgentMessage[], opts?: { hint?: string; sessionId?: string }): void
   abort(): void
   listTools(): Array<{ name: string; description: string; parameters: AgentTool['parameters'] }>
@@ -164,6 +181,10 @@ export function createAgentEngine(deps: EngineDeps): AgentEngine {
   let ctl: AbortController | null = null
   let currentSessionId: string | null = null
   let currentSessionKey = 'main'
+  // 轮次认证标签(2026-09-22 归属指纹):agent:send 签发的 nonce,附在本轮
+  // 全部事件元数据上(与 sessionKey 同款注入)——主进程落定核对
+  // event.turnTag === route.turnTag,对不上 = 陈旧/跨轮投递,不发送
+  let currentTurnTag: string | null = null
 
   // 可变输出预算(用对象包装以便各插件经 ctx.outputBudget 服务共享读写)
   const configuredBudget = deps.getConfig().maxOutputTokens
@@ -183,7 +204,12 @@ export function createAgentEngine(deps: EngineDeps): AgentEngine {
   // currentSessionKey 覆盖(多会话引擎并存时,任务终态回调由最后装配的
   // 引擎发出,其 currentSessionKey 未必是发起下载的会话);普通事件
   // (message/status 等)不带显式键,沿用引擎当前会话键
-  const emit = (event: AgentEvent) => deps.onEvent({ ...event, sessionKey: event.sessionKey ?? currentSessionKey })
+  const emit = (event: AgentEvent) =>
+    deps.onEvent({
+      ...event,
+      sessionKey: event.sessionKey ?? currentSessionKey,
+      turnTag: event.turnTag ?? currentTurnTag ?? undefined,
+    })
 
   // per-agent 上下文:每引擎一份(主对话与每个外部会话天然隔离)
   const ctx: AgentContext = createContext('agent-engine')
@@ -209,7 +235,7 @@ export function createAgentEngine(deps: EngineDeps): AgentEngine {
     get outputBudget() {
       return outputBudgetRef.value
     },
-    send(text, history, sessionId, sessionKey) {
+    send(text, history, sessionId, sessionKey, turnTag) {
       if (running) {
         emit({ type: 'error', message: 'Agent 正在运行中,请先等待或中止' })
         return
@@ -221,6 +247,7 @@ export function createAgentEngine(deps: EngineDeps): AgentEngine {
       }
       currentSessionId = typeof sessionId === 'string' && sessionId ? sessionId : null
       currentSessionKey = typeof sessionKey === 'string' && sessionKey ? sessionKey : 'main'
+      currentTurnTag = typeof turnTag === 'string' && turnTag ? turnTag : null
       running = true
       const turnCtl = new AbortController()
       ctl = turnCtl
@@ -243,6 +270,8 @@ export function createAgentEngine(deps: EngineDeps): AgentEngine {
       if (!localFreeKey(config)) return
       currentSessionId =
         typeof opts?.sessionId === 'string' && opts.sessionId ? opts.sessionId : null
+      // 系统/主动轮不带轮次标签(永不路由,无需核对)
+      currentTurnTag = null
       running = true
       const turnCtl = new AbortController()
       ctl = turnCtl
