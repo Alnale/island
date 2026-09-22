@@ -82,5 +82,7 @@ declare module './kernel' {
     memoryStore: MemoryStoreLike | null
     /** 自我进化 harness(null = evolve 工具不可用) */
     evolution: EvolutionLike | null
+    /** Sub Agent 能力宿主(null = 插件自行建本地工厂) */
+    subagents: import('../types').SubAgentHost | null
   }
 }

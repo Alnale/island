@@ -245,12 +245,29 @@ contextBridge.exposeInMainWorld('desktop', {
   agentEvolutionReset() {
     return ipcRenderer.invoke('agent:evolution-reset')
   },
-  /** Agent:清除数据(2026-08-10,Agent 设置「数据管理」区)
-   * scope 'app' = 灵动岛所有数据(记忆/进化/settings.json);
-   * scope 'tools' = 所有工具的下载记录及源文件(bili 下载与登录态、
-   * xxt 登录态与截图)。渲染端已清 localStorage + IndexedDB */
+  /** Agent:恢复出厂设置 / 清除工具数据。主进程编排渲染端存储清理。 */
   agentClearData(scope) {
     return ipcRenderer.invoke('agent:clear-data', scope)
+  },
+  onPrepareReset(callback) {
+    const listener = (_event, payload) => callback(payload)
+    ipcRenderer.on('data:prepare-reset', listener)
+    return () => ipcRenderer.removeListener('data:prepare-reset', listener)
+  },
+  prepareResetDone(payload) {
+    ipcRenderer.send('data:prepare-reset-done', payload)
+  },
+  agentSecretStatus() {
+    return ipcRenderer.invoke('agent:secret-status')
+  },
+  agentSessionLogStatus() {
+    return ipcRenderer.invoke('agent:session-log-status')
+  },
+  agentSessionLogSet(enabled) {
+    return ipcRenderer.invoke('agent:session-log-set', enabled)
+  },
+  agentSessionLogClear() {
+    return ipcRenderer.invoke('agent:session-log-clear')
   },
   /** 穿透轮询校正(2026-08-10):返回窗口屏幕 bounds + 光标屏幕位置,
    * 渲染端核对岛体 rect 校正穿透状态(防 mouseleave 后穿透死锁) */

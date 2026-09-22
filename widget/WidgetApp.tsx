@@ -44,6 +44,7 @@ import {
   type AudioLibraryItem,
   type VideoLibraryItem,
 } from '../src/media/libraryStore'
+import { resetRendererStorage } from '../src/media/resetRendererData'
 
 /** Agent 模式的岛体强调色(自定义主题色未设置时使用) */
 const AGENT_THEME = '#4d6bfe'
@@ -674,6 +675,15 @@ export default function WidgetApp() {
   const [settingsSeq, setSettingsSeq] = useState(0)
   useEffect(() => {
     return window.desktop?.onOpenSettings?.(() => setSettingsSeq((s) => s + 1))
+  }, [])
+  useEffect(() => {
+    return window.desktop?.onPrepareReset?.((payload) => {
+      void (async () => {
+        const databases = Array.isArray(payload.databases) ? payload.databases : []
+        const entries = payload.scope === 'app' ? await resetRendererStorage(databases) : []
+        window.desktop?.prepareResetDone?.({ requestId: payload.requestId, entries })
+      })()
+    })
   }, [])
   // 全屏状态(2026-08-08 用户要求"全屏时右键拖拽移动窗口,不退出全屏、
   // 不越来越大"):全屏层 = 100% viewport,窗口任何 setWindowSize 都会

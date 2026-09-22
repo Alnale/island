@@ -63,6 +63,7 @@ export function hostBridgePlugin(
       ctx.register('napcatClient', deps.napcat as never)
       ctx.register('memoryStore', deps.getMemoryStore?.() ?? null)
       ctx.register('evolution', deps.getEvolution?.() ?? null)
+      ctx.register('subagents', deps.getSubAgents?.() ?? null)
 
       // 外部工具源:宿主共享注入优先(多会话引擎共用 MCP 进程);
       // 缺省引擎自建(MCP + 技能,每步实时调用)
@@ -84,7 +85,7 @@ export function hostBridgePlugin(
       ctx.register('externalTools', externalTools)
 
       // MCP 管理器随引擎销毁回收(技能扫描器无资源)
-      return () => mcpManager.dispose()
+      return () => { void mcpManager.dispose() }
     },
   }
 }

@@ -1584,7 +1584,10 @@ export function AgentView({
               </div>
             ) : (
               <>
-                <span key={currentSessionKey} className="island-session-current-title">
+                {/* 标题与操作区是同级节点，key 必须互不相同。此前两者都直接
+                    使用 currentSessionKey，React 在会话切换时会因重复 key
+                    遗留旧标题，连续切换群聊后顶栏便会叠出多个群聊信息。 */}
+                <span key={`session-title:${currentSessionKey}`} className="island-session-current-title">
                   {(() => {
                     const it = (sessionList ?? []).find((x) => x.key === currentSessionKey)
                     const kind = it?.kind
@@ -1614,7 +1617,7 @@ export function AgentView({
                     )
                   })()}
                 </span>
-                <span key={currentSessionKey} className="island-session-current-actions">
+                <span key={`session-actions:${currentSessionKey}`} className="island-session-current-actions">
                   <button
                     type="button"
                     className={`island-session-ctl${sessionNoteText ? ' has-note' : ''}`}

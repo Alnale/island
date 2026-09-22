@@ -20,11 +20,11 @@ class NotificationStub {
 
 module.exports = {
   Notification: NotificationStub,
-  // tools.ts 经 app.getPath('userData') 取运行时产物落点
-  // (bili 下载 / xxt 登录态);测试环境返回固定假路径,不落盘
+  // tools.ts 经 app.getPath('userData') 取运行时产物落点；测试环境使用
+  // 每轮显式注入的临时目录，绝不读取用户真实配置。
   app: {
     getPath() {
-      return 'C:/__test_userData__'
+      return process.env.DYNAMIC_ISLAND_TEST_USER_DATA || 'C:/__dynamic_island_agent_tests__'
     },
   },
   shell: {

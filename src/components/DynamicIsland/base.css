@@ -1,6 +1,30 @@
 /* 岛体核心:主体/状态色/内容布局/长按展开/按压与涟漪/播放模式动画/歌词/进度条/粒子(2026-08-06 从单文件拆分) */
 /* ===== 灵动岛主体 ===== */
 .island-demo {
+  /* 所有交互表面共享同一组语义色。默认是深色 UI；当自动/自定义文字
+     为深色时，React 会挂 island-ui-light，整套表面、描边和浮层一起
+     切到浅色，避免“黑字落在固定黑色菜单上”这类组合冲突。 */
+  color-scheme: dark;
+  --island-surface-soft: rgba(255, 255, 255, 0.07);
+  --island-surface-raised: rgba(255, 255, 255, 0.11);
+  --island-surface-hover: rgba(255, 255, 255, 0.16);
+  --island-surface-active: rgba(255, 255, 255, 0.22);
+  --island-stroke-soft: rgba(255, 255, 255, 0.14);
+  --island-stroke-strong: rgba(255, 255, 255, 0.24);
+  --island-scroll-thumb: rgba(255, 255, 255, 0.2);
+  --island-solid-bg: rgb(8, 10, 14);
+  --island-solid-panel: rgba(8, 10, 14, 0.9);
+  --island-panel-strong: rgba(8, 10, 14, 0.72);
+  --island-high-contrast-border: rgba(255, 255, 255, 0.5);
+  --island-panel-veil: rgba(8, 10, 14, 0.55);
+  --island-agent-veil: rgba(8, 10, 14, 0.16);
+  --island-popover-bg: rgba(18, 22, 30, 0.97);
+  --island-popover-hover: rgba(255, 255, 255, 0.1);
+  --island-popover-active: rgba(255, 255, 255, 0.16);
+  --island-popover-stroke: rgba(255, 255, 255, 0.22);
+  --island-popover-shadow: rgba(0, 0, 0, 0.5);
+  --island-danger-text: #fca5a5;
+  --island-danger-surface: rgba(248, 113, 113, 0.14);
   border-radius: 999px;
   padding: 14px 28px;
   display: inline-flex;
@@ -40,17 +64,49 @@
   animation: islandEnter 0.6s cubic-bezier(0.34, 1.56, 0.64, 1) backwards;
 }
 
+.island-demo.island-ui-light {
+  color-scheme: light;
+  --island-surface-soft: rgba(11, 11, 15, 0.06);
+  --island-surface-raised: rgba(11, 11, 15, 0.1);
+  --island-surface-hover: rgba(11, 11, 15, 0.15);
+  --island-surface-active: rgba(11, 11, 15, 0.21);
+  --island-stroke-soft: rgba(11, 11, 15, 0.14);
+  --island-stroke-strong: rgba(11, 11, 15, 0.24);
+  --island-scroll-thumb: rgba(11, 11, 15, 0.24);
+  --island-solid-bg: rgb(248, 250, 252);
+  --island-solid-panel: rgba(248, 250, 252, 0.94);
+  --island-panel-strong: rgba(248, 250, 252, 0.82);
+  --island-high-contrast-border: rgba(11, 11, 15, 0.5);
+  --island-panel-veil: rgba(248, 250, 252, 0.58);
+  --island-agent-veil: rgba(248, 250, 252, 0.14);
+  --island-popover-bg: rgba(248, 250, 252, 0.97);
+  --island-popover-hover: rgba(11, 11, 15, 0.08);
+  --island-popover-active: rgba(11, 11, 15, 0.14);
+  --island-popover-stroke: rgba(11, 11, 15, 0.2);
+  --island-popover-shadow: rgba(15, 23, 42, 0.24);
+  --island-danger-text: #b42318;
+  --island-danger-surface: rgba(180, 35, 24, 0.1);
+}
+
 /* 背景与毛玻璃独立一层:border-radius 跟随父级、由父级 overflow:hidden
-   裁剪,避免 backdrop-filter 与圆角过渡组合时的"矩形模糊外露"渲染问题 */
+   裁剪,避免 backdrop-filter 与圆角过渡组合时的"矩形模糊外露"渲染问题。
+   无自定义背景图时用实底(--island-solid-bg):半透明 0.85 叠在浅色壁纸上
+   合成偏灰,白字对比不足(用户实测"背景不够黑,文字看不见");
+   有背景图时保持深色半透明底,让图层按不透明度叠出可调效果。 */
 .island-bg {
   position: absolute;
   inset: 0;
   z-index: 0;
   border-radius: inherit;
-  background: rgba(0, 0, 0, 0.85);
+  background: var(--island-solid-bg, rgb(8, 10, 14));
   backdrop-filter: blur(25px);
   /* 形变期关闭毛玻璃(is-animating)后平滑恢复,避免收尾瞬间突现的跳动 */
   transition: backdrop-filter 0.4s ease;
+}
+
+/* 有自定义背景图:半透明深底(图层在其上按 opacity 叠加,透明处透出深底) */
+.island-demo.island-has-bg-image .island-bg {
+  background: rgba(0, 0, 0, 0.85);
 }
 
 /* 形变动画期与按压期:关闭毛玻璃(backdrop 每帧重采样是卡顿主因),
@@ -584,8 +640,8 @@
   justify-content: center;
   border-radius: 999px;
   /* 0.12:蒙版层下调亮按钮底色(0.08 叠在深蒙版上发黑) */
-  background: rgba(255, 255, 255, 0.12);
-  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: var(--island-surface-raised, rgba(255, 255, 255, 0.12));
+  border: 1px solid var(--island-stroke-soft, rgba(255, 255, 255, 0.18));
   color: var(--text-color, #fff);
   cursor: pointer;
   transition:
@@ -1259,4 +1315,3 @@
     opacity: 1;
   }
 }
-

@@ -299,9 +299,27 @@ interface DesktopApi {
   agentEvolutionRollback(): Promise<string | { error: string }>
   /** Agent:清除全部进化版本(回到初始状态)(失败返回 {error}) */
   agentEvolutionReset(): Promise<string | { error: string }>
-  /** Agent:清除数据(2026-08-10,Agent 设置「数据管理」区):
-   * 'app' = 灵动岛所有数据 / 'tools' = 工具下载记录及源文件 */
-  agentClearData(scope: 'app' | 'tools'): Promise<{ ok?: boolean; error?: string }>
+  /** Agent:恢复出厂设置 / 清除工具数据。app 成功后主进程重启。 */
+  agentClearData(scope: 'app' | 'tools'): Promise<{
+    ok?: boolean
+    error?: string
+    removed?: string[]
+    restartRequired?: boolean
+    entries?: Array<{ id: string; status: string; error?: string }>
+  }>
+  onPrepareReset?(callback: (payload: {
+    requestId: string
+    scope: 'app' | 'tools'
+    databases: string[]
+  }) => void): () => void
+  prepareResetDone?(payload: {
+    requestId: string
+    entries: Array<{ id: string; status: string; error?: string }>
+  }): void
+  agentSecretStatus?(): Promise<{ available?: boolean; error?: string }>
+  agentSessionLogStatus?(): Promise<{ enabled?: boolean; bytes?: number; files?: string[]; error?: string }>
+  agentSessionLogSet?(enabled: boolean): Promise<{ enabled?: boolean; error?: string }>
+  agentSessionLogClear?(): Promise<{ ok?: boolean; error?: string }>
   /** 穿透轮询校正(2026-08-10):窗口屏幕 bounds + 光标屏幕位置 +
    * 主进程真实穿透状态(渲染端核对岛体 rect 校正穿透,防穿透死锁) */
   pointerPoll(): Promise<{

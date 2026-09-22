@@ -16,7 +16,8 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { hasMasterTurnMark, hasTurnMark, stripNapcatHistoryInstructions, stripTurnMarks } from '../agent/text'
+import { MASTER_WINDOW_MARK, tagMasterWindowText } from '../../electron/agent/constants'
+import { hasMasterTurnMark, hasTurnMark, isEmptyNapcatDisplayText, stripNapcatHistoryInstructions, stripTurnMarks } from '../agent/text'
 import type {
   AgentConfig,
   AgentEvent,
@@ -106,6 +107,7 @@ function fallbackSessionTitle(session: AgentSession): string {
       .filter((p): p is Extract<AgentPart, { type: 'text' }> => p.type === 'text')
       .map((p) => p.text)
       .join(' ')
+      .replace(/^【主人窗口】\s*/, '')
     // 跳过过短消息(与引擎 fallbackTitle 同款:首条"你?"这类短句
     // 得到单字垃圾标题,取第一条 ≥4 码元的实质内容)
     if (text.trim() && Array.from(text).length >= 4) {
@@ -222,7 +224,7 @@ export interface AgentController {
   tools: AgentToolInfo[]
   /** 当前对话实时总结标题(每轮回复后静默更新;null = 尚无总结) */
   currentTitle: string | null
-  /** 心理揣测(独立 Sub Agent 每轮回复后静默更新;紧凑态文字区优先展示) */
+  /** 心理揣测(助手回复落定同步评估;紧凑态文字区优先展示) */
   mindGuess: string | null
   /** 发送一轮对话。opts.silent = 系统提示静默模式(不进渲染端历史,
    * 仅作引擎本轮输入——background-done 等系统通知用);
@@ -300,8 +302,7 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
       return null
     }
   })
-  // 当前回复的心理揣测(独立 Sub Agent 每轮回复完成后静默生成;
-  // 紧凑态文字区优先展示)
+  // 当前回复的心理揣测(助手回复落定同步评估;紧凑态文字区优先展示)
   const [mindGuess, setMindGuess] = useState<string | null>(() => {
     try {
       const v = localStorage.getItem(MIND_KEY)
@@ -361,6 +362,12 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
   // message 落定到达——先缓存,消息落定时应用,保证任何时序下"已发送"
   // 指纹 UI 都能补上(messageId → 'peer' | 'group' | 'master')
   const pendingRoutedRef = useRef<Map<string, string>>(new Map())
+  // 心理揣测时序兜底:回复落定同步评估可能与 message 事件同拍到达,
+  // messagesRef 要等下一帧渲染才更新——先到的猜缓存,消息落定再应用;
+  // lastLandedId 覆盖"消息已 setState 但 ref 未刷新"的中间态
+  const pendingMindRef = useRef<{ messageId: string; guess: string } | null>(null)
+  const pendingTitleRef = useRef<{ messageId: string; title: string } | null>(null)
+  const lastLandedIdRef = useRef<string | null>(null)
   const resetStreaming = useCallback(() => {
     if (streamingRafRef.current) cancelAnimationFrame(streamingRafRef.current)
     streamingRafRef.current = 0
@@ -517,6 +524,17 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
             return [...prev, landed]
           })
           setLastError(null)
+          lastLandedIdRef.current = landed.id
+          const pendingMind = pendingMindRef.current
+          if (pendingMind && pendingMind.messageId === landed.id) {
+            pendingMindRef.current = null
+            setMindGuess(truncateCodepoints(pendingMind.guess, 16))
+          }
+          const pendingTitle = pendingTitleRef.current
+          if (pendingTitle && pendingTitle.messageId === landed.id) {
+            pendingTitleRef.current = null
+            setCurrentTitle(truncateCodepoints(pendingTitle.title, 20))
+          }
           // 主动陪伴:主动回复落定 = 一次"有操作"(重置 idle 时钟——
           // 否则每分钟重发 tick、judge 连续 yes → 每 N 分钟一条主动
           // 回复不断循环;judge 判 no 兜底不可依赖,关键坑)
@@ -537,6 +555,9 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
           resetStreaming()
           sessionIdRef.current = newSessionId()
           setLastError(null)
+          pendingMindRef.current = null
+          pendingTitleRef.current = null
+          lastLandedIdRef.current = null
           break
         case 'tool-confirm-request':
           setPendingConfirm({ command: event.command, title: event.title, detail: event.detail })
@@ -594,16 +615,33 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
           })
           break
         }
+        case 'conversation-title': {
+          const { messageId, title } = event
+          if (!title) break
+          const known =
+            lastLandedIdRef.current === messageId ||
+            messagesRef.current.some((m) => m.id === messageId)
+          if (!known) {
+            pendingTitleRef.current = { messageId, title }
+            break
+          }
+          setCurrentTitle(truncateCodepoints(title, 20))
+          break
+        }
+        case 'mind-guess':
         case 'mind-proactive': {
-          // 主动陪伴:主进程对主动回复的心理揣测(与 Windows 系统通知
-          // 同一句)——更新紧凑态文字区,两处一致。messageId 校验:
-          // clear/loadSession 后迟到的旧揣测丢弃(不污染新会话)
+          // 心理揣测:回复落定同步评估(mind-guess)或巡检直调
+          // (mind-proactive)——更新紧凑态文字区。messageId 校验:
+          // 尚未落定则缓存,clear/loadSession 后迟到的旧揣测丢弃
           const { messageId, guess } = event
           if (!guess) break
-          if (!messagesRef.current.some((m) => m.id === messageId)) break
-          // **按 16 码元兜底截断(2026-08-16)**:本路径原值直入,绕过
-          // mindRunner 的 truncateCodepoints——任何来源的揣测进文字区
-          // 都不超过 16 字(与 labelRunner 双保险一致)
+          const known =
+            lastLandedIdRef.current === messageId ||
+            messagesRef.current.some((m) => m.id === messageId)
+          if (!known) {
+            pendingMindRef.current = { messageId, guess }
+            break
+          }
           setMindGuess(truncateCodepoints(guess, 16))
           break
         }
@@ -799,26 +837,13 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
     },
     [],
   )
-  // 总结标题 runner(每轮回复完成后静默生成;入历史作会话标题)
-  const summaryRunner = useMemo(
-    () =>
-      createLabelRunner(
-        (snapshot) => window.desktop?.agentSummarize?.(snapshot) ?? Promise.resolve(''),
-        (t) => setCurrentTitle(t),
-        // 标题上限 20 码元(2026-08-07 用户要求放宽:推荐 10 字左右,
-        // 严格不超过 20;紧凑态文字区随字数扩展岛宽)
-        20,
-      ),
-    [createLabelRunner],
-  )
-  // 心理揣测 runner(独立 Sub Agent,每轮回复完成后静默生成;
-  // 紧凑态文字区优先展示)
+  // 心理揣测 runner:仅 loadSession 补跑(生产路径已改为回复落定同步
+  // 评估,经 mind-guess 事件回推;标题走 conversation-title 事件)
   const mindRunner = useMemo(
     () =>
       createLabelRunner(
         (snapshot) => window.desktop?.agentMindGuess?.(snapshot) ?? Promise.resolve(''),
         (g) => setMindGuess(g),
-        // 心理揣测上限 16 码元(15 字左右最多 16)
         16,
       ),
     [createLabelRunner],
@@ -826,30 +851,19 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
 
   useEffect(() => {
     if (status !== 'idle' || messages.length === 0) return
+    // 会话隔离:标题/揣测仅主对话实例运行(外部会话无文字区展示)
+    if (myKey !== 'main') return
     if (skipNextLabelRef.current) {
       skipNextLabelRef.current = false
-      // 只跳过总结标题(加载的历史会话已有标题语义,避免重复 LLM 调用);
-      // **心理揣测照跑**(Bug 修复 2026-08-07):loadSession 清了 mindGuess
-      // 又跳过生成 → 紧凑态文字区回退到"最后回复预览"(LLM 回复开头
-      // 几个字),用户实测反馈;重新生成揣测后文字区恢复揣测优先
+      // 只跳过总结标题(加载的历史会话已有标题语义);
+      // **心理揣测照跑**(loadSession 清了 mindGuess,历史消息不会再走
+      // 回复落定插件,需补猜一次,否则文字区回退回复预览)
       mindRunner(messages)
       return
     }
-    // 主动消息跳过心理揣测 runner:揣测由主进程统一提供(主动回合落定
-    // 后 getMindAgent 跑一次 → 系统通知 + mind-proactive 事件 → 这里
-    // 会话隔离(2026-08-13):标题/揣测仅主对话实例运行(外部会话
-    // 无文字区展示,白跑 LLM 无意义)
-    if (myKey !== 'main') return
-    // setMindGuess,与通知同一句)——再跑 mindRunner 会重复调用 LLM 且
-    // 两处措辞不一致;标题照常跟随(主动回复是真实内容)
-    if (messages[messages.length - 1]?.proactive) {
-      summaryRunner(messages)
-      return
-    }
-    // 两个后台标签 runner 各自守卫并发(进行中 → 内部标记排队,完成追平)
-    summaryRunner(messages)
-    mindRunner(messages)
-  }, [messages, status, summaryRunner, mindRunner, myKey])
+    // 标题与心理揣测均由引擎插件在回复落定时同步评估
+    // (conversation-title / mind-guess);此处不再 IPC,避免重复调用
+  }, [messages, status, mindRunner, myKey])
 
   /**
    * 拉取配置与工具清单(主进程),挂载与"打开设置视图前刷新"共用。
@@ -1008,16 +1022,30 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
     const attachParts = (opts?.paths ?? [])
       .filter((p) => typeof p === 'string' && p.trim())
       .map((p) => ({ type: 'text' as const, text: `【附件】${p}` }))
+    // 外部会话窗口输入(2026-08-31):正文打【主人窗口】,与【QQ私聊】对称。
+    // LLM 按标记判定身份——别人的会话里打的字仍是主人权限,不是对方的话。
+    // 显示层剥前缀;历史回传保留
+    const isPanelInput = isMasterTurn && myKey !== 'main'
+    const storedText = isPanelInput
+      ? trimmed
+        ? tagMasterWindowText(trimmed)
+        : MASTER_WINDOW_MARK
+      : trimmed
     const userMessage: AgentMessage = {
       id: `u-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       role: 'user',
-      parts: [{ type: 'text', text: trimmed }, ...mediaParts, ...attachParts],
+      parts: [{ type: 'text', text: storedText }, ...mediaParts, ...attachParts],
       // NapCat 来源标记(2026-08-12):QQ 私聊('qq',target = QQ 号)/
       // 群聊('group',target = 群号)/ 询问轮('ask',target = 陌生人 QQ,
       // 2026-08-13 起保留字段以显示私聊类别头;回复路由走主进程
       // lastAskTurn,与此字段无关)。档案卡(2026-08-13)随消息展示
+      // window = 主人在外部会话面板输入(2026-08-31,气泡挂「主人 · 窗口」)
       source:
-        opts?.source === 'qq' || opts?.source === 'group' || opts?.source === 'ask' ? opts.source : undefined,
+        opts?.source === 'qq' || opts?.source === 'group' || opts?.source === 'ask'
+          ? opts.source
+          : isPanelInput
+            ? 'window'
+            : undefined,
       qq: opts?.target,
       profileCard: opts?.profileCard,
       // 撤销快照 id(2026-08-14):撤销时经 agentUndoRestore 回滚 git 工作区
@@ -1052,7 +1080,7 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
     // 会话情况记录(2026-08-13):随发送回传主进程 → 注入引擎输入
     // (主进程拼系统项;空 = 不注入)——每轮参考,清空上下文不清除
     window.desktop?.agentSend?.(
-      trimmed,
+      storedText,
       next,
       sessionIdRef.current,
       routed ?? 'window',
@@ -1124,6 +1152,7 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
   const processNapcatMessage = useCallback(
     (msg: { text?: string; qq?: string; trusted?: boolean; media?: string[]; profileCard?: string; muted?: boolean; sessionKey?: string; messageId?: string }) => {
       if (!msg || typeof msg.text !== 'string') return
+      if ((!msg.media || msg.media.length === 0) && isEmptyNapcatDisplayText(msg.text)) return
       // 双通道去重(2026-08-13):实例订阅 + 父级 ingest 会各送一次;
       // 键带私聊前缀(2026-08-13:与群聊 message_id 可能同值,分开去重)
       if (dedupNapcatMsg(msg.messageId, 'private', { qq: msg.qq, text: msg.text })) return
@@ -1162,6 +1191,7 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
   const processNapcatGroupMessage = useCallback(
     (msg: { text?: string; qq?: string; groupId?: string; media?: string[]; profileCard?: string; muted?: boolean; sessionKey?: string; messageId?: string }) => {
       if (!msg || typeof msg.text !== 'string') return
+      if ((!msg.media || msg.media.length === 0) && isEmptyNapcatDisplayText(msg.text)) return
       // 双通道去重(2026-08-13):实例订阅 + 父级 ingest 会各送一次;
       // 键带群聊前缀(2026-08-13:与私聊 message_id 可能同值,分开去重
       // ——修复"群聊会话里的人消息没有正确传递给 LLM")
@@ -1395,6 +1425,9 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
     setLastError(null)
     setCurrentTitle(null)
     setMindGuess(null)
+    pendingMindRef.current = null
+    pendingTitleRef.current = null
+    lastLandedIdRef.current = null
     // 主动陪伴:切换会话 = 有操作(新会话从零计时)
     lastUserSendRef.current = Date.now()
   }, [abort, resetStreaming, myKey])
@@ -1417,6 +1450,9 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
     setLastError(null)
     setCurrentTitle(null)
     setMindGuess(null)
+    pendingMindRef.current = null
+    pendingTitleRef.current = null
+    lastLandedIdRef.current = null
     // 主动陪伴:加载历史会话 = 有操作(从零计时)
     lastUserSendRef.current = Date.now()
   }, [])

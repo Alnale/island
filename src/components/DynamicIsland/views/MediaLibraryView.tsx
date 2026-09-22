@@ -1133,7 +1133,7 @@ export function MediaLibraryView({
             onClick={(event) => {
               event.stopPropagation()
               if (onImageLibraryChange && imageLibrary) {
-                // 图片上传复用现有图片库上传(降采样入库)
+                // 图片上传复用现有图片库上传(保留原始分辨率入库)
                 const input = document.createElement('input')
                 input.type = 'file'
                 input.accept = 'image/*'
@@ -1143,7 +1143,7 @@ export function MediaLibraryView({
                   const reader = new FileReader()
                   reader.onload = () => {
                     if (typeof reader.result !== 'string') return
-                    // 降采样复用背景库工具(长边 ≤1024,防大图卡顿)
+                    // 复用背景库导入流程，保留原始分辨率与编码
                     void import('../../../media/backgroundStore').then(({ downscaleBackgroundImage }) =>
                       downscaleBackgroundImage(reader.result as string).then((small) => {
                         onImageLibraryChange([

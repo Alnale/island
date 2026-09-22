@@ -948,6 +948,8 @@ running(detail 带进程与输出目录),完成/失败进终态——**顺带修
 - **独立的总结后台 Sub Agent**(`createSummaryAgent`,主进程独立单例,与主
   对话引擎**零共享**——独立实例/AbortController/每次调用独立读配置,主对话
   的发送/中止/清空/模式切换都打不断总结,总结失败也不外溢到对话)。
+  **2026-09-01 职责收窄**:主动陪伴判断已迁出 `createProactiveAgent`,本工厂
+  只做标题总结 + 静默记忆提取。
 - 无工具单轮(系统提示"对话标题生成器,推荐 10 字左右、**严格不超过 20 字**"),
   事件不转发 UI,**强制 low effort + noThinking 加速**。
 - **输入压缩**:最近 12 条消息,reasoning 截 500 字、工具结果截 2000 字、
@@ -982,9 +984,9 @@ running(detail 带进程与输出目录),完成/失败进终态——**顺带修
   完成后补跑最新一轮);runSummary 入口守卫 + in-flight 标记跨越重试窗口;
   失败重试:1.5s 后同快照重试(retryLeft 预算 1),预算耗尽 10s 后补跑一次
   最新消息;loadSession 跳过下次总结。
-- 渲染端 mindGuess 状态(localStorage `widget-agent-mind`)与标题共用
-  **泛化标签 runner**(createLabelRunner 工厂:入口守卫/排队追平/1.5s 重试/
-  10s 补跑,总结标题与心理揣测各自独立 in-flight 状态)。
+- 渲染端 mindGuess 状态(localStorage `widget-agent-mind`);标题仍走
+  **泛化标签 runner**(createLabelRunner:入口守卫/排队追平/1.5s 重试/
+  10s 补跑)。心理揣测改为回复落定同步评估,runner 仅 loadSession 补跑。
 - **静默记忆提取(2026-08-10 新增职能,用户要求"自动根据对话的整个上下文
   提取适合作为记忆的内容入长期记忆,静默,仅主动陪伴开启时")**:
   `extractMemories(messages)`——完整历史(最多 40 条,reasoning/工具结果/
@@ -996,10 +998,16 @@ running(detail 带进程与输出目录),完成/失败进终态——**顺带修
 
 ### 5.7 心理揣测 Sub Agent
 
-- `createMindAgent`(engine.ts,与总结/主对话引擎均零共享,`agent:mind-guess`
-  IPC + preload agentMindGuess + main.cjs getMindAgent 懒加载单例)——根据
-  当前对话**揣测 LLM 回复时的心态**,≤16 汉字俏皮话(推荐 10 字左右,如
+- `createMindAgent`(与总结/主动陪伴/主对话引擎均零共享)——根据当前对话
+  **揣测 LLM 本轮回复时的心态**,≤16 汉字俏皮话(推荐 10 字左右,如
   「表面淡定,内心在慌」),显示在灵动岛紧凑态文字区。
+- **同步评估**:助手最终回复落定时 loop 发 `agent/assistant-settled`,
+  `subagent-on-reply` 插件立刻跑揣测+标题(fire-and-forget),经 `mind-guess`
+  / `conversation-title` 回推渲染端。IPC `agent:mind-guess` 仅 loadSession 补跑。
+- **能力内核**(subagents/runtime.ts):配置解析/超时/鉴权/压缩/JSON 重试
+  五厂共用;createSubAgentHost 一份单例给 IPC 与插件(ctx.subagents)。
+  进化评估 createEvaluatorAgent 迁入同一内核,由 evolution 持有生命周期。
+- 用户风格分析已迁出 `createProactiveAgent`(不再挂在心理揣测工厂上)。
 - **系统提示与主引擎同源**(buildMindSystem 拼装「自定义提示词 + 长期记忆块
   + 进化状态 + 后台任务状态 + 人格预设」再接揣测指令)——揣测必须知道助手
   "是谁、记得什么、在忙什么",否则心理是猜的空气。
@@ -1021,20 +1029,17 @@ running(detail 带进程与输出目录),完成/失败进终态——**顺带修
 - **文字区回退 Bug 修复**:loadSession 清 mindGuess 且 skipNextLabelRef
   跳过生成 → 文字区回退"最后回复预览";修复:skip 块**只跳过总结标题,
   心理揣测照跑**。
-- **用户风格分析(2026-08-10 新增职能,用户要求"主动回复有时模仿用户的
-  嘴癖和风格")**:`analyzeUserStyle(messages)`——最近 12 条 → JSON {style}
-  (≤120 字可模仿特征:口头禅/句式/称呼/emoji;无明显风格或语境严肃输出
-  空);main.cjs 主动陪伴调度与 judge **并行**调用(Promise.all,任一方失败
-  静默降级),风格描述拼进 hint 内部指令(措辞引导"偶尔模仿、自然融入不
-  刻意"),proactiveTurn 经 role:'system' 请求项注入。
+- 触发改为回复落定同步评估后,loadSession 仍清 mindGuess 并经 IPC 补跑一次
+  (历史消息不会再走落定插件,否则文字区回退回复预览)。
 
 ### 5.8 主动陪伴(2026-08-07 用户要求"LLM 主动向用户发送消息")
 
 - 用户无操作满 N × 单位(设置 `agent.proactiveEnabled` 默认开 /
   proactiveInterval 默认 15,钳制 5-480 / proactiveIntervalUnit s·m·h
   默认分钟;旧 proactiveIntervalMinutes 由 main.cjs currentAgentConfig
-  统一迁移)后,增强的总结标题 Sub Agent 独立判断语境是否需要主动开口
-  (`createSummaryAgent.judgeProactive`):JSON 输出 `{should, hint?}`,
+  统一迁移)后,**独立的主动陪伴 Sub Agent**(`createProactiveAgent`,
+  2026-09-01 从总结/心理揣测拆出)判断语境是否需要主动开口
+  (`judgeProactive`)并分析用户风格(`analyzeUserStyle`):JSON 输出 `{should, hint?}`,
   parseJudgeJson 严格解析(复用 extractJsonObject 候选链),失败/无 Key →
   should:false(安全侧,一次都不主动打扰);判断上下文与主引擎同源
   (自定义提示词 + 记忆块 + 进化状态 + 后台状态 + 当前时间,buildJudgeSystem
@@ -1056,10 +1061,11 @@ running(detail 带进程与输出目录),完成/失败进终态——**顺带修
   prompt**(动态段拼进去断缓存前缀,50 倍价差);与 send 共享 running 互斥,
   busy 时静默拒绝不排队;共享 ctl abort 链路;确认门行为不变。
 - **系统消息 = Windows 系统通知**(用户明确:不是对话内气泡):主动回合
-  message 落定后主进程 getMindAgent().guess([该消息]) → `new
-  Notification({title:'岛灵 · 心理揣测', body})` 展示 + mind-proactive
-  事件送渲染端更新紧凑态文字区——同一句,两处一致、不重复调用 LLM;
-  渲染端标签 effect 对 proactive 末条跳过 mindRunner。
+  与普通回复同一条心理揣测路径(落定同步评估 → `mind-guess` 事件);
+  `proactive:true` 时主进程另 `showMainNotify('岛灵 · 心理揣测', guess)`
+  ——与文字区同一句,不重复调用 LLM。
+- **风格分析**(2026-08-10,现挂 createProactiveAgent):`analyzeUserStyle`
+  与 `judgeProactive` 并行(Promise.all),风格描述拼进 hint 内部指令。
 - **调度器在渲染端**(useAgent,每 60s 检查:agent 模式 / 配置开启 /
   status idle / 有历史 / 距上次"有操作"≥N 分钟 / in-flight 守卫)→
   `agent:proactive-tick(messages, idleMinutes)`(IPC resolve 时机 = judge
@@ -2694,10 +2700,10 @@ send_group 对公 / 对话回复对私双通道、看场合回复、【不回复
 | Agent | 约束要点(多轮实测收敛) |
 | --- | --- |
 | 总结标题 | 名词短语、推荐 10 字 ≤20 字、禁回应词/摘抄/套话、闲聊=场景情绪短语;JSON 主措辞 + 纯文本兜底(2 级链,原 3 级精简);严格解析 + 判效(示例词/代码字面量/句子式/超长过短)+ fallbackTitle 确定性兜底 |
-| 心理揣测 | 4 规则:内心 OS 非回复 / 旁观者视角 / ≤16 字完整句 / 直接输出;超长先语义截取(cutMindSentence)、重试反馈注入上次原文、3 次后回退无人格版 |
-| 主动陪伴判断 | JSON {should, hint};上下文与主引擎同源(记忆/进化/后台任务/时间);失败 = 不打扰(安全侧) |
-| 记忆提取 | {memories:[]};忽略【】系统段;与现有记忆块对照防重复 |
-| 用户风格 | {style ≤120 字};无明显风格/严肃语境输出空 |
+| 心理揣测 | 4 规则:内心 OS 非回复 / 旁观者视角 / ≤16 字完整句 / 直接输出;超长先语义截取(cutMindSentence)、重试反馈注入上次原文、3 次后回退无人格版;**回复落定同步评估**(assistant-settled 插件),不与主动陪伴共用工厂 |
+| 主动陪伴 | 独立 `createProactiveAgent`:判断 JSON {should, hint}(失败 = 不打扰)+ 风格 {style ≤120 字};与心理揣测零共享 |
+| 记忆提取 | {memories:[]};仍挂总结工厂;回复落定且 proactiveEnabled 时由 subagent-on-reply 同步沉淀 |
+| 进化评估 | `createEvaluatorAgent` 走同一 runtime;失败上抛(不能空转);由 evolution 持有 |
 
 ### 16.7 回复路由三分类(2026-08-13 泄露根治)
 
@@ -2819,6 +2825,15 @@ global.__fpGate 可归因;F4 各轮指纹互不相同(7 轮全唯一)。mock 标
 自带测试标记会误触发分支,实测)。验证:164 单测 + session-debug 25 断言
 全过。
 
+**六轮(2026-09-03,用户实测"群聊会话窗口里给主人的回复被发到群")**:
+群触发轮(source=`group`,群友发来)与群会话窗口输入(source=`window` +
+`group:<id>`)被同一套「带指纹就发群 / 判定器面板轮倾向 other」处理。
+主人在群会话窗口打的字是在跟岛灵说话,LLM 偶发给回答带上本轮指纹(或
+判定器把回答判成 other)→ 整段发到群。修复三层:① 窗口轮发群改硬门
+`shouldSendGroupPanelReply`(未明确要求发群 → 一律留窗口,带指纹也不发);
+② 群窗口专用指纹指令 + `masterWindowTurnRule` 声明「回复默认不发群」;
+③ 判定器面板轮倾向改为 master。群友消息触发轮语义不变。
+
 ### 16.8 受保护记忆(人设锁定)
 
 主人指定的人设/岛灵设定 = protected 条目(显式标记 + 人设标签/内容启发
@@ -2839,6 +2854,7 @@ global.__fpGate 可归因;F4 各轮指纹互不相同(7 轮全唯一)。mock 标
 | 十七轮 | **串台后陌生人收不到消息**(主人先回"嗯"这类应答消费了 pending,真正指示轮的回复发回主人)+ 对方收到 2-3 条重复 | 执行回复标记化(【回复对方】标记才路由+消费 pending,无标记留在主人侧且 pending 保留)+ 防重发快照(本轮已用工具发过则跳过路由)(见 16.7) |
 | 十九轮 | **询问轮泄露(扩展信任)**:LLM 征求主人意见的回复被白名单轮整条发回对方;执行轮汇报被面板输入轮整条发回对方 | isAskTurnToMaster 询问轮判定拦截(留窗口+pending+同步主人 QQ)+ 执行轮标记化注入(agent:send 对 pending 存活的主入指示轮再注入 system 指令)+ 面板输入轮防重发(私聊/群聊)+ 窗口路径防重发失效修复(见 16.7 三轮) |
 | 二十轮 | **静态标记协议的结构性弱点**(用户要求"每个轮都加入特殊指纹,指纹对不上就不发送"):LLM 可以从上下文"抄"到静态【回复对方】标记,误用/串台无法根治 | **轮次指纹协议**:每轮随机指纹(6 位安全字母表)注入系统指令,路由只发送带本轮指纹的回复(剥指纹发送);询问/汇报不带指纹 = 永不外发;指纹不进历史/显示(stripTurnMarks);询问轮拦截/防重发/pending 全保留(见 16.7 四轮) |
+| 群窗口 | **群聊会话窗口里给主人的回复被发到群**(带指纹/判定器 other 无条件发群) | 窗口轮发群硬门:主人未明确要求发群则留窗口;群窗口专用指纹指令;判定器面板轮倾向 master(见 16.7 六轮) |
 
 
 
@@ -3082,9 +3098,10 @@ global.__fpGate 可归因;F4 各轮指纹互不相同(7 轮全唯一)。mock 标
   (LLM 把发给对方的话标成【主人指纹:xxx】)→ masterFpResult 分支无条件
   发主人、别人收不到;c) 日常轮判定器失败(API 超时/空响应)回退"直发
   主人"——回复若是发给别人的话即串台。修复 = ① 判定器 prompt 倾向**按
-  回合类型分设**(执行轮/群轮/私聊轮/面板轮回复默认发给对方 → 倾向 other;
-  仅主人日常轮默认给主人 → 倾向 master,但触发消息含发送/转达指令且回复
-  简短 → other),强化"主人指示转达 vs 回复 = 转达内容"判据;② **执行轮
+  回合类型分设**(执行轮/群聊触发轮/私聊触发轮回复默认发给对方 → 倾向
+  other;面板轮=主人窗口输入 → 倾向 master 留窗口,只有明确要求发对方/
+  群才 other;主人日常轮默认给主人,触发消息含发送/转达且回复简短 →
+  other),强化"主人指示转达 vs 回复 = 转达内容"判据;② **执行轮
   主人指纹复核**:pendLive + masterFpResult 时经判定器复核归属(判定 other
   → 发 pending 对象、清 pending;master/hold/判定失败 → 按原行为发主人,
   复核失败不丢主人消息);③ **日常轮判定失败启发式收紧**:
@@ -4247,7 +4264,7 @@ builtinPlugins(deps, emit, outputBudget, sessionState, opts?)
   → 校验(assertLinesValid)→ 逐行取工厂(PLUGIN_REGISTRY)→ 产出插件树
 ```
 
-- **工厂注册表** `PLUGIN_REGISTRY`(name → factory,18 个工厂)是组合层
+- **工厂注册表** `PLUGIN_REGISTRY`(name → factory,19 个工厂)是组合层
   唯一的实现解析点;**换实现 = 换行的 name**;
 - **patch 行语义**:`applyPatch` 按 id 定位——命中**整体替换该行**
   (name/config 一并换,不是合并),未命中追加到末尾;`enabled: false`
@@ -4256,12 +4273,12 @@ builtinPlugins(deps, emit, outputBudget, sessionState, opts?)
   (`AGENT_COMPOSITION_ID_DUP`)在装配前最早可解析点抛出;
 - **dump 可见**:`dumpComposition` 导出真实启动树——"这台机器上真正装配
   的是什么"完全透明;
-- **缺省 Profile**(defaultProfile,18 行)与重构前硬编码序列**逐位一致,
-  行为零变化**:host-bridge → seam-llm → seam-tools → session-log →
-  tools-core → tools-island-settings → tools-napcat → tools-music-control →
-  tools-session → tools-delegate → tools-memory → tools-config →
-  tools-builtin → tools-external-source → prompt-memory → prompt-evolution →
-  prompt-bg-tasks → prompt-tools-guide。
+- **缺省 Profile**(defaultProfile,19 行):host-bridge → seam-llm →
+  seam-tools → session-log → tools-core → tools-island-settings →
+  tools-napcat → tools-music-control → tools-session → tools-delegate →
+  tools-memory → tools-config → tools-builtin → tools-external-source →
+  prompt-memory → prompt-evolution → prompt-bg-tasks → prompt-tools-guide →
+  subagent-on-reply(助手回复落定同步评估标题+心理揣测)。
 
 **新增能力的纪律**:在对应领域文件写一个插件 + PLUGIN_REGISTRY 注册工厂 +
 Profile 加一行——不改 loop、不改其他插件;装配清单在 defaultProfile 单点
@@ -4279,7 +4296,7 @@ Profile 加一行——不改 loop、不改其他插件;装配清单在 defaultP
 | `providers/` | 9 | deepseek/chat/anthropic/mimo-chat/mimo-constants/mimo-responses/deepseek-constants + sse 公共层 + provider 分发 |
 | `tools/` | 13 | tools.ts 主入口 + env/bili/docflow/search/media 分簇 + settingsTools 四文件 + sessionTools/configTools/tool-args |
 | `napcat/` | 7 | napcat.ts 入口 + client/message/session/store/text + wsclient(QQ 通道五期拆分) |
-| `subagents/` | 2 | subagents.ts + helpers |
+| `subagents/` | 4 | runtime 内核 + host 装配 + subagents 工厂 + helpers |
 | (根层) | 9 | constants/evolution/mcp/memory/notify/skills/tasks/types/undo(跨域共享) |
 
 ### 42.9 十四期重构节奏与验证
@@ -4564,7 +4581,7 @@ provider/工具/任务/总结/揣测/主动陪伴/记忆/进化/MCP/技能/预�
   → useAgent 调度器(60s 周期检查,agent 模式/配置开/idle/有历史/in-flight
     守卫)
   → agent:proactive-tick(messages, idleMinutes)
-  → main.cjs → judgeProactive(Sub Agent,同源上下文:提示词+记忆+进化+
+  → main.cjs → createProactiveAgent.judgeProactive(同源上下文:提示词+记忆+进化+
     后台任务+当前时间;JSON {should, hint};失败 → should:false)
   → should:true → engine.proactiveTurn(history, {hint})
       → PROACTIVE_INSTRUCTION 追加 input 末尾(system 请求项,不进历史)

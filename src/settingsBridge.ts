@@ -609,8 +609,8 @@ export function registerIslandSettingsBridge(): void {
       notify(['font'])
       return { ok: true, id, name: item.name }
     },
-    // 背景导入:降采样(长边 ≤1024,与上传同款防卡顿)→ 展开/紧凑
-    // 两槽位都应用(任意形态立即可见)→ 自动入库(名称按传入的)
+    // 背景导入:保留原始分辨率与编码 → 展开/紧凑两槽位都应用
+    // (任意形态立即可见)→ 自动入库(名称按传入的)
     async importBackground(dataUrl, name) {
       const small = await downscaleBackgroundImage(String(dataUrl))
       await Promise.all([

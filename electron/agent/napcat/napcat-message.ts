@@ -46,7 +46,7 @@ export function napcatMessageText(msg: unknown, botQQ?: string): string {
 }
 
 // ---- 类型定义 ----
-/** 收到的 QQ 消息(私聊) */
+/** 收到的 QQ 消息(私聊;群消息复用并带 groupId) */
 export interface NapcatMessage {
   qq: string
   text: string
@@ -54,6 +54,8 @@ export interface NapcatMessage {
   time: number
   replied?: boolean
   images?: NapcatImage[]
+  /** 群号(有值 = 群消息,无值 = 私聊) */
+  groupId?: string
 }
 
 /** 收到的群消息 */
@@ -102,6 +104,45 @@ export function napcatMessageImages(msg: unknown): NapcatImage[] {
 export function cqAtMe(raw: unknown, botQQ: string): boolean {
   if (typeof raw === 'string') {
     return new RegExp(`\\[CQ:at,qq=${botQQ}(?:,|\\])`).test(raw)
+  }
+  return false
+}
+
+/** OneBot/NapCat 偶发空包:无正文且无图片(含零宽字符/纯空白)。
+ * 这类事件进对话会变成"空消息气泡",实际并没有人说话 */
+const ZERO_WIDTH_RE = /[\u200b-\u200d\ufeff]/g
+
+export function napcatIncomingIsBlank(text: string, images?: NapcatImage[]): boolean {
+  if (Array.isArray(images) && images.some((img) => img && (img.file || img.url))) return false
+  return String(text ?? '').replace(ZERO_WIDTH_RE, '').trim().length === 0
+}
+
+/** 不是真实聊天的 message 子类型(输入状态/戳一戳/通知),应丢弃 */
+export function napcatMessageSubTypeNoise(subType: unknown): boolean {
+  const t = String(subType ?? '').toLowerCase()
+  return t === 'notice' || t === 'input_status' || t === 'poke' || t === 'typing'
+}
+
+/**
+ * 该群消息是否放行进对话(2026-09-03,修复"发到未监听群后收不到回复"):
+ * - 监听名单为空 = 收全部群(与 set_napcat_config 文案一致);
+ * - 在名单里 = 收;
+ * - 本进程已向该群发过/已 watch 的临时放行(发完必须能听见回复,等
+ *   配置落盘前的窗口也要通)。unwatch 会从 extraListen 移除。
+ */
+export function shouldAdmitGroupMessage(
+  allowedGroups: string[] | undefined,
+  groupId: string,
+  extraListen?: Iterable<string>,
+): boolean {
+  const id = String(groupId ?? '')
+  if (!id) return false
+  const groups = allowedGroups ?? []
+  if (groups.length === 0) return true
+  if (groups.includes(id)) return true
+  if (!extraListen) return false
+  for (const g of extraListen) {
+    if (String(g) === id) return true
   }
   return false
 }

@@ -45,7 +45,11 @@
   backdrop-filter: none;
 }
 .island-demo.expanded.island-agent-view .island-panel-mask {
-  background: rgba(8, 10, 14, 0.16);
+  /* 无自定义背景图时保持 0.55:0.16 叠在默认底上偏灰,白字发虚 */
+  background: var(--island-panel-veil, rgba(8, 10, 14, 0.55));
+}
+.island-demo.expanded.island-agent-view.island-has-bg-image .island-panel-mask {
+  background: var(--island-agent-veil, rgba(8, 10, 14, 0.16));
 }
 
 /* 视图根:覆盖面板,自带内边距(与 island-panel-list 同款布局)。
@@ -59,6 +63,13 @@
   flex-direction: column;
   gap: 10px;
   min-height: 0;
+  /* 对话表面色从当前文字色派生：深背景/白字时得到浅色玻璃层，
+     白背景/黑字时得到浅灰玻璃层。避免浅色背景上的白色半透明气泡
+     消失，也避免会话切换面板始终是一整块纯黑。 */
+  --agent-surface-soft: var(--island-surface-soft);
+  --agent-surface-raised: var(--island-surface-raised);
+  --agent-stroke-soft: var(--island-stroke-soft);
+  --agent-stroke-strong: var(--island-stroke-strong);
 }
 
 /* 头部:标题(状态点 + Agent)+ 状态文案 + 右侧动作 */
@@ -122,9 +133,9 @@
   justify-content: center;
   width: 26px;
   height: 26px;
-  border: 1px solid rgba(255, 255, 255, 0.24);
+  border: 1px solid var(--island-stroke-strong, rgba(255, 255, 255, 0.24));
   border-radius: 9px;
-  background: rgba(255, 255, 255, 0.09);
+  background: var(--island-surface-raised, rgba(255, 255, 255, 0.09));
   color: var(--text-color, #fff);
   cursor: pointer;
   transition:
@@ -134,8 +145,8 @@
 
 .island-agent-ctl:hover,
 .island-agent-ctl.on {
-  background: rgba(255, 255, 255, 0.16);
-  border-color: rgba(255, 255, 255, 0.38);
+  background: var(--island-surface-hover, rgba(255, 255, 255, 0.16));
+  border-color: color-mix(in srgb, var(--text-color, #fff) 38%, transparent);
 }
 
 .island-agent-menu-pop {
@@ -150,10 +161,10 @@
   display: flex;
   flex-direction: column;
   gap: 2px;
-  border: 1px solid rgba(255, 255, 255, 0.14);
+  border: 1px solid var(--island-popover-stroke, rgba(255, 255, 255, 0.14));
   border-radius: 10px;
-  background: rgba(13, 16, 23, 0.97);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  background: var(--island-popover-bg, rgba(13, 16, 23, 0.97));
+  box-shadow: 0 8px 24px var(--island-popover-shadow, rgba(0, 0, 0, 0.5));
   /* 右上角弹出:从触发 ⋯ 按钮缩放展开,空间关系指向触发源 */
   transform-origin: top right;
   animation: agent-menu-in 0.15s ease backwards;
@@ -191,7 +202,7 @@
 /* 纯视觉 hover 高亮仅对指针设备生效:触屏点击不残留粘滞底色 */
 @media (hover: hover) and (pointer: fine) {
   .island-agent-menu-item:hover {
-    background: rgba(255, 255, 255, 0.09);
+    background: var(--island-popover-hover, rgba(255, 255, 255, 0.09));
   }
 }
 
@@ -201,11 +212,11 @@
 }
 
 .island-agent-menu-item.danger {
-  color: #fca5a5;
+  color: var(--island-danger-text, #fca5a5);
 }
 
 .island-agent-menu-item.danger:hover {
-  background: rgba(248, 113, 113, 0.14);
+  background: var(--island-danger-surface, rgba(248, 113, 113, 0.14));
 }
 
 /* 快捷切换按钮:悬浮 ⋯ 时在左侧浮现。
@@ -522,6 +533,12 @@
   min-width: 0;
 }
 
+/* 图片消息优先使用对话区宽度，避免先被普通短文本气泡的 82% 上限
+   缩小一轮；最终宽度仍由消息区本身兜底，不会横向溢出。 */
+.island-agent-msg-user-row:has(.island-media-wrap) {
+  max-width: 96%;
+}
+
 /* 撤销按钮(2026-08-14):气泡左侧小按钮,悬停显形;armed(两段式
    确认态)保持常显并换警示色——回滚具破坏性 */
 .island-agent-msg-undo {
@@ -572,6 +589,8 @@
   padding: 8px 12px;
   border-radius: 14px 14px 4px 14px;
   background: var(--state-color, #4d6bfe);
+  border: 1px solid var(--agent-stroke-soft);
+  box-shadow: 0 1px 3px color-mix(in srgb, var(--text-color, #fff) 10%, transparent);
   color: #0b0b0f;
   min-width: 0;
 }
@@ -617,11 +636,13 @@
   align-items: stretch;
   width: 24px;
   height: 52px;
-  background: rgba(13, 16, 24, 0.96);
-  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: var(--agent-surface-raised);
+  border: 1px solid var(--agent-stroke-strong);
   border-right: none;
   border-radius: 14px 0 0 14px;
-  box-shadow: -3px 3px 18px rgba(0, 0, 0, 0.38);
+  box-shadow: -3px 3px 18px rgba(0, 0, 0, 0.2);
+  -webkit-backdrop-filter: blur(18px) saturate(145%);
+  backdrop-filter: blur(18px) saturate(145%);
   overflow: hidden;
   /* 2026-08-18 收起动画单独优化:收起(移除 .open 用基础类过渡)用 0.34s
      平缓 ease-out(cubic-bezier(0.4,0,0.2,1) 开头不暴冲)——dock 高度
@@ -648,8 +669,8 @@
   height: 100%;
   padding: 0;
   border: none;
-  border-right: 1px solid rgba(255, 255, 255, 0.1);
-  background: rgba(255, 255, 255, 0.04);
+  border-right: 1px solid var(--agent-stroke-soft);
+  background: var(--agent-surface-soft);
   color: var(--text-dim, rgba(255, 255, 255, 0.72));
   font-family: inherit;
   font-size: 0.56rem;
@@ -660,7 +681,7 @@
 }
 
 .island-session-fold:hover {
-  background: rgba(255, 255, 255, 0.09);
+  background: var(--agent-surface-raised);
   color: var(--text-color, #fff);
 }
 
@@ -689,7 +710,7 @@
   align-items: center;
   gap: 4px;
   padding: 3px 6px 5px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  border-bottom: 1px solid var(--agent-stroke-soft);
   /* 2026-08-18 会话切换动画:横幅进入时淡入 + 轻微下滑,与会话切换
      同步;离开由 closing 类驱动反向动画 */
   animation: island-banner-in 0.22s ease both;
@@ -754,8 +775,8 @@
   width: 15px;
   height: 15px;
   border-radius: 5px;
-  background: rgba(255, 255, 255, 0.1);
-  color: rgba(255, 255, 255, 0.62);
+  background: var(--agent-surface-raised);
+  color: var(--text-dim, rgba(255, 255, 255, 0.62));
   flex: none;
 }
 .island-session-current-badge.group {
@@ -803,14 +824,14 @@
   line-height: 1;
   padding: 5px 10px;
   border-radius: 9px;
-  border: 1px solid rgba(255, 255, 255, 0.24);
-  background: rgba(255, 255, 255, 0.09);
+  border: 1px solid var(--agent-stroke-strong);
+  background: var(--agent-surface-raised);
   color: var(--text-color, #fff);
   cursor: pointer;
   transition: background 0.2s ease, border-color 0.2s ease, color 0.2s ease;
 }
 .island-session-ctl:hover {
-  background: rgba(255, 255, 255, 0.14);
+  background: color-mix(in srgb, var(--text-color, #fff) 16%, transparent);
 }
 .island-session-ctl.has-note {
   border-color: var(--state-color, #4d6bfe);
@@ -876,14 +897,14 @@
   font-size: 0.56rem;
   line-height: 1.5;
   color: var(--text-color, #fff);
-  background: rgba(255, 255, 255, 0.06);
-  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: var(--agent-surface-soft);
+  border: 1px solid var(--agent-stroke-soft);
   border-radius: 8px;
   padding: 4px 6px;
   outline: none;
 }
 .island-session-note-input:focus {
-  border-color: rgba(255, 255, 255, 0.35);
+  border-color: var(--agent-stroke-strong);
 }
 .island-session-note-input::placeholder {
   color: var(--text-dim, rgba(255, 255, 255, 0.5));
@@ -922,7 +943,7 @@
   flex-direction: column;
   gap: 3px;
   padding: 6px;
-  border-right: 1px solid rgba(255, 255, 255, 0.1);
+  border-right: 1px solid var(--agent-stroke-soft);
   overflow-y: auto;
   overflow-x: hidden;
 }
@@ -963,7 +984,7 @@
 }
 
 .island-session-item:hover {
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--agent-surface-raised);
   color: var(--text-color, #fff);
 }
 
@@ -1054,7 +1075,7 @@
   display: flex;
   align-items: center;
   padding: 0 2px 5px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  border-bottom: 1px solid var(--agent-stroke-soft);
 }
 
 .island-session-chat-title {
@@ -1090,7 +1111,8 @@
   max-width: 92%;
   padding: 4px 7px;
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--agent-surface-raised);
+  border: 1px solid var(--agent-stroke-soft);
   font-size: 0.56rem;
   line-height: 1.5;
   color: var(--text-color, #fff);
@@ -1106,15 +1128,15 @@
 .island-session-chat-input {
   flex: none;
   padding-top: 5px;
-  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  border-top: 1px solid var(--agent-stroke-soft);
 }
 
 .island-session-chat-input input {
   width: 100%;
   padding: 4px 7px;
-  border: 1px solid rgba(255, 255, 255, 0.16);
+  border: 1px solid var(--agent-stroke-soft);
   border-radius: 7px;
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--agent-surface-soft);
   color: var(--text-color, #fff);
   font-family: inherit;
   font-size: 0.56rem;
@@ -1144,6 +1166,11 @@
   color: #fff;
   background: rgba(77, 107, 254, 0.55);
   border: 1px solid rgba(77, 107, 254, 0.8);
+}
+
+.island-agent-msg-qq-cat.master {
+  background: color-mix(in srgb, var(--state-color, #e8b450) 55%, transparent);
+  border-color: color-mix(in srgb, var(--state-color, #e8b450) 85%, #fff);
 }
 
 .island-agent-msg-qq-num {
@@ -1337,8 +1364,8 @@
   max-width: 100%;
   padding: 8px 12px;
   border-radius: 4px 14px 14px 14px;
-  background: rgba(255, 255, 255, 0.07);
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: var(--agent-surface-raised);
+  border: 1px solid var(--agent-stroke-soft);
   font-size: 0.75rem;
   line-height: 1.6;
   color: var(--text-color, #fff);
@@ -1444,23 +1471,19 @@
   max-width: 100%;
 }
 
-/* 消息内嵌图片(工具生成的二维码等 data URL;解析器已限定 data:image/):
-   尺寸双约束(2026-08-19 用户反馈二维码高度超整个对话窗口):
-   - 宽:超宽图由 max-width: 100% 兜底压缩;
-   - 高:按消息区可视高(--agent-h - 116,与 .island-agent-messages
-     max-height 同源公式)× 62% 封顶,余量留给正文/工具卡/脚注,
-     等比由块级包裹容器内的常规流解析保证(见 island-agent-md-img-wrap);
-   - 下限 160px:Bili 登录二维码 57 模块(49+静区),低于此手机
-     扫码不可靠(模块 <3px) */
+/* 消息内嵌图片(工具生成的二维码等 data URL):只在宽度超出消息区时
+   等比缩小，不再按窗口高度二次压缩。长图交给消息列表滚动查看，二维码
+   和截图则尽量保留原始像素，避免缩小后文字/模块边缘发糊。 */
 .island-agent-md-img {
   display: block;
   width: auto;
   height: auto;
   max-width: 100%;
-  max-height: max(160px, calc((var(--agent-h, 260px) - 116px) * 0.62));
+  max-height: none;
   margin: 4px 0;
   border-radius: 10px;
-  border: 1px solid rgba(255, 255, 255, 0.14);
+  border: 1px solid var(--island-popover-stroke, rgba(255, 255, 255, 0.14));
+  image-rendering: auto;
 }
 
 /* 对话媒体窗口(2026-08-08):图片/视频 = **气泡 UI 包裹**(圆角卡片 +
@@ -1504,6 +1527,11 @@
     box-shadow 0.2s ease;
 }
 
+/* 透明 PNG/SVG 不再透出固定黑底；视频仍由自身播放器保持黑色画布。 */
+.island-media-frame--img {
+  background: var(--agent-surface-soft);
+}
+
 .island-media-frame:hover,
 .island-media-frame.resizing {
   border-color: rgba(255, 255, 255, 0.34);
@@ -1512,7 +1540,14 @@
     0 2px 12px rgba(0, 0, 0, 0.35);
 }
 
-.island-media-frame img,
+.island-media-frame img {
+  display: block;
+  width: 100%;
+  height: auto;
+  object-fit: contain;
+  image-rendering: auto;
+}
+
 .island-media-frame video {
   display: block;
   width: 100%;
@@ -1834,10 +1869,10 @@
   bottom: calc(100% + 6px);
   min-width: 148px;
   padding: 8px;
-  border: 1px solid rgba(255, 255, 255, 0.16);
+  border: 1px solid var(--island-popover-stroke, rgba(255, 255, 255, 0.16));
   border-radius: 10px;
-  background: rgba(14, 17, 23, 0.96);
-  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+  background: var(--island-popover-bg, rgba(14, 17, 23, 0.96));
+  box-shadow: 0 6px 18px var(--island-popover-shadow, rgba(0, 0, 0, 0.45));
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -1853,7 +1888,7 @@
 
 .island-video-more-label {
   font-size: 0.6rem;
-  color: rgba(255, 255, 255, 0.5);
+  color: var(--text-dim, rgba(255, 255, 255, 0.5));
 }
 
 .island-video-more-speeds {
@@ -1864,10 +1899,10 @@
 
 .island-video-more-item {
   padding: 3px 8px;
-  border: 1px solid rgba(255, 255, 255, 0.18);
+  border: 1px solid var(--island-popover-stroke, rgba(255, 255, 255, 0.18));
   border-radius: 6px;
   background: transparent;
-  color: rgba(255, 255, 255, 0.8);
+  color: var(--text-color, rgba(255, 255, 255, 0.8));
   font-size: 0.62rem;
   cursor: pointer;
   transition:
@@ -1877,7 +1912,7 @@
 }
 
 .island-video-more-item:hover {
-  background: rgba(255, 255, 255, 0.12);
+  background: var(--island-popover-hover, rgba(255, 255, 255, 0.12));
 }
 
 .island-video-more-item.on {
@@ -3216,12 +3251,12 @@
   transition:
     transform 0.24s cubic-bezier(0.2, 0.9, 0.25, 1),
     opacity 0.18s ease;
-  background: rgba(16, 20, 28, 0.97);
-  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: var(--island-popover-bg, rgba(16, 20, 28, 0.97));
+  border: 1px solid var(--island-popover-stroke, rgba(255, 255, 255, 0.14));
   border-radius: 10px;
   z-index: 6;
   scrollbar-width: thin;
-  scrollbar-color: rgba(255, 255, 255, 0.15) transparent;
+  scrollbar-color: var(--island-scroll-thumb, rgba(255, 255, 255, 0.15)) transparent;
 }
 
 /* 展开态:挂载即从 scaleY(0) 弹开到 1(与输入框一体的"长出"感) */
@@ -3459,8 +3494,8 @@
 }
 
 .island-quick-menu.open {
-  background: rgba(255, 255, 255, 0.09);
-  border-color: rgba(255, 255, 255, 0.24);
+  background: var(--island-surface-raised, rgba(255, 255, 255, 0.09));
+  border-color: var(--island-stroke-strong, rgba(255, 255, 255, 0.24));
 }
 
 /* 左侧展开(Bug 修复 2026-08-07):菜单项 **absolute 定位在按钮左缘之外**
@@ -3486,9 +3521,9 @@
   align-items: center;
   gap: 6px;
   padding: 6px 12px;
-  border: 1px solid rgba(255, 255, 255, 0.24);
+  border: 1px solid var(--island-stroke-strong, rgba(255, 255, 255, 0.24));
   border-radius: 11px;
-  background: rgba(255, 255, 255, 0.09);
+  background: var(--island-surface-raised, rgba(255, 255, 255, 0.09));
   color: var(--text-color, #fff);
   font-size: 0.7rem;
   font-family: inherit;
@@ -3501,8 +3536,8 @@
 }
 
 .island-quick-menu-btn:hover {
-  background: rgba(255, 255, 255, 0.16);
-  border-color: rgba(255, 255, 255, 0.36);
+  background: var(--island-surface-hover, rgba(255, 255, 255, 0.16));
+  border-color: color-mix(in srgb, var(--text-color, #fff) 36%, transparent);
 }
 
 /* open 时按钮融入容器胶囊(取消独立边框/底色,成为胶囊第一段) */
@@ -3512,7 +3547,7 @@
 }
 
 .island-quick-menu.open .island-quick-menu-btn:hover {
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--island-surface-soft, rgba(255, 255, 255, 0.08));
 }
 
 .island-quick-menu-arrow {
@@ -3650,8 +3685,8 @@
 }
 
 .island-quick-menu.dir-left.open .island-quick-menu-shell {
-  background: rgba(255, 255, 255, 0.09);
-  border-color: rgba(255, 255, 255, 0.24);
+  background: var(--island-surface-raised, rgba(255, 255, 255, 0.09));
+  border-color: var(--island-stroke-strong, rgba(255, 255, 255, 0.24));
 }
 
 /* shell 接管背景后容器自身不再画(防双重叠加变深) */
@@ -3665,12 +3700,12 @@
    形成主从层次——原按钮完全融入胶囊,与菜单项平级无层次(用户实测
    "快捷按钮没有比子菜单有突出性") */
 .island-quick-menu.dir-left.open .island-quick-menu-btn {
-  border-color: rgba(255, 255, 255, 0.3);
-  background: rgba(255, 255, 255, 0.14);
+  border-color: color-mix(in srgb, var(--text-color, #fff) 30%, transparent);
+  background: var(--island-surface-hover, rgba(255, 255, 255, 0.14));
 }
 
 .island-quick-menu.dir-left.open .island-quick-menu-btn:hover {
-  background: rgba(255, 255, 255, 0.2);
+  background: var(--island-surface-active, rgba(255, 255, 255, 0.2));
 }
 
 .island-quick-menu.dir-left.open .island-quick-menu-pop {
@@ -3727,7 +3762,7 @@
 }
 
 .island-quick-menu-item:hover {
-  background: rgba(255, 255, 255, 0.1);
+  background: var(--island-surface-raised, rgba(255, 255, 255, 0.1));
   color: var(--text-color, #fff);
 }
 
@@ -4275,10 +4310,10 @@
   max-height: 176px;
   overflow-y: auto;
   padding: 5px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  border: 1px solid var(--island-popover-stroke, rgba(255, 255, 255, 0.12));
   border-radius: 10px;
-  background: rgba(28, 30, 38, 0.97);
-  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.4);
+  background: var(--island-popover-bg, rgba(28, 30, 38, 0.97));
+  box-shadow: 0 10px 28px var(--island-popover-shadow, rgba(0, 0, 0, 0.4));
   /* 入场动画(2026-08-19 动画审计):弹层从下方触发按钮一侧缩放展开
      (向上开的弹层,origin 在底部;0.2s 与右键菜单 island-ctx-menu
      同款节奏——此前条件渲染瞬间出现,全程序唯一无过渡的弹层) */
@@ -4286,7 +4321,7 @@
   animation: island-ui-in 0.2s cubic-bezier(0.34, 1.56, 0.64, 1) both;
   /* 定制滚动条:标准属性(Chromium 121+) */
   scrollbar-width: thin;
-  scrollbar-color: rgba(255, 255, 255, 0.22) transparent;
+  scrollbar-color: var(--island-scroll-thumb, rgba(255, 255, 255, 0.22)) transparent;
 }
 
 /* 定制滚动条:webkit 前缀兜底(Electron Chromium,滚动条不上原生样式) */
@@ -4300,11 +4335,11 @@
 
 .island-agent-sublms-pop::-webkit-scrollbar-thumb {
   border-radius: 3px;
-  background: rgba(255, 255, 255, 0.18);
+  background: var(--island-scroll-thumb, rgba(255, 255, 255, 0.18));
 }
 
 .island-agent-sublms-pop::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.32);
+  background: color-mix(in srgb, var(--text-color, #fff) 36%, transparent);
 }
 
 .island-agent-sublms-pop::-webkit-scrollbar-corner {
@@ -4331,7 +4366,7 @@
 }
 
 .island-agent-sublms-item:hover {
-  background: rgba(255, 255, 255, 0.07);
+  background: var(--island-popover-hover, rgba(255, 255, 255, 0.07));
   color: var(--text-color, #fff);
 }
 
@@ -4787,10 +4822,10 @@
   display: flex;
   flex-direction: column;
   gap: 2px;
-  border: 1px solid rgba(255, 255, 255, 0.14);
+  border: 1px solid var(--island-popover-stroke, rgba(255, 255, 255, 0.14));
   border-radius: 9px;
-  background: rgba(13, 16, 23, 0.97);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  background: var(--island-popover-bg, rgba(13, 16, 23, 0.97));
+  box-shadow: 0 8px 24px var(--island-popover-shadow, rgba(0, 0, 0, 0.5));
   /* 从左上角(触发按钮下方)缩放展开,空间关系指向触发源,而非中心缩放 */
   transform-origin: top left;
   animation: island-ui-in 0.28s cubic-bezier(0.34, 1.56, 0.64, 1) both;
@@ -4813,7 +4848,7 @@
 }
 
 .island-memory-type-opt:hover {
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--island-popover-hover, rgba(255, 255, 255, 0.08));
 }
 
 .island-memory-type-opt.on {
@@ -5046,7 +5081,7 @@
   display: flex;
   flex-direction: column;
   gap: 10px;
-  background: rgba(8, 10, 14, 0.94);
+  background: var(--island-popover-bg, rgba(8, 10, 14, 0.94));
   pointer-events: none;
 }
 
@@ -5509,7 +5544,7 @@
   display: block;
   padding: 6px 8px;
   border-radius: 7px;
-  background: rgba(0, 0, 0, 0.35);
+  background: var(--island-surface-raised, rgba(0, 0, 0, 0.35));
   color: var(--text-color, #fff);
   font-size: 0.64rem;
   line-height: 1.5;
@@ -5524,7 +5559,7 @@
   display: block;
   padding: 6px 8px;
   border-radius: 7px;
-  background: rgba(0, 0, 0, 0.35);
+  background: var(--island-surface-raised, rgba(0, 0, 0, 0.35));
   color: var(--text-color, #fff);
   font-size: 0.64rem;
   line-height: 1.5;

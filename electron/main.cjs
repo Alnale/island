@@ -31,6 +31,8 @@ const path = require('node:path')
 const fs = require('node:fs')
 const fsPromises = require('node:fs/promises')
 const { Readable } = require('node:stream')
+const { clearManagedData, RENDERER_DATABASES } = require('./data-manifest.cjs')
+const { placementFromBounds, restoreWindowBounds } = require('./window-placement.cjs')
 
 // Agent 引擎(由 scripts/build-electron.mjs 打包):DeepSeek Responses API
 // provider + 工具系统,主进程内运行(纯异步网络/文件 IO,无阻塞点)。
@@ -280,6 +282,7 @@ let bridgeRestartCount = 0
 let bridgeFirstCrashAt = 0
 /** 显式退出标记:close 事件据此决定 hide 还是真关 */
 let quitting = false
+let factoryResetInProgress = false
 
 // ---------------------------------------------------------------------------
 // 配置持久化(userData/settings.json)
@@ -304,7 +307,15 @@ function loadSettings() {
   return settingsStore.load()
 }
 function saveSettings(patch) {
+  if (factoryResetInProgress) return
   return settingsStore.save(patch)
+}
+
+function applySessionLogPref() {
+  const enabled = loadSettings().sessionLogEnabled !== false
+  if (typeof agentEngineModule.setSessionLogDiskEnabled === 'function') {
+    agentEngineModule.setSessionLogDiskEnabled(enabled)
+  }
 }
 function flushSettings() {
   return settingsStore.flush()
@@ -522,7 +533,8 @@ const AGENT_CONFIG_DEFAULTS = {
    * "空 = 全部信任"语义——LLM 把列表清空后陌生人全被当主人处理的
    * 隐患已杜绝;缺省以 privacy.json 的 allowed 回填) */
   napcatAllowed: [],
-  /** 群白名单(缺省以 privacy.json 的 allowedGroups 回填;空数组 = 不监听) */
+  /** 群白名单(缺省以 privacy.json 的 allowedGroups 回填;空数组 = 监听所有群;
+   * 非空 = 只收名单内的群。向某群 send_group 会自动把该群加入名单) */
   napcatAllowedGroups: [],
   /** 机器人自身 QQ(群 @ 检测;缺省以 privacy.json 的 botQQ 回填) */
   napcatBotQQ: '',
@@ -1037,13 +1049,10 @@ function sendToWidget(channel, payload) {
 }
 
 /**
- * 主动陪伴:主动回合消息落定后,主进程跑心理揣测 → ① **Windows 系统
- * 通知**展示(用户要求的"系统消息"展示揣测)② mind-proactive 事件送
- * 渲染端更新紧凑态文字区——与通知同一句,两处一致、不重复调用 LLM。
- * 抽成具名函数:onEvent 钩子与巡检(deps 注入 runProactiveGuess,绕开
- * LLM 调度的确定性测试,同 runIslandSettings 模式)共用。
- * getMindAgent 是独立 Sub Agent 单例(事件静默),guess 失败返回空串
- * → 不通知,可接受
+ * 巡检直调心理揣测(段 4.8 绕开引擎事件链路):生产路径已改为回复落定
+ * 时 mind-guess-on-reply 插件同步评估。本函数保留给巡检注入消息后
+ * 确定性触发 → ① 系统通知 ② mind-proactive 事件(渲染端与 mind-guess
+ * 同处理)。guess 失败返回空串 → 不通知,可接受
  */
 function runProactiveGuess(message) {
   return getMindAgent()
@@ -1097,8 +1106,10 @@ function buildEngineDeps(route, sessionKey) {
       }
       if (event.type === 'background-done' && currentMode() !== 'agent') return
       sendToWidget('agent:event', event)
-      if (event.type === 'message' && event.message?.proactive) {
-        void runProactiveGuess(event.message)
+      // 心理揣测与回复同步评估:插件在落定时推 mind-guess;主动陪伴回合
+      // 另弹系统通知(与文字区同一句)。不再事后 getMindAgent 补跑。
+      if (event.type === 'mind-guess' && event.proactive && event.guess) {
+        showMainNotify('岛灵 · 心理揣测', event.guess, 'low')
       }
       if (event.type === 'message' && !event.message?.proactive) {
         // async 路由(2026-08-16):指纹缺失/歧义的轮次落定后 await 意图
@@ -1130,6 +1141,7 @@ function buildEngineDeps(route, sessionKey) {
     // 系统/主动轮)——仅窗口直发轮允许设置主人身份;setOwnerQQ 写 privacy.json
     getTurnSource: () => route.lastSendSource,
     setOwnerQQ,
+    getSubAgents,
   }
 }
 
@@ -1217,8 +1229,26 @@ function getSessionEngine(sessionKey) {
 
 function getAgentEngine() {
   if (agentEngine) return agentEngine
+  applySessionLogPref()
   agentEngine = agentEngineModule.createAgentEngine(buildEngineDeps(mainRoute, 'main'))
   return agentEngine
+}
+
+async function disposeAllAgents() {
+  const engines = []
+  if (agentEngine) engines.push(agentEngine)
+  agentEngine = null
+  for (const [, entry] of sessionEngines) {
+    if (entry?.engine) engines.push(entry.engine)
+  }
+  sessionEngines.clear()
+  for (const engine of engines) {
+    try { engine.dispose() } catch { /* already gone */ }
+  }
+  try { void sharedMcpManager.dispose() } catch { /* already gone */ }
+  if (typeof agentEngineModule.closeActiveSessionLog === 'function') {
+    await agentEngineModule.closeActiveSessionLog()
+  }
 }
 
 // 音乐控制桥调用(2026-08-12):白名单只放行 control/status(防原型链
@@ -1501,6 +1531,8 @@ function getNapcatClient() {
     // 提示词注入前缀进对话,LLM 先询问主人怎么回复,得到指示后再回**
     // ——同步上下文,回复链路见 pendingQQReply
     onMessage: (msg) => {
+      // 空包不进对话(2026-08-31,客户端已丢弃,此处兜底)
+      if (agentEngineModule.napcatIncomingIsBlank(msg.text, msg.images)) return
       // 已删除会话(2026-08-19 语义修正,修复"删除/清除记录后再发消息没有
       // 重建新会话"):真实新消息到达 = **全新会话重建**——清除持久删除
       // 标记放行(旧聊天记录/人格/监听信任已在删除时清理),而非永久丢弃
@@ -1648,6 +1680,7 @@ function getNapcatClient() {
     // 介入),系统通知已由客户端发出;回复发回群,LLM 用
     // 「【不回复群消息】」声明不发回
     onGroupMessage: (msg) => {
+      if (agentEngineModule.napcatIncomingIsBlank(msg.text, msg.images)) return
       // 已删除会话(2026-08-19 语义修正,与私聊 onMessage 同款):真实新
       // 群消息到达 = 全新会话重建——清除持久删除标记放行,而非丢弃。
       // (NapCat 客户端仍有 allowedGroups 过滤:删除群已移出监听名单,
@@ -1836,6 +1869,20 @@ function turnFingerprintRule(fp) {
   )
 }
 
+/** 指纹注入指令(群会话窗口输入轮,2026-09-03 修复"给主人的回复被发到群"):
+ * 主人在群会话面板打的字 = 跟岛灵说话,回复默认留窗口;只有主人明确要求
+ * 发群时才带指纹写群友话。与群触发轮(群友发来消息)的双指纹规则不同 */
+function turnFingerprintGroupPanelRule(fp) {
+  return (
+    `【本轮是主人在群会话窗口输入】你的对话回复默认只留在对话窗口给主人看,不会发到群里。` +
+    `给主人的回答/解释/确认绝对不要带指纹——带「【指纹:${fp}】」的回复可能被发到群里让群友看到。` +
+    `只有主人明确要求「发到群里/回群友/在群里说」时,才以「【指纹:${fp}】」开头写要发到群的那句话` +
+    `(第一行就是指纹,后面直接写群友话,指纹前面不要加任何话);` +
+    `或者用 napcat send_group 工具真实发送(推荐)。` +
+    `历史消息里出现的「【指纹:xxxx】」是旧轮次的,与本轮无关,绝对不要使用。`
+  )
+}
+
 /** 指纹注入指令(群触发轮,2026-08-14;2026-08-15 双指纹升级):回复群友 =
  * 以本轮他人指纹开头写群友话(落定路由自动发回群、剥指纹);给主人的汇报
  * 必须以【主人指纹:xxx】开头(落定私发主人)——无指纹不发送(不再"无指纹
@@ -1935,6 +1982,7 @@ function logFpGate(sessionKey, reason, text, notify = true) {
       'qq-no-fp': '回复未带指纹,未发送给对方',
       'panel-no-fp': '面板回复未带指纹,未发送',
       'group-panel-no-fp': '群回复未带指纹,未发送到群',
+      'group-panel-stay': '群窗口回复留给主人,未发到群',
       'qq-ask-with-fp': '询问消息误带指纹,已拦截',
       'master-no-fp': '回复未带主人指纹,未发送到主人 QQ',
       'master-fp-no-target': '回复带他人指纹但无发送目标,未发送(发给别人请用 send 工具)',
@@ -2400,25 +2448,35 @@ async function handleEngineMessageForNapcat(message, sessionKey) {
         logFpGate(sessionKey, panelIntent ? 'classify-hold' : 'panel-no-fp', text)
       }
     } else if (grp) {
-      // 群面板:带本轮指纹才发回群(指纹 = 发给群友的话);已用 send_group
-      // 发过则跳过(工具消息即回复,这条是给主人的汇报)
-      if (fpPanel && !turnAlreadySentToTarget('group', grp[1], route)) {
-        c.sendToGroup(grp[1], fpPanel.content).catch((err) => handleNapcatSendError(err, grp[1], '群'))
-        showMainNotify('🐳 已发送到群', fpPanel.content.length > 60 ? fpPanel.content.slice(0, 60) + '…' : fpPanel.content)
-      } else if (!fpPanel && turnAlreadySentToTarget('group', grp[1], route)) {
-        // 本轮已用 send_group 工具发过 → 给主人的汇报,静默放行(2026-08-14)
+      // 群会话窗口输入(2026-09-03 修复"给主人的回复被发到群"):
+      // 主人在群会话面板打的字默认是在跟岛灵说话,回复留窗口。
+      // 与群触发轮(source=group,群友发来)不同——窗口轮绝不因「带了指纹」
+      // 或判定器倾向 other 就外发;只有主人明确要求发群才发出。
+      const alreadySentGroup = turnAlreadySentToTarget('group', grp[1], route)
+      const askedGroup = agentEngineModule.looksLikeGroupSendInstruction(triggerText)
+      let groupPanelIntent = null
+      if (!alreadySentGroup && !isAsk && !fpPanel && askedGroup) {
+        groupPanelIntent = await classifyReplyIntent('panel', '群会话窗口输入轮', text, triggerText, `群 ${grp[1]}`)
+      }
+      if (agentEngineModule.shouldSendGroupPanelReply({
+        hasFingerprint: !!fpPanel,
+        alreadySent: alreadySentGroup,
+        isAsk,
+        triggerText,
+        classifierIntent: groupPanelIntent,
+      })) {
+        const body = fpPanel ? fpPanel.content : agentEngineModule.stripFingerprintMarks(text)
+        notifyRouted('group')
+        c.sendToGroup(grp[1], body).catch((err) => handleNapcatSendError(err, grp[1], '群'))
+        showMainNotify(fpPanel ? '🐳 已发送到群' : '🐳 已发送到群(意图判定)', body.length > 60 ? body.slice(0, 60) + '…' : body, fpPanel ? 'high' : 'low')
+      } else if (alreadySentGroup) {
         logFpGate(sessionKey, 'group-panel-no-fp', text, false)
-      } else if (!fpPanel) {
-        // 意图判定器兜底(2026-08-16):无指纹的群面板回复——发给群友的
-        // 话发回群;判定失败回退扣留(原行为)
-        const panelGroupIntent = await classifyReplyIntent('panel', '会话面板输入轮', text, triggerText, `群 ${grp[1]}`)
-        if (panelGroupIntent === 'other' && !turnAlreadySentToTarget('group', grp[1], route)) {
-          notifyRouted('group')
-          c.sendToGroup(grp[1], agentEngineModule.stripFingerprintMarks(text)).catch((err) => handleNapcatSendError(err, grp[1], '群'))
-          showMainNotify('🐳 已发送到群(意图判定)', text.length > 60 ? text.slice(0, 60) + '…' : text, 'low')
-          return
-        }
-        logFpGate(sessionKey, panelGroupIntent ? 'classify-hold' : 'group-panel-no-fp', text)
+      } else if (isAsk && fpPanel) {
+        logFpGate(sessionKey, 'qq-ask-with-fp', text)
+      } else if (askedGroup) {
+        logFpGate(sessionKey, groupPanelIntent ? 'classify-hold' : 'group-panel-no-fp', text)
+      } else {
+        logFpGate(sessionKey, 'group-panel-stay', text, false)
       }
     }
   }
@@ -2563,38 +2621,31 @@ async function runIslandSettings(op, args) {
   return result
 }
 
-// 独立的总结后台 Sub Agent(懒加载单例):与主对话引擎零共享——
-// 对话的发送/中止/清空都不会打断总结,总结失败也不外溢到对话
-let summaryAgent = null
+// Sub Agent 能力宿主(懒加载单例):总结/揣测/主动陪伴/判定器/评估
+// 共用一份装配,IPC 与引擎插件走同一实例
+let subAgentHost = null
 
-function getSummaryAgent() {
-  if (summaryAgent) return summaryAgent
-  summaryAgent = agentEngineModule.createSummaryAgent({
-    getConfig: () => (currentAgentConfig()),
-    // 主动陪伴判断(judgeProactive)需要同源上下文:记忆块/进化状态进
-    // 判断系统提示,否则判断不知道助手"记得什么、在忙什么"
+function getSubAgents() {
+  if (subAgentHost) return subAgentHost
+  subAgentHost = agentEngineModule.createSubAgentHost({
+    getConfig: () => currentAgentConfig(),
     getMemoryStore: () => getMemoryStore(),
     getEvolution: () => getEvolution(),
-    // 群聊状态(2026-08-13 群聊冒泡):群安静时长/助手上次群发言进判断
-    // 上下文——群里没人说话时,主动陪伴也可"偶尔冒个泡活跃气氛"
     getGroupStatus: () => getGroupStatusBlock(),
   })
-  return summaryAgent
+  return subAgentHost
 }
 
-// 独立的回复意图判定 Sub Agent(懒加载单例,2026-08-16 兜底路由):
-// QQ 机器人落定路由对**指纹缺失/歧义**的轮次调用它判定回复发送意图
-// (master/other/hold)——主 Agent 边生成边记指纹服从性不稳定(用户实测
-// 两病:该发给主人的消息因忘带主人指纹没发出、发给别人的消息被发到
-// 主人 QQ),判定器只做单一分类任务,比主 Agent 可靠;失败回退原行为
-let replyClassifier = null
+function getSummaryAgent() {
+  return getSubAgents().summary
+}
+
+function getProactiveAgent() {
+  return getSubAgents().proactive
+}
 
 function getReplyClassifier() {
-  if (replyClassifier) return replyClassifier
-  replyClassifier = agentEngineModule.createReplyClassifier({
-    getConfig: () => (currentAgentConfig()),
-  })
-  return replyClassifier
+  return getSubAgents().classifier
 }
 
 /** 意图判定器调用(2026-08-16):判定无指纹回复的发送意图;失败/未配置/
@@ -2653,21 +2704,8 @@ async function getGroupStatusBlock() {
   }
 }
 
-// 独立的心理揣测后台 Sub Agent(懒加载单例):与总结标题/主对话引擎
-// 均零共享,失败返回空串(渲染端回退标题/回复预览);
-// 注入记忆/进化依赖——揣测的系统提示与主引擎同源(自定义提示词 +
-// 长期记忆块 + 进化状态 + 后台任务状态),否则心理是猜的空气
-let mindAgent = null
-
 function getMindAgent() {
-  if (mindAgent) return mindAgent
-  mindAgent = agentEngineModule.createMindAgent({
-    getConfig: () => (currentAgentConfig()),
-    // 与主引擎同款记忆/进化单例(记忆块进系统提示,揣测知道助手记得什么)
-    getMemoryStore: () => getMemoryStore(),
-    getEvolution: () => getEvolution(),
-  })
-  return mindAgent
+  return getSubAgents().mind
 }
 
 // ---------------------------------------------------------------------------
@@ -2744,10 +2782,34 @@ function defaultBounds() {
   }
 }
 
+let placementSaveTimer = null
+function saveWindowPlacement() {
+  placementSaveTimer = null
+  if (!win || win.isDestroyed()) return
+  const placement = placementFromBounds(win.getBounds(), screen.getAllDisplays(), screen.getPrimaryDisplay())
+  if (placement) saveSettings({ windowPlacement: placement })
+}
+function scheduleWindowPlacementSave() {
+  clearTimeout(placementSaveTimer)
+  placementSaveTimer = setTimeout(saveWindowPlacement, 300)
+}
+function restoreWindowPlacement() {
+  return restoreWindowBounds(
+    loadSettings().windowPlacement,
+    screen.getAllDisplays(),
+    defaultBounds(),
+    screen.getPrimaryDisplay(),
+  )
+}
+function keepWindowVisible() {
+  if (!win || win.isDestroyed() || screen.getAllDisplays().length === 0) return
+  win.setBounds(restoreWindowPlacement())
+  scheduleWindowPlacementSave()
+}
+
 function createWindow() {
   const settings = loadSettings()
-  // 每次启动都从桌面顶部居中出现(不恢复上次位置)
-  const bounds = defaultBounds()
+  const bounds = restoreWindowPlacement()
 
   win = new BrowserWindow({
     ...bounds,
@@ -2836,6 +2898,10 @@ function createWindow() {
       saveSettings({ firstRun: true })
     }
   })
+  // 多显示器热插拔或 DPI/工作区变化后，使用已存的相对位置重算并钳制。
+  screen.on('display-added', keepWindowVisible)
+  screen.on('display-removed', keepWindowVisible)
+  screen.on('display-metrics-changed', keepWindowVisible)
 
   // 关闭 = 隐藏(挂件常驻托盘),托盘"退出"才真正结束
   win.on('close', (event) => {
@@ -2869,8 +2935,7 @@ function createWindow() {
       settingsPath,
       runIslandSettings,
       resetSettingsCache,
-      // 主动陪伴:主动消息 → 心理揣测 + 系统通知 + mind-proactive 事件
-      // (巡检直接调主进程函数,绕开 LLM 调度的确定性测试)
+      // 主动陪伴巡检:直调心理揣测(生产路径已改回复落定同步评估)
       runProactiveGuess,
       // 主动陪伴完整回合(引擎 proactiveTurn;巡检端到端验证真实回合
       // 流式落定 → 主进程钩子 → 揣测通知的完整链路)
@@ -3261,6 +3326,7 @@ ipcMain.on('widget:drag-move', (_event, sx, sy) => {
 ipcMain.on('widget:drag-end', () => {
   dragState = null
   dragLastCorrectAt = 0
+  scheduleWindowPlacementSave()
 })
 
 // ---------------------------------------------------------------------------
@@ -3404,8 +3470,9 @@ ipcMain.on('agent:send', (_event, text, history, sessionId, source, target, sess
           {
             type: 'text',
             text:
-              `【当前会话对象】QQ ${pm[1]}——你正在与 TA 的私聊会话中。` +
-              `主人说「发消息给他/她/对方/这个QQ」就是指给 QQ ${pm[1]} 发私聊消息` +
+              `【当前会话对象】QQ ${pm[1]}——你正在与 TA 的私聊会话面板中。` +
+              `面板里主人打的字带【主人窗口】= 主人指示(最高权限),不是 TA 发来的消息。` +
+              `主人说「发消息给他/她/对方/这个QQ」才是指给 QQ ${pm[1]} 发私聊消息` +
               `(napcat send 可省略 user_id,默认发给 TA)。`,
           },
         ],
@@ -3418,13 +3485,45 @@ ipcMain.on('agent:send', (_event, text, history, sessionId, source, target, sess
           {
             type: 'text',
             text:
-              `【当前会话对象】群 ${gm[1]}——你正在本群会话中。` +
-              `主人说「发到群里/给群友发」就是指群 ${gm[1]}` +
+              `【当前会话对象】群 ${gm[1]}——你正在本群会话面板中。` +
+              `面板里主人打的字带【主人窗口】= 主人指示(最高权限),不是群友发来的消息。` +
+              `主人说「发到群里/给群友发」才是指群 ${gm[1]}` +
               `(napcat send_group 可省略 group_id,默认发本群)。`,
           },
         ],
       })
     }
+  }
+  // **窗口输入 = 主人权限(2026-08-31)**:别人的会话面板里打的字不是对方
+  // 发来的 QQ 消息。给最后一条用户正文打【主人窗口】,并注入当轮身份指令
+  let sendText = typeof text === 'string' ? text : ''
+  if (source === 'window' && key !== 'main') {
+    sendText = agentEngineModule.tagMasterWindowText(sendText)
+    for (let i = hist.length - 1; i >= 0; i--) {
+      const m = hist[i]
+      if (m && m.role === 'user' && Array.isArray(m.parts)) {
+        let tagged = false
+        hist[i] = {
+          ...m,
+          parts: m.parts.map((p) => {
+            if (!tagged && p && p.type === 'text' && typeof p.text === 'string') {
+              tagged = true
+              return { ...p, text: agentEngineModule.tagMasterWindowText(p.text) }
+            }
+            return p
+          }),
+        }
+        break
+      }
+    }
+    const pmPeer = /^private:(\d+)$/.exec(key)
+    const gmPeer = /^group:(\d+)$/.exec(key)
+    const peerLabel = gmPeer ? `群 ${gmPeer[1]}` : pmPeer ? `QQ ${pmPeer[1]}` : '对方'
+    hist.push({
+      id: 'master-win-' + Date.now(),
+      role: 'system',
+      parts: [{ type: 'text', text: agentEngineModule.masterWindowTurnRule(peerLabel) }],
+    })
   }
   const pendNow = mainRoute.pendingQQReply
   const pendNowLive = pendNow && Date.now() - pendNow.at < PENDING_QQ_TIMEOUT_MS
@@ -3434,6 +3533,7 @@ ipcMain.on('agent:send', (_event, text, history, sessionId, source, target, sess
     ((source === 'window' && (key === 'main' || key === 'private:' + pendNow.qq)) ||
       (source === 'qq' && target === masterQQ()))
   const isPanelTurn = source === 'window' && key !== 'main' && /^(private:\d+|group:\d+)$/.test(key)
+  const isGroupPanelTurn = source === 'window' && /^group:\d+$/.test(key)
   const isContactTurn = source === 'qq' && typeof target === 'string' && target !== masterQQ()
   // 群触发轮(2026-08-14):注入群专用指纹规则——回复群友 = 带指纹的群友话
   // (落定自动发群),汇报不带指纹;没有指纹协议,LLM 把群友话写进对话回复
@@ -3463,7 +3563,9 @@ ipcMain.on('agent:send', (_event, text, history, sessionId, source, target, sess
                     ? turnFingerprintGroupRule(fp, fpMaster)
                     : isExecTurn
                       ? turnFingerprintExecRule(fp, pendNow.qq)
-                      : turnFingerprintRule(fp),
+                      : isGroupPanelTurn
+                        ? turnFingerprintGroupPanelRule(fp)
+                        : turnFingerprintRule(fp),
         },
       ],
     })
@@ -3476,7 +3578,7 @@ ipcMain.on('agent:send', (_event, text, history, sessionId, source, target, sess
   // 从未收到消息、渲染端永远等不到回复(主对话路径 getAgentEngine
   // 返回引擎本体所以正常,外部会话全灭)
   engine.send(
-    text,
+    sendText,
     hist,
     typeof sessionId === 'string' ? sessionId : undefined,
     key,
@@ -3628,8 +3730,8 @@ function getLastProactiveTick() {
 }
 
 // 主动陪伴 tick(2026-08-07):渲染端调度器触发(无操作满 N 分钟)。
-// 判模式/配置/引擎忙 → 总结 Sub Agent 判断语境 → should 则主 Agent
-// 完整回合主动回复。**resolve 时机 = judge 完成后**(渲染端 in-flight
+// 判模式/配置/引擎忙 → 主动陪伴 Sub Agent 判断语境(+ 风格分析) →
+// should 则主 Agent 完整回合主动回复。**resolve 时机 = judge 完成后**(渲染端 in-flight
 // 覆盖 judge 全程,期间用户 send 天然优先——judge 结果到来时引擎已
 // busy,proactiveTurn 自动放弃)。judge-no 携带 reason 供渲染端回退
 // idle 时钟(下次判断在 N 分钟后,防闲置时每分钟一次 LLM 判断调用)。
@@ -3652,8 +3754,8 @@ ipcMain.handle('agent:proactive-tick', async (_event, messages, idleMinutes, ses
         // 模仿用户的嘴癖和风格")——两者独立,任一方失败静默降级(judge
         // 失败 → 不开口;风格分析失败 → 不注入风格指令)
         const [verdict, style] = await Promise.all([
-          getSummaryAgent().judgeProactive(list, minutes),
-          getMindAgent().analyzeUserStyle(list),
+          getProactiveAgent().judgeProactive(list, minutes),
+          getProactiveAgent().analyzeUserStyle(list),
         ])
         if (!verdict.should) result = { started: false, reason: 'judge-no' }
         else {
@@ -4106,72 +4208,142 @@ safeHandle('agent:lmstudio-models', (action, payload) => lmstudioModelsApi(actio
 //   xxt 登录态与截图目录
 // 删除失败(文件被占用,如下载中)返回 {error},渲染端展示;force 忽略
 // 不存在,部分失败不中断其余删除
+let pendingPrepareReset = null
+
+function requestRendererPrepareReset(requestId, scope) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      if (pendingPrepareReset?.requestId === requestId) pendingPrepareReset = null
+      resolve({ ok: false, timedOut: true, entries: [] })
+    }, 8000)
+    pendingPrepareReset = { requestId, timer, resolve }
+    if (!win || win.isDestroyed()) {
+      clearTimeout(timer)
+      pendingPrepareReset = null
+      resolve({ ok: true, entries: [{ id: 'renderer', status: 'not-found' }] })
+      return
+    }
+    win.webContents.send('data:prepare-reset', {
+      requestId,
+      scope,
+      databases: [...RENDERER_DATABASES],
+    })
+  })
+}
+
+ipcMain.on('data:prepare-reset-done', (_event, payload) => {
+  if (!pendingPrepareReset || payload?.requestId !== pendingPrepareReset.requestId) return
+  clearTimeout(pendingPrepareReset.timer)
+  const { resolve } = pendingPrepareReset
+  pendingPrepareReset = null
+  resolve(payload && typeof payload === 'object' ? payload : { ok: false, entries: [] })
+})
+
 safeHandle('agent:clear-data', async (scope) => {
   const ud = app.getPath('userData')
-  const rm = (p) => fs.rmSync(p, { recursive: true, force: true })
-  if (scope === 'app') {
-    rm(path.join(ud, 'memory.json'))
-    rm(path.join(ud, 'memory-state.json'))
-    rm(path.join(ud, 'evolution.json'))
-    rm(path.join(ud, 'memory-snapshots'))
-    rm(path.join(ud, 'settings.json'))
-    // 2026-08-18 补全"清除所有数据不全面":QQ 会话记录(napcat 聊天记录/
-    // 联系人档案/会话人格/去重 ID/媒体附件)+ 撤销快照一并清理——
-    // 此前只清记忆/进化/settings,会话记录与联系人残留
-    rm(path.join(ud, 'napcat-contacts.json'))
-    rm(path.join(ud, 'napcat-chats.json'))
-    rm(path.join(ud, 'napcat-personas.json'))
-    rm(path.join(ud, 'napcat-seen.json'))
-    rm(path.join(ud, 'napcat-media'))
-    rm(path.join(ud, 'undo-snapshots.json'))
-    // 重置会话状态文件(2026-08-18):清除所有数据 = 重置全部会话状态
-    // (会话列表 + 已删除列表),清除后重新启用会话(watch)可正常建立
-    rm(path.join(ud, 'napcat-sessions.json'))
-    deletedSessionsSet = new Set()
-    knownSessions.clear()
-    memoryStore = null
-    evolutionHandle = null
-    resetSettingsCache()
-    // NapCat 存储域模块级缓存(contacts/chats/seen)已随文件删除,须一并
-    // 重置,否则旧缓存会在下次保存时把已删内容"复活"(与引擎 dispose 同类)
-    if (typeof agentEngineModule.resetNapcatStore === 'function') {
-      agentEngineModule.resetNapcatStore()
-    }
-    // 引擎随数据重建(2026-08-10 修复"LLM 列出记忆 id 但设置视图长期
-    // 记忆为空"):引擎 tools 创建时持有 store 引用,不清除则旧引用继续
-    // 操作已删除的旧记忆、与渲染端读的新实例永久不一致;dispose 清理
-    // MCP 子进程,懒加载在下次对话重建
-    if (agentEngine) {
-      try {
-        agentEngine.dispose()
-      } catch {
-        // already gone
-      }
-      agentEngine = null
-    }
-    // 停止 NapCat 连接(2026-08-18 根治"清除数据重启还是恢复"):清除所有
-    // 数据后 config 清空——NapCat 客户端群聊过滤(allowedGroups 非空才过滤)
-    // 失效、私聊全收,若仍连接则收到的消息会实时重建会话(用户实测"清除
-    // 数据重启还是恢复")。清除 = 重置,停止连接;用户在设置重新启用
-    // NapCat(syncNapcatLifecycle)后再连接
-    if (napcatClientState?.active) {
-      try {
-        napcatClientState.client.stop()
-      } catch {
-        // already stopped
-      }
-      napcatClientState.active = false
-    }
-    return { ok: true }
+  if (scope !== 'app' && scope !== 'tools') {
+    return { ok: false, error: `未知的清除范围:${String(scope)}` }
   }
+  if (factoryResetInProgress) return { ok: false, error: '正在恢复出厂设置' }
+
   if (scope === 'tools') {
-    // bili 下载与登录态(下载中文件被占用会抛错 → 返回错误,可稍后重试)
-    rm(path.join(ud, 'bili'))
-    rm(path.join(ud, 'xxt-profile'))
-    rm(path.join(ud, 'xxt-screenshots'))
-    return { ok: true }
+    return clearManagedData(ud, 'tools')
   }
-  return { error: `未知的清除范围:${String(scope)}` }
+
+  factoryResetInProgress = true
+  const requestId = `reset-${Date.now()}`
+  const renderer = await requestRendererPrepareReset(requestId, 'app')
+  await disposeAllAgents()
+  if (napcatClientState?.active) {
+    try { napcatClientState.client.stop() } catch { /* already stopped */ }
+    napcatClientState.active = false
+  }
+  if (typeof settingsStore.destroy === 'function') settingsStore.destroy()
+
+  const result = clearManagedData(ud, 'app')
+  const rendererFailed = Array.isArray(renderer.entries)
+    ? renderer.entries.filter((entry) => entry.status === 'failed')
+    : []
+  const ok = result.ok && rendererFailed.length === 0
+
+  if (!ok) {
+    if (typeof settingsStore.revive === 'function') settingsStore.revive()
+    if (typeof agentEngineModule.reopenSessionLog === 'function') agentEngineModule.reopenSessionLog()
+    factoryResetInProgress = false
+    const extra = rendererFailed.map((entry) => entry.id)
+    return {
+      ok: false,
+      error: [result.error, extra.length ? `渲染端:${extra.join(', ')}` : '']
+        .filter(Boolean)
+        .join('；') || '部分项目未能删除',
+      removed: result.removed,
+      failures: result.failures,
+      entries: [...(result.entries || []), ...(renderer.entries || [])],
+    }
+  }
+
+  deletedSessionsSet = new Set()
+  knownSessions.clear()
+  memoryStore = null
+  evolutionHandle = null
+  if (typeof agentEngineModule.resetNapcatStore === 'function') agentEngineModule.resetNapcatStore()
+  if (typeof agentEngineModule.invalidatePrivacyCache === 'function') agentEngineModule.invalidatePrivacyCache()
+
+  const screenshot = Boolean(process.env.WIDGET_SCREENSHOT)
+  if (!screenshot) {
+    setTimeout(() => {
+      if (quitting) return
+      quitting = true
+      app.relaunch()
+      app.quit()
+    }, 500)
+  }
+  return {
+    ok: true,
+    removed: result.removed,
+    restartRequired: !screenshot,
+    entries: [...(result.entries || []), ...(renderer.entries || [])],
+  }
+})
+
+safeHandle('agent:secret-status', () => ({
+  available: typeof settingsStore.isSecretStorageAvailable === 'function'
+    ? settingsStore.isSecretStorageAvailable()
+    : true,
+}))
+
+safeHandle('agent:session-log-status', () => {
+  const names = ['session-log.jsonl', 'session-log.1.jsonl', 'session-log.2.jsonl']
+  const ud = app.getPath('userData')
+  let bytes = 0
+  const files = []
+  for (const name of names) {
+    try {
+      const st = fs.statSync(path.join(ud, name))
+      bytes += st.size
+      files.push(name)
+    } catch { /* missing */ }
+  }
+  return { enabled: loadSettings().sessionLogEnabled !== false, bytes, files }
+})
+
+safeHandle('agent:session-log-set', (enabled) => {
+  const on = enabled !== false
+  saveSettings({ sessionLogEnabled: on })
+  applySessionLogPref()
+  return { enabled: on }
+})
+
+safeHandle('agent:session-log-clear', async () => {
+  if (typeof agentEngineModule.clearSessionLogFiles === 'function') {
+    await agentEngineModule.clearSessionLogFiles()
+  } else {
+    const ud = app.getPath('userData')
+    for (const name of ['session-log.jsonl', 'session-log.1.jsonl', 'session-log.2.jsonl']) {
+      try { fs.rmSync(path.join(ud, name), { force: true }) } catch { /* ignore */ }
+    }
+  }
+  return { ok: true }
 })
 // ---- 外部会话状态持久化(2026-08-18 重构:单一权威文件,推倒旧的
 // deleted-sessions.json 拼补方案)----
@@ -4619,8 +4791,8 @@ ipcMain.handle('agent:summarize', async (_event, messages) => {
   return summaryPromise
 })
 
-// 心理揣测(紧凑态文字区展示):独立 Sub Agent 根据当前对话揣测
-// LLM 回复时的心态(≤10 汉字俏皮话);与总结/主对话引擎均隔离,
+// 心理揣测 IPC(加载历史会话补跑):生产路径已改为回复落定同步评估
+// (mind-guess-on-reply 插件);本通道仅 loadSession 跳过标题时补猜。
 // 失败返回空串由渲染端回退标题/回复预览
 ipcMain.handle('agent:mind-guess', (_event, messages) =>
   getMindAgent().guess(asArray(messages)),
@@ -4767,8 +4939,12 @@ if (!gotLock) {
 
   app.on('before-quit', () => {
     quitting = true
-    // 防抖中的 settings 写立即落盘(退出瞬间的 mode/配置修改不丢)
-    flushSettings()
+    if (!factoryResetInProgress) {
+      clearTimeout(placementSaveTimer)
+      saveWindowPlacement()
+      // 防抖中的 settings 写立即落盘(退出瞬间的 mode/配置修改不丢)
+      flushSettings()
+    }
     try {
       bridgeProc?.kill()
     } catch {

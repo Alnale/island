@@ -39,6 +39,7 @@ import {
   memoryPromptPlugin,
   toolsGuidePromptPlugin,
 } from './prompt-plugins'
+import { mindGuessPlugin } from './subagent-plugins'
 import { AGENT_COMPOSITION_ID_DUP, AGENT_COMPOSITION_LINE_UNKNOWN, CodedError } from './errors'
 import type { Plugin } from './kernel'
 import type { SessionStateService } from './host'
@@ -71,6 +72,7 @@ export interface Profile {
 /**
  * 工厂注册表(name → factory)——组合层唯一的实现解析点。
  * 换实现 = 换行的 name;新增能力 = 注册工厂并在 Profile 加一行。
+ * 缺省 19 行(含 subagent-on-reply:助手回复落定同步评估标题+心理揣测)。
  */
 export const PLUGIN_REGISTRY: Record<string, PluginFactory> = {
   'host-bridge': (_c, env) => hostBridgePlugin(env.deps, env.emit, env.outputBudget, env.sessionState),
@@ -91,6 +93,7 @@ export const PLUGIN_REGISTRY: Record<string, PluginFactory> = {
   'prompt-evolution': () => evolutionPromptPlugin(),
   'prompt-bg-tasks': () => bgTasksPromptPlugin(),
   'prompt-tools-guide': () => toolsGuidePromptPlugin(),
+  'subagent-on-reply': (c) => mindGuessPlugin(c),
 }
 
 /** 引擎缺省 Profile(与既有 builtinPlugins 的装配顺序逐位一致) */
@@ -115,6 +118,7 @@ export function defaultProfile(): Profile {
       { id: 'prompt-evolution', name: 'prompt-evolution' },
       { id: 'prompt-bg-tasks', name: 'prompt-bg-tasks' },
       { id: 'prompt-tools-guide', name: 'prompt-tools-guide' },
+      { id: 'subagent-on-reply', name: 'subagent-on-reply' },
     ],
   }
 }

@@ -3,8 +3,8 @@
  *
  * 独立自包含卸载程序(与安装器同构):由 scripts/build-uninstaller.mjs
  * 打包为「灵动岛卸载器.exe」(内含 electron 运行时 + resources/app 卸载
- * 向导),安装器安装时复制到安装目录根,系统设置卸载入口(UninstallString)
- * 与安装目录双击都指向它——不依赖主应用,主应用损坏也能卸载。
+ * 向导),安装器安装时复制到安装目录/uninstaller/,系统设置卸载入口
+ * (UninstallString)指向它——不依赖主应用,主应用损坏也能卸载。
  *
  * 卸载逻辑:
  * 1. 先 taskkill 主应用 electron.exe(卸载器进程名为「灵动岛卸载器.exe」,
@@ -50,9 +50,12 @@ function emitProgress(p) {
   if (win && !win.isDestroyed()) win.webContents.send('unins:progress', p)
 }
 
-/** 安装目录:卸载器 exe 位于 <安装目录>/灵动岛卸载器.exe */
+/** 安装目录:卸载器 exe 位于 <安装目录>/uninstaller/灵动岛卸载器.exe */
 function installDir() {
-  return path.dirname(process.execPath)
+  const executableDir = path.dirname(process.execPath)
+  return path.basename(executableDir).toLowerCase() === 'uninstaller'
+    ? path.dirname(executableDir)
+    : executableDir
 }
 
 function createWindow() {

@@ -85,7 +85,7 @@ export function ImageLibraryView({
       compact: bgTarget === 'compact' ? DEFAULT_BG_CROP : compactCrop,
     })
   }
-  // 图片库上传:降采样 → 入库(保留文件名)并应用到当前形态
+  // 图片库上传:保留原始分辨率入库(保留文件名)并应用到当前形态
   const handleImageLibraryUpload = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0]
     event.target.value = ''

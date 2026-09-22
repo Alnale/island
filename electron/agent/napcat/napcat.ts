@@ -45,7 +45,8 @@ export function createNapcatTools(deps: NapcatToolDeps): AgentTool[] {
         '或需要**主动**发消息时(action=send/send_group)。' +
         'action=status 查连接状态;action=recent 最近收到的消息;action=sent 已发出消息(可撤回);' +
         'action=contacts/contact_update/chats/persona/persona_set 档案与人格管理;' +
-        'action=send/send_group 发消息(image 发图;file 发文件/视频,大视频上传可达 3 分钟);action=recall 撤回;' +
+        'action=send/send_group 发消息(image 发图;file 发文件/视频,大视频上传可达 3 分钟;' +
+        'send_group 成功后自动把该群加入监听名单,才能收到群友回复——未监听的群消息会被丢掉);action=recall 撤回;' +
         'action=zone QQ空间动态;action=members/friends/profile/group_info 查询;' +
         'action=groups 列出机器人已加入的所有群(群号+群名)——**监听/接入某群前先调它拿真实群号**,不要凭群名猜群号;' +
         'action=group_manage 群管理(踢人/禁言/全员禁言,需要主人确认);' +
@@ -103,9 +104,10 @@ export function createNapcatTools(deps: NapcatToolDeps): AgentTool[] {
         if (action === 'recent') {
           const list = client.getRecentMessages()
           if (list.length === 0) return '(最近没有收到 QQ 消息)'
-          return list.slice(0, 10).map((m) =>
-            `- ${m.replied ? '[已回复]' : '[未回复]'} ${m.qq}(${new Date(m.time * 1000).toLocaleTimeString('zh-CN')}):${m.text.slice(0, 80)}`
-          ).join('\n')
+          return list.slice(0, 10).map((m) => {
+            const who = m.groupId ? `群${m.groupId} QQ${m.qq}` : `QQ${m.qq}`
+            return `- ${m.replied ? '[已回复]' : '[未回复]'} ${who}(${new Date(m.time * 1000).toLocaleTimeString('zh-CN')}):${m.text.slice(0, 80)}`
+          }).join('\n')
         }
         if (action === 'sent') {
           const list = client.getSentMessages()

@@ -14,7 +14,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   clearBackgroundImage,
   deleteImageItem,
-  downscaleBackgroundImage,
   genImageId,
   loadBackgroundImage,
   loadImageItems,
@@ -99,33 +98,17 @@ export function useBackgroundStore() {
   // 图片库(背景视图"图片库"入口):条目 IndexedDB
   const [imageLibrary, setImageLibrary] = useState<ImageLibraryItem[]>([])
   const imageLibraryRef = useRef<ImageLibraryItem[]>([])
-  // 旧版单图迁移后恢复两个槽位(IndexedDB);旧版本可能存了未降采样的
-  // 大图,降采样后再用并回存(形变逐帧重栅格化大图是卡顿主因)
+  // 旧版单图迁移后恢复两个槽位(IndexedDB)。背景直接使用存储的原始
+  // data URL；启动时不再重采样或回存，避免 2K 对话窗口放大低清图。
   useEffect(() => {
     void migrateLegacyBackground().then(() => {
       loadBackgroundImage('expanded').then((img) => {
         if (!img) return
-        downscaleBackgroundImage(img).then((small) => {
-          if (small !== img) {
-            // 迁移回存前校验槽位当前值仍是迁移读出的旧图(启动期间用户
-            // 可能已换背景,不能覆盖用户刚保存的新图)
-            loadBackgroundImage('expanded').then((now) => {
-              if (now === img) saveBackgroundImage(small, 'expanded').catch(() => {})
-            })
-          }
-          setBackground((prev) => ({ ...prev, expandedImage: small }))
-        })
+        setBackground((prev) => ({ ...prev, expandedImage: img }))
       })
       loadBackgroundImage('compact').then((img) => {
         if (!img) return
-        downscaleBackgroundImage(img).then((small) => {
-          if (small !== img) {
-            loadBackgroundImage('compact').then((now) => {
-              if (now === img) saveBackgroundImage(small, 'compact').catch(() => {})
-            })
-          }
-          setBackground((prev) => ({ ...prev, compactImage: small }))
-        })
+        setBackground((prev) => ({ ...prev, compactImage: img }))
       })
     })
   }, [])

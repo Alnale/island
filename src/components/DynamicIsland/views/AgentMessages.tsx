@@ -88,6 +88,11 @@ export const UserBubble = memo(function UserBubble({ m, onUndo }: { m: AgentMess
             私聊/群聊 → 发言 QQ 号 → 档案卡"):第一行 类别 + QQ 号 +
             档案卡按钮;档案卡展开为全宽块(每条消息都带,主人/外人
             一眼区分);ask(陌生人询问轮)同私聊类别显示 */}
+        {m.source === 'window' && (
+          <div className="island-agent-msg-qq-head">
+            <span className="island-agent-msg-qq-cat master">主人 · 窗口</span>
+          </div>
+        )}
         {(m.source === 'qq' || m.source === 'group' || m.source === 'ask') && (
           <div className="island-agent-msg-qq-head">
             <span className="island-agent-msg-qq-cat">QQ · {m.source === 'group' ? '群聊' : '私聊'}</span>

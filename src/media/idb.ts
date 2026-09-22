@@ -38,6 +38,22 @@ export function openIdb(
   return cached
 }
 
+/** 关闭页面内缓存的 IndexedDB 连接，否则 deleteDatabase 会一直 blocked。 */
+export async function closeAllIdb(): Promise<void> {
+  const pending = [...dbCache.values()]
+  dbCache.clear()
+  await Promise.all(
+    pending.map(async (open) => {
+      try {
+        const db = await open
+        db.close()
+      } catch {
+        // 打开失败的连接无需再关
+      }
+    }),
+  )
+}
+
 /**
  * 事务包装:在指定 store 上执行请求,事务完成时以请求结果 resolve。
  * 读(get/getAll)与写(put/delete)通吃;请求失败/事务中止时 reject。

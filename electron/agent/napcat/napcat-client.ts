@@ -38,8 +38,11 @@ import {
 } from './napcat-text'
 import {
   cqAtMe,
+  napcatIncomingIsBlank,
   napcatMessageImages,
+  napcatMessageSubTypeNoise,
   napcatMessageText,
+  shouldAdmitGroupMessage,
   type NapcatGroupMessage,
   type NapcatImage,
   type NapcatMessage,
@@ -198,6 +201,8 @@ export function createNapcatClient(deps: NapcatDeps): NapcatClient {
   let lastQzoneCall = 0
   const messages: NapcatMessage[] = []
   const sentMessages: NapcatSentMessage[] = []
+  /** 本进程已向这些群发过/已 watch 的临时放行(发完必须能收到回复) */
+  const extraListenGroups = new Set<string>()
   const pending = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> }>()
   let echoSeq = 0
 
@@ -248,6 +253,31 @@ export function createNapcatClient(deps: NapcatDeps): NapcatClient {
   const cacheSize = () => DEFAULT_CACHE_SIZE
   const sentSize = () => DEFAULT_SENT_SIZE
   const chatsSize = () => DEFAULT_CHATS_SIZE
+
+  function pushRecent(msg: NapcatMessage): void {
+    if (msg.messageId && messages.some((m) => m.messageId === msg.messageId && (m.groupId ?? '') === (msg.groupId ?? ''))) {
+      return
+    }
+    messages.push(msg)
+    const limit = cacheSize()
+    while (messages.length > limit) messages.shift()
+  }
+
+  // 启动时用聊天备份填 recent(2026-09-03):messages 是进程内缓存,
+  // 重启后 napcat recent 恒空 → LLM 误报"没收到任何 QQ 消息"
+  void loadNapcatChats(chatsSize()).then((chats) => {
+    if (messages.length > 0) return
+    for (const c of chats.slice(-cacheSize())) {
+      pushRecent({
+        qq: c.qq,
+        text: c.text,
+        messageId: c.id,
+        time: c.time,
+        groupId: c.type === 'group' ? c.target : undefined,
+      })
+    }
+    receivedCount = Math.max(receivedCount, messages.length)
+  }).catch(() => {})
 
   function recordSent(msg: Omit<NapcatSentMessage, 'time'> & { time?: number }): void {
     if (!msg.messageId) return
@@ -322,14 +352,17 @@ export function createNapcatClient(deps: NapcatDeps): NapcatClient {
             const qq = String(obj.user_id ?? '')
             if (!qq) return
             if (qq === botQQ()) return // 跳过自己
+            if (napcatMessageSubTypeNoise(obj.sub_type)) return
             const messageId = String(obj.message_id ?? '')
             // 去重键区分私聊/群聊前缀(2026-08-14:不同会话message_id可能同值,分开去重)
             const dedupKey = messageId ? `private:${messageId}` : ''
             if (dedupKey && seenHas(dedupKey)) return
-            if (dedupKey) seenAdd(dedupKey)
             const raw = obj.message ?? obj.raw_message
             const text = extractText(raw)
             const images = napcatMessageImages(raw)
+            // 空包不进对话(2026-08-31:偶现空消息气泡,实际无人说话)
+            if (napcatIncomingIsBlank(text, images)) return
+            if (dedupKey) seenAdd(dedupKey)
             const msg: NapcatMessage = {
               qq,
               text,
@@ -337,9 +370,7 @@ export function createNapcatClient(deps: NapcatDeps): NapcatClient {
               time: Number(obj.time ?? Math.floor(Date.now() / 1000)),
               images,
             }
-            messages.push(msg)
-            const limit = cacheSize()
-            while (messages.length > limit) messages.shift()
+            pushRecent(msg)
             receivedCount++
             if (text) {
               deps.notify?.(`QQ 消息(${qq})`, text.length > 50 ? text.slice(0, 50) + '…' : text)
@@ -352,16 +383,17 @@ export function createNapcatClient(deps: NapcatDeps): NapcatClient {
             const qq = String(obj.user_id ?? '')
             if (!groupId || !qq) return
             if (qq === botQQ()) return // 跳过自己
-            const groups = cfg().napcatAllowedGroups ?? []
-            if (groups.length > 0 && !groups.includes(groupId)) return
+            if (!shouldAdmitGroupMessage(cfg().napcatAllowedGroups, groupId, extraListenGroups)) return
+            if (napcatMessageSubTypeNoise(obj.sub_type)) return
             const messageId = String(obj.message_id ?? '')
             // 去重键区分私聊/群聊前缀(2026-08-14:不同会话message_id可能同值,分开去重)
             const dedupKey = messageId ? `group:${messageId}` : ''
             if (dedupKey && seenHas(dedupKey)) return
-            if (dedupKey) seenAdd(dedupKey)
             const raw = obj.message ?? obj.raw_message
             const text = extractText(raw)
             const images = napcatMessageImages(raw)
+            if (napcatIncomingIsBlank(text, images)) return
+            if (dedupKey) seenAdd(dedupKey)
             // @ 机器人检测:段数组 + CQ码字符串
             const bqq = botQQ()
             const atMe =
@@ -378,6 +410,14 @@ export function createNapcatClient(deps: NapcatDeps): NapcatClient {
               time: Number(obj.time ?? Math.floor(Date.now() / 1000)),
               images,
             }
+            pushRecent({
+              qq,
+              text,
+              messageId,
+              time: msg.time,
+              images,
+              groupId,
+            })
             receivedCount++
             if (text) {
               deps.notify?.(
@@ -749,6 +789,14 @@ export function createNapcatClient(deps: NapcatDeps): NapcatClient {
       }
       recordSent({ messageId, type: 'group', target: groupId, text: finalText.slice(0, 100) || '(图片/文件)' })
       deps.onSent?.({ type: 'group', target: groupId, text: finalText, images: finalImages })
+      // 发到某群 = 正在对话,必须能收到回复(2026-09-03:白名单过滤会把
+      // 未 watch 的群消息整段丢掉,LLM send_group 后以为群里没人回)
+      extraListenGroups.add(groupId)
+      try {
+        deps.watchSession?.('group', groupId)
+      } catch (err) {
+        reportError(`自动监听群 ${groupId} 失败:${(err as Error).message}`)
+      }
       repliedCount++
       return messageId
     },
@@ -922,8 +970,14 @@ export function createNapcatClient(deps: NapcatDeps): NapcatClient {
     listSessions: () => deps.listSessions?.() ?? [],
     muteSession: (key: string, muted: boolean) => deps.muteSession?.(key, muted),
     bindSession: (key: string) => deps.bindSession?.(key),
-    watchSession: (kind: 'private' | 'group', id: string) => deps.watchSession?.(kind, id),
-    unwatchSession: (kind: 'private' | 'group', id: string) => deps.unwatchSession?.(kind, id),
+    watchSession: (kind: 'private' | 'group', id: string) => {
+      if (kind === 'group') extraListenGroups.add(String(id))
+      deps.watchSession?.(kind, id)
+    },
+    unwatchSession: (kind: 'private' | 'group', id: string) => {
+      if (kind === 'group') extraListenGroups.delete(String(id))
+      deps.unwatchSession?.(kind, id)
+    },
     status(): NapcatStatus {
       return {
         connected: !!ws && ws.open,

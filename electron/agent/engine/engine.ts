@@ -80,11 +80,17 @@ export {
   parseClassifierJson,
   createSummaryAgent,
   createMindAgent,
+  createProactiveAgent,
   createReplyClassifier,
+  createEvaluatorAgent,
+  runSubJson,
+  resolveSubConfig,
+  prepareSubCall,
   SUMMARY_STYLES,
   MIND_PERSONAS,
   resolveSubAgentStyle,
 } from '../subagents/subagents'
+export { createSubAgentHost } from '../subagents/host'
 export { createConfigTools } from '../tools/configTools'
 export {
   createNapcatClient,
@@ -103,6 +109,8 @@ export {
   stripFingerprintMarks,
   routeForClassifierIntent,
   looksLikeForwardInstruction,
+  looksLikeGroupSendInstruction,
+  shouldSendGroupPanelReply,
   REPLY_TO_STRANGER_MARK,
 } from '../napcat/napcat'
 export type {
@@ -128,6 +136,12 @@ export {
 // 供测试使用
 export { createTurnConfirmGate } from './engine-confirm-gate'
 export { fetchDeepseekBalance, MAIN_MAX_OUTPUT_TOKENS, MIN_OUTPUT_TOKENS, MAX_OUTPUT_TOKENS } from './engine-builtins'
+export {
+  MASTER_WINDOW_MARK,
+  tagMasterWindowText,
+  masterWindowTurnRule,
+} from '../constants'
+export { napcatIncomingIsBlank, napcatMessageSubTypeNoise, shouldAdmitGroupMessage } from '../napcat/napcat'
 
 export interface AgentEngine {
   readonly busy: boolean
@@ -287,3 +301,9 @@ export { createMCPManager } from '../mcp'
 export { createSkillLoader } from '../skills'
 // 撤销 git 快照(2026-08-14 停止与撤销分离;主进程 agent:undo-* IPC 用)
 export { snapshotWatchDirs, restoreUndoSnapshot, releaseUndoRef } from '../undo'
+export {
+  closeActiveSessionLog,
+  reopenSessionLog,
+  clearSessionLogFiles,
+  setSessionLogDiskEnabled,
+} from '../plugin/session-log'

@@ -1,18 +1,12 @@
 /**
- * 后台标签 Sub Agent —— 总结标题 + 心理揣测
- * (2026-08-07 从 engine.ts 拆出,审计 P1:纯搬移零行为变化;
- * 依赖仅 provider/types/memory/tools,零引擎状态,可独立测试)
+ * Sub Agent 能力工厂
  *
- * 与主对话引擎**零共享**:独立实例、独立 AbortController、每次调用
- * 独立读取配置。主对话的任何操作(发送/中止/模式切换/清空)都无法
- * 打断它们;失败/超时也绝不外溢到主对话(返回空串,由调用方重试/
- * 回退)。事件静默,不转发 UI。
+ * 每个工厂只声明一项(或紧密相关的一组)能力:拼提示 + 解析。
+ * 配置/超时/鉴权/压缩/JSON 重试走 runtime.ts,不在此复制脚手架。
+ * 装配入口是 host.ts(createSubAgentHost),IPC 与引擎插件共用同一份单例。
  */
 
-import { getDefaultLlmRuntime, type LlmStreamParams } from '../plugin/llm'
-import { isLMStudioProvider } from '../providers/lmstudio-constants'
-import { formatMemoryBlock } from '../memory'
-import { getTasksStatusBlock } from '../tasks'
+import type { LlmStreamParams } from '../plugin/llm'
 import type { ReplyIntent } from '../napcat/napcat-session'
 import {
   buildClassifierSystem,
@@ -21,7 +15,6 @@ import {
   buildMindSystem,
   buildMonologueJudgeSystem,
   buildUserStyleSystem,
-  compressArgs,
   cutMindSentence,
   extractJsonTitle,
   fallbackTitle,
@@ -43,92 +36,33 @@ import {
   sanitizeTitle,
   TITLE_LITERAL_EXAMPLES,
 } from './subagents-helpers'
+import {
+  compressMessages,
+  currentTimeBlock,
+  defaultSubStream,
+  loadSubContext,
+  prepareSubCall,
+  recentMessages,
+  runSubJson,
+  singleUserHistory,
+  subTimeout,
+  textReasoningOnly,
+} from './runtime'
 import type { AgentConfig, AgentMessage, EvolutionLike, MemoryEntry, MemoryStoreLike, ProviderOutcome } from '../types'
 
-// 纯辅助函数簇已拆至 subagents-helpers.ts(barrel 兼容 re-export,engine.ts 既有路径不变)
 export * from './subagents-helpers'
-
-/**
- * Sub Agent 专用配置解析(2026-08-18 主/Sub 供应商拆分):主 Agent 用
- * 强模型、Sub Agent 用本地弱模型的分工——subProvider 指定 Sub 使用的
- * 供应商桶(缺省跟随主供应商),apiKey/baseURL/model 从
- * providers[subProvider] 取,subModel 非空则覆盖该桶的 model。
- * 三供应商两两组合最多 9 种;未配置时行为与旧版完全一致(跟随主)。
- *
- * 2026-08-19 修复"Sub Agent 失效"(用户实测:Sub 指向 LM Studio 但桶
- * 里 model 为空——旧版「选用」不持久化的遗留):空 model 去调 LM
- * Studio 会直接报"未选择模型",总结/心理揣测全部静默失败——Sub 桶
- * model 与 subModel 都为空时**回退主配置**(跟着主 Agent 走),绝不
- * 用空 model 硬撞本地端点。
- */
-function resolveSubConfig(config: AgentConfig): AgentConfig {
-  const pid = config.subProvider ?? config.activeProvider
-  const creds = config.providers?.[pid]
-  const subModel = (config.subModel ?? '').trim()
-  // Sub 桶凭据不全(无 model 可用)→ 回退主配置,与"未配置"同行为
-  if (!creds || (!creds.model && !subModel)) return config
-  if (pid === config.activeProvider && !subModel) return config
-  return {
-    ...config,
-    apiKey: creds.apiKey,
-    baseURL: creds.baseURL,
-    model: subModel || creds.model,
-  }
-}
-
-/**
- * Sub Agent 任务超时(2026-08-19 修复本地模型 Sub 失效):本地推理模型
- * 思维链动辄数分钟,云端的 20-90s 上限会把它全部掐死(心理揣测 60s × 5
- * 次重试全超时 = 空串,总结同理)——Sub 配置指向 LM Studio 时统一放宽
- * 到 300s(后台静默任务不阻塞对话,慢但总比静默失败好);云端保持原值。
- */
-function subTimeout(config: AgentConfig, baseMs: number): AbortSignal {
-  const ms = isLMStudioProvider(config.baseURL) ? 300000 : baseMs
-  return AbortSignal.timeout(ms)
-}
-
-/** Sub Agent 发送前置检查:apiKey 为空时仅 LM Studio 本地端点放行
- * (2026-08-18 本地部署免 Key;与 engine.ts 同款规则,业务允许重复) */
-function subKeyReady(config: AgentConfig): boolean {
-  if (config.apiKey.trim()) return true
-  const u = (config.baseURL || '').toLowerCase()
-  return (
-    config.activeProvider === 'lmstudio' ||
-    u.includes('lmstudio') ||
-    u.includes('127.0.0.1:1234') ||
-    u.includes('localhost:1234')
-  )
-}
-
-/**
- * LLM 流式调用默认实现(经 LLM 接缝默认运行时,与兼容层 streamByConfig
- * 同源);两个工厂均支持经 deps.stream 注入替换(测试/定制装配用)
- */
-const defaultStream = (params: LlmStreamParams): Promise<ProviderOutcome> =>
-  getDefaultLlmRuntime().stream(params)
-
-
-/**
- * 后台标签 Sub Agent(总结标题 / 心理揣测)共用的输入压缩:
- * 最近 12 条,reasoning 截 500、工具结果截 2000、工具参数压缩
- * (compressArgs)——标签只需主题与最后回复,细节无用,大请求是
- * 这类单轮任务超时/变慢的隐藏原因
- */
-function recentMessages(messages: AgentMessage[]): AgentMessage[] {
-  return messages.slice(-12).map((m) => ({
-    ...m,
-    parts: m.parts.map((p) => {
-      if (p.type === 'reasoning') return { ...p, text: p.text.slice(0, 500) }
-      if (p.type === 'tool-result') return { ...p, result: p.result.slice(0, 2000) }
-      if (p.type === 'tool-call') return { ...p, args: compressArgs(p.args) as Record<string, unknown> }
-      // 长文本截断(2026-08-12 实机修复:助手回复常 300+ 字长段,模型
-      // 看多长的回复就模仿写多长的揣测——标签只需"最近在聊什么",
-      // 截 200 字足够语义,过长是揣测输出超长的诱因之一)
-      if (p.type === 'text' && p.text.length > 200) return { ...p, text: p.text.slice(0, 200) + '…' }
-      return p
-    }),
-  }))
-}
+export {
+  compressMessages,
+  currentTimeBlock,
+  defaultSubStream,
+  loadSubContext,
+  prepareSubCall,
+  recentMessages,
+  resolveSubConfig,
+  runSubJson,
+  subKeyReady,
+  subTimeout,
+} from './runtime'
 
 
 /**
@@ -137,30 +71,18 @@ function recentMessages(messages: AgentMessage[]): AgentMessage[] {
  * (发送/中止/模式切换/清空)都无法打断它;它失败/超时也绝不
  * 外溢到主对话(失败返回空串,由调用方重试/补跑)。
  * 与 delegate 子代理同构:独立上下文、事件静默、单轮完成。
- * 2026-08-07 起兼任**主动陪伴判断师**(judgeProactive):它有总结上下文
- * 的能力,用户无操作满 N 分钟后独立判断当前语境是否需要主动开口,
- * 是则主 Agent 完整回合主动回复
+ * 2026-09-01 职责收窄:主动陪伴判断已迁出 createProactiveAgent,
+ * 本工厂只做标题总结 + 静默记忆提取(对话内容沉淀,不是开口决策)。
  */
 export function createSummaryAgent(deps: {
   getConfig: () => AgentConfig
-  /** 长期记忆(与主引擎同源:记忆块进判断上下文,判断才知道助手记得什么) */
+  /** 长期记忆(记忆提取对照现有条目,防重复沉淀;未注入则省略) */
   getMemoryStore?(): MemoryStoreLike | null
-  /** 自我进化 harness(状态块进判断上下文;未注入则省略) */
-  getEvolution?(): EvolutionLike | null
-  /** 群聊状态块(2026-08-13 群聊冒泡:群安静时长/助手上次群发言/
-   * 最近群消息——进判断上下文,判断才知道"群该不该冒个泡";未注入省略) */
-  getGroupStatus?(): Promise<string>
   /** LLM 流式调用(可注入;缺省经 LLM 接缝默认运行时) */
   stream?(params: LlmStreamParams): Promise<ProviderOutcome>
 }): {
   /** 静默总结对话标题(无工具单轮,事件不转发 UI);失败/未配置返回空串 */
   summarize(messages: AgentMessage[]): Promise<string>
-  /**
-   * 主动陪伴判断(2026-08-07):用户无操作满 idleMinutes 分钟时,根据当前
-   * 语境判断是否需要主动开口。失败/未配置返回 {should:false}(安全侧,
-   * 零 LLM 调用);should:true 时 hint 为建议话题(≤200 字)
-   */
-  judgeProactive(messages: AgentMessage[], idleMinutes: number): Promise<{ should: boolean; hint?: string }>
   /**
    * 静默记忆提取(2026-08-10 用户要求"自动根据对话全上下文提取值得记住
    * 的内容入长期记忆,静默,仅主动陪伴开启时"):从对话中提取偏好/事实/
@@ -170,11 +92,11 @@ export function createSummaryAgent(deps: {
    */
   extractMemories(messages: AgentMessage[]): Promise<{ content: string; type: MemoryEntry['type'] }[]>
 } {
-  const stream = deps.stream ?? defaultStream
+  const stream = deps.stream ?? defaultSubStream
   return {
     async summarize(messages: AgentMessage[]) {
-      const config = resolveSubConfig(deps.getConfig())
-      if (!subKeyReady(config) || messages.length === 0) return ''
+      const { config, ready } = prepareSubCall(deps.getConfig)
+      if (!ready || messages.length === 0) return ''
       try {
         // 静默总结:无工具、单轮、事件不转发 UI(标题生成不打扰用户);
         // 输入只取最近 12 条消息,并压缩 reasoning(500 字)/工具结果
@@ -285,121 +207,22 @@ export function createSummaryAgent(deps: {
         return fallbackTitle(messages)
       }
     },
-    async judgeProactive(messages: AgentMessage[], idleMinutes: number) {
-      const config = resolveSubConfig(deps.getConfig())
-      if (!subKeyReady(config) || messages.length === 0) return { should: false }
-      try {
-        const recent = recentMessages(messages)
-        // 与主引擎同源上下文(自定义提示词 + 记忆块 + 进化状态 + 后台
-        // 状态)+ 当前时间——判断需要知道助手"是谁、记得什么、在忙什么、
-        // 现在几点"。块缺失/读取失败静默跳过,不杀判断
-        let memoryBlock = ''
-        try {
-          const entries = (await deps.getMemoryStore?.()?.list()) ?? []
-          memoryBlock = formatMemoryBlock(entries)
-        } catch {
-          // 记忆读取失败:省略记忆块,继续判断
-        }
-        let evolutionStatus = ''
-        try {
-          evolutionStatus = (await deps.getEvolution?.()?.getStatus()) ?? ''
-        } catch {
-          // 进化状态读取失败:省略
-        }
-        const bgStatus = getTasksStatusBlock()
-        // 群聊状态(2026-08-13 群聊冒泡:群安静时长/助手上次群发言进判断
-        // 上下文);读取失败静默省略(不影响窗口向主动陪伴)
-        let groupStatus = ''
-        try {
-          groupStatus = (await deps.getGroupStatus?.()) ?? ''
-        } catch {
-          // 群状态读取失败:省略
-        }
-        const now = new Date()
-        const nowText =
-          `当前时间:${now.getFullYear()}年${now.getMonth() + 1}月${now.getDate()}日 ` +
-          `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`
-        const system = buildJudgeSystem(
-          [config.systemPrompt, memoryBlock, evolutionStatus, bgStatus, groupStatus, nowText],
-          idleMinutes,
-        )
-        // 单措辞 + 一次重试;60s 超时,noThinking 低强度——判断是廉价决策,
-        // 失败按 should:false 处理(不主动打扰是安全侧,一次都不打扰用户)
-        for (let retry = 0; retry < 2; retry++) {
-          try {
-            const result = await stream({
-              config: { ...config, reasoningEffort: 'low' },
-              system,
-              history: recent,
-              tools: [],
-              signal: subTimeout(config, 60000),
-              onEvent: () => {},
-              jsonMode: true,
-              noThinking: true,
-            })
-            const verdict = parseJudgeJson(result.text)
-            if (verdict) return verdict
-            // 空 content / 垃圾输出(json_mode 已知问题):重试一次
-          } catch {
-            if (retry === 0) continue
-            break
-          }
-        }
-        return { should: false }
-      } catch {
-        return { should: false }
-      }
-    },
     async extractMemories(messages: AgentMessage[]) {
-      const config = resolveSubConfig(deps.getConfig())
-      if (!subKeyReady(config) || messages.length === 0) return []
+      const { config, ready } = prepareSubCall(deps.getConfig)
+      if (!ready || messages.length === 0) return []
       try {
-        // 输入:完整历史(最多 40 条),reasoning/工具结果/工具参数压缩
-        // ——记忆提取需要全文语境,但细节(长思维链/大参数)无用
-        const history = messages
-          .slice(-40)
-          .map((m) => ({
-            ...m,
-            parts: m.parts.map((p) => {
-              if (p.type === 'reasoning') return { ...p, text: p.text.slice(0, 500) }
-              if (p.type === 'tool-result') return { ...p, result: p.result.slice(0, 800) }
-              if (p.type === 'tool-call') return { ...p, args: compressArgs(p.args) as Record<string, unknown> }
-              return p
-            }),
-          }))
-        // 与主引擎同源上下文:自定义提示词 + **现有记忆块**(提取必须知道
-        // 已记得什么,否则重复沉淀)。块读取失败静默跳过,不杀提取
-        let memoryBlock = ''
-        try {
-          const entries = (await deps.getMemoryStore?.()?.list()) ?? []
-          memoryBlock = formatMemoryBlock(entries)
-        } catch {
-          // 记忆读取失败:省略记忆块,继续提取
-        }
-        const system = buildMemoryExtractSystem([config.systemPrompt, memoryBlock])
-        // 单措辞 + 一次重试;60s 超时,noThinking 低强度——静默后台任务,
-        // 失败返回 [] 不打扰(不写错记忆是安全侧)
-        for (let retry = 0; retry < 2; retry++) {
-          try {
-            const result = await stream({
-              config: { ...config, reasoningEffort: 'low' },
-              system,
-              history,
-              tools: [],
-              signal: subTimeout(config, 60000),
-              onEvent: () => {},
-              jsonMode: true,
-              noThinking: true,
-            })
-            const memories = parseMemoriesJson(result.text)
-            if (memories.length > 0) return memories
-            // 空数组/垃圾输出:重试一次
-          } catch {
-            if (retry === 0) continue
-            break
-          }
-        }
-        return []
+        const history = compressMessages(messages, { limit: 40, reasoning: 500, toolResult: 800 })
+        const { memoryBlock } = await loadSubContext(deps)
+        return runSubJson({
+          config,
+          stream,
+          system: buildMemoryExtractSystem([config.systemPrompt, memoryBlock]),
+          history,
+          timeoutMs: 60000,
+          parse: parseMemoriesJson,
+          accept: (m) => m.length > 0,
+          fallback: [],
+        })
       } catch {
         return []
       }
@@ -409,12 +232,13 @@ export function createSummaryAgent(deps: {
 
 
 /**
- * 独立的心理揣测后台 Sub Agent:与主对话引擎、总结标题 Agent 均零共享。
- * 根据当前对话,揣测 LLM 回复时的心态,输出 ≤15 汉字俏皮话
- * (推荐 10 字左右,如「表面淡定,内心在慌」),显示在灵动岛紧凑态文字区——替代直接
- * 显示对话标题,文字区更有"人味"。失败/超时返回空串,由调用方回退
- * (标题 → 回复预览)。与 createSummaryAgent 同构:独立实例、独立
- * AbortController、事件静默、单轮完成
+ * 独立的心理揣测后台 Sub Agent:与主对话引擎、总结标题、主动陪伴 Agent
+ * 均零共享。根据当前对话,揣测 LLM **本轮回复**时的心态,输出 ≤16 汉字
+ * 俏皮话(推荐 10 字左右,如「表面淡定,内心在慌」),显示在灵动岛紧凑态
+ * 文字区。失败/超时返回空串,由调用方回退(标题 → 回复预览)。
+ * 2026-09-01:用户风格分析迁出 createProactiveAgent;本工厂只做 guess。
+ * 触发改为助手消息落定同步评估(agent/assistant-settled 插件),不再等
+ * 渲染端 idle 后再 IPC 补跑。
  */
 export function createMindAgent(deps: {
   getConfig: () => AgentConfig
@@ -427,46 +251,20 @@ export function createMindAgent(deps: {
 }): {
   /** 静默揣测(无工具单轮,事件不转发 UI);失败/未配置返回空串 */
   guess(messages: AgentMessage[]): Promise<string>
-  /**
-   * 用户风格分析(2026-08-10 用户要求"主动回复有时模仿用户嘴癖"):
-   * 从对话中提炼用户可模仿的说话风格特征(口头禅/句式/称呼/emoji 等),
-   * 供主动回复的 hint 内部指令注入。无明显风格/语境不适合返回 ''(安全侧,
-   * 零 LLM 调用);失败同样返回 ''
-   */
-  analyzeUserStyle(messages: AgentMessage[]): Promise<string>
 } {
-  const stream = deps.stream ?? defaultStream
+  const stream = deps.stream ?? defaultSubStream
   return {
     async guess(messages: AgentMessage[]) {
-      const config = resolveSubConfig(deps.getConfig())
-      if (!subKeyReady(config) || messages.length === 0) return ''
+      const { config, ready } = prepareSubCall(deps.getConfig)
+      if (!ready || messages.length === 0) return ''
       try {
         // 输入特化:心理揣测只需要文本语义,剥离工具调用/结果 parts——
         // ① 工具语法噪音干扰揣测(心态在文本里,不在参数里);
         // ② 模型看到历史里的 <tool_calls>/<invoke> 格式会**模仿输出**
         // 工具调用幻觉(2026-08-12 实测诊断:重试时大量 raw 是
         // "<tool_calls><invoke name=…>",清洗后乱码残片全废)
-        const recent = recentMessages(messages).map((m) => ({
-          ...m,
-          parts: m.parts.filter((p) => p.type === 'text' || p.type === 'reasoning'),
-        }))
-        // 与主对话引擎同源的上下文(自定义提示词 + 长期记忆块 + 进化
-        // 状态 + 后台任务状态)——揣测必须知道助手"是谁、记得什么、在忙
-        // 什么",否则心理是猜的空气。块缺失/读取失败静默跳过,不杀揣测
-        let memoryBlock = ''
-        try {
-          const entries = (await deps.getMemoryStore?.()?.list()) ?? []
-          memoryBlock = formatMemoryBlock(entries)
-        } catch {
-          // 记忆读取失败:省略记忆块,继续揣测
-        }
-        let evolutionStatus = ''
-        try {
-          evolutionStatus = (await deps.getEvolution?.()?.getStatus()) ?? ''
-        } catch {
-          // 进化状态读取失败:省略
-        }
-        const bgStatus = getTasksStatusBlock()
+        const recent = textReasoningOnly(recentMessages(messages))
+        const { memoryBlock, evolutionStatus, bgStatus } = await loadSubContext(deps)
         // Sub Agent 设置(2026-08-07):心理揣测人格(预设 id 或自定义 ≤100 字)
         // 拼进同源上下文,块为空时 buildMindSystem 静默跳过
         const personaBlock = resolveSubAgentStyle('mind', config.mindPersona)
@@ -584,35 +382,76 @@ export function createMindAgent(deps: {
         return ''
       }
     },
-    async analyzeUserStyle(messages: AgentMessage[]) {
-      const config = resolveSubConfig(deps.getConfig())
-      if (!subKeyReady(config) || messages.length === 0) return ''
+  }
+}
+
+/**
+ * 独立的主动陪伴 Sub Agent(2026-09-01 从总结/心理揣测拆出):
+ * 只负责「该不该开口」与「开口时模仿谁的嘴癖」——与心理揣测(回复心态)
+ * 、标题总结零共享。判断失败 = 不打扰(安全侧);风格分析失败 = 不注入。
+ */
+export function createProactiveAgent(deps: {
+  getConfig: () => AgentConfig
+  /** 长期记忆(判断才知道助手记得什么,如「用户在开会别打扰」) */
+  getMemoryStore?(): MemoryStoreLike | null
+  /** 自我进化 harness(状态块进判断上下文;未注入则省略) */
+  getEvolution?(): EvolutionLike | null
+  /** 群聊状态块(群安静时长/助手上次群发言——群冒泡判断用;未注入省略) */
+  getGroupStatus?(): Promise<string>
+  /** LLM 流式调用(可注入;缺省经 LLM 接缝默认运行时) */
+  stream?(params: LlmStreamParams): Promise<ProviderOutcome>
+}): {
+  /**
+   * 主动陪伴判断:用户无操作满 idleMinutes 分钟时,根据当前语境判断是否
+   * 需要主动开口。失败/未配置返回 {should:false}(安全侧,零 LLM 调用);
+   * should:true 时 hint 为建议话题(≤200 字)
+   */
+  judgeProactive(messages: AgentMessage[], idleMinutes: number): Promise<{ should: boolean; hint?: string }>
+  /**
+   * 用户风格分析:从对话中提炼可模仿的说话风格(口头禅/句式/称呼/emoji),
+   * 供主动回复的 hint 内部指令注入。无明显风格/语境不适合返回 ''
+   */
+  analyzeUserStyle(messages: AgentMessage[]): Promise<string>
+} {
+  const stream = deps.stream ?? defaultSubStream
+  return {
+    async judgeProactive(messages, idleMinutes) {
+      const { config, ready } = prepareSubCall(deps.getConfig)
+      if (!ready || messages.length === 0) return { should: false }
       try {
-        const recent = recentMessages(messages)
-        const system = buildUserStyleSystem([config.systemPrompt])
-        // 单措辞 + 一次重试;60s 超时,noThinking——风格分析是廉价决策,
-        // 失败返回 ''(不注入风格指令,主动回复照常,安全侧)
-        for (let retry = 0; retry < 2; retry++) {
-          try {
-            const result = await stream({
-              config: { ...config, reasoningEffort: 'low' },
-              system,
-              history: recent,
-              tools: [],
-              signal: subTimeout(config, 60000),
-              onEvent: () => {},
-              jsonMode: true,
-              noThinking: true,
-            })
-            const style = parseStyleJson(result.text)
-            if (style) return style
-            // 空 style/垃圾输出:重试一次
-          } catch {
-            if (retry === 0) continue
-            break
-          }
-        }
-        return ''
+        const { memoryBlock, evolutionStatus, bgStatus, groupStatus } = await loadSubContext(deps)
+        return runSubJson({
+          config,
+          stream,
+          system: buildJudgeSystem(
+            [config.systemPrompt, memoryBlock, evolutionStatus, bgStatus, groupStatus, currentTimeBlock()],
+            idleMinutes,
+          ),
+          history: recentMessages(messages),
+          timeoutMs: 60000,
+          parse: parseJudgeJson,
+          fallback: { should: false },
+        })
+      } catch {
+        return { should: false }
+      }
+    },
+    async analyzeUserStyle(messages) {
+      const { config, ready } = prepareSubCall(deps.getConfig)
+      if (!ready || messages.length === 0) return ''
+      try {
+        return runSubJson({
+          config,
+          stream,
+          system: buildUserStyleSystem([config.systemPrompt]),
+          history: recentMessages(messages),
+          timeoutMs: 60000,
+          parse: (raw) => {
+            const style = parseStyleJson(raw)
+            return style || null
+          },
+          fallback: '',
+        })
       } catch {
         return ''
       }
@@ -650,86 +489,103 @@ export function createReplyClassifier(deps: {
    * false = 放行, null = 判定失败(调用方按放行处理,避免误删正常内容) */
   judgeMonologue(reply: string): Promise<boolean | null>
 } {
-  const stream = deps.stream ?? defaultStream
+  const stream = deps.stream ?? defaultSubStream
   return {
     async classify(input) {
-      const config = resolveSubConfig(deps.getConfig())
-      if (!subKeyReady(config)) return null
+      const { config, ready } = prepareSubCall(deps.getConfig)
+      if (!ready) return null
       try {
-        const system = buildClassifierSystem(input.kindLabel, input.targetLabel, input.trigger)
-        // 单措辞 + 一次重试;20s 超时,noThinking 低强度——路由等待判定,
-        // 快速返回优先;JSON 模式(prompt 含 "JSON" 字样满足官方要求)
-        for (let retry = 0; retry < 2; retry++) {
-          try {
-            const result = await stream({
-              config: { ...config, reasoningEffort: 'low' },
-              system,
-              history: [
-                {
-                  id: 'cls-' + Date.now(),
-                  role: 'user',
-                  parts: [{ type: 'text', text: `【助手回复】\n${input.reply.slice(0, 2000)}` }],
-                },
-              ],
-              tools: [],
-              // 路径同步等待场景不放宽(QQ 消息路由等它定去留,本地模型
-              // 也不等 300s——超时回退 null = 放行,不阻塞消息)
-              signal: AbortSignal.timeout(20000),
-              onEvent: () => {},
-              jsonMode: true,
-              noThinking: true,
-            })
-            const verdict = parseClassifierJson(result.text)
-            if (verdict) return verdict
-            // 空 content / 垃圾输出(json_mode 已知问题):重试一次
-          } catch {
-            if (retry === 0) continue
-            break
-          }
-        }
-        return null
+        return runSubJson({
+          config,
+          stream,
+          system: buildClassifierSystem(input.kindLabel, input.targetLabel, input.trigger),
+          history: singleUserHistory('cls-' + Date.now(), `【助手回复】\n${input.reply.slice(0, 2000)}`),
+          timeoutMs: 20000,
+          extendLocalTimeout: false,
+          parse: parseClassifierJson,
+          fallback: null,
+        })
       } catch {
         return null
       }
     },
     async judgeMonologue(reply) {
-      const config = resolveSubConfig(deps.getConfig())
-      if (!subKeyReady(config)) return null
+      const { config, ready } = prepareSubCall(deps.getConfig)
+      if (!ready) return null
       try {
-        const system = buildMonologueJudgeSystem()
-        // 与 classify 同款:低强度无思考 + JSON + 20s 超时 + 一次重试;
-        // **失败/垃圾输出返回 null → 调用方按放行处理**(审核拿不准不拦截)
-        for (let retry = 0; retry < 2; retry++) {
-          try {
-            const result = await stream({
-              config: { ...config, reasoningEffort: 'low' },
-              system,
-              history: [
-                {
-                  id: 'mono-' + Date.now(),
-                  role: 'user',
-                  parts: [{ type: 'text', text: `【待发送文本】\n${String(reply ?? '').slice(0, 2000)}` }],
-                },
-              ],
-              tools: [],
-              // 同 classify:发送前同步判定,超时回退放行,不放宽
-              signal: AbortSignal.timeout(20000),
-              onEvent: () => {},
-              jsonMode: true,
-              noThinking: true,
-            })
-            const verdict = parseMonologueJson(result.text)
-            if (verdict) return verdict.isInternal
-            // 空 content / 垃圾输出:重试一次
-          } catch {
-            if (retry === 0) continue
-            break
-          }
-        }
-        return null
+        return runSubJson({
+          config,
+          stream,
+          system: buildMonologueJudgeSystem(),
+          history: singleUserHistory(
+            'mono-' + Date.now(),
+            `【待发送文本】\n${String(reply ?? '').slice(0, 2000)}`,
+          ),
+          timeoutMs: 20000,
+          extendLocalTimeout: false,
+          parse: (raw) => {
+            const verdict = parseMonologueJson(raw)
+            return verdict ? verdict.isInternal : null
+          },
+          fallback: null,
+        })
       } catch {
         return null
       }
+    },
+  }
+}
+
+/**
+ * 进化评估 Sub Agent(从 evolution.ts 迁入,走同一套内核)。
+ * 评审/复评委托给它,优化流程自身不评分——评估者与改进者分离。
+ * 失败上抛(由进化流程终止并通知),与其它 Sub 的 fallback 安全侧不同:
+ * 空评分被棘轮接受会版本空转。
+ */
+export function createEvaluatorAgent(deps: {
+  getConfig: () => AgentConfig
+  stream?: (params: LlmStreamParams) => Promise<ProviderOutcome>
+  onProgress?: (phase: string) => void
+}): {
+  evaluate(
+    system: string,
+    input: string,
+    phase: string,
+    opts?: { jsonMode?: boolean; maxOutputTokens?: number; timeoutMs?: number },
+  ): Promise<string>
+} {
+  const stream = deps.stream ?? defaultSubStream
+  return {
+    async evaluate(system, input, phase, opts) {
+      deps.onProgress?.(phase)
+      const { config, ready } = prepareSubCall(deps.getConfig)
+      if (!ready) throw new Error('尚未配置 API Key,无法评估')
+      const jsonMode = opts?.jsonMode !== false
+      const timeoutMs = opts?.timeoutMs ?? 60000
+      for (let retry = 0; retry < 2; retry++) {
+        try {
+          const result = await stream({
+            config: { ...config, reasoningEffort: 'low' },
+            system,
+            history: singleUserHistory('eval', input),
+            tools: [],
+            signal: subTimeout(config, timeoutMs),
+            onEvent: () => {},
+            jsonMode,
+            noThinking: true,
+            maxOutputTokens: opts?.maxOutputTokens,
+          })
+          if (result.aborted) throw new Error('评估被中止')
+          return result.text
+        } catch (err) {
+          if (retry === 0) {
+            deps.onProgress?.(`${phase}(网络重试)`)
+            continue
+          }
+          throw err
+        }
+      }
+      throw new Error('评估失败')
     },
   }
 }

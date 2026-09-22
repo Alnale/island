@@ -66,11 +66,19 @@ interface Transport {
 }
 
 /** JSON-RPC 公共请求/响应逻辑(stdio 与 sse 复用) */
+function isAbortError(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false
+  const name = (err as { name?: string }).name
+  const message = String((err as { message?: unknown }).message ?? '')
+  return name === 'AbortError' || /aborted/i.test(message)
+}
+
 class RpcCore {
   private nextId = 1
   protected pending = new Map<number, PendingRequest>()
   protected ready = false
   protected tools: RawTool[] = []
+  protected closing = false
   /** 连接互斥:并行工具调用会并发 connect,不加锁会重复拉起连接 */
   protected connectPromise: Promise<void> | null = null
 
@@ -119,11 +127,13 @@ class RpcCore {
   /** 握手 + 拉取工具清单(initialize → initialized → tools/list) */
   protected async handshake(
     doInitialize: () => Promise<unknown>,
-    notify: (method: string) => void,
+    notify: (method: string) => Promise<void>,
     doList: () => Promise<unknown>,
   ): Promise<void> {
     await doInitialize()
-    notify('notifications/initialized')
+    // SSE 的通知同样是一次异步 POST。必须纳入握手生命周期，避免 close()
+    // 中止该请求后留下未捕获 AbortError。
+    await notify('notifications/initialized')
     const listRes = (await doList()) as { tools?: unknown[] }
     this.tools = Array.isArray(listRes?.tools)
       ? listRes.tools
@@ -170,6 +180,7 @@ class StdioClient extends RpcCore implements Transport {
 
   private async doConnect(): Promise<void> {
     if (!this.cfg.command.trim()) throw new Error('MCP 服务缺少启动命令')
+    this.closing = false
     this.buf = ''
     this.ready = false
     this.spawnError = false
@@ -217,7 +228,7 @@ class StdioClient extends RpcCore implements Transport {
           capabilities: {},
           clientInfo: { name: 'dynamic-island-agent', version: '1.0.0' },
         }),
-        (method) => this.sendLine(JSON.stringify({ jsonrpc: '2.0', method })),
+        async (method) => { this.sendLine(JSON.stringify({ jsonrpc: '2.0', method })) },
         () => this.request('tools/list', {}),
       )
       this.onLog(`[mcp:${this.cfg.name}] 握手成功,${this.tools.length} 个工具`)
@@ -306,6 +317,7 @@ class StdioClient extends RpcCore implements Transport {
   }
 
   kill() {
+    this.closing = true
     this.ready = false
     this.failAll('MCP 服务已关闭')
     const child = this.child
@@ -359,6 +371,7 @@ class SseClient extends RpcCore implements Transport {
   private async doConnect(): Promise<void> {
     const url = String(this.cfg.url ?? '').trim()
     if (!/^https?:\/\//i.test(url)) throw new Error('sse 服务需要 http/https 端点 URL')
+    this.closing = false
     this.endpoint = ''
     this.ready = false
     this.streamEnded = false
@@ -493,22 +506,27 @@ class SseClient extends RpcCore implements Transport {
   /** POST 发送(通知无响应;请求的响应走事件流,响应体通常为空) */
   private async post(body: Record<string, unknown>): Promise<void> {
     if (!this.endpoint) throw new Error('sse 端点未就绪')
-    const res = await fetch(this.endpoint, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...(this.cfg.headers ?? {}) },
-      body: JSON.stringify(body),
-      signal: this.aborter?.signal,
-    })
-    if (!res.ok) throw new Error(`sse 回传 HTTP ${res.status}`)
-    // 部分实现直接返回结果体:有 id 的 JSON 就按响应处理
-    const text = await res.text()
-    if (text.trim() && typeof body.id === 'number') {
-      try {
-        const m = JSON.parse(text) as { id?: unknown; result?: unknown; error?: unknown }
-        if (m && m.id === body.id) this.settle(body.id, m.result, m.error)
-      } catch {
-        // 响应体非 JSON,忽略
+    try {
+      const res = await fetch(this.endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(this.cfg.headers ?? {}) },
+        body: JSON.stringify(body),
+        signal: this.aborter?.signal,
+      })
+      if (!res.ok) throw new Error(`sse 回传 HTTP ${res.status}`)
+      // 部分实现直接返回结果体:有 id 的 JSON 就按响应处理
+      const text = await res.text()
+      if (text.trim() && typeof body.id === 'number') {
+        try {
+          const m = JSON.parse(text) as { id?: unknown; result?: unknown; error?: unknown }
+          if (m && m.id === body.id) this.settle(body.id, m.result, m.error)
+        } catch {
+          // 响应体非 JSON,忽略
+        }
       }
+    } catch (err) {
+      if (this.closing || isAbortError(err)) return
+      throw err
     }
   }
 
@@ -527,6 +545,7 @@ class SseClient extends RpcCore implements Transport {
   }
 
   kill() {
+    this.closing = true
     this.ready = false
     this.endpoint = ''
     this.failAll('MCP 服务已关闭')
@@ -694,10 +713,13 @@ export function createMCPManager() {
     }
   }
 
-  /** 销毁全部客户端(应用退出/引擎销毁时调用) */
-  function dispose() {
-    for (const client of clients.values()) client.kill()
+  /** 销毁全部客户端(应用退出/引擎销毁时调用)。AbortError 视为预期终止。 */
+  async function dispose(): Promise<void> {
+    const list = [...clients.values()]
     clients.clear()
+    for (const client of list) {
+      try { client.kill() } catch { /* already gone */ }
+    }
   }
 
   return { listTools, test, dispose }

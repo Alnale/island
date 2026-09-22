@@ -28,6 +28,7 @@ import {
   type ReactNode,
 } from 'react'
 import { parseMarkdown, type MdBlock, type MdInline } from './markdownParser'
+import { ErrorBoundary } from '../../ErrorBoundary'
 import {
   loadVideoPrefs,
   onVideoPrefsChange,
@@ -144,7 +145,7 @@ export function AgentImage({ src, alt }: { src: string; alt?: string }) {
   )
 }
 
-/** 媒体窗口拖拽钳制范围 */
+/** 视频窗口拖拽钳制范围；图片可按自身像素宽度放大，见 MediaFrame。 */
 const MEDIA_MIN_W = 120
 const MEDIA_MAX_W = 640
 
@@ -1574,7 +1575,9 @@ export function MediaFrame({
     dragRef.current = {
       x: event.clientX,
       y: event.clientY,
-      w: width ?? readMediaWindowWidth(),
+      // 从当前真实显示宽度起拖。图片使用原图宽或被消息区限宽时，width
+      // state 仍为 null；若回退默认 320px，会在按下手柄的一瞬间跳小。
+      w: frameRef.current?.getBoundingClientRect().width ?? width ?? readMediaWindowWidth(),
       aspect: aspect ?? 1,
     }
     setResizing(true)
@@ -1589,7 +1592,8 @@ export function MediaFrame({
     // 1.78 倍、斜向拖动双轴叠加——鼠标移 1px 视频宽变近 2px。
     // 等比例缩放由宽度决定大小(高度自动按宽高比),水平移 1px = 宽
     // 1px 完全跟手;垂直位移不再缩放
-    setWidth(Math.round(Math.min(MEDIA_MAX_W, Math.max(MEDIA_MIN_W, d.w + dx))))
+    const maxWidth = kind === 'img' ? Math.max(MEDIA_MAX_W, naturalW ?? MEDIA_MAX_W) : MEDIA_MAX_W
+    setWidth(Math.round(Math.min(maxWidth, Math.max(MEDIA_MIN_W, d.w + dx))))
     // 滚动跟随在下方 useEffect([width]) 里做:setWidth 是异步 React
     // 更新,pointermove 时布局还是旧尺寸,立即滚动读不到新高度
   }
@@ -1625,12 +1629,10 @@ export function MediaFrame({
   if (err) return <MediaError src={resolved} kind={kind} code={err.code} />
   // 音频 = 语音气泡(不参与拖拽缩放;LLM 播放的音频自动播放)
   if (kind === 'audio') return <VoiceBubble src={resolved} alt={alt} autoPlay={autoPlay} />
-  // 图片原图优先(2026-08-11):width(拖拽/小窗缓存) → 图片原图宽(钳制
-  // 在拖拽上限 MEDIA_MAX_W 内,防止 4000px 截图等超大原图把容器高算成
-  // 几千px导致撑大) → 媒体窗口默认宽;视频保持默认宽(无"原图"概念,
-  // 元数据加载后按真实比例,16/9 兜底)。CSS max-width:100% 在 frame
-  // 上兜底防超气泡宽。
-  const imgAutoW = naturalW != null ? Math.min(naturalW, MEDIA_MAX_W) : readMediaWindowWidth()
+  // 图片原图优先:自动展示不再套用拖拽手柄的 640px 上限；超出对话区时
+  // 由 CSS max-width:100% 按可用宽度等比显示，原图本身不会被重采样或
+  // 转码。视频仍使用媒体窗口默认宽，手动拖拽也继续受安全范围约束。
+  const imgAutoW = naturalW ?? readMediaWindowWidth()
   const w = width ?? (kind === 'img' ? imgAutoW : readMediaWindowWidth())
   // 图片/视频:气泡容器固定宽 + 按自然比例的高,内容 100% 填充(无留白)。
   // 外层 wrap 承载拖拽手柄(2026-08-08 用户要求"手柄移到气泡外面"——
@@ -1640,7 +1642,7 @@ export function MediaFrame({
     <div className={`island-media-wrap${resizing ? ' resizing' : ''}`}>
       <div
         ref={frameRef}
-        className="island-media-frame"
+        className={`island-media-frame island-media-frame--${kind}`}
         // 媒体名(2026-08-10,get_conversation_media 工具读取:LLM 查对话
         // 窗口有哪些媒体附件、哪个在播放)
         data-media-name={alt ?? ''}
@@ -1653,7 +1655,12 @@ export function MediaFrame({
         // aspect 未知(视频元数据未加载)时 16/9 兜底:video 元素没有
         // 内在尺寸,容器无高度 = 高度 0 = **视频不可见**(2026-08-08
         // 修复"播放视频看不到");元数据加载后按真实比例修正
-        style={{ width: w, aspectRatio: aspect != null ? String(aspect) : '16 / 9' }}
+        style={{
+          width: w,
+          // 图片在解码完成前直接使用自身内在比例，不先塞进 16:9 容器；
+          // 避免加载首帧被拉伸，也减少随后重排时的缩放采样。
+          aspectRatio: aspect != null ? String(aspect) : kind === 'video' ? '16 / 9' : undefined,
+        }}
       >
         {kind === 'img' ? (
           <>
@@ -2065,12 +2072,7 @@ function renderBlock(b: MdBlock, key: number, plainMermaid: boolean, trailing?: 
  *   主题,塞进浅色用户气泡里不可读)
  * @param caret 流式光标:附加在最后一个段落文本末尾(贴住正在流的文字)
  */
-export function Markdown({
-  text,
-  plainMermaid = false,
-  caret = false,
-  mediaAutoPlay = false,
-}: {
+export interface MarkdownProps {
   text: string
   plainMermaid?: boolean
   caret?: boolean
@@ -2078,7 +2080,32 @@ export function Markdown({
    * (markdown 内嵌 ![歌名](路径) 场景;由 AssistantBlock 分派,只限
    * 当次对话流式落定消息) */
   mediaAutoPlay?: boolean
-}) {
+}
+
+/** 单条消息的渲染故障只回退为原始文本，不影响 Agent 面板或其他消息。 */
+export function Markdown(props: MarkdownProps) {
+  return (
+    <ErrorBoundary
+      title="消息渲染失败"
+      fallback={({ retry }) => (
+        <div className="island-agent-md" role="alert">
+          <p>此消息暂无法渲染。</p>
+          <pre style={{ whiteSpace: 'pre-wrap' }}>{props.text}</pre>
+          <button type="button" onClick={retry}>重试</button>
+        </div>
+      )}
+    >
+      <MarkdownRenderer {...props} />
+    </ErrorBoundary>
+  )
+}
+
+function MarkdownRenderer({
+  text,
+  plainMermaid = false,
+  caret = false,
+  mediaAutoPlay = false,
+}: MarkdownProps) {
   // 渲染前设置模块级播权(组件体同步执行;useMemo 缓存不影响赋值)
   mdAutoPlayRemaining = mediaAutoPlay
   const blocks = useMemo(() => parseMarkdown(text), [text])

@@ -2,7 +2,7 @@
  * 后台标签 Sub Agent 纯辅助函数(标题清洗/JSON 解析/提示构建/mind 清洗)
  *
  * 2026-08-14 插件化四期从 subagents.ts 拆出:全部纯函数,无 IO/无状态,
- * 被工厂(createSummaryAgent/createMindAgent)与测试共用;
+ * 被工厂(createSummaryAgent/createMindAgent/createProactiveAgent)与测试共用;
  * subagents.ts barrel 兼容 re-export,engine.ts 既有导出路径不变。
  */
 
@@ -506,7 +506,10 @@ const CLASSIFIER_SYSTEM_PROMPT = (kindLabel: string, targetLabel: string, trigge
   '\n2. 回复是执行情况汇报(「已发送/已告诉他了/好的,这就发」)→ master' +
   '\n3. 回复是直接回答主人/对方问题的内容 → 按对话对象判定(主人问 → master;对方问 → other)' +
   '\n4. 主人指示后的执行回复(只写给对方的一句话)→ other;向主人的汇报/应答 → master' +
-  '\n5. **倾向(拿不准时,2026-08-16 二轮修复"发给别人的消息被发到主人QQ")**:「发给对方的话被误发到主人 QQ」比「给主人的话被扣留」更糟糕,不要无脑倾向 master——按回合类型:执行轮/群聊轮/私聊轮/面板轮的回复默认就是发给对方的话 → 倾向 other(误判为 other 也只是发给该发的人或扣留,不会串台);只有主人日常对话轮默认给主人 → 倾向 master,但若触发消息指示了发送/转达而回复是简短一句 → other。' +
+  '\n5. **倾向(拿不准时,按回合类型分设)**:不要无脑倾向 master 或 other。' +
+  '\n- 执行轮/群聊触发轮/私聊触发轮:回复默认发给对方 → 倾向 other(「发给对方的话被误发到主人 QQ」更糟糕)' +
+  '\n- **面板轮(主人在对话窗口输入,触发消息带【主人窗口】)**:回复默认是给主人看的 → 倾向 master(留在窗口);只有主人明确要求发到对方/群、且助手回复就是那句要发出去的话 → other。把给主人的回答发到群里是更糟糕的串台。' +
+  '\n- 主人日常对话轮:默认给主人 → 倾向 master;若触发消息指示了发送/转达而回复是简短一句 → other。' +
   '\n\n只输出 JSON 对象:{"intent": "master|other|hold", "reason": "不超过20字的理由"}。不要解释,不要输出其它内容。'
 
 /** 回复意图判定系统提示拼装(测试用导出):回合背景(类型/触发消息/回复

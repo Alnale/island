@@ -224,7 +224,7 @@ export function BackgroundView({
     const reader = new FileReader()
     reader.onload = () => {
       if (typeof reader.result === 'string') {
-        // 先降采样(形变逐帧重栅格化大图是卡顿主因),再一键应用到当前形态
+        // 保留原图分辨率与编码，一键应用到当前形态
         // (该形态 cover 居中,另一形态的图片与裁切不受影响)
         void downscaleBackgroundImage(reader.result).then((small) => {
           onBackgroundChange({

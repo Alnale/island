@@ -10,7 +10,8 @@
  * 三期细分:历史裁剪 → engine-history.ts、手动调用 → engine-manual-call.ts、
  * 回合文案 → engine-turn-text.ts、执行辅助复用 engine-tool-execution.ts。
  * 十一期:回合/步边界发 turn/step 生命周期事件(plugin/lifecycle-events.ts)——
- * 观测/审计插件平行挂载监听即可,loop 只多出四个 emit 点。
+ * 观测/审计插件平行挂载监听即可,loop 只多出 emit 点。
+ * 2026-09-01:最终回复落定另发 agent/assistant-settled,心理揣测插件同步评估。
  * 十二期:Model-visible⟺Logged——每次调 LLM 前记完整模型可见快照、
  * 助手消息落定记一条(plugin/session-log.ts);loop 只多出两个 append 点。
  */
@@ -33,7 +34,7 @@ import { parseManualCall, findManualTool, matchManualToolPrefix } from './engine
 import { BUDGET_TRUNCATE_HINT, PROACTIVE_INSTRUCTION } from './engine-turn-text'
 import { PRE_STEP_EVENT } from '../plugin/prompt'
 import { toolExecHooksOf } from '../plugin/tool-events'
-import { STEP_END, STEP_START, TURN_END, TURN_START } from '../plugin/lifecycle-events'
+import { ASSISTANT_SETTLED, STEP_END, STEP_START, TURN_END, TURN_START } from '../plugin/lifecycle-events'
 import { sanitizeMessagesForLog } from '../plugin/session-log'
 import type { AgentContext } from '../plugin/kernel'
 import type {} from '../plugin/host' // config/events/outputBudget 服务声明
@@ -82,8 +83,18 @@ export function createRunTurn(ctx: AgentContext) {
         ],
       })
     } else {
-      const lastMsg = historyIn[historyIn.length - 1]
-      if (lastMsg?.role !== 'user') {
+      // 跳过末尾 system 项再看(2026-08-31):agent:send 会在用户消息后
+      // 追加当前会话对象/指纹/主人窗口身份等 system 项。若只看最后一条,
+      // 会误判"缺用户消息"再补一条无标记副本——外部会话里这条副本被当成
+      // 对方的话(无【主人窗口】/无 QQ 来源)。原语义 = 历史缺尾才补一条
+      let lastNonSystem: AgentMessage | undefined
+      for (let i = historyIn.length - 1; i >= 0; i--) {
+        if (historyIn[i].role !== 'system') {
+          lastNonSystem = historyIn[i]
+          break
+        }
+      }
+      if (lastNonSystem?.role !== 'user') {
         historyIn.push({ id: randomUUID(), role: 'user', parts: [{ type: 'text', text }] })
       }
     }
@@ -232,16 +243,25 @@ export function createRunTurn(ctx: AgentContext) {
       if (calls.length === 0 && !result.truncated) {
         ctx.emit(STEP_END, { step, callCount: 0, truncated: false, durationMs: Date.now() - stepStartedAt })
         const msgId = randomUUID()
+        const landed = {
+          id: msgId,
+          role: 'assistant' as const,
+          parts: msgParts,
+          proactive: opts.proactive || undefined,
+        }
         // Model-visible⟺Logged:落定的助手消息将在下一轮进入 history,先记录
         ctx.get('sessionLog').append({
           kind: 'assistant-message',
-          message: { id: msgId, role: 'assistant', parts: msgParts },
+          message: landed,
         })
-        emit({
-          type: 'message',
-          message: { id: msgId, role: 'assistant', parts: msgParts, proactive: opts.proactive || undefined },
-          usage,
+        // 心理揣测与回复同步评估:落定瞬间发生命周期事件(fire-and-forget,
+        // 插件不阻塞消息出口);再推 message + idle 给渲染端
+        ctx.emit(ASSISTANT_SETTLED, {
+          message: landed,
+          history: [...historyIn, landed],
+          proactive: !!opts.proactive,
         })
+        emit({ type: 'message', message: landed, usage })
         emit({ type: 'status', status: 'idle' })
         turnOk = true
         return

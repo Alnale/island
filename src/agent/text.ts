@@ -26,7 +26,8 @@ export function textFromMessage(message: AgentMessage, separator = '\n'): string
  * 渲染端经 profileCard 字段独立展示,文本内剥离避免重复) */
 export function stripNapcatInstructions(text: string): string {
   return text
-    .replace(/【(?:群聊指令|私聊指令|主人消息|档案卡|回复规则|群聊上下文)】[\s\S]*$/, '')
+    .replace(/^【主人窗口】\s*/, '')
+    .replace(/【(?:群聊指令|私聊指令|主人消息|档案卡|回复规则|群聊上下文|本轮是主人窗口输入)】[\s\S]*$/, '')
     .trim()
 }
 
@@ -42,8 +43,16 @@ export function stripNapcatInstructions(text: string): string {
  */
 export function stripNapcatHistoryInstructions(text: string): string {
   return text
-    .replace(/【(?:群聊指令|私聊指令|主人消息|回复规则|群聊上下文)】[\s\S]*$/, '')
+    .replace(/【(?:群聊指令|私聊指令|主人消息|回复规则|群聊上下文|本轮是主人窗口输入)】[\s\S]*$/, '')
     .trim()
+}
+
+/** 注入模板后的 QQ 消息是否没有真实正文(类别行空壳)。
+ * 入口空包应在 NapCat 客户端丢弃;这里兜底,避免空气泡进窗口 */
+export function isEmptyNapcatDisplayText(text: string): boolean {
+  const shown = stripNapcatInstructions(String(text ?? ''))
+  if (!shown) return true
+  return /^【QQ(?:私聊|群聊)[^】]*】\s*$/.test(shown)
 }
 
 /**

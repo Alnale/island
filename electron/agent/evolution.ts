@@ -32,6 +32,7 @@ import path from 'node:path'
 import { isProtectedEntry } from './constants'
 import { showNotify } from './notify'
 import { getDefaultLlmRuntime, type LlmStreamParams } from './plugin/llm'
+import { createEvaluatorAgent } from './subagents/subagents'
 import type { AgentConfig, AgentEvent, MemoryEntry, MemoryStoreLike, ProviderOutcome } from './types'
 
 /** 评估 Sub Agent 单次调用基础超时(条目多时按 evalTimeoutMs 自适应放大) */
@@ -253,8 +254,12 @@ export function createEvolution(deps: {
 }): EvolutionHandle {
   const { getConfig, getStore, getMemoryDir, onEvent } = deps
   const stream = deps.stream ?? ((params: LlmStreamParams) => getDefaultLlmRuntime().stream(params))
-  // 评估 Sub Agent(独立实例):评审与复评委托给它,优化流程自身不评分
-  const evaluator = createEvaluatorAgent()
+  // 评估 Sub Agent:与总结/揣测同一套内核(Sub 供应商/超时/鉴权)
+  const evaluator = createEvaluatorAgent({
+    getConfig,
+    stream,
+    onProgress: (phase) => onEvent({ type: 'evolution-progress', phase }),
+  })
   let busy = false
   let lastResult: { at: number; version: number; applied: boolean; before: number; after: number; summary: string } | null = null
   let logs: EvolutionLogEntry[] = []
@@ -342,80 +347,6 @@ export function createEvolution(deps: {
         return `${i + 1}. [${typeLabel[e.type] ?? e.type}]${lock} ${e.content}`
       })
       .join('\n')
-  }
-
-  /**
-   * 评估 Sub Agent(独立实例)——评审与复评都委托给它。
-   * 借鉴 penguin-harness 的语义:"评估必须委托 agent-evaluation 子代理,
-   * 优化器自己不评分"——评估者与改进者分离,防自评偏差。
-   * 每次评估独立 AbortController/60s 超时;调用失败(超时/网络)自动
-   * 重试一次,仍失败上抛(由进化流程终止并通知);事件静默,仅经
-   * onEvent 发 evolution-progress 阶段提示(渲染端忽略)。
-   */
-  function createEvaluatorAgent() {
-    return {
-      /**
-       * @param jsonMode 请求 json 模式(评审/复评默认 true);**解析失败
-       * 降级重试时传 false**(2026-08-11 实测:jsonMode 下评审/复评偶发
-       * 返回空/垃圾,parse 失败 → before=0 → 空轮次被棘轮接受,版本
-       * 空转、记忆原样——与总结标题的 json_mode 三级降级链同策略)
-       * @param maxOutputTokens 输出上限覆盖(2026-08-14 可扩展性:大记忆集
-       * 评审 JSON 超缺省 4096 被截断 → 解析失败中止;按输入规模放大,
-       * 见 evalOutputBudget)
-       * @param timeoutMs 单次调用超时覆盖(按条目数放大,见 evalTimeoutMs)
-       */
-      async evaluate(
-        system: string,
-        input: string,
-        phase: string,
-        opts?: { jsonMode?: boolean; maxOutputTokens?: number; timeoutMs?: number },
-      ): Promise<string> {
-        onEvent({ type: 'evolution-progress', phase })
-        const config = getConfig()
-        // LM Studio 本地端点免 Key 放行(2026-08-18,与 engine.ts 同款规则)
-        {
-          const u = (config.baseURL || '').toLowerCase()
-          const free =
-            config.apiKey.trim() ||
-            config.activeProvider === 'lmstudio' ||
-            u.includes('lmstudio') ||
-            u.includes('127.0.0.1:1234') ||
-            u.includes('localhost:1234')
-          if (!free) throw new Error('尚未配置 API Key,无法评估')
-        }
-        const jsonMode = opts?.jsonMode !== false
-        for (let retry = 0; retry < 2; retry++) {
-          try {
-            const result = await stream({
-              // **noThinking + 低强度(2026-08-11 实测修复:评审/复评空白
-              // content 的根因——原用 config 默认 effort=high,复杂评审
-              // 任务把输出 token 全烧在思维链上,最终文本恒为空(两次
-              // 实测 review raw:""),与总结标题同款场景(该处早已
-              // noThinking 修复);noThinking 后模型直接产出 JSON,历史
-              // 可靠(judge/风格分析同款)**
-              config: { ...config, reasoningEffort: 'low' },
-              system,
-              history: [{ id: 'eval', role: 'user', parts: [{ type: 'text', text: input }] }],
-              tools: [],
-              signal: AbortSignal.timeout(opts?.timeoutMs ?? EVAL_TIMEOUT_MS),
-              onEvent: () => {},
-              jsonMode,
-              noThinking: true,
-              maxOutputTokens: opts?.maxOutputTokens,
-            })
-            if (result.aborted) throw new Error('评估被中止')
-            return result.text
-          } catch (err) {
-            if (retry === 0) {
-              onEvent({ type: 'evolution-progress', phase: `${phase}(网络重试)` })
-              continue
-            }
-            throw err
-          }
-        }
-        throw new Error('评估失败')
-      },
-    }
   }
 
   /** 评审系统提示(评分 rubric + 假说驱动的改进建议) */

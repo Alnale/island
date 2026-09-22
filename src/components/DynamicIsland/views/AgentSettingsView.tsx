@@ -18,6 +18,7 @@ import { GLM_CLOUD_DEFAULT_BASE_URL, GLM_CLOUD_DEFAULT_MODEL, GLM_CLOUD_PLATFORM
 import { useLeavingList } from '../../../hooks/useLeavingList'
 import { BackFoot, PanelHead } from './shared'
 import { QuickMenu } from './QuickMenu'
+import { DataManagementSettings } from './DataManagementSettings'
 
 /** 空凭据(DeepSeek 默认地址/模型) */
 const EMPTY_DEEPSEEK: ProviderCredentials = { apiKey: '', baseURL: DEEPSEEK_DEFAULT_BASE_URL, model: DEEPSEEK_DEFAULT_MODEL }
@@ -680,19 +681,49 @@ export function AgentSettingsView({
   const [evolving, setEvolving] = useState(false)
   const [evolutionLog, setEvolutionLog] = useState<Array<{ at: number; version: number; before: number; after: number; applied: boolean; summary: string }>>([])
   const [evolutionMsg, setEvolutionMsg] = useState('')
-  // 数据管理(2026-08-10 用户要求):清除数据两段式确认——第一次点击
-  // 进入确认态(3.5s 无操作自动复位),再次点击执行;scope = 'app' 灵动岛
-  // 所有数据 / 'tools' 工具下载记录及源文件
+  // 数据管理:两段式确认(10s 复位)。app = 恢复出厂设置 / tools = 工具数据
   const [confirmClear, setConfirmClear] = useState<'app' | 'tools' | null>(null)
   const [clearMsg, setClearMsg] = useState('')
+  const [sessionLog, setSessionLog] = useState<{ enabled: boolean; bytes: number; files: string[] }>({
+    enabled: true,
+    bytes: 0,
+    files: [],
+  })
+  const [secretStorageAvailable, setSecretStorageAvailable] = useState(true)
   const clearConfirmTimerRef = useRef(0)
   useEffect(() => () => window.clearTimeout(clearConfirmTimerRef.current), [])
+  const refreshSessionLog = useCallback(() => {
+    void window.desktop
+      ?.agentSessionLogStatus?.()
+      .then((info) => {
+        if (!info || typeof info !== 'object' || 'error' in info) return
+        setSessionLog({
+          enabled: info.enabled !== false,
+          bytes: typeof info.bytes === 'number' ? info.bytes : 0,
+          files: Array.isArray(info.files) ? info.files : [],
+        })
+      })
+      .catch(() => {})
+  }, [])
+  useEffect(() => {
+    if (tab === 6) refreshSessionLog()
+  }, [tab, refreshSessionLog])
+  useEffect(() => {
+    void window.desktop
+      ?.agentSecretStatus?.()
+      .then((info) => {
+        if (info && typeof info === 'object' && typeof info.available === 'boolean') {
+          setSecretStorageAvailable(info.available)
+        }
+      })
+      .catch(() => {})
+  }, [])
   const requestClear = (scope: 'app' | 'tools') => {
     if (confirmClear !== scope) {
       setConfirmClear(scope)
       setClearMsg('')
       window.clearTimeout(clearConfirmTimerRef.current)
-      clearConfirmTimerRef.current = window.setTimeout(() => setConfirmClear(null), 3500)
+      clearConfirmTimerRef.current = window.setTimeout(() => setConfirmClear(null), 10_000)
       return
     }
     window.clearTimeout(clearConfirmTimerRef.current)
@@ -701,40 +732,16 @@ export function AgentSettingsView({
   }
   const doClear = async (scope: 'app' | 'tools') => {
     try {
-      // 渲染端数据:localStorage(widget-* 全部:主题/缩放/背景/字体/歌词/
-      // 消息/会话/标题/揣测/视频偏好/seek 记忆…) + IndexedDB 五个库
-      // (上传音乐/背景与图片库/字体库/音频库/视频库)。
-      // 删除请求在 blocked(页面自身连接)时直接放行——reload 销毁连接后
-      // 浏览器自动完成删除;localStorage.clear 同步生效
-      try {
-        localStorage.clear()
-      } catch {
-        // 清除失败忽略(部分隐私模式)
-      }
-      const DB_NAMES = [
-        'island-uploads',
-        'island-background',
-        'island-font',
-        'island-audio-library',
-        'island-video-library',
-      ]
-      for (const db of DB_NAMES) {
-        await new Promise<void>((resolve) => {
-          const req = indexedDB.deleteDatabase(db)
-          req.onsuccess = () => resolve()
-          req.onerror = () => resolve()
-          req.onblocked = () => resolve() // reload 销毁连接后浏览器续删
-        })
-      }
-      // 主进程文件(main.cjs agent:clear-data):app = 记忆/进化/settings.json;
-      // tools = bili 下载与登录态 / xxt 登录态与截图
       const res = await window.desktop?.agentClearData?.(scope)
       if (res && typeof res === 'object' && typeof res.error === 'string') {
-        setClearMsg(`清除失败:${res.error}(文件可能被占用,如 B站下载中——稍后重试)`)
+        setClearMsg(`清除失败:${res.error}`)
         return
       }
-      setClearMsg('已清除,正在重启界面…')
-      window.setTimeout(() => window.location.reload(), 800)
+      if (res && res.ok === false) {
+        setClearMsg(`清除失败:${res.error ?? '部分项目未能删除'}`)
+        return
+      }
+      setClearMsg(scope === 'app' ? '已清除，正在重新启动灵动岛…' : '工具数据已清除')
     } catch {
       setClearMsg('清除失败,请重试')
     }
@@ -1435,6 +1442,11 @@ export function AgentSettingsView({
                 需登录+实名认证,支付宝/微信),按钮经 openExternal 跳转
                 系统浏览器;余额不足时醒目提示 + 充值入口 */}
             <div className="island-agent-account">
+              {!secretStorageAvailable ? (
+                <span className="island-agent-section-hint">
+                  当前无法安全持久化 API Key（系统加密不可用）。密钥只保留在本次运行的内存中，重启后需要重新填写。
+                </span>
+              ) : null}
               <div className="island-agent-account-head">
                 <span>账户余额</span>
                 <div className="island-agent-account-actions">
@@ -2403,53 +2415,24 @@ export function AgentSettingsView({
           </>
         )}
         {tab === 6 && (
-          <>
-            {/* 数据管理(2026-08-10 用户要求):清除灵动岛所有数据 / 所有
-                工具的下载记录及源文件。危险操作:两段式确认(第一次点击
-                进入确认态,3.5s 无操作复位;再次点击执行),执行后清
-                localStorage + IndexedDB + userData 文件并重启界面 */}
-            <div className="island-agent-section">
-              <span className="island-agent-section-title">清除灵动岛数据</span>
-              <span className="island-agent-section-hint">
-                主题色/背景/字体/歌词/界面设置、播放列表与上传音乐、多媒体库、对话历史与会话、长期记忆与进化版本、Agent 配置(API Key/模型/提示词)全部重置——操作不可恢复
-              </span>
-              <div className="island-agent-scale-row">
-                <button
-                  type="button"
-                  className={`island-agent-scale-btn island-data-clear${confirmClear === 'app' ? ' confirming' : ''}`}
-                  onClick={(event) => {
-                    event.stopPropagation()
-                    requestClear('app')
-                  }}
-                >
-                  {confirmClear === 'app' ? '再次点击确认清除' : '清除灵动岛数据'}
-                </button>
-              </div>
-            </div>
-            <div className="island-agent-section">
-              <span className="island-agent-section-title">清除工具数据(下载记录及源文件)</span>
-              <span className="island-agent-section-hint">
-                B站下载的文件与登录态、超星答题登录态与截图等工具产物全部删除(不影响灵动岛本体数据)——操作不可恢复
-              </span>
-              <div className="island-agent-scale-row">
-                <button
-                  type="button"
-                  className={`island-agent-scale-btn island-data-clear${confirmClear === 'tools' ? ' confirming' : ''}`}
-                  onClick={(event) => {
-                    event.stopPropagation()
-                    requestClear('tools')
-                  }}
-                >
-                  {confirmClear === 'tools' ? '再次点击确认清除' : '清除工具数据'}
-                </button>
-              </div>
-            </div>
-            {clearMsg ? (
-              <span className={`island-mcp-test-result ${clearMsg.startsWith('清除失败') ? 'fail' : 'ok'} island-ui-enter`}>
-                {clearMsg}
-              </span>
-            ) : null}
-          </>
+          <DataManagementSettings
+            confirming={confirmClear}
+            message={clearMsg}
+            onRequestClear={requestClear}
+            sessionLog={sessionLog}
+            onToggleSessionLog={(enabled) => {
+              void window.desktop
+                ?.agentSessionLogSet?.(enabled)
+                .then(() => refreshSessionLog())
+                .catch(() => {})
+            }}
+            onClearSessionLog={() => {
+              void window.desktop
+                ?.agentSessionLogClear?.()
+                .then(() => refreshSessionLog())
+                .catch(() => {})
+            }}
+          />
         )}
       </div>
       <div className="island-agent-form-foot">

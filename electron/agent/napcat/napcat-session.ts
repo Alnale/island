@@ -170,7 +170,7 @@ export function routeForClassifierIntent(kind: ClassifierTurnKind, intent: Reply
  * 某人;负向 = 日常聊天(不含发送语义)
  */
 export function looksLikeForwardInstruction(text: string): boolean {
-  const t = String(text ?? '')
+  const t = String(text ?? '').replace(/^【主人窗口】\s*/, '')
   if (!t) return false
   return (
     // 把/帮/替 X 发给/回复/告诉/转告 某人
@@ -185,4 +185,47 @@ export function looksLikeForwardInstruction(text: string): boolean {
     // 回他/发他/转达他 一句/话/消息
     /(回|发|转达)[他她他们对方][^。！？\n]{0,6}(一句|话|消息)/.test(t)
   )
+}
+
+/**
+ * 主人是否明确要求把话发到群里(2026-09-03,修复"群会话窗口里给主人的
+ * 回复被发到群"):群会话面板输入 ≠ 群触发轮——主人在窗口打的字默认是
+ * 在跟岛灵说话,只有显式「发到群里/回群友/在群里说」或转达指令才允许
+ * 外发。剥【主人窗口】前缀再匹配;转达指令复用 looksLikeForwardInstruction
+ */
+export function looksLikeGroupSendInstruction(text: string): boolean {
+  const t = String(text ?? '').replace(/^【主人窗口】\s*/, '').trim()
+  if (!t) return false
+  // 转达指令必须带群/对象词才算「发到这个群」——「帮我回一下刚才那个问题」
+  // 是在问岛灵,不能当成发群(宁漏:主人可再说「发到群里」,误发更糟)
+  if (looksLikeForwardInstruction(t) && /群|群友|他|她|他们|大家|对方/.test(t)) return true
+  return (
+    /发(到|去|给|在)(这[个一]?|本)?群(里|友|消息)?/.test(t) ||
+    /发(消息|一句|一声)?到(这[个一]?|本)?群/.test(t) ||
+    /发群(里|友|消息)/.test(t) ||
+    /在群里(说|发|回|讲)/.test(t) ||
+    /回(到)?群(里|友)/.test(t) ||
+    /群里(说|回|发)(一声|一句|一下)?/.test(t) ||
+    /(告诉|回复|回)群友/.test(t) ||
+    /给群友(发|回|说)/.test(t) ||
+    /帮我回群/.test(t)
+  )
+}
+
+/**
+ * 群会话窗口输入轮是否把本轮回复发到群(纯函数,main.cjs 落定路由调用)。
+ * 默认不发:主人在群会话窗口打的字是在跟岛灵说话,回复留给主人看。
+ * 只有主人明确要求发群,且(带本轮指纹 / 判定器确认 other)才发出。
+ */
+export function shouldSendGroupPanelReply(input: {
+  hasFingerprint: boolean
+  alreadySent: boolean
+  isAsk: boolean
+  triggerText: string
+  classifierIntent?: ReplyIntent | null
+}): boolean {
+  if (input.alreadySent || input.isAsk) return false
+  if (!looksLikeGroupSendInstruction(input.triggerText)) return false
+  if (input.hasFingerprint) return true
+  return input.classifierIntent === 'other'
 }

@@ -4,7 +4,8 @@
  * 产出 release/灵动岛安装器/(绿色自包含结构,发给别人无需 node_modules):
  *   灵动岛安装器.exe            ← 重命名自 electron.exe,双击启动安装向导
  *   resources/app/              ← 安装向导(installer/ 内容)
- *   resources/release/灵动岛/   ← 发布产物(安装器复制的源)
+ *   resources/release/灵动岛/   ← 主应用发布产物(安装器复制的源)
+ *   resources/uninstaller/     ← 独立卸载器资源(安装时复制到安装目录)
  *
  * main.cjs 中 releaseDir = path.join(__dirname, '..', 'release', '灵动岛'),
  * __dirname = resources/app → .. = resources → 恰好匹配 resources/release/灵动岛,
@@ -63,11 +64,13 @@ async function main() {
   await fsp.mkdir(outDir, { recursive: true })
 
   console.log('[installer] 复制 Electron 运行时…')
-  // default_app.asar 若被杀毒/索引临时锁定(EBUSY),跳过覆盖沿用旧文件——
-  // 其内容固定;安装器走 resources/app 应用,default_app.asar 非必需
+  // default_app.asar 与 *.official 是开发环境残留，不进入安装器。
   await fsp.cp(dist, outDir, {
     recursive: true,
-    filter: (src) => !(src && path.basename(src) === 'default_app.asar'),
+    filter: (src) => {
+      const name = path.basename(src)
+      return name !== 'default_app.asar' && !name.endsWith('.official')
+    },
   })
 
   console.log('[installer] 装入安装向导(resources/app)…')
@@ -90,23 +93,36 @@ async function main() {
     console.error('[installer] 缺少独立卸载器,请先运行: node scripts/build-uninstaller.mjs')
     process.exit(1)
   }
-  console.log('[installer] 装入独立卸载器(发行包根 完整目录)…')
-  // default_app.asar 对卸载器非必需(build-uninstaller 已跳过),且其残留文件
-  // 可能被占用/被复制到目标触发 EBUSY,过滤掉避免覆盖已有被锁文件
-  await fsp.cp(uninsDir, path.join(root, 'release', '灵动岛'), {
+  console.log('[installer] 装入独立卸载器(resources/uninstaller)…')
+  // 不再把卸载器复制到 release/灵动岛：那会污染绿色版并导致旧运行时残留。
+  // 安装时 installer/main.cjs 从本资源目录复制到 <安装目录>/uninstaller。
+  await fsp.cp(uninsDir, path.join(outDir, 'resources', 'uninstaller'), {
     recursive: true,
-    filter: (src) => !(src && path.basename(src) === 'default_app.asar'),
+    filter: (src) => {
+      const name = path.basename(src)
+      return name !== 'default_app.asar' && !name.endsWith('.official')
+    },
   })
 
   console.log('[installer] 装入发布产物(resources/release/灵动岛)…')
+  const releaseSource = path.join(root, 'release', '灵动岛')
   await fsp.cp(
-    path.join(root, 'release', '灵动岛'),
+    releaseSource,
     path.join(outDir, 'resources', 'release', '灵动岛'),
-    { recursive: true },
+    {
+      recursive: true,
+      // 兼容旧发布目录：拒绝将过去由安装器写回的卸载器和 Electron
+      // *.official 备份带入新的安装器。正常 release 构建本身不会产生它们。
+      filter: (src) => {
+        const name = path.basename(src)
+        const rel = path.relative(releaseSource, src).replace(/\\/g, '/')
+        return !name.endsWith('.official') && rel !== '灵动岛卸载器.exe'
+      },
+    },
   )
   // 列出已打包的外部工具(由 build-release --tools 决定;安装器按此呈现
   // 可选安装的工具,源码 + 编译 exe 已一并打入 release)
-  const toolsDir = path.join(root, 'release', '灵动岛', 'electron', 'resources', 'tools')
+  const toolsDir = path.join(releaseSource, 'electron', 'resources', 'tools')
   if (fs.existsSync(toolsDir)) {
     const names = (await fsp.readdir(toolsDir, { withFileTypes: true }))
       .filter((e) => e.isDirectory())

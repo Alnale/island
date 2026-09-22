@@ -152,16 +152,27 @@ function regSet(rootPath, values) {
 }
 
 // ---- 安装卸载器 ----
-// 把发行包里的独立卸载器 exe(release/灵动岛/灵动岛卸载器.exe,由
-// scripts/build-uninstaller.mjs 产出)复制到安装目录根;系统设置卸载入口
-// (UninstallString)与安装目录双击都指向它。卸载器自包含 electron 运行时,
-// 不依赖主应用(主应用损坏也能卸载)。
+// 卸载器作为安装器的独立资源(resources/uninstaller)随安装器分发，而不是
+// 混入 release/灵动岛 绿色版。安装时整体复制到 <安装目录>/uninstaller，
+// 保留其 Electron 运行时和 resources/app，从而不依赖主应用。
+function bundledUninstallerDir() {
+  const bundled = path.join(__dirname, '..', 'uninstaller')
+  if (fs.existsSync(path.join(bundled, '灵动岛卸载器.exe'))) return bundled
+
+  // 开发模式兼容：build-installer.mjs 尚未生成 resources/uninstaller 时，
+  // 直接使用 build-uninstaller.mjs 的输出。
+  return path.join(__dirname, '..', 'release', '灵动岛卸载器')
+}
+
 function installUninstaller(installDir) {
-  const src = path.join(releaseDir, '灵动岛卸载器.exe')
-  if (!fs.existsSync(src)) {
-    throw new Error('发行包缺少 灵动岛卸载器.exe(需先运行 node scripts/build-uninstaller.mjs)')
+  const srcDir = bundledUninstallerDir()
+  const srcExe = path.join(srcDir, '灵动岛卸载器.exe')
+  if (!fs.existsSync(srcExe)) {
+    throw new Error('安装器缺少完整卸载器(需先运行 node scripts/build-uninstaller.mjs 与 node scripts/build-installer.mjs)')
   }
-  fs.copyFileSync(src, path.join(installDir, '灵动岛卸载器.exe'))
+  const targetDir = path.join(installDir, 'uninstaller')
+  fs.cpSync(srcDir, targetDir, { recursive: true, force: true })
+  return path.join(targetDir, '灵动岛卸载器.exe')
 }
 
 // ---- 执行安装 ----
@@ -278,7 +289,8 @@ async function performInstall(opts) {
       }, 0.97, '设置开机自启')
     }
 
-    // 5. 卸载器 + 卸载项(卸载器 exe 复制到安装目录根,核心;注册表项降级)
+    // 5. 卸载器 + 卸载项(完整卸载器目录复制到安装目录,注册表项降级)
+    const uninstallerExe = path.join(installDir, 'uninstaller', '灵动岛卸载器.exe')
     attempt('卸载器', () => installUninstaller(installDir), 0.98, '安装卸载器')
     attempt('卸载项', () => {
       regSet('HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\' + APP_NAME, [
@@ -287,7 +299,7 @@ async function performInstall(opts) {
         ['Publisher', '灵动岛', 'String'],
         ['InstallLocation', installDir, 'String'],
         ['DisplayIcon', exe, 'String'],
-        ['UninstallString', `"${path.join(installDir, '灵动岛卸载器.exe')}"`, 'String'],
+        ['UninstallString', `"${uninstallerExe}"`, 'String'],
         ['NoModify', '1', 'DWord'],
         ['NoRepair', '1', 'DWord'],
       ])

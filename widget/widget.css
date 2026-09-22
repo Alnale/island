@@ -45,9 +45,15 @@ body {
    整层背景不渲染),桌面挂件本就没有"页面背景"可模糊。
    覆盖为纯黑实底,视觉与 iPhone 灵动岛一致 */
 .widget-stage .island-bg {
-  /* 全不透明实底:避免半透明 alpha 在 Windows 透明窗口合成时的突变 */
-  background: rgb(8, 10, 14);
+  /* 全不透明实底:避免半透明 alpha 在 Windows 透明窗口合成时的突变;
+     跟随 --island-solid-bg(island-ui-light 时浅底,否则深底) */
+  background: var(--island-solid-bg, rgb(8, 10, 14));
   backdrop-filter: none !important;
+}
+
+/* 有自定义背景图:半透明深底(图层按 opacity 叠加,与 Web 一致) */
+.widget-stage .island-demo.island-has-bg-image .island-bg {
+  background: rgba(0, 0, 0, 0.85);
 }
 
 /* ===== 挂件版:展开/收起动画去掉内容模糊 =====

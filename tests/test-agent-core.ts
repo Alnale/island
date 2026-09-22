@@ -30,6 +30,7 @@ import {
   extractJsonTitle,
   validateRequiredArgs,
   parseMemoriesJson,
+  parseJudgeJson,
   parseStyleJson,
   buildMemoryExtractSystem,
   buildUserStyleSystem,
@@ -37,7 +38,11 @@ import {
   parseClassifierJson,
   createSummaryAgent,
   createMindAgent,
+  createProactiveAgent,
   createReplyClassifier,
+  createEvaluatorAgent,
+  createSubAgentHost,
+  runSubJson,
   fetchDeepseekBalance,
   sanitizeTitle,
   looksLikeSentenceTitle,
@@ -58,8 +63,11 @@ import {
   gtkFromCookie,
   isAskTurnToMaster,
   isValidSessionKey,
+  napcatIncomingIsBlank,
   napcatMessageImages,
+  napcatMessageSubTypeNoise,
   napcatMessageText,
+  shouldAdmitGroupMessage,
   newTurnFingerprint,
   REPLY_TO_STRANGER_MARK,
   sessionKeyFor,
@@ -71,10 +79,12 @@ import {
   turnAlreadySentToTarget,
   routeForClassifierIntent,
   looksLikeForwardInstruction,
+  looksLikeGroupSendInstruction,
+  shouldSendGroupPanelReply,
   type NapcatToolDeps,
   type NapcatClient,
 } from '../electron/agent/napcat/napcat'
-import { masterIdentityLine } from '../electron/agent/constants'
+import { MASTER_WINDOW_MARK, masterIdentityLine, masterWindowTurnRule, tagMasterWindowText } from '../electron/agent/constants'
 import { streamResponse } from '../electron/agent/providers/deepseek'
 import { sanitizeUnpairedSurrogates } from '../electron/agent/providers/sse'
 
@@ -93,7 +103,7 @@ function napcatTools(mockClient: Partial<NapcatClient>, opts?: Omit<NapcatToolDe
 import { createWsSocket, encodeWsFrame, parseWsUrl, WsFrameParser } from '../electron/agent/napcat/wsclient'
 import { snapshotWatchDirs, restoreUndoSnapshot, releaseUndoRef, type GitExec } from '../electron/agent/undo'
 import { runPluginKernelTests } from './plugin-kernel-tests'
-import { hasMasterTurnMark, stripNapcatHistoryInstructions, stripNapcatInstructions, stripTurnMarks } from '../src/agent/text'
+import { hasMasterTurnMark, isEmptyNapcatDisplayText, stripNapcatHistoryInstructions, stripNapcatInstructions, stripTurnMarks } from '../src/agent/text'
 import {
   getTasksStatusBlock,
   listTasks,
@@ -108,6 +118,7 @@ import {
 import { createMusicControlTools, createSettingsTools } from '../electron/agent/tools/settingsTools'
 import { createSessionTools } from '../electron/agent/tools/sessionTools'
 import { applyChanges, createEvolution, evalOutputBudget, evalTimeoutMs, isCleanupChange, mapSeqToEntry, resolveRoundBudget } from '../electron/agent/evolution'
+import { invalidatePrivacyCache } from '../electron/agent/privacy'
 import type { AgentMessage, AgentTool, McpServerConfig, MemoryEntry } from '../electron/agent/types'
 
 // exec_command 的 shell stub(2026-08-14):测试里 `start "some title"`/`dir`
@@ -190,6 +201,15 @@ async function readJson(p: string): Promise<unknown> {
 // ---------------------------------------------------------------------------
 
 const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-test-'))
+// 隐私配置是运行时文件，不应由源码硬编码；为依赖主人身份的测试显式
+// 注入隔离夹具，避免读取机器上的真实 userData 或得到空主人。
+process.env.DYNAMIC_ISLAND_TEST_USER_DATA = path.join(tmp, 'userData')
+await fs.mkdir(process.env.DYNAMIC_ISLAND_TEST_USER_DATA, { recursive: true })
+await fs.writeFile(
+  path.join(process.env.DYNAMIC_ISLAND_TEST_USER_DATA, 'privacy.json'),
+  JSON.stringify({ masterQQ: MASTER_QQ, allowed: [], allowedGroups: [], botQQ: '' }),
+)
+invalidatePrivacyCache()
 // 每个记忆用例用独立文件(写盘是异步队列,共享文件会读到旧数据)
 const memoryFile = (n: number) => path.join(tmp, `memory-${n}.json`)
 const memoryDir = tmp
@@ -549,6 +569,23 @@ await test('握手(endpoint 事件)+ 工具映射', async () => {
     assert(names.includes('mcp_mock-sse_echo') || names.includes('mcp_mock_sse_echo'), `应含 echo 工具,实际:${names.join(',')}`)
     assert(tools.length === 2, `应有 2 个工具,实际 ${tools.length}`)
   } finally {
+    mgr.dispose()
+  }
+})
+
+await test('sse 初始化通知与销毁并发时不产生未处理 AbortError', async () => {
+  const mgr = createMCPManager()
+  const unhandled: unknown[] = []
+  const onUnhandled = (reason: unknown) => unhandled.push(reason)
+  process.on('unhandledRejection', onUnhandled)
+  try {
+    await mgr.listTools([sseCfg])
+    // 正常握手后立即销毁是此前最稳定的复现路径：通知 POST 尚未被 await。
+    mgr.dispose()
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    assert(unhandled.length === 0, `不应有未处理拒绝:${String(unhandled[0])}`)
+  } finally {
+    process.off('unhandledRejection', onUnhandled)
     mgr.dispose()
   }
 })
@@ -1242,6 +1279,7 @@ await test('masterIdentityLine:窗口直发 = 主人,外部 QQ 消息不继承�
   assert(LINE.includes('外部消息'), '带来源标注的 QQ 消息应声明为外部消息')
   assert(LINE.includes('不具主人权限'), '外部 QQ 消息不得继承主人权限')
   assert(LINE.includes('没有来源标注的用户消息') && LINE.includes('最高权限'), '无来源标注的窗口直发 = 主人最高权限')
+  assert(LINE.includes('【主人窗口】') && LINE.includes('别人的私聊/群会话'), '外部会话窗口输入也应按主人权限')
   assert(LINE.includes('「先问主人」'), '窗口消息不应触发先问主人')
   assert(LINE.includes('【系统通知】'), '系统通知类消息应单独定性')
   assert(masterIdentityLine('').includes('未配置'), 'masterQQ 为空应降级为「未配置」')
@@ -1620,11 +1658,64 @@ await test('extractMemories / analyzeUserStyle:无 Key 优雅失败(零 LLM 调�
   const noKey = { ...MOCK_PROVIDERS, apiKey: '', baseURL: '', model: '', systemPrompt: '', reasoningEffort: 'high' as const, mcpServers: [], skillsDirs: [] }
   const summaryAgent = createSummaryAgent({ getConfig: () => noKey })
   const mindAgent = createMindAgent({ getConfig: () => noKey })
+  const proactiveAgent = createProactiveAgent({ getConfig: () => noKey })
   const history = [{ id: 'u1', role: 'user' as const, parts: [{ type: 'text' as const, text: '你好' }] }]
   assert((await summaryAgent.extractMemories(history)).length === 0, '无 Key 返回空数组')
   assert((await summaryAgent.extractMemories([])).length === 0, '空历史返回空数组')
-  assert((await mindAgent.analyzeUserStyle(history)) === '', '无 Key 返回空串')
-  assert((await mindAgent.analyzeUserStyle([])) === '', '空历史返回空串')
+  assert((await mindAgent.guess(history)) === '', '无 Key 揣测返回空串')
+  assert((await proactiveAgent.analyzeUserStyle(history)) === '', '无 Key 风格分析返回空串')
+  assert((await proactiveAgent.analyzeUserStyle([])) === '', '空历史风格分析返回空串')
+  assert((await proactiveAgent.judgeProactive(history, 15)).should === false, '无 Key 判断 should:false')
+  assert((await proactiveAgent.judgeProactive([], 15)).should === false, '空历史判断 should:false')
+  assert(!('judgeProactive' in summaryAgent), '总结 Agent 不再兼任主动陪伴判断')
+  assert(!('analyzeUserStyle' in mindAgent), '心理揣测 Agent 不再兼任风格分析')
+})
+
+await test('runSubJson:解析成功采信,垃圾/失败回退 fallback', async () => {
+  const cfg = { ...MOCK_PROVIDERS, apiKey: 'k', systemPrompt: '' }
+  const ok = await runSubJson<{ should: boolean; hint?: string }>({
+    config: cfg as never,
+    stream: async () => ({ calls: [], text: '{"should":true,"hint":"问候"}', usage: null, aborted: false }),
+    system: 'x',
+    history: [{ id: '1', role: 'user', parts: [{ type: 'text', text: 'hi' }] }],
+    timeoutMs: 1000,
+    parse: parseJudgeJson,
+    fallback: { should: false },
+  })
+  assert(ok.should === true && ok.hint === '问候', `合法 JSON 应采信,实际 ${JSON.stringify(ok)}`)
+  const bad = await runSubJson({
+    config: cfg as never,
+    stream: async () => ({ calls: [], text: '不是json', usage: null, aborted: false }),
+    system: 'x',
+    history: [{ id: '1', role: 'user', parts: [{ type: 'text', text: 'hi' }] }],
+    timeoutMs: 1000,
+    parse: parseJudgeJson,
+    fallback: { should: false },
+  })
+  assert(bad.should === false, '垃圾输出应回退 fallback')
+})
+
+await test('createSubAgentHost:一份宿主挂齐对话侧四类能力', () => {
+  const host = createSubAgentHost({
+    getConfig: () => ({ ...MOCK_PROVIDERS, apiKey: '', systemPrompt: '' }) as never,
+  })
+  assert(typeof host.summary.summarize === 'function' && typeof host.summary.extractMemories === 'function', 'summary 能力')
+  assert(typeof host.mind.guess === 'function', 'mind 能力')
+  assert(typeof host.proactive.judgeProactive === 'function' && typeof host.proactive.analyzeUserStyle === 'function', 'proactive 能力')
+  assert(typeof host.classifier.classify === 'function' && typeof host.classifier.judgeMonologue === 'function', 'classifier 能力')
+})
+
+await test('createEvaluatorAgent:无 Key 上抛(进化不能空转)', async () => {
+  const ev = createEvaluatorAgent({
+    getConfig: () => ({ ...MOCK_PROVIDERS, apiKey: '', baseURL: '', model: '', systemPrompt: '' }) as never,
+  })
+  let threw = false
+  try {
+    await ev.evaluate('sys', 'input', '评审')
+  } catch (err) {
+    threw = String((err as Error).message).includes('API Key')
+  }
+  assert(threw, '无 Key 应上抛而非返回空评分')
 })
 
 // ---------------------------------------------------------------------------
@@ -1684,6 +1775,7 @@ await test('buildClassifierSystem:判定提示词含回合背景与意图定义(
   assert(sys.includes('帮我把"周末见"发给张三'), '应含触发消息(判定关键)')
   assert(sys.includes('master') && sys.includes('other') && sys.includes('hold'), '应含三意图定义')
   assert(sys.includes('JSON'), '应含 JSON 字样(json_mode 官方要求)')
+  assert(sys.includes('面板轮') && sys.includes('【主人窗口】'), '面板轮应倾向 master(窗口输入不是群友话)')
 })
 
 await test('createReplyClassifier:无 Key/空回复/垃圾输出回退 null,合法 JSON 采信(2026-08-16)', async () => {
@@ -1825,6 +1917,38 @@ await test('looksLikeForwardInstruction:发送/转达指令识别(2026-08-16 二
   assert(looksLikeForwardInstruction('好的,我看看') === false, '应答不命中')
   assert(looksLikeForwardInstruction('帮我查一下B站排名') === false, '查询指令不命中(发给对象缺失)')
   assert(looksLikeForwardInstruction('') === false, '空串不命中')
+  assert(looksLikeForwardInstruction('【主人窗口】帮我把"周末见"发给张三') === true, '窗口前缀不挡转达指令')
+})
+
+await test('looksLikeGroupSendInstruction:群窗口发群指令识别(2026-09-03)', () => {
+  assert(looksLikeGroupSendInstruction('发到群里') === true, '发到群里应命中')
+  assert(looksLikeGroupSendInstruction('【主人窗口】发到这个群') === true, '窗口前缀+发到这个群应命中')
+  assert(looksLikeGroupSendInstruction('在群里说一声我晚点') === true, '在群里说应命中')
+  assert(looksLikeGroupSendInstruction('帮我回群友一声') === true, '回群友应命中')
+  assert(looksLikeGroupSendInstruction('发消息到群里') === true, '发消息到群里应命中')
+  assert(looksLikeGroupSendInstruction('帮我回他们一声') === true, '转达指令应命中')
+  assert(looksLikeGroupSendInstruction('帮我回他一声') === true, '回他=回群里的人')
+  assert(looksLikeGroupSendInstruction('帮我回一下刚才那个问题') === false, '向岛灵提问不命中')
+  assert(looksLikeGroupSendInstruction('你好') === false, '日常招呼不命中')
+  assert(looksLikeGroupSendInstruction('这个群最近在聊什么') === false, '问群况不命中')
+  assert(looksLikeGroupSendInstruction('发现这个群很有趣') === false, '发现…群不误伤')
+  assert(looksLikeGroupSendInstruction('【主人窗口】帮我看看这个群') === false, '查询群不命中')
+  assert(looksLikeGroupSendInstruction('') === false, '空串不命中')
+})
+
+await test('shouldSendGroupPanelReply:群窗口默认不发群(2026-09-03)', () => {
+  const stay = { alreadySent: false, isAsk: false }
+  // 根因:主人在群会话窗口说「你好」,LLM 误带指纹 → 原实现无条件发群
+  assert(shouldSendGroupPanelReply({ ...stay, hasFingerprint: true, triggerText: '【主人窗口】你好' }) === false, '未要求发群+指纹仍不发')
+  assert(shouldSendGroupPanelReply({ ...stay, hasFingerprint: true, triggerText: '这个群怎么样' }) === false, '问群况+指纹不发')
+  assert(shouldSendGroupPanelReply({ ...stay, hasFingerprint: false, triggerText: '你好', classifierIntent: 'other' }) === false, '判定器 other 但未要求发群不发')
+  // 主人明确要求发群
+  assert(shouldSendGroupPanelReply({ ...stay, hasFingerprint: true, triggerText: '【主人窗口】发到群里:我晚点到' }) === true, '要求发群+指纹应发')
+  assert(shouldSendGroupPanelReply({ ...stay, hasFingerprint: false, triggerText: '发到群里', classifierIntent: 'other' }) === true, '要求发群+判定 other 应发')
+  assert(shouldSendGroupPanelReply({ ...stay, hasFingerprint: false, triggerText: '发到群里', classifierIntent: 'master' }) === false, '要求发群但判定 master 不发')
+  assert(shouldSendGroupPanelReply({ ...stay, hasFingerprint: false, triggerText: '发到群里' }) === false, '要求发群无指纹无判定不发')
+  assert(shouldSendGroupPanelReply({ ...stay, hasFingerprint: true, triggerText: '发到群里', alreadySent: true }) === false, '本轮已用工具发过不重发')
+  assert(shouldSendGroupPanelReply({ ...stay, hasFingerprint: true, triggerText: '发到群里', isAsk: true }) === false, '询问轮不发群')
 })
 
 // ---------------------------------------------------------------------------
@@ -3695,6 +3819,42 @@ await test('napcatMessageText:string 与段数组解析', () => {
   assert(napcatMessageText(null) === '', '空返回空串')
 })
 
+await test('napcatIncomingIsBlank:空包/零宽/无图才丢弃(2026-08-31 空消息)', () => {
+  assert(napcatIncomingIsBlank('') === true, '空串应丢弃')
+  assert(napcatIncomingIsBlank('   ') === true, '空白应丢弃')
+  assert(napcatIncomingIsBlank('\u200b\ufeff') === true, '零宽应丢弃')
+  assert(napcatIncomingIsBlank('你好') === false, '正文应保留')
+  assert(napcatIncomingIsBlank('', [{ file: 'a.png' }]) === false, '无文有图应保留')
+  assert(napcatIncomingIsBlank('', [{ url: 'https://x/a.png' }]) === false, '无文有 url 应保留')
+  assert(napcatIncomingIsBlank('', [{}]) === true, '空图片条目不算有图')
+  assert(napcatMessageSubTypeNoise('notice') && napcatMessageSubTypeNoise('poke'), '通知/戳一戳子类型应丢弃')
+  assert(napcatMessageSubTypeNoise('friend') === false, '正常 friend 子类型不丢')
+})
+
+await test('shouldAdmitGroupMessage:白名单过滤 + 已发群临时放行(2026-09-03 外部消息)', () => {
+  // 空名单 = 收全部群
+  assert(shouldAdmitGroupMessage([], '852540695') === true, '空名单应收全部群')
+  assert(shouldAdmitGroupMessage(undefined, '1') === true, '未配置应收全部群')
+  // 非空名单只收列出的群
+  assert(shouldAdmitGroupMessage(['1045765371'], '1045765371') === true, '名单内应收')
+  assert(shouldAdmitGroupMessage(['1045765371'], '852540695') === false, '名单外应丢——发到未监听群后收不到回复的根因')
+  // 本进程已向该群发过/已 watch → 临时放行(发完必须能听见回复)
+  assert(shouldAdmitGroupMessage(['1045765371'], '852540695', ['852540695']) === true, '已发群应临时放行')
+  assert(shouldAdmitGroupMessage(['1045765371'], '716992179', new Set(['852540695'])) === false, '未发过的其它群仍丢')
+  assert(shouldAdmitGroupMessage(['1045765371'], '') === false, '空群号不放行')
+})
+
+await test('tagMasterWindowText / masterWindowTurnRule:窗口输入打主人标记', () => {
+  assert(tagMasterWindowText('帮我回他一声') === `${MASTER_WINDOW_MARK}帮我回他一声`, '应加【主人窗口】前缀')
+  assert(tagMasterWindowText(`${MASTER_WINDOW_MARK}已标记`) === `${MASTER_WINDOW_MARK}已标记`, '已标记不重复打')
+  assert(tagMasterWindowText('【QQ私聊 · QQ 123】你好').startsWith('【QQ私聊'), 'QQ 来源标注不改写成窗口')
+  assert(tagMasterWindowText('  ') === '  ', '空白不打标')
+  const rule = masterWindowTurnRule('QQ 222')
+  assert(rule.includes('主人窗口输入') && rule.includes('QQ 222') && rule.includes('最高权限'), '当轮身份指令应点名对方并声明主人权限')
+  const groupRule = masterWindowTurnRule('群 20001')
+  assert(groupRule.includes('群 20001') && groupRule.includes('不要发到群里'), '群窗口指令应声明回复默认不发群')
+})
+
 await test('napcat 工具:status/recent 格式化,send/send_group 校验与透传', async () => {
   const calls: Array<{ kind: 'qq' | 'group'; target: string; text: string }> = []
   const contactWrites: Array<{ qq: string; name?: string; info?: string }> = []
@@ -3712,6 +3872,7 @@ await test('napcat 工具:status/recent 格式化,send/send_group 校验与透�
     getRecentMessages: () => [
       { qq: '10001', text: '你好', messageId: 'm1', time: 1700000000, replied: true },
       { qq: '10002', text: '在吗', messageId: 'm2', time: 1700000000 },
+      { qq: '363147748', text: '群友说话', messageId: 'm3', time: 1700000000, groupId: '852540695' },
     ],
     getContacts: async () => contacts,
     updateContact: async (patch) => {
@@ -3736,6 +3897,7 @@ await test('napcat 工具:status/recent 格式化,send/send_group 校验与透�
   assert(status.includes('已连接') && status.includes('3 条') && status.includes('2 条'), `status 应含连接与统计,实际:${status}`)
   const recent = String(await tool.execute({ action: 'recent' }))
   assert(recent.includes('10001') && recent.includes('[已回复]') && recent.includes('10002'), `recent 应列消息与回复标记,实际:${recent}`)
+  assert(recent.includes('群852540695') && recent.includes('363147748'), `recent 应列出群消息(否则 LLM 以为没监听到外部消息),实际:${recent}`)
   const send = String(await tool.execute({ action: 'send', user_id: '10001', message: '下载完成' }))
   assert(calls.length === 1 && calls[0].kind === 'qq' && calls[0].target === '10001' && calls[0].text === '下载完成', 'send 应透传 QQ 号与文本')
   assert(send.includes('msg-1'), `send 应回显 message_id,实际:${send}`)
@@ -3994,6 +4156,13 @@ await test('stripNapcat 双通道:显示剥离档案卡/历史保留档案卡(�
   assert(stripNapcatHistoryInstructions(group).includes('称呼:群友') && !stripNapcatHistoryInstructions(group).includes('最近群聊记录'), '群聊历史保留档案卡剥规则与群上下文')
   // 空输入
   assert(stripNapcatInstructions('') === '' && stripNapcatHistoryInstructions('  ') === '', '空输入返回空')
+  // 主人窗口标记:显示剥前缀留正文,历史回传保留(LLM 按标记判定身份)
+  const win = `${MASTER_WINDOW_MARK}帮我回他一声`
+  assert(stripNapcatInstructions(win) === '帮我回他一声', '显示应剥【主人窗口】留正文')
+  assert(stripNapcatHistoryInstructions(win) === win, '历史应保留【主人窗口】供身份判定')
+  assert(isEmptyNapcatDisplayText('【QQ私聊 · QQ 123 · 魔精】') === true, '仅类别行的注入空壳应判空')
+  assert(isEmptyNapcatDisplayText('【QQ私聊 · QQ 123】你好') === false, '有正文不应判空')
+  assert(isEmptyNapcatDisplayText('') === true, '空串应判空')
 })
 
 await test('extractReplyToStranger:执行回复标记判定(串台根治,2026-08-13 回归)', () => {
@@ -4067,6 +4236,7 @@ await test('manage_sessions 工具:list/watch/unwatch/mute/bind 直接新建监�
     bindSession: (key: string) => calls.push(['bind', key]),
     watchSession: (kind: string, id: string) => calls.push(['watch', kind, id]),
     unwatchSession: (kind: string, id: string) => calls.push(['unwatch', kind, id]),
+    getGroupList: async () => [{ group_id: '987654', group_name: '测试群' }],
   })
   const tool = tools.find((t) => t.name === 'manage_sessions')
   assert(!!tool, 'manage_sessions 工具应注册')

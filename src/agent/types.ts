@@ -34,7 +34,7 @@ export interface AgentMessage extends EngineAgentMessage {
    * 'ask' = 陌生人询问轮(同私聊类别显示,2026-08-13 起保留展示;
    * 回复路由由 main.cjs lastAskTurn 处理,与消息字段无关),
    * qq = 发送者 QQ 号(气泡显示来源标签,回复发回对应 QQ/群) */
-  source?: 'qq' | 'group' | 'ask'
+  source?: 'qq' | 'group' | 'ask' | 'window'
   qq?: string
   /** 发送者档案卡(2026-08-13,用户要求"每条消息带该人的档案卡"):
    * main.cjs 聚合联系人档案 + 会话人格 + 长期记忆相关条目下发,
@@ -105,7 +105,7 @@ export interface AgentPanelProps {
   tools: AgentToolInfo[]
   /** 当前对话实时总结标题(每轮回复后静默更新;入历史作会话标题) */
   currentTitle: string | null
-  /** 心理揣测(独立 Sub Agent 每轮回复后静默更新;紧凑态文字区优先展示) */
+  /** 心理揣测(助手回复落定同步评估;紧凑态文字区优先展示) */
   mindGuess: string | null
   /** 发送一轮对话(2026-08-17 拖拽上传:opts.media = 媒体附件路径列表,
    * 作 media part 对话窗口展示;opts.paths = 全部附件路径(含媒体),

@@ -11,17 +11,22 @@
  *   未找到/超步数上限均保证触发),携带 ok/步数/用量/耗时。
  * - **agent/step-start** / **agent/step-end**:每个 LLM 步的开始与
  *   结束(含工具调用数、是否被输出预算截断)。
+ * - **agent/assistant-settled**:最终助手消息落定(无待执行工具),
+ *   携带落定消息 + 含本轮的历史;心理揣测插件平行挂载,不阻塞消息出口。
  *
  * 与能力事件(tools/pre-execute)的分工:能力事件是瀑布(可决策/改写),
  * 生命周期事件是纯观察(只读载荷,不影响执行流)。
  */
 
 import type { AgentContext } from './kernel'
+import type { AgentMessage } from '../types'
 
 export const TURN_START = 'agent/turn-start' as const
 export const TURN_END = 'agent/turn-end' as const
 export const STEP_START = 'agent/step-start' as const
 export const STEP_END = 'agent/step-end' as const
+/** 助手消息落定(最终回复,无待执行工具):心理揣测同步评估挂这里 */
+export const ASSISTANT_SETTLED = 'agent/assistant-settled' as const
 
 /** 回合用量(与主循环内部累加结构一致) */
 export interface TurnUsage {
@@ -69,12 +74,23 @@ export interface StepEndInfo {
   durationMs: number
 }
 
+/** agent/assistant-settled 载荷(最终回复落定,与 message 事件同步发出) */
+export interface AssistantSettledInfo {
+  /** 本轮落定的助手消息 */
+  message: AgentMessage
+  /** 含本轮落定消息的完整历史(心理揣测取最近 12 条) */
+  history: AgentMessage[]
+  /** 是否主动陪伴回合 */
+  proactive: boolean
+}
+
 declare module './kernel' {
   interface ContextEventMap {
     'agent/turn-start': [TurnStartInfo]
     'agent/turn-end': [TurnEndInfo]
     'agent/step-start': [StepStartInfo]
     'agent/step-end': [StepEndInfo]
+    'agent/assistant-settled': [AssistantSettledInfo]
   }
 }
 

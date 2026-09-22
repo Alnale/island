@@ -33,10 +33,13 @@ import {
 import { createToolRegistry, toolRegistryPlugin } from '../electron/agent/plugin/tool-registry'
 import { delegateToolPlugin } from '../electron/agent/plugin/tool-plugins'
 import { TOOL_POST_EXECUTE, TOOL_PRE_EXECUTE, toolExecHooksOf } from '../electron/agent/plugin/tool-events'
-import { recordLifecycle, type TurnUsage } from '../electron/agent/plugin/lifecycle-events'
+import { ASSISTANT_SETTLED, recordLifecycle, type TurnUsage } from '../electron/agent/plugin/lifecycle-events'
+import { mindGuessPlugin } from '../electron/agent/plugin/subagent-plugins'
 import {
   createFileSessionLog,
   createMemorySessionLog,
+  reopenSessionLog,
+  sanitizeMessagesForLog,
   sessionLogPlugin,
   type AssistantMessagePayload,
   type ModelRequestPayload,
@@ -557,6 +560,58 @@ export async function runPluginKernelTests({ test, assert, assertRejects }: Harn
     assert(reg.builtin().length === 0, 'dispose 后工具注册应逆序回滚')
   })
 
+  await test('心理揣测插件:助手落定后同步评估并经 events 回推 mind-guess', async () => {
+    const ctx = createContext('mind-sync-1')
+    const events: AgentEvent[] = []
+    ctx.register('config', { getConfig: () => ({ apiKey: 'sk-test', systemPrompt: '' }) as never })
+    ctx.register('events', { emit: (e: AgentEvent) => events.push(e) })
+    ctx.register('sessionState', { getSessionId: () => null, getSessionKey: () => 'main' })
+    ctx.register('memoryStore', null)
+    ctx.register('evolution', null)
+    ctx.plugin(mindGuessPlugin({ stream: async () => mockOutcome('心里偷乐装没事') as never }))
+    const landed = {
+      id: 'a-1',
+      role: 'assistant' as const,
+      parts: [{ type: 'text' as const, text: '好啊一起去' }],
+    }
+    ctx.emit(ASSISTANT_SETTLED, {
+      message: landed,
+      history: [
+        { id: 'u-1', role: 'user', parts: [{ type: 'text', text: '周末去徒步吗' }] },
+        landed,
+      ],
+      proactive: false,
+    })
+    const t0 = Date.now()
+    while (!events.some((e) => e.type === 'mind-guess') && Date.now() - t0 < 2000) {
+      await new Promise((r) => setTimeout(r, 10))
+    }
+    const ev = events.find((e) => e.type === 'mind-guess')
+    assert(!!ev && ev.type === 'mind-guess', '应回推 mind-guess 事件')
+    assert(ev && ev.type === 'mind-guess' && ev.messageId === 'a-1', 'messageId 对应当轮落定消息')
+    assert(ev && ev.type === 'mind-guess' && ev.guess === '心里偷乐装没事', `揣测文本回流,实际 ${ev && ev.type === 'mind-guess' ? ev.guess : ''}`)
+    const titleEv = events.find((e) => e.type === 'conversation-title')
+    assert(!!titleEv && titleEv.type === 'conversation-title', '同一拍应回推 conversation-title')
+    ctx.dispose()
+  })
+
+  await test('心理揣测插件:外部会话不评估(紧凑态文字区只展示主对话)', async () => {
+    const ctx = createContext('mind-sync-2')
+    const events: AgentEvent[] = []
+    ctx.register('config', { getConfig: () => ({ apiKey: 'sk-test', systemPrompt: '' }) as never })
+    ctx.register('events', { emit: (e: AgentEvent) => events.push(e) })
+    ctx.register('sessionState', { getSessionId: () => null, getSessionKey: () => 'private:222' })
+    ctx.plugin(mindGuessPlugin({ stream: async () => mockOutcome('不该出现') as never }))
+    ctx.emit(ASSISTANT_SETTLED, {
+      message: { id: 'a-x', role: 'assistant', parts: [{ type: 'text', text: 'hi' }] },
+      history: [{ id: 'a-x', role: 'assistant', parts: [{ type: 'text', text: 'hi' }] }],
+      proactive: false,
+    })
+    await new Promise((r) => setTimeout(r, 50))
+    assert(!events.some((e) => e.type === 'mind-guess'), '外部会话不应回推 mind-guess')
+    ctx.dispose()
+  })
+
   await test('总结子代理:标题总结使用注入的 stream(不直连供应商)', async () => {
     let calls = 0
     const agent = createSummaryAgent({
@@ -647,6 +702,26 @@ export async function runPluginKernelTests({ test, assert, assertRejects }: Harn
     )
     assert(usageOut!.input === 10 && usageOut!.output === 5, 'turn-end 应携带累计用量')
     rec.dispose()
+    h.ctx.dispose()
+  })
+
+  await test('生命周期事件:最终回复落定发出 agent/assistant-settled(含本轮消息)', async () => {
+    const h = turnHarness('life-settle', [
+      { calls: [], text: '最终回复', usage: null, aborted: false } as never,
+    ])
+    let settled: { id: string; text: string; historySize: number } | null = null
+    h.ctx.on(ASSISTANT_SETTLED, (info) => {
+      const text = info.message.parts.find((p) => p.type === 'text')
+      settled = {
+        id: info.message.id,
+        text: text && text.type === 'text' ? text.text : '',
+        historySize: info.history.length,
+      }
+    })
+    await h.runTurn('你好', [], h.turn)
+    assert(!!settled, '最终回复应发 assistant-settled')
+    assert(settled!.text === '最终回复', `落定文本应为最终回复,实际 ${settled!.text}`)
+    assert(settled!.historySize >= 2, `历史应含用户消息+本轮助手,实际 ${settled!.historySize}`)
     h.ctx.dispose()
   })
 
@@ -769,11 +844,54 @@ export async function runPluginKernelTests({ test, assert, assertRejects }: Harn
     const sink = createFileSessionLog(() => file)
     sink.write({ ts: 1, sessionKey: 'main', kind: 'assistant-message', message: { id: 'x', role: 'assistant', parts: [{ type: 'text', text: 'hi' }] } })
     sink.write({ ts: 2, sessionKey: 'main', kind: 'model-request', step: 1, system: 's', history: [], tools: [] })
+    await sink.flush?.()
     const lines = fs.readFileSync(file, 'utf8').trim().split('\n')
     assert(lines.length === 2, `应两行 JSONL,实际 ${lines.length}`)
     const first = JSON.parse(lines[0]) as SessionLogEntry
     assert(first.kind === 'assistant-message', '首行可回放为 assistant-message')
     fs.rmSync(file, { force: true })
+  })
+
+  await test('会话日志:close 后不再落盘', async () => {
+    const file = path.join(os.tmpdir(), `slog-close-${Date.now()}.jsonl`)
+    const sink = createFileSessionLog(() => file)
+    sink.write({ ts: 1, sessionKey: 'main', kind: 'assistant-message', message: { id: 'x', role: 'assistant', parts: [{ type: 'text', text: 'keep' }] } })
+    await sink.flush?.()
+    await sink.close?.()
+    sink.write({ ts: 2, sessionKey: 'main', kind: 'assistant-message', message: { id: 'y', role: 'assistant', parts: [{ type: 'text', text: 'drop' }] } })
+    await sink.flush?.()
+    const text = fs.readFileSync(file, 'utf8')
+    assert(text.includes('keep'), '关闭前的记录应在')
+    assert(!text.includes('drop'), '关闭后不得再写入')
+    fs.rmSync(file, { force: true })
+    reopenSessionLog()
+  })
+
+  await test('会话日志:超过 7 天的轮转文件在 flush 时删除', async () => {
+    const file = path.join(os.tmpdir(), `slog-age-${Date.now()}.jsonl`)
+    const aged = file.replace(/\.jsonl$/, '.1.jsonl')
+    fs.writeFileSync(aged, '{"old":true}\n')
+    const past = Date.now() / 1000 - 8 * 24 * 60 * 60
+    fs.utimesSync(aged, past, past)
+    const sink = createFileSessionLog(() => file)
+    sink.write({ ts: 1, sessionKey: 'main', kind: 'assistant-message', message: { id: 'n', role: 'assistant', parts: [{ type: 'text', text: 'new' }] } })
+    await sink.flush?.()
+    assert(!fs.existsSync(aged), '过期轮转文件应被删除')
+    await sink.close?.()
+    fs.rmSync(file, { force: true })
+    reopenSessionLog()
+  })
+
+  await test('会话日志:工具结果超过 20KB 截成摘要', () => {
+    const big = 'x'.repeat(40_000)
+    const [msg] = sanitizeMessagesForLog([
+      { id: 'a', role: 'assistant', parts: [{ type: 'tool-result', id: 'c1', name: 'echo', ok: true, result: big, durationMs: 1 }] },
+    ])
+    const part = msg.parts[0]
+    assert(part.type === 'tool-result', '仍是 tool-result')
+    if (part.type !== 'tool-result') return
+    assert(part.result.length < 40_000, '应截断')
+    assert(part.result.includes('truncated 40000 chars'), '带总长度标注')
   })
 
   // -------------------------------------------------------------------------

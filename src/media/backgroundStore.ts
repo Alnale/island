@@ -181,7 +181,7 @@ export function clearBackgroundImage(slot: BackgroundSlot): Promise<void> {
 export interface ImageLibraryItem {
   id: string
   name: string
-  /** 图片 data URL(已降采样) */
+  /** 图片原始 data URL（不重采样、不转码） */
   dataUrl: string
   createdAt: number
 }
@@ -266,38 +266,14 @@ export async function migrateLegacyBackground(): Promise<void> {
   }
 }
 
-/** 背景图长边上限(px):岛体最大显示约 500×260(150% DPI 下 ~2 倍)。
- *  原图直存会导致形变(宽度/高度逐帧动画)时每帧重栅格化整张大图,
- *  是"带背景切换卡顿"的主因;降采样后重栅格化成本可忽略 */
-const BG_MAX_EDGE_PX = 1024
-
 /**
- * 背景图降采样(data URL → data URL):长边超过上限时经 canvas 缩放,
- *  PNG 保留透明(走 PNG),其余转 JPEG 压缩;不需要缩放时原样返回。
+ * 背景图导入预处理（兼容旧调用名）。
+ *
+ * 对话窗口现在可以扩展到 2K 甚至更宽，旧的 1024px 长边上限会把背景
+ * 永久缩小后再由 CSS 放大，非 PNG 还会被转成 quality=0.85 的 JPEG，
+ * 因此出现明显模糊和压缩痕迹。IndexedDB 可以保存完整 data URL，这里
+ * 保留上传文件的原始字节，不再经过 Canvas 重采样或转码。
  */
 export function downscaleBackgroundImage(dataUrl: string): Promise<string> {
-  return new Promise((resolve) => {
-    const img = new Image()
-    img.onload = () => {
-      const longEdge = Math.max(img.naturalWidth, img.naturalHeight)
-      if (longEdge <= BG_MAX_EDGE_PX) {
-        resolve(dataUrl)
-        return
-      }
-      const scale = BG_MAX_EDGE_PX / longEdge
-      const canvas = document.createElement('canvas')
-      canvas.width = Math.max(1, Math.round(img.naturalWidth * scale))
-      canvas.height = Math.max(1, Math.round(img.naturalHeight * scale))
-      const ctx = canvas.getContext('2d')
-      if (!ctx) {
-        resolve(dataUrl)
-        return
-      }
-      ctx.drawImage(img, 0, 0, canvas.width, canvas.height)
-      const isPng = dataUrl.startsWith('data:image/png')
-      resolve(canvas.toDataURL(isPng ? 'image/png' : 'image/jpeg', 0.85))
-    }
-    img.onerror = () => resolve(dataUrl)
-    img.src = dataUrl
-  })
+  return Promise.resolve(dataUrl)
 }

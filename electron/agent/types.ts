@@ -110,8 +110,19 @@ export type AgentEvent = { sessionKey?: string } & (
    * command(兼容),bili 批量下载等动作确认带 title+detail 展示 */
   | { type: 'tool-confirm-request'; command: string; title?: string; detail?: string }
   /**
-   * 主动陪伴:主进程对主动回合消息的心理揣测结果(与 Windows 系统通知
-   * 同一条 guess)——渲染端更新紧凑态文字区 mindGuess,与通知一致
+   * 心理揣测:助手回复落定时由 subagent-on-reply 插件同步评估,
+   * 经宿主事件出口推渲染端更新紧凑态文字区。proactive = 主动陪伴
+   * 回合(主进程据此弹系统通知,与文字区同一句)
+   */
+  | { type: 'mind-guess'; messageId: string; guess: string; proactive?: boolean }
+  /**
+   * 对话标题:与心理揣测同一拍(回复落定同步评估),渲染端更新
+   * currentTitle;失败不发本事件(文字区回退回复预览)
+   */
+  | { type: 'conversation-title'; messageId: string; title: string }
+  /**
+   * 主动陪伴揣测(巡检/旧路径兼容):runProactiveGuess 直调仍发此事件;
+   * 渲染端与 mind-guess 同处理
    */
   | { type: 'mind-proactive'; messageId: string; guess: string }
   /**
@@ -429,6 +440,11 @@ export interface EngineDeps {
   getTurnSource?(): string | null
   setOwnerQQ?(qq: string): { ok: boolean; error?: string }
   /**
+   * Sub Agent 能力宿主:主进程一份单例,引擎插件经 ctx.subagents
+   * 取同一实例。未注入时插件自行建本地工厂(测试环境)
+   */
+  getSubAgents?(): SubAgentHost
+  /**
    * NapCat QQ 机器人客户端(2026-08-12,main.cjs 创建注入):
    * 未注入则不注册 napcat 工具。收到的 QQ 消息经 main.cjs 转发渲染端
    * 进入对话;回复由 main.cjs 的 message 事件链路发回 QQ
@@ -448,6 +464,31 @@ export interface EngineDeps {
       info?: string
       source?: 'private' | 'group'
     }): Promise<{ qq: string; name?: string; info?: string; source?: 'private' | 'group'; updatedAt: number }>
+  }
+}
+
+/** Sub Agent 能力宿主(避免 types → host → subagents → memory 把 Node 模块拖进渲染端类型检查) */
+export interface SubAgentHost {
+  summary: {
+    summarize(messages: AgentMessage[]): Promise<string>
+    extractMemories(messages: AgentMessage[]): Promise<{ content: string; type: MemoryEntry['type'] }[]>
+  }
+  mind: { guess(messages: AgentMessage[]): Promise<string> }
+  proactive: {
+    judgeProactive(
+      messages: AgentMessage[],
+      idleMinutes: number,
+    ): Promise<{ should: boolean; hint?: string }>
+    analyzeUserStyle(messages: AgentMessage[]): Promise<string>
+  }
+  classifier: {
+    classify(input: {
+      kindLabel: string
+      targetLabel: string
+      trigger: string
+      reply: string
+    }): Promise<{ intent: 'master' | 'other' | 'hold'; reason?: string } | null>
+    judgeMonologue(reply: string): Promise<boolean | null>
   }
 }
 

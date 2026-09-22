@@ -57,11 +57,13 @@ async function main() {
   await fsp.mkdir(outDir, { recursive: true })
 
   console.log('[uninstaller] 复制 Electron 运行时…')
-  // default_app.asar 若被杀毒/索引临时锁定(EBUSY),跳过覆盖沿用旧文件——
-  // 其内容固定;卸载器走 resources/app 应用,default_app.asar 非必需
+  // default_app.asar 与本机 HEVC 的 *.official 备份均非运行时资产。
   await fsp.cp(dist, outDir, {
     recursive: true,
-    filter: (src) => !(src && path.basename(src) === 'default_app.asar'),
+    filter: (src) => {
+      const name = path.basename(src)
+      return name !== 'default_app.asar' && !name.endsWith('.official')
+    },
   })
   // 清理目标目录残留的 default_app.asar(卸载器不依赖它;被占用时跳过不阻断)
   try {

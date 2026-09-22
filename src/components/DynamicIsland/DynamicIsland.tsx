@@ -1,5 +1,7 @@
 import {
   memo,
+  lazy,
+  Suspense,
   useCallback,
   useEffect,
   useImperativeHandle,
@@ -10,6 +12,7 @@ import {
   type CSSProperties,
   type KeyboardEvent,
   type PointerEvent,
+  type ReactNode,
   type Ref,
 } from 'react'
 import {
@@ -26,21 +29,12 @@ import { useAgentPanelLayout } from '../../hooks/useAgentPanelLayout'
 import type { AudioLibraryItem, VideoLibraryItem } from '../../media/libraryStore'
 import { loadImageNaturalSize, sampleImageBrightness } from '../../media/imageUtils'
 import { ParticleTime } from './ParticleTime'
-import {
-  AgentSettingsView,
-  MediaLibraryView,
-  AgentView,
-  BackgroundView,
-  ControlView,
-  FontColorView,
-  FontLibraryView,
-  FontView,
-  ImageLibraryView,
-  ListView,
-  SettingsView,
-  LyricApiView,
-  ThemeView,
-} from './views'
+import { ErrorBoundary } from '../ErrorBoundary'
+import { AgentView } from './views/AgentView'
+import { ControlView } from './views/ControlView'
+import { ListView } from './views/ListView'
+import { SettingsView, LyricApiView } from './views/SettingsViews'
+import { ThemeView } from './views/ThemeView'
 import type { AgentConfig, AgentPanelProps } from '../../agent/types'
 import { textFromMessage } from '../../agent/text'
 import { AgentMediaMini } from './views/AgentMediaMini'
@@ -49,6 +43,35 @@ import {
   clearAgentVideoResume,
   type AgentMediaReport,
 } from './views/Markdown'
+
+// 低频、体积较大的设置面板不进入紧凑态首包；核心播放和 Agent 对话仍同步加载。
+const AgentSettingsView = lazy(async () => ({ default: (await import('./views/AgentSettingsView')).AgentSettingsView }))
+const MediaLibraryView = lazy(async () => ({ default: (await import('./views/MediaLibraryView')).MediaLibraryView }))
+const BackgroundView = lazy(async () => ({ default: (await import('./views/BackgroundView')).BackgroundView }))
+const FontView = lazy(async () => ({ default: (await import('./views/FontViews')).FontView }))
+const FontColorView = lazy(async () => ({ default: (await import('./views/FontViews')).FontColorView }))
+const FontLibraryView = lazy(async () => ({ default: (await import('./views/FontViews')).FontLibraryView }))
+const ImageLibraryView = lazy(async () => ({ default: (await import('./views/ImageLibraryView')).ImageLibraryView }))
+
+function DeferredPanel({ children }: { children: ReactNode }) {
+  return <Suspense fallback={<div className="island-settings-view">正在载入面板…</div>}>{children}</Suspense>
+}
+
+/** 为浮层选择与当前文字颜色对比更高的实色表面。
+ * 字体颜色设置只接受 hex；解析失败时沿用默认深色 UI。阈值 0.179 是
+ * 黑/白两种背景获得相同 WCAG 对比度的交点。 */
+function prefersLightUiSurface(color: string | null): boolean {
+  if (!color) return false
+  const raw = color.trim().replace(/^#/, '')
+  const hex = raw.length === 3 ? raw.split('').map((ch) => ch + ch).join('') : raw
+  if (!/^[\da-f]{6}$/i.test(hex)) return false
+  const channel = (offset: number) => {
+    const value = Number.parseInt(hex.slice(offset, offset + 2), 16) / 255
+    return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4
+  }
+  const luminance = channel(0) * 0.2126 + channel(2) * 0.7152 + channel(4) * 0.0722
+  return luminance < 0.179
+}
 
 /** 媒体源归一化比较(2026-08-09 修复"移交永不触发"):agentPlaying 上报
  * 的是**已解析形态**(VoiceBubble 收到 resolved 后原样上报,
@@ -1729,6 +1752,7 @@ export const DynamicIsland = memo(function DynamicIsland({
   const textDimColor = resolvedTextColor
     ? `color-mix(in srgb, ${resolvedTextColor} 55%, transparent)`
     : undefined
+  const lightUiSurface = prefersLightUiSurface(resolvedTextColor)
   // 自定义字体应用:覆盖岛体及后代文字(按钮/输入 font-family: inherit 跟随),
   // fallback 取运行时 body 字体栈,保证无字体时的观感一致;
   // 粗细随设置(300-900 档位,2026-08-11 用户要求"更多选择";**原
@@ -1813,7 +1837,7 @@ export const DynamicIsland = memo(function DynamicIsland({
   return (
     <div
       ref={islandRef}
-      className={`island-demo${stateClass ? ` ${stateClass}` : ''}${modeClass ? ` ${modeClass}` : ''}${expanded ? ' expanded' : ''}${press ? ' is-pressed' : ''}${collapsing ? ' island-collapsing' : ''}${animating ? ' is-animating' : ''}${lyricFold ? ' island-lyric-off' : ''}${miniActive ? ' island-agent-mini' : ''}${panelView === 'background' ? ` island-bg-view${bgTarget === 'compact' ? ' island-bg-view--compact' : ''}` : ''}${panelView === 'font-library' || panelView === 'image-library' ? ' island-lib-view' : ''}${panelView === 'media-library' ? ' island-lib-view island-media-lib-view' : ''}${panelView === 'font' ? ' island-font-view' : ''}${panelView === 'font-color' ? ' island-font-color-view' : ''}${panelView === 'theme' ? ' island-theme-view' : ''}${panelView === 'agent' ? ' island-agent-view' : ''}${panelView === 'agent' && agentHReady ? ' agent-height-ready' : ''}${panelView === 'agent-settings' ? ' island-agent-settings-view' : ''}${panelView === 'settings' ? ' island-settings-view' : ''}${panelView === 'lyric-api' ? ' island-lyric-api-view' : ''}`}
+      className={`island-demo${lightUiSurface ? ' island-ui-light' : ''}${expandedImage || compactImage ? ' island-has-bg-image' : ''}${stateClass ? ` ${stateClass}` : ''}${modeClass ? ` ${modeClass}` : ''}${expanded ? ' expanded' : ''}${press ? ' is-pressed' : ''}${collapsing ? ' island-collapsing' : ''}${animating ? ' is-animating' : ''}${lyricFold ? ' island-lyric-off' : ''}${miniActive ? ' island-agent-mini' : ''}${panelView === 'background' ? ` island-bg-view${bgTarget === 'compact' ? ' island-bg-view--compact' : ''}` : ''}${panelView === 'font-library' || panelView === 'image-library' ? ' island-lib-view' : ''}${panelView === 'media-library' ? ' island-lib-view island-media-lib-view' : ''}${panelView === 'font' ? ' island-font-view' : ''}${panelView === 'font-color' ? ' island-font-color-view' : ''}${panelView === 'theme' ? ' island-theme-view' : ''}${panelView === 'agent' ? ' island-agent-view' : ''}${panelView === 'agent' && agentHReady ? ' agent-height-ready' : ''}${panelView === 'agent-settings' ? ' island-agent-settings-view' : ''}${panelView === 'settings' ? ' island-settings-view' : ''}${panelView === 'lyric-api' ? ' island-lyric-api-view' : ''}`}
       role="button"
       tabIndex={0}
       aria-label={`灵动岛,当前状态:${agentActive ? 'Agent' : ISLAND_STATES[state].label},点击切换,长按展开`}
@@ -1994,7 +2018,7 @@ export const DynamicIsland = memo(function DynamicIsland({
               一键上传即应用(cover 居中),之后可用双形态蒙版裁切;
               裁切/视口/上传逻辑自包含在 BackgroundView */}
           {panelView === 'background' && onBackgroundChange ? (
-            <BackgroundView
+            <DeferredPanel><BackgroundView
               bgTarget={bgTarget}
               expandedImage={expandedImage}
               compactImage={compactImage}
@@ -2012,7 +2036,7 @@ export const DynamicIsland = memo(function DynamicIsland({
                 if (back) back()
                 else setPanelView('settings')
               }}
-            />
+            /></DeferredPanel>
           ) : null}
           {/* 设置视图(托盘菜单入口,岛内打开):设置类功能的总入口,
               自定义背景 / 主题色 / 字体按宿主能力显隐(帮助手册已移除
@@ -2034,7 +2058,17 @@ export const DynamicIsland = memo(function DynamicIsland({
               图片/音频/视频三库增删改查,音频导入播放列表。
               返回 = 收起岛体(托盘呼出)或回到对话视图(⋯ 菜单呼出) */}
           {panelView === 'media-library' ? (
-            <MediaLibraryView
+            <ErrorBoundary
+              title="媒体库出现异常"
+              fallback={({ retry }) => (
+                <div role="alert" className="island-settings-view">
+                  <p>媒体库暂时无法打开。</p>
+                  <button type="button" onClick={retry}>重试</button>
+                  <button type="button" onClick={() => setPanelView('settings')}>返回设置</button>
+                </div>
+              )}
+            >
+              <DeferredPanel><MediaLibraryView
               imageLibrary={imageLibrary}
               onImageLibraryChange={onImageLibraryChange}
               audioLibrary={audioLibrary}
@@ -2072,7 +2106,8 @@ export const DynamicIsland = memo(function DynamicIsland({
               // LLM 工具 play_library_video(2026-08-10):定位播放指定视频
               autoPlayVideoId={mediaLibraryPlayId}
               onAutoPlayConsumed={onMediaLibraryPlayConsumed}
-            />
+              /></DeferredPanel>
+            </ErrorBoundary>
           ) : null}
           {/* 歌词 API 接入点(设置视图"歌词 API"入口):预设厂家 + 自定义 */}
           {panelView === 'lyric-api' ? (
@@ -2084,7 +2119,17 @@ export const DynamicIsland = memo(function DynamicIsland({
               宽条内面板被裁切、compact 内容已淡出 = 全透明),高度
               动画就绪后才挂载面板(淡入 + 测量 + 高度展开同步) */}
           {panelView === 'agent' && agent && agentHReady ? (
-            <AgentView
+            <ErrorBoundary
+              title="Agent 面板出现异常"
+              fallback={({ retry }) => (
+                <div role="alert" className="island-agent-view">
+                  <p>Agent 面板暂时无法使用。</p>
+                  <button type="button" onClick={retry}>重试</button>
+                  <button type="button" onClick={() => setPanelView('settings')}>返回设置</button>
+                </div>
+              )}
+            >
+              <AgentView
               {...agent}
               // ⋯ 菜单"设置"入口:切换到 Agent 设置视图(设置类视图,
               // 只能经返回键退出);"多媒体库"入口切视图(独立菜单,
@@ -2100,12 +2145,23 @@ export const DynamicIsland = memo(function DynamicIsland({
               onCollapseMini={() => changeExpanded(false, { mediaMini: false })}
               onHeightChange={setAgentPanelH}
               onMediaSnapshot={setAgentLastMedia}
-            />
+              />
+            </ErrorBoundary>
           ) : null}
           {/* Agent 设置(设置视图"Agent 设置"入口,设置类视图:只能经返回键退出):
               API Key / Base URL / 模型 / 系统提示词,持久化走主进程 settings.json */}
           {panelView === 'agent-settings' && agentConfig ? (
-            <AgentSettingsView
+            <ErrorBoundary
+              title="Agent 设置出现异常"
+              fallback={({ retry }) => (
+                <div role="alert" className="island-settings-view">
+                  <p>设置页暂时无法打开。</p>
+                  <button type="button" onClick={retry}>重试</button>
+                  <button type="button" onClick={() => setPanelView('settings')}>返回设置</button>
+                </div>
+              )}
+            >
+              <DeferredPanel><AgentSettingsView
               config={agentConfig.config}
               onSave={agentConfig.onSave}
               // tools 单通道:AgentPanelProps(与 AgentView 工具列表同源,
@@ -2116,13 +2172,14 @@ export const DynamicIsland = memo(function DynamicIsland({
               mediaWindowWidth={mediaWindowWidth}
               onMediaWindowWidthChange={onMediaWindowWidthChange ?? (() => {})}
               onBack={() => setPanelView('settings')}
-            />
+              /></DeferredPanel>
+            </ErrorBoundary>
           ) : null}
           {/* 字体设置视图(设置视图"字体"入口,岛内打开):
               上传自定义字体(注入 @font-face 应用到岛体全部文字)、
               字体颜色:自动(按背景亮度选黑/白保证可读)或自定义色 */}
           {panelView === 'font' && (onFontAdd || onFontLibraryChange) ? (
-            <FontView
+            <DeferredPanel><FontView
               fontLibrary={fontLibrary}
               fontDataUrl={fontDataUrl}
               fontFamilyName={fontFamilyName}
@@ -2137,21 +2194,21 @@ export const DynamicIsland = memo(function DynamicIsland({
               onOpenLibrary={() => setPanelView('font-library')}
               onOpenColorView={() => setPanelView('font-color')}
               onBack={() => setPanelView('settings')}
-            />
+            /></DeferredPanel>
           ) : null}
           {/* 自定义颜色页(字体视图"自定义"入口,岛内打开):
               预设色板 + 岛内自绘取色器(SV 面 + 色相条)+ hex 输入 */}
           {panelView === 'font-color' && onFontColorChange ? (
-            <FontColorView
+            <DeferredPanel><FontColorView
               fontColor={fontColor}
               onFontColorChange={onFontColorChange}
               onBack={() => setPanelView('font')}
-            />
+            /></DeferredPanel>
           ) : null}
           {/* 字体库页面(字体视图"字体库"入口,岛内打开,大面板):
               搜索 / 列表(点击应用、行内编辑名称、删除)/ 上传入库 */}
           {panelView === 'font-library' && onFontLibraryChange ? (
-            <FontLibraryView
+            <DeferredPanel><FontLibraryView
               fontLibrary={fontLibrary}
               currentFontId={currentFontId}
               onFontSelect={onFontSelect}
@@ -2159,12 +2216,12 @@ export const DynamicIsland = memo(function DynamicIsland({
               onFontAdd={onFontAdd}
               onError={showFontError}
               onBack={() => setPanelView('font')}
-            />
+            /></DeferredPanel>
           ) : null}
           {/* 图片库页面(背景视图"图片库"入口,岛内打开,大面板):
               搜索 / 网格(点击应用当前形态、行内编辑名称、删除)/ 上传入库 */}
           {panelView === 'image-library' && onImageLibraryChange ? (
-            <ImageLibraryView
+            <DeferredPanel><ImageLibraryView
               imageLibrary={imageLibrary}
               onImageLibraryChange={onImageLibraryChange}
               onBackgroundChange={onBackgroundChange}
@@ -2175,7 +2232,7 @@ export const DynamicIsland = memo(function DynamicIsland({
               expandedCrop={expandedCrop}
               compactCrop={compactCrop}
               onBack={() => setPanelView('background')}
-            />
+            /></DeferredPanel>
           ) : null}
           {/* 上传音乐文件选择(隐藏输入,由"上传音乐"按钮触发;
               字体/背景上传输入已下沉到各自视图) */}
