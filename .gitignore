@@ -53,3 +53,7 @@ tools/bili/config/login-qrcode.png
 
 # bili-tool ç™»å½•æ€ä¸æœ¬åœ°é…ç½®(å«æ•æ„Ÿ cookie,ä¸¥ç¦å…¥åº“)
 tools/bili/config/
+
+# NapCat µÇÂ¼¶şÎ¬Âë(ÁÙÊ±Ãô¸ĞÎÄ¼ş,½ûÖ¹Èë¿â)
+*login-qrcode*
+
