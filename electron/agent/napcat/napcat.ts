@@ -93,7 +93,7 @@ export function createNapcatTools(deps: NapcatToolDeps): AgentTool[] {
         if (action === 'status') {
           const s = client.status()
           return (
-            `NapCat 状态:${s.connected ? '已连接' : s.circuitBroken ? '已熔断(需重启)' : '未连接'}(${s.url})` +
+            `NapCat 状态:${s.connected ? '已连接' : s.circuitBroken ? '熔断冷却中(自动重试,无需重启)' : '未连接'}(${s.url})` +
             (s.lastError ? `\n最近错误:${s.lastError}` : '') +
             `\n收到消息 ${s.receivedCount} 条,已回复 ${s.repliedCount} 条` +
             `\n主人:${masterQQ() || '(未配置,privacy.json)'}(在 privacy.json 配置)` +

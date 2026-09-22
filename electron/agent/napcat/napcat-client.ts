@@ -75,9 +75,13 @@ const ACTION_TIMEOUT_MS = 15000
 // 视频但工具报"超时失败",LLM 误报没发成功;延长到 180s
 const FILE_UPLOAD_TIMEOUT_MS = 180_000
 const MAX_IMAGE_SIZE = 20 * 1024 * 1024 // 20MB(原50MB过大)
-const MAX_RECONNECT_FAILS = 10 // 连续失败N次后熔断
+const MAX_RECONNECT_FAILS = 10 // 连续失败N次后熔断冷却
 const IMAGE_DOWNLOAD_TIMEOUT_MS = 10000 // 图片下载超时
 const RECONNECT_CAP_MS = 30000
+// 熔断后半开探测间隔(2026-09-03 修复"一直熔断":原熔断后永不重连,
+// NapCat 晚启动/重启后只能重启应用;改为冷却后自动探测,连上即恢复)
+const CIRCUIT_COOLDOWN_MS = 60_000
+const CIRCUIT_COOLDOWN_CAP_MS = 180_000
 const SEEN_CLEANUP_INTERVAL_MS = 10 * 60 * 1000 // 10分钟清理一次过期ID
 const QZONE_RATE_LIMIT_MS = 1000 // QQ空间接口最小间隔
 
@@ -191,10 +195,12 @@ export function createNapcatClient(deps: NapcatDeps): NapcatClient {
   let ws: WsConn | null = null
   let stopped = false
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+  let circuitProbeTimer: ReturnType<typeof setTimeout> | null = null
   let seenCleanupTimer: ReturnType<typeof setInterval> | null = null
   let reconnectDelay = 1000
   let reconnectFails = 0
   let circuitBroken = false
+  let circuitCooldownMs = CIRCUIT_COOLDOWN_MS
   let lastError = ''
   let receivedCount = 0
   let repliedCount = 0
@@ -296,16 +302,52 @@ export function createNapcatClient(deps: NapcatDeps): NapcatClient {
     return napcatMessageText(msg, botQQ())
   }
 
-  function connect() {
-    if (stopped || circuitBroken) return
+  /** 熔断冷却 → 半开探测(2026-09-03):失败后不再永久停死,
+   * 冷却到期尝试一次连接;成功 onOpen 全量复位,失败再排下一轮冷却 */
+  function scheduleCircuitProbe(): void {
+    if (stopped) return
+    if (circuitProbeTimer) clearTimeout(circuitProbeTimer)
+    circuitProbeTimer = setTimeout(() => {
+      circuitProbeTimer = null
+      if (stopped) return
+      connect(true)
+    }, circuitCooldownMs)
+    circuitCooldownMs = Math.min(Math.round(circuitCooldownMs * 1.5), CIRCUIT_COOLDOWN_CAP_MS)
+  }
+
+  function enterCircuitBreak(): void {
+    const wasBroken = circuitBroken
+    circuitBroken = true
+    if (!wasBroken) {
+      deps.notify?.(
+        'NapCat 连接失败',
+        `连续${MAX_RECONNECT_FAILS}次连接失败，进入熔断冷却。约${Math.round(circuitCooldownMs / 1000)}秒后自动重试，NapCat 启动后无需重启应用。`,
+      )
+      reportError(`NapCat连续${MAX_RECONNECT_FAILS}次连接失败，熔断冷却中(自动重试)`)
+    }
+    scheduleCircuitProbe()
+  }
+
+  function resetCircuit(): void {
+    reconnectDelay = 1000
+    reconnectFails = 0
+    circuitBroken = false
+    circuitCooldownMs = CIRCUIT_COOLDOWN_MS
+    if (circuitProbeTimer) {
+      clearTimeout(circuitProbeTimer)
+      circuitProbeTimer = null
+    }
+  }
+
+  function connect(isProbe = false) {
+    if (stopped) return
+    if (circuitBroken && !isProbe) return
     const url = cfg().napcatWsUrl?.trim() || DEFAULT_WS_URL
     try {
       lastError = ''
       const socket = createWsSocket(url, {
         onOpen: () => {
-          reconnectDelay = 1000
-          reconnectFails = 0
-          circuitBroken = false
+          resetCircuit()
           deps.notify?.('NapCat 已连接', `QQ 消息桥就绪(${url})`)
           // 启动定期清理过期seen
           if (!seenCleanupTimer) {
@@ -433,11 +475,12 @@ export function createNapcatClient(deps: NapcatDeps): NapcatClient {
         },
         onClose: () => {
           if (ws === socket) ws = null
+          // 主动 stop() 关闭不计失败、不熔断(2026-09-03:原 stop 触发的
+          // onClose 会 ++fails,凑满 10 次时误弹"已熔断"通知)
+          if (stopped) return
           reconnectFails++
           if (reconnectFails >= MAX_RECONNECT_FAILS) {
-            circuitBroken = true
-            deps.notify?.('NapCat 连接失败', `连续${MAX_RECONNECT_FAILS}次连接失败，已停止重连。请确认NapCat已启动后重启应用或重新连接。`)
-            reportError(`NapCat连续${MAX_RECONNECT_FAILS}次连接失败，已熔断`)
+            enterCircuitBreak()
             return
           }
           scheduleReconnect()
@@ -446,10 +489,10 @@ export function createNapcatClient(deps: NapcatDeps): NapcatClient {
       ws = socket
     } catch (e) {
       lastError = (e as Error).message
+      if (stopped) return
       reconnectFails++
       if (reconnectFails >= MAX_RECONNECT_FAILS) {
-        circuitBroken = true
-        deps.notify?.('NapCat 连接失败', `连续${MAX_RECONNECT_FAILS}次连接失败，已停止重连。`)
+        enterCircuitBreak()
         return
       }
       scheduleReconnect()
@@ -508,7 +551,11 @@ export function createNapcatClient(deps: NapcatDeps): NapcatClient {
   }
 
   function scheduleReconnect() {
-    if (stopped || reconnectTimer || circuitBroken) return
+    if (stopped || reconnectTimer) return
+    if (circuitBroken) {
+      scheduleCircuitProbe()
+      return
+    }
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null
       connect()
@@ -632,14 +679,15 @@ export function createNapcatClient(deps: NapcatDeps): NapcatClient {
     },
     start() {
       stopped = false
-      circuitBroken = false
-      reconnectFails = 0
+      resetCircuit()
+      if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null }
       connect()
     },
     stop() {
       stopped = true
       circuitBroken = true
       if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null }
+      if (circuitProbeTimer) { clearTimeout(circuitProbeTimer); circuitProbeTimer = null }
       if (seenCleanupTimer) { clearInterval(seenCleanupTimer); seenCleanupTimer = null }
       for (const [, p] of pending) {
         clearTimeout(p.timer)
