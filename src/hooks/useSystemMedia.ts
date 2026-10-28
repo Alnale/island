@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { recognizePlatform, type SystemPlatform } from '../media/systemPlatforms'
 import type { PlaybackMode } from '../media/playbackModes'
+import {
+  reconcileRepeatLoop,
+  REPEAT_PAST_END_GRACE_SEC,
+  STALE_END_WINDOW_SEC,
+} from '../media/repeatPosition'
 
 /** 本地桥接服务地址(scripts/system-media-bridge.ts 提供) */
 const BRIDGE_BASE = 'http://127.0.0.1:8765/system-media'
@@ -116,7 +121,8 @@ interface BridgeStateMessage {
  * 进度显示 = 锚定基准 + 本地时钟流逝:常规轮询不跟随上报位置
  * (浏览器等平台的位置会抖动/阶梯式过期,跟随会让进度条抽搐),
  * 仅在曲目变化 / 播放状态变化 / 用户 seek(立即锚定,拒绝则回退)/
- * 严重偏离且上报位置大幅移动时重锚定。
+ * 严重偏离且上报位置大幅移动时重锚定。单曲循环越过整首时长时
+ * 另按时长折回本轮(QQ 音乐循环不换曲目、时间线常停在结尾)。
  * 桥接未运行时 active 为 false,回退本地播放器。
  */
 export function useSystemMedia(): SystemMediaState {
@@ -142,6 +148,9 @@ export function useSystemMedia(): SystemMediaState {
   const prevSmPlayingRef = useRef(true)
   // 上次轮询的上报位置:"大幅移动"判定(区分真实跳变与阶梯式过期上报)
   const prevReportedRef = useRef<number | null>(null)
+  // 单曲循环折回后,时间线仍贴在上一轮结尾的上报值。
+  // 这段里的位置不能再把进度拉回去(见 reconcileRepeatLoop)。
+  const loopStaleRef = useRef<number | null>(null)
   // 挂起的 seek 验证(control 内创建,轮询确认或超时收尾):
   // 客户端"接受" seek 但实际未跳转时(如 QQ音乐)回退显示并判定不支持
   const pendingSeekRef = useRef<{
@@ -211,10 +220,12 @@ export function useSystemMedia(): SystemMediaState {
           // 时长可信度:位置已明显超过上报时长(>5s)说明时长本身不可信
           // (如 QQ音乐个别曲目 EndTime 固定 ~8s 而实际播放数分钟),视为
           // 未知(0)→ 进度条切不确定态、不显示假的总时长;不做外部查询
-          // 兜底(曲库搜索匹配到的是同名其它版本,不可靠)
+          // 兜底(曲库搜索匹配到的是同名其它版本,不可靠)。
+          // 不可信时也不能拿这个时长做单曲循环折回。
           const reportedPos = typeof data.position === 'number' ? data.position : 0
           const reportedDur = typeof data.duration === 'number' ? data.duration : 0
-          setDuration(reportedDur > 0 && reportedPos > reportedDur + 5 ? 0 : reportedDur)
+          const durationTrusted = !(reportedDur > 0 && reportedPos > reportedDur + 5)
+          setDuration(durationTrusted ? reportedDur : 0)
           if (typeof data.modeSupported === 'boolean') setModeSupported(data.modeSupported)
           // 真实播放模式校准(SMTC PlaybackInfo;repeat-all 映射为 sequence 前端三态)
           if (data.playbackMode === 'repeat-one' || data.playbackMode === 'shuffle') {
@@ -232,6 +243,7 @@ export function useSystemMedia(): SystemMediaState {
           //   3) 位置严重偏离(> 5s)且上报位置大幅移动(本次 ≥ 2s):
           //      真实跳变(外部 seek/重播)才满足;浏览器阶梯上报在
           //      冻结期移动≈0、更新瞬间偏差≈0,永远不满足
+          //   4) 单曲循环越过整首时长:折回本轮(见下方 reconcileRepeatLoop)
           const reported = data.position ?? baseRef.current
           const now = performance.now()
           const displayed = playingRef.current
@@ -247,9 +259,24 @@ export function useSystemMedia(): SystemMediaState {
           // 记录当前平台(seek 支持按平台持久化记忆,切换不重学)
           const sourceId = data.sourceAppId ?? null
           if (sourceId !== sourceIdRef.current) sourceIdRef.current = sourceId
+          // 恢复瞬间 displayed 含暂停时长(baseAt 还停在暂停时刻)。
+          // 循环折回只能看冻结点,不能把暂停的几秒当成「又播了一轮」。
+          const positionForLoop = playChanged && smPlaying ? baseRef.current : displayed
+          const loop = reconcileRepeatLoop({
+            displayed: positionForLoop,
+            reported,
+            prevReported: prevReportedRef.current,
+            duration: reportedDur,
+            durationTrusted,
+            mode: data.playbackMode,
+            sameTrack: !trackChanged,
+            playing: smPlaying,
+            staleEnd: loopStaleRef.current,
+          })
           if (trackChanged) {
             baseRef.current = reported
             baseAtRef.current = now
+            loopStaleRef.current = null
           } else if (playChanged && !smPlaying) {
             // 外部暂停:冻结在本地时钟当前显示位置
             baseRef.current = displayed
@@ -260,13 +287,31 @@ export function useSystemMedia(): SystemMediaState {
             // 算进去,恢复瞬间时间突跳,显示比进度条长)
             baseAtRef.current = now
           } else if (
+            !loop.suppressDiverge &&
             Math.abs(reported - displayed) > POSITION_DIVERGENCE_LIMIT_SEC &&
             (prevReportedRef.current === null ||
               Math.abs(reported - prevReportedRef.current) > POSITION_ALIVE_MOVE_SEC)
           ) {
             baseRef.current = reported
             baseAtRef.current = now
+            loopStaleRef.current = null
           }
+          // 单曲循环越过整首时长:折回本轮。必须写在重锚定之后,
+          // 这样「上报仍停在结尾」不会把刚折回的进度再拉满。
+          if (!trackChanged && loop.base !== null) {
+            baseRef.current = loop.base
+            baseAtRef.current = now
+            // 时间线还贴在结尾时,歌词跟着折回的进度走,避免停在最后一句
+            if (
+              reportedDur > 0 &&
+              reported > reportedDur - STALE_END_WINDOW_SEC &&
+              loop.base < reportedDur
+            ) {
+              lyricPosRef.current = loop.base
+              lyricAnchorAtRef.current = now
+            }
+          }
+          if (!trackChanged) loopStaleRef.current = loop.staleEnd
           // 歌词定位:歌词必须与实际平台播放对齐,与显示进度(防进度条
           // 抽搐的锚定+本地时钟模型)分离处理——
           //   上报"活着"(本次移动 ≥ 0.5s,原生客户端每秒 +1s)→ 直接
@@ -277,15 +322,32 @@ export function useSystemMedia(): SystemMediaState {
           //   (平台实际在播,只是 SMTC 未更新,插值照常推进);
           //   暂停 → 停在最后位置;恢复后上报通常立即解冻,采信上报
           if (smPlaying) {
+            // 折回保持期内结尾上报是上一轮残留,不能拿来盖掉已折回的歌词进度
+            const holdingStaleEnd =
+              loopStaleRef.current !== null &&
+              reportedDur > 0 &&
+              reported > reportedDur - STALE_END_WINDOW_SEC &&
+              reported <= reportedDur + 5
             const lyricAlive =
-              prevReportedRef.current === null ||
-              Math.abs(reported - prevReportedRef.current) >= LYRIC_ALIVE_MOVE_SEC
+              !holdingStaleEnd &&
+              (prevReportedRef.current === null ||
+                Math.abs(reported - prevReportedRef.current) >= LYRIC_ALIVE_MOVE_SEC)
             if (lyricAlive) {
               lyricPosRef.current = reported
               lyricAnchorAtRef.current = now
             } else {
               lyricPosRef.current += (now - lyricAnchorAtRef.current) / 1000
               lyricAnchorAtRef.current = now
+              // 上报冻结时歌词时钟同样会越过时长,和进度一起折回
+              if (
+                durationTrusted &&
+                reportedDur > 0 &&
+                lyricPosRef.current >= reportedDur &&
+                (data.playbackMode === 'repeat-one' ||
+                  lyricPosRef.current >= reportedDur + REPEAT_PAST_END_GRACE_SEC)
+              ) {
+                lyricPosRef.current = lyricPosRef.current % reportedDur
+              }
             }
             setLyricPosition(lyricPosRef.current)
           } else {
@@ -344,10 +406,16 @@ export function useSystemMedia(): SystemMediaState {
   playingRef.current = userPlaying
 
   // 显示进度:校准基准 + 播放以来的本地流逝时间(平滑无回跳);
-  // 暂停时停在基准位置,轮询持续校准
-  const position = playingRef.current
+  // 暂停时停在基准位置,轮询持续校准。
+  // 单曲循环在两次轮询之间就会越过时长(右上角计时、进度条都读这里),
+  // 先按时长取模,等下一拍轮询再把基准写回 [0, duration)。
+  const rawPosition = playingRef.current
     ? baseRef.current + (performance.now() - baseAtRef.current) / 1000
     : baseRef.current
+  const position =
+    mode === 'repeat-one' && duration > 0 && rawPosition >= duration
+      ? rawPosition % duration
+      : rawPosition
 
   const control = useCallback(
     async (action: SystemControlAction, seekPosition?: number): Promise<boolean | undefined> => {

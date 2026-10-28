@@ -49,7 +49,8 @@
   background: var(--island-panel-veil, rgba(8, 10, 14, 0.55));
 }
 .island-demo.expanded.island-agent-view.island-has-bg-image .island-panel-mask {
-  background: var(--island-agent-veil, rgba(8, 10, 14, 0.16));
+  /* 与设置页同一条:有背景图时不跟浅色 UI 的近白蒙版,避免高不透明度发灰 */
+  background: rgba(8, 10, 14, 0.16);
 }
 
 /* 视图根:覆盖面板,自带内边距(与 island-panel-list 同款布局)。
@@ -415,6 +416,12 @@
   scrollbar-gutter: stable;
   scrollbar-width: thin;
   scrollbar-color: rgba(255, 255, 255, 0.15) transparent;
+  /* 关闭浏览器滚动锚定(2026-10-25 修复"切群聊停在中间"的根因):
+     会话切换时消息列表整体替换,Chromium 的 scroll anchoring 会在下一
+     次布局按旧锚点回写 scrollTop——即使代码已 scrollTop = scrollHeight
+     落底,布局阶段也会被拽回中部(实测 gap 1124px,且全程未经过 JS
+     setter)。聊天列表的贴底由代码统一管理,不需要锚定 */
+  overflow-anchor: none;
   /* 骨架 → 内容切换的平滑淡入:骨架(120ms)替换为真实消息时,文字
      直接突现会与面板 maskPanelIn 淡入重叠,表现为"展开到扩展高度
      那一帧文字闪烁"(实测)——淡入后文字平滑出现,不再闪。
@@ -894,6 +901,7 @@
   width: 100%;
   box-sizing: border-box;
   resize: none;
+  white-space: pre-wrap;
   font-size: 0.56rem;
   line-height: 1.5;
   color: var(--text-color, #fff);
@@ -3441,6 +3449,7 @@
   min-height: 34px;
   max-height: 96px;
   resize: none;
+  white-space: pre-wrap;
   padding: 8px 12px;
   border: 1px solid rgba(255, 255, 255, 0.14);
   border-radius: 12px;
@@ -3449,6 +3458,12 @@
   font-family: inherit;
   font-size: 0.75rem;
   line-height: 1.5;
+  /* 表单控件不继承字形度量(UA 重置 font/letter-spacing):不补上,
+     自定义字体粗细时输入文字与底字行宽度不一致,盖字粒子落点会偏 */
+  font-weight: inherit;
+  letter-spacing: inherit;
+  word-spacing: inherit;
+  text-transform: inherit;
   outline: none;
   user-select: text;
   transition: border-color 0.15s ease;
@@ -3460,6 +3475,252 @@
 
 .island-agent-input textarea:focus {
   border-color: color-mix(in srgb, var(--state-color, #4d6bfe) 65%, transparent);
+}
+
+/* 输入框底字:她的一句贴在文字背后。框的底色放在 compose 上,
+   textarea 本身透明,字才能透出来。盖住用透明度,粒子只走 transform。 */
+.island-agent-compose {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 12px;
+}
+.island-agent-input .island-agent-compose textarea {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  background: transparent;
+}
+@property --mind-sweep {
+  syntax: '<angle>';
+  inherits: false;
+  initial-value: 270deg;
+}
+@property --mind-ink {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: #d6ff3c;
+}
+/* 底字在时,边缘是一圈淡水色。亮纹从最左侧出发,沿途换一档色相再绕回。
+   种类变了,--mind-ink 会缓到新颜色,不是硬切。 */
+.island-agent-compose[data-mind] {
+  --mind-sweep: 270deg;
+  transition: --mind-ink 720ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+.island-agent-compose[data-mind] textarea {
+  border-color: color-mix(in srgb, var(--mind-ink, #d6ff3c) 38%, transparent);
+  box-shadow: none;
+}
+.island-agent-compose[data-mind]::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  border-radius: inherit;
+  padding: 1.5px;
+  pointer-events: none;
+  background:
+    conic-gradient(
+      from var(--mind-sweep),
+      #fff 0deg,
+      var(--mind-ink, #d6ff3c) 14deg,
+      oklch(from var(--mind-ink, #d6ff3c) l c calc(h + 42)) 32deg,
+      oklch(from var(--mind-ink, #d6ff3c) l c calc(h - 28)) 52deg,
+      transparent 86deg,
+      transparent 248deg,
+      color-mix(in srgb, var(--mind-ink, #d6ff3c) 20%, transparent) 300deg,
+      oklch(from var(--mind-ink, #d6ff3c) l c calc(h + 42)) 334deg,
+      var(--mind-ink, #d6ff3c) 350deg,
+      #fff 360deg
+    ),
+    conic-gradient(
+      from calc(var(--mind-sweep) - 150deg),
+      transparent 0deg,
+      transparent 292deg,
+      oklch(from var(--mind-ink, #d6ff3c) l c calc(h - 28) / 0.55) 328deg,
+      transparent 352deg
+    );
+  -webkit-mask:
+    linear-gradient(#fff 0 0) content-box,
+    linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask:
+    linear-gradient(#fff 0 0) content-box,
+    linear-gradient(#fff 0 0);
+  mask-composite: exclude;
+  animation: island-mind-ripple 12s linear infinite;
+}
+@keyframes island-mind-ripple {
+  to { --mind-sweep: 630deg; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .island-agent-compose[data-mind] { transition: none; }
+  .island-agent-compose[data-mind]::before {
+    animation: none;
+    --mind-sweep: 270deg;
+  }
+}
+.island-mind-whisper {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  transition: --mind-ink 720ms cubic-bezier(0.23, 1, 0.32, 1);
+  padding: 8px 12px;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  box-sizing: border-box;
+  pointer-events: none;
+  user-select: none;
+}
+.island-mind-whisper-line {
+  white-space: pre-wrap;
+  font-family: inherit;
+  font-size: 0.75rem;
+  line-height: 1.5;
+  /* 长串折行要和 textarea(UA overflow-wrap: break-word)一致,
+     否则盖字粒子落点会错行 */
+  overflow-wrap: break-word;
+}
+/* 她的一句之后再打的字没有字面可量:隐藏镜像行盖在 textarea 内容框上
+   (同字体/同内边距/同折行),量出落点即弃 */
+.island-mind-measure {
+  position: absolute;
+  inset: 0;
+  box-sizing: border-box;
+  padding: 8px 12px;
+  visibility: hidden;
+  pointer-events: none;
+}
+.island-mind-ch {
+  opacity: 1;
+  transition: opacity 180ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+.island-mind-ch.is-covered {
+  opacity: 0;
+}
+.island-mind-ink {
+  display: inline-block;
+  color: var(--mind-ink, #ff2e88);
+  text-shadow: 0 0 8px color-mix(in srgb, var(--mind-ink, #ff2e88) 55%, transparent);
+  transform-origin: 50% 100%;
+}
+.island-mind-ink.is-printing {
+  animation: island-mind-print 150ms cubic-bezier(0.23, 1, 0.32, 1) both;
+}
+/* 盖字的光画在输入文字上面,不然 会被刚打的字挡住。 */
+.island-mind-burst-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  overflow: visible;
+  pointer-events: none;
+  border-radius: 12px;
+}
+.island-mind-burst {
+  position: absolute;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+}
+.island-mind-spark,
+.island-mind-core,
+.island-mind-ring {
+  position: absolute;
+  left: 0;
+  top: 0;
+  margin: 0;
+  pointer-events: none;
+}
+.island-mind-spark {
+  border-radius: 50%;
+  opacity: 1;
+  transform: translate(-50%, -50%) rotate(var(--rot, 0deg));
+  animation: island-mind-spark 340ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+.island-mind-spark.is-streak {
+  width: 2.5px;
+  height: 11px;
+  border-radius: 2px;
+}
+.island-mind-core {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+  animation: island-mind-core 220ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+.island-mind-ring {
+  width: 18px;
+  height: 18px;
+  border: 1.5px solid transparent;
+  border-radius: 50%;
+  transform: translate(-50%, -50%) scale(0.55);
+  animation: island-mind-ring 300ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+@keyframes island-mind-print {
+  from {
+    opacity: 0;
+    transform: translateY(0.2em);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@keyframes island-mind-print-still {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes island-mind-spark {
+  0% {
+    opacity: 1;
+    transform: translate(-50%, -50%) rotate(var(--rot, 0deg)) scale(1);
+  }
+  55% {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+    transform: translate(calc(-50% + var(--dx, 0px)), calc(-50% + var(--dy, 0px))) rotate(var(--rot, 0deg)) scale(0.65);
+  }
+}
+@keyframes island-mind-core {
+  0% {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(0.7);
+  }
+  40% {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1.35);
+  }
+  to {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(1.6);
+  }
+}
+@keyframes island-mind-ring {
+  from {
+    opacity: 0.95;
+    transform: translate(-50%, -50%) scale(0.55);
+  }
+  to {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(1.85);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .island-mind-whisper { transition: none; }
+  .island-mind-ch { transition: none; }
+  .island-mind-ink.is-printing {
+    animation-name: island-mind-print-still;
+    animation-duration: 120ms;
+  }
+  .island-mind-spark,
+  .island-mind-core,
+  .island-mind-ring { animation: none; opacity: 0; }
 }
 
 /* 定制滚动条(2026-08-14):输入框多行溢出与会话列表 —— 细轨道透明、
@@ -4150,6 +4411,7 @@
   resize: none;
   line-height: 1.5;
   min-height: 52px;
+  white-space: pre-wrap;
 }
 
 .island-agent-field input:focus,
@@ -4779,6 +5041,7 @@
   outline: none;
   user-select: text;
   resize: vertical;
+  white-space: pre-wrap;
 }
 
 .island-agent-section .island-agent-scale-row textarea:focus {
@@ -4905,6 +5168,699 @@
 
 .island-memory-type-arrow.open {
   transform: rotate(180deg);
+}
+
+/* 人格卡(2026-10-25):卡片列表 / 编辑区 / 进化整合区。复用记忆行的
+   进场/离场动画与按钮样式,仅补卡片容器与文本域。 */
+.island-persona-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.island-persona-card {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 11px;
+  background: rgba(255, 255, 255, 0.045);
+  animation: island-ui-in 0.34s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+
+/* 激活卡:柔和强调边(不抢主题色,保持与设置页其它选中态一致) */
+.island-persona-card.active {
+  border-color: color-mix(in srgb, var(--state-color, #4d6bfe) 48%, rgba(255, 255, 255, 0.14));
+  background: color-mix(in srgb, var(--state-color, #4d6bfe) 8%, rgba(255, 255, 255, 0.045));
+}
+
+.island-persona-card.island-ui-leave {
+  animation: island-ui-out 0.24s cubic-bezier(0.23, 1, 0.32, 1) both;
+}
+
+.island-persona-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.island-persona-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.66rem;
+  font-weight: 600;
+  color: var(--text-color, #fff);
+}
+
+.island-persona-badge {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 0.5rem;
+  line-height: 1.5;
+  color: color-mix(in srgb, var(--state-color, #4d6bfe) 80%, #fff);
+  background: color-mix(in srgb, var(--state-color, #4d6bfe) 18%, transparent);
+  border: 1px solid color-mix(in srgb, var(--state-color, #4d6bfe) 38%, transparent);
+}
+
+.island-persona-notes-count {
+  flex: none;
+  margin-left: auto;
+  font-size: 0.52rem;
+  color: var(--text-dim, rgba(255, 255, 255, 0.5));
+}
+
+.island-persona-preview {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  font-size: 0.58rem;
+  line-height: 1.45;
+  color: var(--text-dim, rgba(255, 255, 255, 0.58));
+  user-select: text;
+}
+
+.island-persona-notes {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.18);
+  animation: island-ui-in 0.28s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+
+.island-persona-notes pre {
+  margin: 0;
+  max-height: 160px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: inherit;
+  font-size: 0.58rem;
+  line-height: 1.5;
+  color: var(--text-dim, rgba(255, 255, 255, 0.6));
+  user-select: text;
+  /* 双击进入编辑(2026-10-26):文本光标提示可编辑 */
+  cursor: text;
+}
+
+.island-persona-notes-empty {
+  padding: 6px 8px;
+  border: 1px dashed rgba(255, 255, 255, 0.14);
+  border-radius: 8px;
+  font-size: 0.56rem;
+  color: var(--text-dim, rgba(255, 255, 255, 0.45));
+  cursor: text;
+  user-select: none;
+}
+
+.island-persona-notes textarea {
+  min-height: 96px;
+}
+
+.island-persona-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border: 1px dashed rgba(255, 255, 255, 0.16);
+  border-radius: 11px;
+  animation: island-ui-in 0.3s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+
+.island-persona-input,
+.island-persona-textarea {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 5px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--text-color, #fff);
+  font-size: 0.62rem;
+  font-family: inherit;
+  outline: none;
+  user-select: text;
+}
+
+.island-persona-textarea {
+  min-height: 110px;
+  resize: vertical;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.island-persona-input:focus,
+.island-persona-textarea:focus {
+  border-color: color-mix(in srgb, var(--state-color, #4d6bfe) 65%, transparent);
+}
+
+.island-persona-count {
+  margin-left: auto;
+  font-size: 0.52rem;
+  color: var(--text-dim, rgba(255, 255, 255, 0.5));
+}
+
+/* 风格输入双列 / 范例行 / 短文本域 / 进化缓冲区(2026-10-26) */
+.island-persona-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.island-persona-example {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  align-items: center;
+}
+
+/* 正例/反例/禁用词三块独立卡片(2026-10-26:用户反馈"两个正例区"与重叠) */
+.island-persona-block {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.island-persona-block-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.island-persona-block-title {
+  flex: none;
+  font-size: 0.6rem;
+  font-weight: 650;
+  color: var(--text-color, #fff);
+}
+
+.island-persona-block-hint {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.5rem;
+  color: var(--text-dim, rgba(255, 255, 255, 0.5));
+}
+
+.island-persona-block-head .island-agent-scale-btn {
+  flex: none;
+  padding: 2px 8px;
+  font-size: 0.54rem;
+}
+
+.island-persona-block-empty {
+  font-size: 0.52rem;
+  line-height: 1.5;
+  color: var(--text-dim, rgba(255, 255, 255, 0.45));
+}
+
+.island-persona-example .island-persona-input {
+  min-width: 0;
+}
+
+.island-persona-textarea--short {
+  min-height: 64px;
+}
+
+.island-persona-buffer {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+/* ===== 人格卡页重排(2026-10-26):引导头部 / 折叠分区 / 渐进式编辑 ===== */
+.island-persona-page {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  min-width: 0;
+}
+
+.island-persona-hero {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 12px;
+  background: linear-gradient(
+    145deg,
+    color-mix(in srgb, var(--state-color, #4d6bfe) 10%, rgba(255, 255, 255, 0.045)),
+    rgba(255, 255, 255, 0.025)
+  );
+}
+
+.island-persona-hero-main {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.island-persona-hero-title {
+  font-size: 0.74rem;
+  font-weight: 650;
+  color: var(--text-color, #fff);
+}
+
+.island-persona-hero-desc {
+  font-size: 0.56rem;
+  line-height: 1.5;
+  color: var(--text-dim, rgba(255, 255, 255, 0.58));
+}
+
+.island-persona-steps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px 12px;
+}
+
+.island-persona-steps span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.52rem;
+  color: var(--text-dim, rgba(255, 255, 255, 0.55));
+  white-space: nowrap;
+}
+
+.island-persona-steps b {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  font-size: 0.46rem;
+  font-weight: 600;
+  color: color-mix(in srgb, var(--state-color, #4d6bfe) 82%, #fff);
+  background: color-mix(in srgb, var(--state-color, #4d6bfe) 20%, transparent);
+}
+
+.island-persona-hero-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.island-persona-primary {
+  padding: 4px 10px;
+  border: 1px solid color-mix(in srgb, var(--state-color, #4d6bfe) 55%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--state-color, #4d6bfe) 20%, transparent);
+  color: color-mix(in srgb, var(--state-color, #4d6bfe) 55%, #fff);
+  font-size: 0.6rem;
+  font-family: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.island-persona-primary:hover {
+  background: color-mix(in srgb, var(--state-color, #4d6bfe) 28%, transparent);
+}
+
+.island-persona-primary:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.island-persona-active {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.island-persona-active.on {
+  border-color: color-mix(in srgb, var(--state-color, #4d6bfe) 40%, rgba(255, 255, 255, 0.12));
+  background: color-mix(in srgb, var(--state-color, #4d6bfe) 7%, rgba(255, 255, 255, 0.03));
+}
+
+.island-persona-active-main {
+  display: flex;
+  flex: 1;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 5px;
+  min-width: 0;
+}
+
+.island-persona-active-label {
+  font-size: 0.5rem;
+  color: var(--text-dim, rgba(255, 255, 255, 0.5));
+}
+
+.island-persona-active-name {
+  font-size: 0.68rem;
+  font-weight: 650;
+  color: var(--text-color, #fff);
+}
+
+.island-persona-active-hint {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.52rem;
+  color: var(--text-dim, rgba(255, 255, 255, 0.55));
+}
+
+.island-persona-section {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 11px;
+  background: rgba(255, 255, 255, 0.025);
+  overflow: hidden;
+}
+
+.island-persona-section-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 30px;
+  padding: 7px 10px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.island-persona-section-head:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.island-persona-section-head.static {
+  cursor: default;
+}
+
+.island-persona-section-head.static:hover {
+  background: transparent;
+}
+
+.island-persona-section-caret {
+  flex: none;
+  width: 10px;
+  font-size: 0.5rem;
+  color: var(--text-dim, rgba(255, 255, 255, 0.45));
+}
+
+.island-persona-section-title {
+  flex: none;
+  font-size: 0.62rem;
+  font-weight: 650;
+  color: var(--text-color, #fff);
+}
+
+.island-persona-section-hint {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.5rem;
+  color: var(--text-dim, rgba(255, 255, 255, 0.5));
+}
+
+.island-persona-section-extra {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.island-persona-section-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 0 10px 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.07);
+  padding-top: 8px;
+  animation: island-ui-in 0.24s cubic-bezier(0.23, 1, 0.32, 1) both;
+}
+
+.island-persona-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.island-persona-field-label {
+  font-size: 0.54rem;
+  color: var(--text-dim, rgba(255, 255, 255, 0.55));
+}
+
+.island-persona-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.island-persona-chip {
+  padding: 3px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-dim, rgba(255, 255, 255, 0.6));
+  font-size: 0.54rem;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.island-persona-chip:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.island-persona-chip.on {
+  border-color: color-mix(in srgb, var(--state-color, #4d6bfe) 45%, transparent);
+  background: color-mix(in srgb, var(--state-color, #4d6bfe) 16%, transparent);
+  color: color-mix(in srgb, var(--state-color, #4d6bfe) 60%, #fff);
+}
+
+.island-persona-editor {
+  border-style: solid;
+  border-color: color-mix(in srgb, var(--state-color, #4d6bfe) 30%, rgba(255, 255, 255, 0.12));
+  background: color-mix(in srgb, var(--state-color, #4d6bfe) 4%, transparent);
+  gap: 8px;
+}
+
+.island-persona-editor-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.island-persona-editor-title {
+  flex: 1;
+  font-size: 0.68rem;
+  font-weight: 650;
+  color: var(--text-color, #fff);
+}
+
+.island-persona-editor-foot {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-top: 7px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.island-persona-editor-foot .island-persona-count {
+  margin-right: auto;
+  margin-left: 0;
+}
+
+.island-persona-tag {
+  flex: none;
+  padding: 1px 5px;
+  border-radius: 5px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.05);
+  font-size: 0.48rem;
+  line-height: 1.5;
+  color: var(--text-dim, rgba(255, 255, 255, 0.55));
+  white-space: nowrap;
+}
+
+.island-persona-card-main {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.island-persona-card-secondary {
+  display: flex;
+  gap: 10px;
+  padding-top: 4px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.island-persona-link {
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--text-dim, rgba(255, 255, 255, 0.5));
+  font-size: 0.5rem;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.island-persona-link:hover {
+  color: var(--text-color, #fff);
+  text-decoration: underline;
+}
+
+.island-persona-link.danger {
+  color: rgba(255, 255, 255, 0.42);
+}
+
+.island-persona-link.danger:hover,
+.island-persona-link.danger.confirm {
+  color: #ff8a8a;
+}
+
+.island-persona-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 12px 10px;
+  border: 1px dashed rgba(255, 255, 255, 0.12);
+  border-radius: 10px;
+  font-size: 0.56rem;
+  color: var(--text-dim, rgba(255, 255, 255, 0.55));
+  text-align: center;
+}
+
+.island-persona-buffer-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.island-persona-pick-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 200px;
+  overflow: auto;
+  padding: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 9px;
+  background: rgba(0, 0, 0, 0.18);
+}
+
+.island-persona-pick {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 0;
+  font-size: 0.56rem;
+  line-height: 1.45;
+  color: var(--text-dim, rgba(255, 255, 255, 0.62));
+  cursor: pointer;
+}
+
+.island-persona-pick.on {
+  color: rgba(255, 255, 255, 0.88);
+}
+
+.island-persona-pick.full {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.island-persona-pick input {
+  flex: none;
+  margin-top: 2px;
+}
+
+.island-persona-pick span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.island-persona-buffer-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.island-persona-buffer-head {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+
+.island-persona-status {
+  flex: none;
+  padding: 1px 5px;
+  border-radius: 5px;
+  font-size: 0.46rem;
+  line-height: 1.5;
+  border: 1px solid transparent;
+}
+
+.island-persona-status.pending {
+  color: #ffd479;
+  background: rgba(255, 193, 79, 0.12);
+  border-color: rgba(255, 193, 79, 0.26);
+}
+
+.island-persona-status.merged {
+  color: #8fd6a8;
+  background: rgba(95, 207, 128, 0.1);
+  border-color: rgba(95, 207, 128, 0.24);
+}
+
+.island-persona-status.undone {
+  color: var(--text-dim, rgba(255, 255, 255, 0.5));
+  background: rgba(255, 255, 255, 0.05);
+  border-color: rgba(255, 255, 255, 0.1);
+}
+
+.island-persona-buffer-detail summary {
+  font-size: 0.52rem;
+  color: var(--text-dim, rgba(255, 255, 255, 0.5));
+  cursor: pointer;
+}
+
+.island-persona-buffer-detail pre {
+  margin: 4px 0;
+  max-height: 160px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: inherit;
+  font-size: 0.56rem;
+  line-height: 1.5;
+  color: var(--text-dim, rgba(255, 255, 255, 0.6));
+  user-select: text;
 }
 
 /* 选项浮层:展开回弹滑入 / 收起平滑退场 */
@@ -5621,6 +6577,11 @@
 
 /* ===== exec_command 确认门(confirmExec 开启,输入区上方) ===== */
 .island-agent-confirm {
+  flex: 1 1 100%;
+  position: relative;
+  z-index: 4;
+  width: 100%;
+  box-sizing: border-box;
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -5628,6 +6589,7 @@
   border: 1px solid rgba(255, 255, 255, 0.14);
   border-radius: 10px;
   background: rgba(255, 255, 255, 0.05);
+  pointer-events: auto;
   animation: island-ui-in 0.3s cubic-bezier(0.34, 1.56, 0.64, 1) both;
 }
 
@@ -5670,6 +6632,8 @@
 
 .island-agent-confirm-actions button {
   flex: 1;
+  position: relative;
+  z-index: 1;
   padding: 5px 0;
   border-radius: 8px;
   border: 1px solid rgba(255, 255, 255, 0.2);
@@ -5678,6 +6642,7 @@
   font-size: 0.66rem;
   font-family: inherit;
   cursor: pointer;
+  pointer-events: auto;
   transition:
     background 0.12s ease,
     border-color 0.12s ease,

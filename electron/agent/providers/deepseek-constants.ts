@@ -13,6 +13,33 @@ export const DEEPSEEK_DEFAULT_MODEL = 'deepseek-v4-flash'
 export const DEEPSEEK_MODEL_PRO = 'deepseek-v4-pro'
 /** DeepSeek Chat 模型(chat 端点用) */
 export const DEEPSEEK_MODEL_CHAT = 'deepseek-chat'
+/**
+ * DeepSeek 图像理解模型(官方 vision 指南:图像理解主推 deepseek-flash;
+ * create-response 参考:"图片仅支持 deepseek-flash 模型")。带图请求在
+ * 配置模型不支持图像理解时换用本模型(见 deepseekModelForInput)
+ */
+export const DEEPSEEK_VISION_MODEL = 'deepseek-flash'
+
+/**
+ * 模型是否支持图像理解(官方:图片仅 deepseek-flash 支持;旧名
+ * deepseek-v4-flash-vision-exp 下线后由最新 Flash 模型处理)。
+ * flash / vision 家族视为支持;pro / chat 等不支持
+ */
+export function isDeepseekVisionModel(model: string): boolean {
+  const m = model.trim().toLowerCase()
+  return m.includes('flash') || m.includes('vision') || m.includes('-vl')
+}
+
+/**
+ * 带图请求的实际模型:hasImages 且配置模型不支持图像理解(pro/chat 等)
+ * 时换 DEEPSEEK_VISION_MODEL——不换会 400("图片仅支持 deepseek-flash"),
+ * 换了图像理解开箱即用;纯文本请求/flash 家族保持配置模型不动
+ */
+export function deepseekModelForInput(model: string, hasImages: boolean): string {
+  const m = model.trim()
+  if (!hasImages || isDeepseekVisionModel(m)) return m || DEEPSEEK_DEFAULT_MODEL
+  return DEEPSEEK_VISION_MODEL
+}
 
 /**
  * 判断是否为 DeepSeek 供应商(地址含 deepseek,且非 mimo)
@@ -54,6 +81,24 @@ export function deepseekProviderLabel(baseURL: string): string {
 }
 
 /**
+ * 带 tools 的思考请求里,助手消息缺思维链会被 400。空串同样被拒
+ * (2026-10 官方思考模式:每一轮都要回传,没调用工具的轮次也算)。
+ * 历史里没存到原文时回一个空格,字段非空才能过校验。
+ */
+export const DEEPSEEK_MISSING_REASONING = ' '
+
+/**
+ * 思考模式思维链没带回。Responses 原文含 reasoning_text,Chat 原文含
+ * reasoning_content,两句都要求 passed back。命中后不再把英文和
+ * request_id 拼进气泡。
+ */
+function isDeepseekReasoningReplayError(message: string): boolean {
+  const text = message.toLowerCase()
+  const aboutReasoning = text.includes('reasoning_text') || text.includes('reasoning_content')
+  return aboutReasoning && text.includes('passed back')
+}
+
+/**
  * DeepSeek API 错误码 → 中文提示(官方文档 https://api-docs.deepseek.com/zh-cn/quick_start/error_codes)
  */
 export function deepseekErrorMessage(status: number, detail: string): string {
@@ -70,6 +115,13 @@ export function deepseekErrorMessage(status: number, detail: string): string {
     }
   } catch {
     if (!message && body) message = body.slice(0, 200)
+  }
+  // 思考链缺失是独立失败,不能落进「格式 / 超长 / 不合规」那一筐
+  if (isDeepseekReasoningReplayError(message)) {
+    return (
+      'API 请求失败:思考链没有带回接口。DeepSeek 思考模式要求把上一轮思维链原样再发回去,这次缺了。' +
+      '请重发这一轮;还不行就点「清空」清掉当前对话,或到 Agent 设置把思考强度改成「关」'
+    )
   }
   const detailHint = message ? `:${message.slice(0, 300)}` : ''
   const known: Record<number, string> = {

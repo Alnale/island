@@ -4,7 +4,7 @@ const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
 const { createSettingsStore } = require('../electron/settings-store.cjs')
-const { APP_DATA_ENTRIES, clearManagedData, resolveManagedPath } = require('../electron/data-manifest.cjs')
+const { APP_DATA_ENTRIES, TOOL_DATA_ENTRIES, clearManagedData, resolveManagedPath } = require('../electron/data-manifest.cjs')
 
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'dynamic-island-settings-'))
 const secretStorage = {
@@ -96,6 +96,28 @@ test('单项删除失败时报告失败且不宣称成功', () => {
   assert.equal(result.ok, false)
   assert.ok(result.failures.some((item) => item.entry === 'privacy.json'))
   assert.equal(fs.existsSync(path.join(temp, 'privacy.json')), true)
+})
+
+test('清除工具数据只删数据子路径:工具本体与 bili 根目录必须保留', () => {
+  const bili = path.join(temp, 'bili')
+  fs.mkdirSync(path.join(bili, 'config'), { recursive: true })
+  fs.writeFileSync(path.join(bili, 'config', 'cookies.json'), '{}')
+  fs.mkdirSync(path.join(bili, 'downloads'), { recursive: true })
+  fs.writeFileSync(path.join(bili, 'downloads', 'video.mp4'), 'video')
+  fs.mkdirSync(path.join(bili, '.progress'), { recursive: true })
+  fs.writeFileSync(path.join(bili, '.progress', 'p.json'), '{}')
+  // 极端场景:工具本体被放进 userData(旧安装布局),也不得被当数据删除
+  fs.writeFileSync(path.join(bili, 'bili-tool.exe'), 'MZ')
+  fs.mkdirSync(path.join(temp, 'docflow', 'output'), { recursive: true })
+  fs.writeFileSync(path.join(temp, 'docflow', 'output', 'a.pdf'), 'pdf')
+
+  const result = clearManagedData(temp, 'tools')
+  assert.equal(result.ok, true)
+  for (const entry of TOOL_DATA_ENTRIES) {
+    assert.equal(fs.existsSync(path.join(temp, entry)), false, `${entry} 应被清除`)
+  }
+  assert.equal(fs.existsSync(bili), true, 'bili 根目录必须保留(bili-tool 的 cwd)')
+  assert.equal(fs.existsSync(path.join(bili, 'bili-tool.exe')), true, '工具本体不得被删除')
 })
 
 test('无法加密时不把密钥写成明文，内存仍保留', () => {

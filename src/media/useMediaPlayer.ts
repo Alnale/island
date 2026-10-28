@@ -97,6 +97,8 @@ export function useMediaPlayer(): MediaPlayer {
   const blobUrlsRef = useRef<Set<string>>(new Set())
   /** timeupdate 节流:位置推进无需逐事件重渲染全树(高频率事件源) */
   const lastPositionUpdateRef = useRef(0)
+  /** 切歌后这一刻之前,丢掉仍报着上一首时间的 timeupdate(否则进度条会弹回去) */
+  const skipHighPositionUntilRef = useRef(0)
   /** 系统媒体会话进度同步节流(秒级,仅用于系统媒体面板显示) */
   const lastSessionSyncRef = useRef(0)
   tracksRef.current = tracks
@@ -112,6 +114,11 @@ export function useMediaPlayer(): MediaPlayer {
     setIndex(nextIndex)
     setPosition(0)
     setPhase('loading')
+    // 续播(对话移交)要保留中途位置;普通切歌从 0 起,换源瞬间
+    // 还可能冒出上一首的 currentTime
+    if (!(fromPosition && fromPosition > 0)) {
+      skipHighPositionUntilRef.current = performance.now() + 1500
+    }
     audio.src = track.url ?? ''
     audio.load()
     // 等"可以播放"再起播(加载中状态自然展示);超时兜底,自动播放被拦截时退回暂停
@@ -412,9 +419,12 @@ export function useMediaPlayer(): MediaPlayer {
       // 节流:timeupdate 事件密集触发(部分浏览器/高倍速下远超显示需求),
       // 200ms 内多次事件合并为一次 setPosition,播放感知无差异
       const now = performance.now()
+      const pos = audio.currentTime
+      // 新歌 1.5s 内播不到 2s。这窗口里更大的时间是上一首的残留。
+      if (now < skipHighPositionUntilRef.current && pos > 2) return
       if (now - lastPositionUpdateRef.current < 200) return
       lastPositionUpdateRef.current = now
-      setPosition(audio.currentTime)
+      setPosition(pos)
       // 同步系统媒体会话的进度(供系统媒体面板显示),节流到秒级
       if (
         now - lastSessionSyncRef.current >= 1000 &&

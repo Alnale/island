@@ -93,7 +93,7 @@ app.whenReady().then(async () => {
 // ---- 2. 测试样本与断言 -------------------------------------------------------
 async function run(config) {
   const { createSummaryAgent } = require(path.join(root, 'electron', 'agent.cjs'))
-  // 可变配置引用:风格段切换 summaryStyle/mindPersona 时替换对象,
+  // 可变配置引用:风格段切换 summaryStyle 时替换对象,
   // Sub Agent 每次调用独立读 getConfig(与主进程"每次调用独立读配置"一致)
   let currentConfig = config
   const agent = createSummaryAgent({ getConfig: () => currentConfig })
@@ -182,34 +182,6 @@ async function run(config) {
   }
   log(bad === 0 ? '\n全部合格' : `\n${bad}/${histories.length} 段不合格`)
 
-  // ---- 心理揣测(createMindAgent.guess):同 5 段历史,断言 ≤16 码元
-  // 无截断、非空;失败(超长重试耗尽/调用失败)回退标题 = 展示缺陷 ----
-  const mind = require(path.join(root, 'electron', 'agent.cjs')).createMindAgent({
-    getConfig: () => currentConfig,
-  })
-  let mindBad = 0
-  log(`\n=== 心理揣测真实 API 测试(默认人格,≤16 码元不截断) ===`)
-  for (const h of histories) {
-    const t0 = Date.now()
-    try {
-      const g = await mind.guess(h.messages)
-      const elapsed = Math.round((Date.now() - t0) / 1000)
-      const len = Array.from(g).length
-      const problems = []
-      if (!g) problems.push('空(重试耗尽回退标题)')
-      if (len > 16) problems.push(`超长 ${len} 码元(截断)`)
-      if (len > 0 && len < 3) problems.push('过短')
-      const mark = problems.length ? `✗ ${problems.join(' / ')}` : '✓'
-      if (problems.length) mindBad++
-      log(`  ${mark} [${h.name}]「${g}」(${len} 码元,${elapsed}s)`)
-    } catch (err) {
-      mindBad++
-      log(`  ✗ [${h.name}] 调用失败:${err.message}`)
-    }
-  }
-  log(mindBad === 0 ? '全部合格' : `${mindBad}/${histories.length} 段不合格`)
-  if (mindBad) bad = 1
-
   // ---- 风格验证:同一段历史分别跑各预设 + 自定义,断言输出有差异 ----
   const styleHist = histories[1] // B 段(工具调用 + 话题),风格差异最明显
   const SUMMARY_STYLES = [
@@ -219,15 +191,7 @@ async function run(config) {
     ['formal', '正式稳重'],
     ['custom', '用网络流行语,像短视频标题'],
   ]
-  const MIND_PERSONAS = [
-    ['catgirl', '俏皮猫娘'],
-    ['tender', '温柔贴心'],
-    ['aloof', '高冷克制'],
-    ['witty', '知性风趣'],
-    ['custom', '用粤语夹杂英语,像港片台词'],
-  ]
   const summaryOuts = []
-  const mindOuts = []
   log(`\n=== 风格影响验证(同一段历史,各预设 + 自定义) ===`)
   for (const [id, label] of SUMMARY_STYLES) {
     currentConfig = { ...config, summaryStyle: id === 'custom' ? '用网络流行语,像短视频标题' : id }
@@ -241,21 +205,6 @@ async function run(config) {
   const uniqueSummary = new Set(summaryOuts).size
   log(`  标题 5 种风格输出互不相同:${uniqueSummary === 5 ? '✓' : `✗ 仅 ${uniqueSummary} 种`}(不同 = 风格确实影响生成)`)
   if (uniqueSummary < 3) bad = 1
-  for (const [id, label] of MIND_PERSONAS) {
-    currentConfig = { ...config, mindPersona: id === 'custom' ? '用粤语夹杂英语,像港片台词' : id }
-    const t0 = Date.now()
-    const out = await mind.guess(styleHist.messages)
-    const elapsed = Math.round((Date.now() - t0) / 1000)
-    mindOuts.push(out)
-    log(`  [揣测 人格=${label}]「${out}」(${Array.from(out).length} 码元,${elapsed}s)`)
-    if (!out || Array.from(out).length > 16) bad = 1
-  }
-  const uniqueMind = new Set(mindOuts).size
-  log(`  揣测 5 种人格输出互不相同:${uniqueMind === 5 ? '✓' : `✗ 仅 ${uniqueMind} 种`}`)
-  if (uniqueMind < 3) bad = 1
-  // 自定义人格应带明显特征(粤语/英语词)——软断言,日志人工核验
-  const customMind = mindOuts[4] ?? ''
-  log(`  自定义人格(粤语+英语)特征词核验:${/(香港|港|粤|冇|咁|咖|啦|OK|bye|好嘢|顶|咗|搞掂|唔|啱|哋|喺|講|識|廢話|靜|咩|係|嘅|嚟|嘢)/.test(customMind) ? '✓ 命中' : '△ 未命中(需人工确认输出是否体现自定义)'}`)
 
   log(bad === 0 ? '\n全部合格' : `\n存在不合格项`)
   log(`完整结果已写入:${LOG_FILE}`)

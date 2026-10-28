@@ -1,12 +1,13 @@
 /**
- * 后台标签 Sub Agent 纯辅助函数(标题清洗/JSON 解析/提示构建/mind 清洗)
+ * 后台标签 Sub Agent 纯辅助函数(标题清洗/JSON 解析/提示构建)
  *
  * 2026-08-14 插件化四期从 subagents.ts 拆出:全部纯函数,无 IO/无状态,
- * 被工厂(createSummaryAgent/createMindAgent/createProactiveAgent)与测试共用;
+ * 被工厂(createSummaryAgent/createProactiveAgent)与测试共用;
  * subagents.ts barrel 兼容 re-export,engine.ts 既有导出路径不变。
+ * 心理行的纯文本清洗/截取已迁居 mind-mark.ts(心理刻画,无 Sub Agent)。
  */
 
-import { MIND_PERSONAS, SUMMARY_STYLES } from '../constants'
+import { SUMMARY_STYLES } from '../constants'
 import type { AgentMessage, AgentPart, MemoryEntry } from '../types'
 import type { ReplyIntent } from '../napcat/napcat-session'
 
@@ -208,22 +209,21 @@ export function looksLikeSentenceTitle(title: string): boolean {
 
 /**
  * Sub Agent 风格配置解析(测试用导出):预设 id → 提示词片段(查表,
- * SUMMARY_STYLES / MIND_PERSONAS 定义在 constants.ts——渲染端设置界面
- * 可安全 import);自定义文本(≤100 字)原样返回;空返回 ''。
+ * SUMMARY_STYLES 定义在 constants.ts——渲染端设置界面可安全 import);
+ * 自定义文本(≤100 字)原样返回;空返回 ''。
  * 设置存 id 或自定义文本,与 UI 预设按钮/输入一致
  */
-export function resolveSubAgentStyle(kind: 'summary' | 'mind', value: string | undefined): string {
+export function resolveSubAgentStyle(value: string | undefined): string {
   if (!value || !value.trim()) return ''
   const v = value.trim()
-  const table = kind === 'summary' ? SUMMARY_STYLES : MIND_PERSONAS
-  const preset = table.find((s) => s.id === v)
+  const preset = SUMMARY_STYLES.find((s) => s.id === v)
   if (preset) return preset.desc
   return v.length > 100 ? v.slice(0, 100) : v
 }
 
 // 预设表 re-export(engine.ts 再导出保持测试/UI 导入路径;定义在
 // constants.ts:渲染端零 node 依赖可安全 import)
-export { MIND_PERSONAS, SUMMARY_STYLES } from '../constants'
+export { SUMMARY_STYLES } from '../constants'
 
 /** 主动陪伴判断系统提示(JSON 措辞;json_mode 要求 prompt 含 "json" 字样;
  * 明确列举判 false 的情形——判断偏保守 = 不打扰,是安全侧;
@@ -245,6 +245,9 @@ const JUDGE_SYSTEM_PROMPT = (idleMinutes: number) =>
   '不要频繁,只有当群与助手都安静超过陪伴间隔时才考虑)。' +
   '不适合:对话刚自然结束、用户明确表示不想被打扰、没有值得跟进或动手的内容、' +
   '上下文太短无法判断、群里刚有活跃对话或助手刚发过言。' +
+  '**但注意(2026-10-22 纠偏):用户主动开启了"主动陪伴",就是期待偶尔被关心——' +
+  '只要不是明确不宜,宁可轻松开口一句(should:true),不要因为"话题不够好"就沉默;' +
+  '拿不准时倾向开口。**' +
   '只输出 JSON 对象:{"should": true或false, "hint": "建议话题或动作(可选,should为true时给,不超过20字)"}。' +
   'hint 可包含"该用什么工具做什么"(如"用 web_search 查一下…"),让主动开口不只是问候而是行动。' +
   '不要解释,不要照抄示例文字。'
@@ -351,139 +354,6 @@ const USER_STYLE_PROMPT =
  * 分析只依赖对话文本本身 */
 export function buildUserStyleSystem(context: string[]): string {
   const blocks = [context.filter(Boolean).join('\n\n'), USER_STYLE_PROMPT]
-  return blocks.filter(Boolean).join('\n\n')
-}
-/**
- * 心理揣测系统提示(2026-08-13 精简重构):历次措辞经验(预演回复判废/
- * 旁观者视角/16 字硬约束/完整句收尾/示例照抄判废)压缩成四条规则——
- * 原长段"不要…不要…"叙述被精简为结构化编号,约束信息不丢、可读性
- * 提升;判效与重试机制(反馈注入/语义截取/人格回退)不变
- */
-const MIND_SYSTEM_PROMPT =
-  '你是灵动岛的「心理揣测师」。写 AI 助手此刻心里的内心 OS(第一人称心里话,如「嘴上客气,心里在偷乐」),要幽默、有画面感。' +
-  '规则:① 是它心里的想法,**不是给用户的回复**——不复述、不预演对话内容;' +
-  '② 旁观者视角,不模仿助手自己的口吻/自称(如「主人/鲸鱼」);' +
-  '③ **严格 ≤16 汉字,且必须是说完的完整一句**——宁可 8 字说完整,不要 16 字说一半,不要以逗号、连词收尾;' +
-  '④ 直接输出这句话,不要引号、前缀、解释,不要照抄示例。'
-
-/** 心理揣测码元上限(2026-08-07 放宽:15 字左右,最多 16;紧凑态文字区
- * 随字数扩展岛宽,超出会截断——展示前自查超长则重新组织,直到不截断,
- * 上限 MIND_MAX_RETRIES 次防死循环) */
-export const MIND_MAX_LEN = 16
-
-/** 超长自查重试上限(2026-08-07 用户要求:截断则重新组织直到不截断;
- * 措辞已强化一轮过,5 次是防 LLM 持续不守约束的死循环兜底) */
-export const MIND_MAX_RETRIES = 5
-
-/** 模型可能照抄的示例词(照抄 = 无效,重试) */
-export const MIND_LITERAL_EXAMPLES = new Set(['表面淡定,内心在慌', '表面淡定内心在慌'])
-
-/**
- * 超长 raw 的语义截取(2026-08-12 实机修复,测试用导出):模型输出超
- * 16 码元时通常是「完整小句 + 续写」的结构(实机样本"好,李文亚教授
- * 是吧!刚才那列表里正好看到…我直接给你抓下来播放 🐳"、"主人这是
- * 又陷进旋律里了吧～那我不吵你…")——取**第一个句子终止标点
- * (。！？；…～)前**的完整小句,语义完整、无截断观感。
- * 结果 4-16 码元且非残句结尾才采用;否则返回 null(判废进重试)。
- * 与 sanitizeMind 的硬截 16 区别:本函数按语义边界截,不切半句
- */
-export function cutMindSentence(raw: string): string | null {
-  // 终止标点:全角(。！？；…～)+ 半角(!.?)(实机模型常输出半角感叹号)
-  const m = /^[\s\S]{0,30}?[。！？；…～!?.]/.exec(raw)
-  if (!m) return null
-  const head = m[0].slice(0, -1).trim()
-  const len = Array.from(head).length
-  if (len < 4 || len > MIND_MAX_LEN) return null
-  if (looksLikeIncompleteMind(head)) return null
-  return head
-}
-
-/**
- * 超长且无句末标点的 raw 二级兜底截取(2026-08-14 实机修复,测试用导出):
- * 人格风格(粤语/猫娘等)持续输出逗号串长句、全程无句末标点(实机样本
- * "收到,以后我答嘢快狠准,唔会再长篇大论")——cutMindSentence 无从截取,
- * 盲重试 5 次同风格同病,耗尽返回空。取 **≤16 码元范围内、以逗号/顿号
- * 收尾的最长前缀小句**(实机样本 → "收到,以后我答嘢快狠准"),首段小句
- * 语义完整、无截断观感;4-16 码元且非残句才采用,否则返回 null 判废重试
- */
-export function salvageMindClause(raw: string): string | null {
-  const chars = Array.from(raw)
-  let best: string | null = null
-  // 逐码元扫描前 16 码元内的逗号/顿号,保留最后一个(= 最长)合规前缀小句
-  for (let i = 0; i < Math.min(chars.length, MIND_MAX_LEN); i++) {
-    if (/[,，、]/.test(chars[i])) {
-      const head = chars.slice(0, i).join('').trim()
-      if (Array.from(head).length >= 4) best = head
-    }
-  }
-  if (!best) return null
-  if (looksLikeIncompleteMind(best)) return null
-  return best
-}
-
-/**
- * 心理揣测残句判定(2026-08-12,测试用导出):以逗号/顿号/冒号等未完成
- * 标点结尾、或收在连词上(你那/就是/因为/但是/然后/所以/还有…) =
- * 句子没说完——模型把 16 字配额用满但话只说一半(实测"收到,以后给你
- * 最精简的干货。你那"16 码元整却以"你那"收尾);过短(<4 码元,如
- * "哈哈,")同样判废。命中 = 判无效重试,防止"16 码元整却半句"的截断观感
- */
-export function looksLikeIncompleteMind(guess: string): boolean {
-  const t = guess.trim()
-  if (!t) return true
-  if (Array.from(t).length < 4) return true
-  return /[,，、;；:：]$/.test(t) || /(你那|就是|因为|但是|然后|所以|还有|这边|之后|接着|反正)$/.test(t)
-}
-
-/**
- * 心理揣测清洗(测试用导出):去引号/首尾括号/「心理揣测:」前缀/尾随标点、
- * **剥离任意位置的 [揣测：xxx] / 【揣测：xxx】 括号标注**(2026-08-07
- * 实测:模型输出"喵～我已经瞄到主人了哦[揣测：表情…]"——标注在中段,
- * 原只剥开头前缀,截 16 码元后残留"[揣测：表",用户要求去掉"["与
- * "揣测："残片;闭合缺失也剥(截断输入安全侧)),
- * 按码元截 16(2026-08-07 放宽:用户要求"15 字左右,最多 16 字"——
- * 紧凑态文字区随字数扩展岛宽,不再像素截断;渲染端兜底同值)。
- * 首尾括号含 2026-08-14 实机样本"（这下总该明白了吧"——开头全角左括号
- * 无闭合,原字符类不含括号透传显示。
- * **顺序修正(2026-08-18 实机修复)**:标签剥离必须先于"首尾括号剥离"——
- * 原实现先用 ^[「『"'《<（(【[]+ 剥掉开头"["(当普通括号),再剥离标签,
- * 此时标签词若不在白名单(实机"[心情]嘴上恭喜","心情"非"心态")则残留
- * "]xxx"(显示"心情]嘴上恭喜")。先整段剥 [标签:xxx](闭合可选),再处理
- * 残留的"标签]"残片,最后才剥普通首尾括号
- */
-export function sanitizeMind(raw: string): string {
-  const text = raw
-    .trim()
-    // ① 剥任意位置的 [标签:xxx] / 【标签】 标注,闭合可选(开头"["无闭合
-    //    也剥;"["匹配先于普通括号剥离,避免标签残片)——标签词覆盖
-    //    心理揣测/揣测/心态/心情/心里/内心/心声/心理/想法/推测/猜测
-    .replace(/[[【]\s*(?:心理揣测|揣测|心态|心情|心里|内心|心声|心理|想法|推测|猜测)\s*[:：]?[^\]】]*[\]】]?/g, '')
-    // ①b 残留标签兜底:开头"标签词+]"残片(防御 ① 已漏、或历史持久化的坏值)
-    .replace(/^(?:心情|心里|内心|心声|心理|想法|心态|推测|猜测)[\]】]/, '')
-    // ② 前缀「心理揣测:」等
-    .replace(/^(?:心理揣测|揣测|心态)\s*[:：]?\s*/, '')
-    // ③ 首尾括号/引号(含 2026-08-14 实机样本"（这下总该明白了吧"——
-    //    开头全角左括号无闭合)
-    .replace(/^[「『"'《<（(【[]+|[」』"'》>）)】\]]+$/g, '')
-    // ③b 兜底:步骤③剥离了开头"["但标签未匹配步骤①列表(如推测/猜测),
-    //    残留"文字+]"在文本中(如"推测]她可能很高兴"→"推测]"被剥离)。
-    //    检测开头连续非空非闭合括号字符后紧跟"]"/"】"并清除
-    .replace(/^[^\s\]】]+[\]】]/, '')
-    // ④ 尾随标点
-    .replace(/[。！？!?…]+$/, '')
-    .trim()
-  return Array.from(text).slice(0, 16).join('')
-}
-
-/**
- * 心理揣测系统提示拼装(测试用导出):**与主对话引擎同源上下文**——
- * 自定义提示词 + 长期记忆块 + 进化状态 + 后台任务状态,再接揣测指令。
- * 揣测必须知道助手"是谁、记得什么、在忙什么",否则心理是猜的空气
- * (用户提示词要求冷淡,猜"热情洋溢"就串味;记忆说讨厌重复,猜
- * "偷懒复读"才对味)。空块/未注入静默跳过
- */
-export function buildMindSystem(context: string[]): string {
-  const blocks = [context.filter(Boolean).join('\n\n'), MIND_SYSTEM_PROMPT]
   return blocks.filter(Boolean).join('\n\n')
 }
 

@@ -14,6 +14,7 @@ import { loadLyricProvider } from '../../../media/lyricProviders'
 import { formatTime } from '../../../utils/format'
 import { ModeIcon } from '../ModeIcon'
 import { ParticleTime } from '../ParticleTime'
+import { ProgressRewindLayer } from '../ProgressRewind'
 import type { PanelView } from '../layout'
 
 export interface ControlViewProps {
@@ -27,6 +28,13 @@ export interface ControlViewProps {
   position: number
   duration: number
   displayRatio: number
+  /** 切到下一首时的进度样式。回退进行中为 undefined,由粒子层直接写比例。 */
+  progressStyle?: CSSProperties
+  /** 正在把当前进度回退到开头(粒子还在画) */
+  rewindRun?: { id: number; from: number } | null
+  /** 回退尚未把真实进度交还:时长短暂变成 0 时也保留这条进度条 */
+  progressPinned?: boolean
+  onRewindDone?: () => void
   scrubbing: boolean
   scrubRatio: number | null
   /** 操作提示(模式/跳转不被接受时,播放键正下方) */
@@ -77,6 +85,10 @@ export function ControlView(props: ControlViewProps) {
     position,
     duration,
     displayRatio,
+    progressStyle,
+    rewindRun,
+    progressPinned,
+    onRewindDone,
     scrubbing,
     scrubRatio,
     hint,
@@ -218,12 +230,12 @@ export function ControlView(props: ControlViewProps) {
         </p>
       </div>
 
-      {showBar && duration > 0 && (
+      {showBar && (duration > 0 || progressPinned) && (
         <div className="island-panel-progress-row">
           <span className="island-panel-time">0:00</span>
           <div
             ref={panelBarRef}
-            className="island-panel-progress"
+            className={`island-panel-progress${rewindRun ? ' is-rewinding' : ''}`}
             role="slider"
             tabIndex={0}
             aria-label="播放进度"
@@ -231,7 +243,11 @@ export function ControlView(props: ControlViewProps) {
             aria-valuemax={duration}
             aria-valuenow={scrubbing && scrubRatio !== null ? scrubRatio * duration : position}
             aria-valuetext={`${formatTime(position)} / ${formatTime(duration)}`}
-            style={{ '--progress-ratio': displayRatio } as CSSProperties}
+            style={
+              rewindRun
+                ? undefined
+                : (progressStyle ?? ({ '--progress-ratio': displayRatio } as CSSProperties))
+            }
             onClick={(event) => event.stopPropagation()}
             onKeyDown={(event) => {
               event.stopPropagation()
@@ -251,11 +267,14 @@ export function ControlView(props: ControlViewProps) {
             }
           >
             <div className="island-panel-progress-fill" />
+            {rewindRun && (
+              <ProgressRewindLayer key={rewindRun.id} from={rewindRun.from} onDone={() => onRewindDone?.()} />
+            )}
           </div>
           <span className="island-panel-time">{formatTime(duration)}</span>
         </div>
       )}
-      {showBar && duration <= 0 && (
+      {showBar && duration <= 0 && !progressPinned && (
         <div className="island-panel-progress-row">
           <div className="island-panel-progress" aria-hidden="true">
             <div className="island-panel-progress-fill" />

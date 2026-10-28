@@ -123,26 +123,34 @@ const STATUS_LABEL: Record<TaskStatus, string> = {
 }
 
 /**
- * 全部任务的状态注入块(引擎/Sub Agent 追加到系统提示;无任务返回空串)。
+ * 全部**进行中**任务的状态注入块(引擎/Sub Agent 追加到系统提示;无任务返回空串)。
  * 让 LLM 对"等待用户扫码/下载进行中"有真实感知,回答时依据真实状态。
+ *
+ * 2026-10-23:终态(done/failed/cancelled)任务**不再注入**——终态结果已由
+ * background-done 事件在当轮对话里告知;旧逻辑保留 24h 并在每轮系统提示里
+ * 重复"B站下载:已完成",LLM 会把已完成的任务当成刚发生的事件,反复向
+ * 用户播报"某个视频下载完毕"(用户实测幻觉)。
  * **文案稳定**:只含任务名/状态/细节(状态不变时不产生序列化抖动,
  * 不破坏 DeepSeek 前缀缓存——更新时间戳不进文案)
  */
 export function getTasksStatusBlock(): string {
   pruneTasks()
-  if (tasks.size === 0) return ''
-  const now = Date.now()
-  const lines = [...tasks.values()]
+  // 终态不注入:完成/失败的结果只在该任务的 background-done 轮出现一次,
+  // 之后需要查阅历史结果用 bili saved / 任务查询工具
+  const active = [...tasks.values()]
+    .filter((t) => !TERMINAL.has(t.status))
     .sort((a, b) => a.updatedAt - b.updatedAt)
-    .map((t) => {
-      const stale = !TERMINAL.has(t.status) && now - t.updatedAt > STALE_MS
-      const detail = t.detail ? `,${t.detail}` : ''
-      return `- ${t.title}:${STATUS_LABEL[t.status]}${detail}${stale ? '(已超时未更新,可能已失效)' : ''}`
-    })
+  if (active.length === 0) return ''
+  const now = Date.now()
+  const lines = active.map((t) => {
+    const stale = now - t.updatedAt > STALE_MS
+    const detail = t.detail ? `,${t.detail}` : ''
+    return `- ${t.title}:${STATUS_LABEL[t.status]}${detail}${stale ? '(已超时未更新,可能已失效)' : ''}`
+  })
   return (
     '【后台任务状态(最新,以此为准)】\n' +
     lines.join('\n') +
-    '\n对话中提及这些任务时按状态如实回答:已完成/已失败就直接说明结果,不要再"还在进行"或"完成后会通知";' +
-    '等待人工操作的任务要提醒用户当前需要做什么(如扫码确认、确认授权);进行中才说还在进行。'
+    '\n对话中提及这些任务时按状态如实回答:等待人工操作的任务要提醒用户当前需要做什么' +
+    '(如扫码确认、确认授权);进行中才说还在进行。'
   )
 }

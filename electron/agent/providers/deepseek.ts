@@ -16,6 +16,10 @@
  *   "unknown variant 'reasoning'")、function_call(归并到相邻 assistant
  *   消息)、function_call_output、reasoning(明文 content 归并到相邻
  *   assistant 消息;summary / encrypted_content 不支持);
+ * - 图像理解(2026-10-22):user 消息内容块支持 **input_image**
+ *   (image_url = URL|data URI 字符串,与 file_id 互斥;官方 vision 指南,
+ *   仅 user/developer 消息与工具输出项可带图)——历史图片 part 序列化见
+ *   deepseek-media.ts,带图请求换 deepseek-flash(官方:图片仅该模型支持);
  * - 流式:stream: true,事件带 event 字段与递增 sequence_number,
  *   以 response.completed / .incomplete / .failed 结束,没有 [DONE]。
  *
@@ -26,7 +30,8 @@
  */
 
 import { parseSse, sanitizeJsonStrings, truncateResult } from './sse'
-import { deepseekErrorMessage } from './deepseek-constants'
+import { DEEPSEEK_MISSING_REASONING, deepseekErrorMessage, deepseekModelForInput } from './deepseek-constants'
+import { deepseekUserContent, historyHasImages, planDeepseekImages } from './deepseek-media'
 import type { AgentConfig, AgentEvent, AgentMessage, AgentPart, AgentTool, ProviderOutcome } from '../types'
 
 /** 工具调用流式累积器 */
@@ -66,26 +71,46 @@ function findCall(d: Record<string, unknown>, calls: Map<string, StreamCall>): S
   return null
 }
 
+/** reasoning item 里的明文思维链(官方 content[].type = reasoning_text) */
+function reasoningTextOf(item: Record<string, unknown> | undefined): string {
+  if (!item || item.type !== 'reasoning' || !Array.isArray(item.content)) return ''
+  let out = ''
+  for (const part of item.content as Array<Record<string, unknown>>) {
+    if (part?.type === 'reasoning_text' && typeof part.text === 'string' && part.text) out += part.text
+  }
+  return out
+}
+
 /**
  * 历史消息 → Responses API 的 input items(严格按官方文档:
  * https://api-docs.deepseek.com/zh-cn/guides/responses_api 输入 Items 表):
- * - user 消息 → message(role=user, content=input_text 块);
- * - assistant 消息:
- *   reasoning part → 独立 reasoning item(明文 content 归并到相邻
- *     assistant 消息;message 内容块不支持 reasoning 类型,塞进去 400);
- *   连续文本 → message(role=assistant, content=output_text 块);
- *   工具调用 → function_call 项(归并到相邻 assistant 消息);
- *   工具结果 → function_call_output 项(引用 call_id)。
+ * - user 消息 → message(role=user, content=input_text 块;**带图片 part 时
+ *   追加 input_image 块**,2026-10-22 图像理解适配,见 deepseek-media.ts);
+ * - assistant 消息按工具轮拆开。replayReasoning(本请求带 tools 且思考
+ *   开着)时,每一轮都以 reasoning item 开头,再跟 message / function_call。
+ *   思维链用 content:[{type:'reasoning_text', text}]。summary /
+ *   encrypted_content 官方不支持,写了等于没带回,下一步 400。
+ *   没存到原文时 text 用一个空格(空串同样 400)。没调用工具的轮次也要带。
+ *   思考关或不带 tools 时不回传 reasoning item。
+ *   工具结果 → function_call_output 项(引用 call_id),紧跟该轮调用。
+ * 图片(官方:仅 user 消息可带图):本地路径读盘转 base64、公网 URL 透传,
+ * 体积超预算的新图优先——async(2026-10-22,本地图片需读盘编码)。
  */
-export function historyToItems(history: AgentMessage[]): unknown[] {
+export async function historyToItems(
+  history: AgentMessage[],
+  options?: { replayReasoning?: boolean },
+): Promise<unknown[]> {
+  const replayReasoning = options?.replayReasoning === true
+  const plan = await planDeepseekImages(history)
   const items: unknown[] = []
   for (const msg of history) {
     if (msg.role === 'user') {
-      const text = msg.parts
-        .filter((p): p is Extract<AgentPart, { type: 'text' }> => p.type === 'text')
-        .map((p) => p.text)
-        .join('\n')
-      if (text) items.push({ type: 'message', role: 'user', content: [{ type: 'input_text', text }] })
+      const content = deepseekUserContent(msg.parts, 'responses', plan)
+      if (typeof content === 'string') {
+        if (content) items.push({ type: 'message', role: 'user', content: [{ type: 'input_text', text: content }] })
+      } else if (content.length > 0) {
+        items.push({ type: 'message', role: 'user', content })
+      }
       continue
     }
     // system 角色(主动陪伴回合的内部指令等):官方输入 items 支持
@@ -99,33 +124,46 @@ export function historyToItems(history: AgentMessage[]): unknown[] {
       if (text) items.push({ type: 'message', role: 'system', content: [{ type: 'input_text', text }] })
       continue
     }
-    // assistant:reasoning 先输出(思维链先于回复,归并到相邻助手消息),
-    // 再按 parts 顺序展开文本与工具调用
-    const reasoning = msg.parts
-      .filter((p): p is Extract<AgentPart, { type: 'reasoning' }> => p.type === 'reasoning')
-      .map((p) => p.text)
-      .join('\n')
-    if (reasoning) {
-      items.push({ type: 'reasoning', content: [{ type: 'reasoning_text', text: reasoning }] })
-    }
-    let pendingText = ''
-    const flushText = () => {
-      if (!pendingText) return
-      items.push({ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: pendingText }] })
-      pendingText = ''
-    }
-    for (const part of msg.parts) {
-      if (part.type === 'text') {
-        pendingText += pendingText ? '\n' + part.text : part.text
-      } else if (part.type === 'tool-call') {
-        flushText()
+    // 一轮 = 思维链(必须在最前) + 正文 + 该轮的 function_call。
+    // 遇到 tool-result 先落这一轮,再落 function_call_output。
+    let reasoningParts: string[] = []
+    let textParts: string[] = []
+    let calls: Array<Extract<AgentPart, { type: 'tool-call' }>> = []
+    const flushAssistant = () => {
+      const reasoning = reasoningParts.join('\n')
+      const text = textParts.join('\n')
+      const roundCalls = calls
+      reasoningParts = []
+      textParts = []
+      calls = []
+      if (!reasoning && !text && roundCalls.length === 0) return
+      if (replayReasoning) {
+        items.push({
+          type: 'reasoning',
+          content: [{ type: 'reasoning_text', text: reasoning || DEEPSEEK_MISSING_REASONING }],
+        })
+      }
+      if (text) {
+        items.push({ type: 'message', role: 'assistant', content: [{ type: 'output_text', text }] })
+      }
+      for (const call of roundCalls) {
         items.push({
           type: 'function_call',
-          call_id: part.id,
-          name: part.name,
-          arguments: JSON.stringify(part.args ?? {}),
+          call_id: call.id,
+          name: call.name,
+          arguments: JSON.stringify(call.args ?? {}),
         })
+      }
+    }
+    for (const part of msg.parts) {
+      if (part.type === 'reasoning') {
+        if (part.text) reasoningParts.push(part.text)
+      } else if (part.type === 'text') {
+        textParts.push(part.text)
+      } else if (part.type === 'tool-call') {
+        calls.push(part)
       } else if (part.type === 'tool-result') {
+        flushAssistant()
         items.push({
           type: 'function_call_output',
           call_id: part.id,
@@ -134,7 +172,7 @@ export function historyToItems(history: AgentMessage[]): unknown[] {
         })
       }
     }
-    flushText()
+    flushAssistant()
   }
   return items
 }
@@ -172,9 +210,15 @@ export async function streamResponse(params: {
   const url = `${base}/responses`
 
   const body: Record<string, unknown> = {
-    model: config.model.trim() || 'deepseek-v4-flash',
+    // 带图请求按官方约束换视觉模型(图片仅 deepseek-flash 支持;flash 家族
+    // 与纯文本请求保持配置模型,见 deepseekModelForInput)
+    model: deepseekModelForInput(config.model, historyHasImages(history)),
     instructions: system,
-    input: historyToItems(history),
+    input: await historyToItems(history, {
+      // 官方:带 tools 且思考开着,历史每一轮 reasoning item 都要回传。
+      // effort 'none'(思考关)或不带 tools 时不回传。
+      replayReasoning: tools.length > 0 && !noThinking,
+    }),
     // 有工具才带 tools/tool_choice(静默总结等无工具请求不带,
     // 请求体最小化,规避空数组边界)
     ...(tools.length > 0
@@ -237,6 +281,23 @@ export async function streamResponse(params: {
 
   const calls = new Map<string, StreamCall>()
   const textParts: string[] = []
+  // 已转发的思维链。delta 是增量;done / completed 上的全文只在增量
+  // 没到齐时补差,避免只靠 done 出链时下一轮无原文可回传。
+  let reasoningAcc = ''
+  const emitReasoningDelta = (text: string) => {
+    if (!text) return
+    reasoningAcc += text
+    onEvent({ type: 'reasoning-delta', text })
+  }
+  const absorbReasoning = (full: string) => {
+    if (!full) return
+    if (!reasoningAcc) {
+      emitReasoningDelta(full)
+      return
+    }
+    if (reasoningAcc === full || reasoningAcc.startsWith(full)) return
+    if (full.startsWith(reasoningAcc)) emitReasoningDelta(full.slice(reasoningAcc.length))
+  }
   // 输出项(按出现顺序,response.completed 前补全):
   // 官方事件的 output_item 只含增量,completed 才带完整 output;
   // 这里只需 usage(参数/文本已由事件增量收集)
@@ -275,10 +336,13 @@ export async function streamResponse(params: {
       }
       case 'response.reasoning_text.delta': {
         const text = typeof d.delta === 'string' ? d.delta : ''
-        if (text) {
-          // reasoning 只作 UI 展示转发,不在此收集
-          onEvent({ type: 'reasoning-delta', text })
-        }
+        if (text) emitReasoningDelta(text)
+        break
+      }
+      case 'response.reasoning_text.done': {
+        // done 带的是全文。增量已经拼齐时不再发一遍。
+        const full = typeof d.text === 'string' ? d.text : ''
+        absorbReasoning(full)
         break
       }
       case 'response.function_call_arguments.delta': {
@@ -307,6 +371,8 @@ export async function streamResponse(params: {
       }
       case 'response.output_item.done': {
         const item = d.item as Record<string, unknown> | undefined
+        const doneReasoning = reasoningTextOf(item)
+        if (doneReasoning) absorbReasoning(doneReasoning)
         if (item?.type === 'function_call' && typeof item.call_id === 'string') {
           const call = calls.get(item.call_id)
           if (call) {
@@ -335,6 +401,12 @@ export async function streamResponse(params: {
             output_tokens: typeof u.output_tokens === 'number' ? u.output_tokens : 0,
             cached_tokens:
               typeof details?.cached_tokens === 'number' ? details.cached_tokens : undefined,
+          }
+        }
+        const output = resp?.output
+        if (Array.isArray(output)) {
+          for (const item of output) {
+            if (item && typeof item === 'object') absorbReasoning(reasoningTextOf(item as Record<string, unknown>))
           }
         }
         break

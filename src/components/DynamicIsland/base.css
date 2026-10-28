@@ -64,6 +64,15 @@
   animation: islandEnter 0.6s cubic-bezier(0.34, 1.56, 0.64, 1) backwards;
 }
 
+/* 点按/长按不画系统焦点环。岛体可聚焦(tabIndex),对话里的播放键
+   也是 button:获焦时浏览器会在外围加一圈描边。 */
+.island-demo:focus,
+.island-demo:focus-visible,
+.island-demo :focus,
+.island-demo :focus-visible {
+  outline: none;
+}
+
 .island-demo.island-ui-light {
   color-scheme: light;
   --island-surface-soft: rgba(11, 11, 15, 0.06);
@@ -90,9 +99,9 @@
 
 /* 背景与毛玻璃独立一层:border-radius 跟随父级、由父级 overflow:hidden
    裁剪,避免 backdrop-filter 与圆角过渡组合时的"矩形模糊外露"渲染问题。
-   无自定义背景图时用实底(--island-solid-bg):半透明 0.85 叠在浅色壁纸上
+   无自定义背景图时用实底(--island-solid-bg):半透明底叠在浅色壁纸上
    合成偏灰,白字对比不足(用户实测"背景不够黑,文字看不见");
-   有背景图时保持深色半透明底,让图层按不透明度叠出可调效果。 */
+   有背景图时同样用不透明实底,明暗交给 .island-bg-image 的蒙层。 */
 .island-bg {
   position: absolute;
   inset: 0;
@@ -104,9 +113,10 @@
   transition: backdrop-filter 0.4s ease;
 }
 
-/* 有自定义背景图:半透明深底(图层在其上按 opacity 叠加,透明处透出深底) */
+/* 有自定义背景图:不透明实底。半透明底在透明窗口里会透出桌面,图发灰。
+   用户调的不透明度由 .island-bg-image 里的深色蒙层完成,不靠这一层的 alpha。 */
 .island-demo.island-has-bg-image .island-bg {
-  background: rgba(0, 0, 0, 0.85);
+  background: rgb(8, 10, 14);
 }
 
 /* 形变动画期与按压期:关闭毛玻璃(backdrop 每帧重采样是卡顿主因),
@@ -442,11 +452,6 @@
   border-radius: 999px;
 }
 
-.island-panel-icon-btn:focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--state-color, #4ade80) 60%, transparent);
-  outline-offset: 2px;
-}
-
 .island-panel-icon-tag {
   font-size: 0.56rem;
   letter-spacing: 0.06em;
@@ -560,12 +565,6 @@
   touch-action: none;
 }
 
-.island-panel-progress:focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--state-color, #4ade80) 60%, transparent);
-  outline-offset: 2px;
-  border-radius: 999px;
-}
-
 .island-panel-progress-fill {
   position: relative;
   width: 100%;
@@ -661,11 +660,6 @@
 
 .island-ctl:active {
   transform: scale(0.93);
-}
-
-.island-ctl:focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--state-color, #4ade80) 60%, transparent);
-  outline-offset: 2px;
 }
 
 /* 播放/暂停主按钮:主题色渐变底 + 深色图标,按压缩小 */
@@ -1182,12 +1176,6 @@
   touch-action: none; /* 触摸拖动不触发页面滚动 */
 }
 
-.island-extra.seekable:focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--state-color, #4ade80) 60%, transparent);
-  outline-offset: 2px;
-  border-radius: 999px;
-}
-
 .island-progress {
   position: relative;
   width: 130px;
@@ -1240,8 +1228,24 @@
 /* 拖动中:填充 1:1 跟随指针(2026-08-18 设计规范:拖拽必须 1:1——原
    0.3s 阻尼让"时间已到、填充未到",与实时粒子时间不同步;松手吸附由
    常规 0.15s 过渡兜底) */
-.island-extra.scrubbing .island-progress-fill {
+.island-extra.scrubbing .island-progress-fill,
+.island-extra.is-rewinding .island-progress-fill {
   transition: none;
+}
+
+/* 切歌回退由脚本逐帧写 --progress-ratio,这里关掉 0.15s 线性
+   过渡,避免填充落后于粒子。粒子画布盖在热区上,不挡住拖动。 */
+.island-panel-progress.is-rewinding .island-panel-progress-fill::after {
+  transition: none;
+}
+
+.island-progress-rewind-particles {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 3;
 }
 
 /* ===== 拖动中的粒子时间 =====

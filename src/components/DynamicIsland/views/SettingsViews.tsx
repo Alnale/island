@@ -39,10 +39,70 @@ export function SettingsView({
   onOpenLyricApi,
   onBack,
 }: SettingsViewProps) {
+  // 置于桌面最上方(2026-10-24 用户要求):仅桌面挂件存在 window.desktop
+  // 桥(Web 演示不渲染该开关);开关权威值在主进程 settings.desktopTopmost,
+  // 渲染端只读初值 + 订阅广播(托盘菜单与设置页共用,任一入口切换即时同步)
+  const topmostSupported = typeof window.desktop?.getDesktopTopmost === 'function'
+  const [desktopTopmost, setDesktopTopmost] = useState(false)
+  useEffect(() => {
+    if (!topmostSupported) return
+    let alive = true
+    window.desktop?.getDesktopTopmost?.().then(
+      (on) => {
+        if (alive) setDesktopTopmost(Boolean(on))
+      },
+      () => {
+        // 读取失败保持默认关闭(开关仍可操作)
+      },
+    )
+    const off = window.desktop?.onDesktopTopmostChange?.((on) => setDesktopTopmost(Boolean(on)))
+    return () => {
+      alive = false
+      off?.()
+    }
+  }, [topmostSupported])
+  const toggleDesktopTopmost = () => {
+    const next = !desktopTopmost
+    setDesktopTopmost(next)
+    const pending = window.desktop?.setDesktopTopmost?.(next)
+    // 主进程写入失败时回滚,避免开关显示与真实层级不一致
+    void pending?.catch(() => setDesktopTopmost((cur) => (cur === next ? !next : cur)))
+  }
   return (
     <div className="island-panel-list">
       <PanelHead title="设置" count="设置类功能" />
       <div className="island-settings-items">
+        {topmostSupported && (
+          <button
+            type="button"
+            role="switch"
+            aria-checked={desktopTopmost}
+            className={`island-settings-item island-settings-toggle${desktopTopmost ? ' on' : ''}`}
+            onClick={(event) => {
+              event.stopPropagation()
+              toggleDesktopTopmost()
+            }}
+          >
+            <svg
+              className="island-ctl-svg"
+              width="16"
+              height="16"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth={2}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="M12 17v5" />
+              <path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" />
+            </svg>
+            <span className="island-settings-toggle-label">置于桌面最上方</span>
+            <span className="island-toggle-track" aria-hidden="true">
+              <span className="island-toggle-knob" />
+            </span>
+          </button>
+        )}
         {onOpenBackground && (
           <button
             type="button"

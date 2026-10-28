@@ -9,7 +9,16 @@
  * 探测到空值即不激活(保持"未注入则不注册"的既有语义)。
  */
 
-import type { AgentConfig, AgentEvent, AgentTool, EvolutionLike, MemoryStoreLike } from '../types'
+import type {
+  AgentConfig,
+  AgentEvent,
+  AgentTool,
+  EngineDeps,
+  EvolutionLike,
+  MemoryStoreLike,
+  PersonaBufferStoreLike,
+  PersonaCardStoreLike,
+} from '../types'
 import type { MCPManager } from '../mcp'
 import type { NapcatClient } from '../napcat/napcat'
 import type { createSkillLoader } from '../skills'
@@ -44,6 +53,8 @@ export interface OwnerConfigService {
   setOwnerQQ(qq: string): { ok: boolean; error?: string }
   /** 轮次种类(classifyTurn 八值;mijia 写守卫区分主人/别人;getTurnSource 仅兜底) */
   getTurnKind?(): string | null
+  /** 本轮触发原文(人格卡危险操作判断主人是否要求改卡;未注入 = 空) */
+  getTurnText?(): string | null
 }
 
 declare module './kernel' {
@@ -78,6 +89,13 @@ declare module './kernel' {
     sessionBridge: SessionBridgeService | undefined
     /** 主人 QQ 配置桥(未注入 = 不注册 set_owner_qq 工具) */
     ownerConfig: OwnerConfigService | undefined
+    /** 群艾特名单和本轮触发消息(未注入 = send_group 只使用显式 at) */
+    groupRoute:
+      | {
+          listParticipants?: EngineDeps['listGroupParticipants']
+          getTurn?: EngineDeps['getGroupTurn']
+        }
+      | undefined
     /** NapCat QQ 客户端(未注入 = 不注册 napcat 工具) */
     napcatClient: NapcatClient | undefined
     /** NapCat 扫码登录窗口(2026-09-22;未注入 = napcat login 提示不可用) */
@@ -86,6 +104,10 @@ declare module './kernel' {
     mijiaLogin: ((region?: string) => void) | undefined
     /** 记忆存储(null = 记忆工具/记忆提示块不可用) */
     memoryStore: MemoryStoreLike | null
+    /** 人格卡存储(null = 人格卡提示段不可用,2026-10-25) */
+    personaStore: PersonaCardStoreLike | null
+    /** 人格卡进化缓冲区(null = persona 工具不提供缓冲区操作) */
+    personaBufferStore: PersonaBufferStoreLike | null
     /** 自我进化 harness(null = evolve 工具不可用) */
     evolution: EvolutionLike | null
     /** Sub Agent 能力宿主(null = 插件自行建本地工厂) */

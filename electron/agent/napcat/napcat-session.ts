@@ -17,6 +17,7 @@
  */
 
 import { randomInt } from 'node:crypto'
+import { stripMindMarks } from '../mind-mark'
 
 // ---- 会话键 ----
 export function sessionKeyFor(qq: string, groupId?: string): string {
@@ -24,6 +25,381 @@ export function sessionKeyFor(qq: string, groupId?: string): string {
 }
 export function isValidSessionKey(key: string): boolean {
   return /^(private:\d+|group:\d+)$/.test(key)
+}
+
+// ---- 群上下文隔离 ----
+// 各群的最近消息必须分桶。一条全局缓冲会把 A 群的话写进 B 群的提示词，
+// 模型接着把那些话当成 B 群的上下文，回复就发到了别的群。
+
+const MASTER_TURN_KINDS = new Set(['window', 'panel', 'master-qq', 'master-group'])
+
+export function isMasterTurnKind(kind: string | null | undefined): boolean {
+  return MASTER_TURN_KINDS.has(String(kind ?? ''))
+}
+
+function sessionGroupId(sessionKey: string | null | undefined): string {
+  return /^group:(\d+)$/.exec(String(sessionKey ?? ''))?.[1] ?? ''
+}
+
+function sessionPrivateId(sessionKey: string | null | undefined): string {
+  return /^private:(\d+)$/.exec(String(sessionKey ?? ''))?.[1] ?? ''
+}
+
+export interface GroupContextEntry {
+  groupId: string
+  qq: string
+  text: string
+  atMe: boolean
+  /** 这条消息当时的群名片或昵称。档案没备注时，艾特仍认得出这个人。 */
+  name?: string
+}
+
+/**
+ * 提示词里「有人在 @ 机器人」的记号。
+ * 不能写成 @名字:模型会把这串抄进群回复,QQ 上就是艾特自己。
+ */
+export const BOT_MENTION_MARK = '（提到你）'
+
+/** 机器人自称。回复里这些称呼是在说自己,不能拿去艾特任何群友。 */
+export const BOT_SELF_NAMES = ['岛灵', '鲸鱼娘', '小鲸'] as const
+
+export function isBotSelfName(name: string): boolean {
+  const n = String(name ?? '').trim()
+  return (BOT_SELF_NAMES as readonly string[]).includes(n)
+}
+
+/** 记下一条群消息。只进该群自己的桶，并按群号做 LRU。 */
+export function rememberGroupContext(
+  buckets: Map<string, GroupContextEntry[]>,
+  entry: { groupId?: string; qq?: string; text?: string; atMe?: boolean; name?: string },
+  limits?: { perGroup?: number; maxGroups?: number },
+): void {
+  const groupId = String(entry.groupId ?? '').trim()
+  const text = String(entry.text ?? '')
+  if (!groupId || !text.trim()) return
+  const perGroup = limits?.perGroup ?? 20
+  const maxGroups = limits?.maxGroups ?? 40
+  const list = buckets.get(groupId) ?? []
+  const name = String(entry.name ?? '').trim()
+  list.push({
+    groupId,
+    qq: String(entry.qq ?? ''),
+    text,
+    atMe: !!entry.atMe,
+    ...(name.length >= 2 ? { name } : {}),
+  })
+  const trimmed = list.length > perGroup ? list.slice(-perGroup) : list
+  buckets.delete(groupId)
+  buckets.set(groupId, trimmed)
+  while (buckets.size > maxGroups) {
+    const oldest = buckets.keys().next().value
+    if (oldest === undefined) break
+    buckets.delete(oldest)
+  }
+}
+
+/** 只取这一个群的最近几条。别的群不在结果里。 */
+export function recentGroupContext(
+  buckets: ReadonlyMap<string, GroupContextEntry[]>,
+  groupId: string,
+  limit = 8,
+): GroupContextEntry[] {
+  const list = buckets.get(String(groupId ?? '').trim()) ?? []
+  if (limit <= 0) return []
+  return list.slice(-limit)
+}
+
+/** 拼进提示词的群记录行。调用方只传入同一个群的条目。 */
+export function formatGroupContextLines(
+  lines: ReadonlyArray<{ qq?: string; text?: string; atMe?: boolean; name?: string }>,
+): string {
+  return lines
+    .map((m) => {
+      const qq = String(m.qq ?? '')
+      const name = String(m.name ?? '').trim()
+      const text = String(m.text ?? '').slice(0, 60)
+      return `${qq}${name ? `(${name})` : ''}: ${text}${m.atMe ? ` ${BOT_MENTION_MARK}` : ''}`
+    })
+    .join('\n')
+}
+
+/**
+ * 群触发轮的自动回复落点。会话键里的群号优先于路由上的 target：
+ * target 一旦和本会话不一致，就不能把本群的回复发到那个群。
+ */
+export function pinGroupReplyTarget(
+  sessionKey: string | null | undefined,
+  target: string | null | undefined,
+): string {
+  const sessionGroup = sessionGroupId(sessionKey)
+  if (sessionGroup) return sessionGroup
+  return String(target ?? '').trim()
+}
+
+/**
+ * send_group / 合并转发的目标群。
+ * 别人的群会话只能发回本群；别人的私聊不能发群。
+ * 主人轮(窗口 / 面板 / 主人 QQ)可以指定别的群。
+ */
+export function resolveGroupSendTarget(input: {
+  requested?: string | null
+  sessionKey?: string | null
+  turnKind?: string | null
+}): { ok: true; groupId: string } | { ok: false; error: string } {
+  const sessionGroup = sessionGroupId(input.sessionKey)
+  const sessionPrivate = sessionPrivateId(input.sessionKey)
+  const requested = String(input.requested ?? '').trim()
+  const groupId = requested || sessionGroup
+  if (!groupId) return { ok: false, error: 'send_group 需要 group_id(目标群号)' }
+  const master = isMasterTurnKind(input.turnKind)
+  if (sessionGroup && groupId !== sessionGroup && !master) {
+    return {
+      ok: false,
+      error: `当前是群 ${sessionGroup} 的会话，不能把消息发到群 ${groupId}。各群上下文互相隔离，只回复本群。`,
+    }
+  }
+  if (sessionPrivate && !master) {
+    return {
+      ok: false,
+      error: `当前是 QQ ${sessionPrivate} 的私聊，不能把消息发到群 ${groupId}。给群发消息只受主人指示。`,
+    }
+  }
+  return { ok: true, groupId }
+}
+
+/**
+ * recent / chats 的读取范围。
+ * 群会话默认只看本群，私聊会话默认只看这条私聊。
+ * 主人轮可以显式点名另一个群或另一个 QQ；别人的会话点名别的会话直接拒绝。
+ */
+export function scopeTranscriptQuery(input: {
+  sessionKey?: string | null
+  turnKind?: string | null
+  groupId?: string | null
+  userId?: string | null
+}): { groupId: string; userId: string; error?: string } {
+  const sessionGroup = sessionGroupId(input.sessionKey)
+  const sessionPrivate = sessionPrivateId(input.sessionKey)
+  const master = isMasterTurnKind(input.turnKind)
+  const reqG = String(input.groupId ?? '').trim()
+  const reqU = String(input.userId ?? '').trim()
+  if (!sessionGroup && !sessionPrivate) return { groupId: reqG, userId: reqU }
+  if (sessionGroup) {
+    if (reqU && !master) {
+      return { groupId: '', userId: '', error: `当前是群 ${sessionGroup} 的会话，不能读取其它私聊记录。` }
+    }
+    if (reqG && reqG !== sessionGroup && !master) {
+      return {
+        groupId: '',
+        userId: '',
+        error: `当前是群 ${sessionGroup} 的会话，不能读取群 ${reqG} 的记录。各群上下文互相隔离。`,
+      }
+    }
+    if (master && (reqG || reqU)) return { groupId: reqG, userId: reqU }
+    return { groupId: sessionGroup, userId: '' }
+  }
+  if (reqG && !master) {
+    return { groupId: '', userId: '', error: `当前是 QQ ${sessionPrivate} 的私聊，不能读取群记录。` }
+  }
+  if (reqU && reqU !== sessionPrivate && !master) {
+    return { groupId: '', userId: '', error: `当前是 QQ ${sessionPrivate} 的私聊，不能读取 QQ ${reqU} 的记录。` }
+  }
+  if (master && (reqG || reqU)) return { groupId: reqG, userId: reqU }
+  return { groupId: '', userId: sessionPrivate }
+}
+
+/**
+ * 群会话里的私聊发送。别人的群回合只能私发给主人;
+ * 别人的私聊只能回当前对象或主人。没标轮次时保持原缺省(测试与旧调用)。
+ */
+export function resolvePrivateSendTarget(input: {
+  requested?: string | null
+  sessionKey?: string | null
+  turnKind?: string | null
+  masterQQ?: string | null
+}): { ok: true; userId: string } | { ok: false; error: string } {
+  const requested = String(input.requested ?? '').trim()
+  const sessionPrivate = sessionPrivateId(input.sessionKey)
+  const sessionGroup = sessionGroupId(input.sessionKey)
+  const masterQQ = String(input.masterQQ ?? '').trim()
+  const kind = String(input.turnKind ?? '')
+  const masterTurn = isMasterTurnKind(kind)
+  const needUser = 'send 需要 user_id(目标QQ号)。发给别人必须写对方的 QQ 号;主人自己的会话里不能省略'
+  if (masterTurn || !kind) {
+    if (requested) return { ok: true, userId: requested }
+    if (sessionPrivate && sessionPrivate !== masterQQ) return { ok: true, userId: sessionPrivate }
+    return { ok: false, error: needUser }
+  }
+  if (sessionGroup) {
+    const g = sessionGroup
+    if (!requested) {
+      return { ok: false, error: `send 需要 user_id(目标QQ号)。当前是群 ${g} 的会话,私发只能写主人的 QQ,不能发给别人。` }
+    }
+    if (masterQQ && requested === masterQQ) return { ok: true, userId: requested }
+    return {
+      ok: false,
+      error: masterQQ
+        ? `当前是群 ${g} 的会话,不能把消息私发给 QQ ${requested}。给主人汇报请写主人的 QQ ${masterQQ}。`
+        : `当前是群 ${g} 的会话,不能把消息私发给 QQ ${requested}。`,
+    }
+  }
+  if (sessionPrivate || kind === 'contact' || kind === 'ask') {
+    const allowed = new Set([sessionPrivate, masterQQ].filter(Boolean))
+    if (requested && allowed.has(requested)) return { ok: true, userId: requested }
+    if (!requested && sessionPrivate && sessionPrivate !== masterQQ) return { ok: true, userId: sessionPrivate }
+    return {
+      ok: false,
+      error: `当前私聊不能把消息发给其它 QQ。只能回复当前对象${masterQQ ? `或主人 ${masterQQ}` : ''}。`,
+    }
+  }
+  if (requested) return { ok: true, userId: requested }
+  return { ok: false, error: needUser }
+}
+
+// ---- 群艾特:按回复在对谁说话,不按「谁刚发了这条」 ----
+
+export interface GroupParticipant {
+  qq: string
+  name?: string
+  /** 群名片、昵称、档案备注。同一个 QQ 可能有不止一个叫法。 */
+  names?: string[]
+}
+
+const MENTION_EDGE = /[\s,，.。!！?？:：;；、~～]/
+const MENTION_REQUEST = /(?:帮我|替我|请你)?(?:回|回复|告诉|转告|问|叫|喊|艾特)(?:一下|下)?$/
+
+interface NamedQQ {
+  qq: string
+  name: string
+}
+
+function mentionNames(participants: ReadonlyArray<GroupParticipant>, self: string): { named: NamedQQ[]; allow: Set<string> } {
+  const allow = new Set<string>()
+  const named: NamedQQ[] = []
+  const seenName = new Set<string>()
+  const addName = (qq: string, name: string) => {
+    const n = name.trim()
+    // 岛灵/鲸鱼娘/小鲸是机器人自称。群名片碰巧同名时也不艾特,
+    // 否则回复里一提自己的名字就会在群里艾特自己。
+    if (n.length < 2 || isBotSelfName(n)) return
+    const key = `${qq}\0${n}`
+    if (seenName.has(key)) return
+    seenName.add(key)
+    named.push({ qq, name: n })
+  }
+  for (const p of participants) {
+    const qq = String(p.qq ?? '').trim()
+    if (!qq || qq === self || !/^\d{5,12}$/.test(qq)) continue
+    allow.add(qq)
+    addName(qq, String(p.name ?? ''))
+    for (const alias of p.names ?? []) addName(qq, String(alias ?? ''))
+  }
+  named.sort((a, b) => b.name.length - a.name.length)
+  return { named, allow }
+}
+
+function scanMentionQQs(text: string, allow: Set<string>): string[] {
+  const hits: string[] = []
+  const re = /(?:QQ|qq|@)\s*(\d{5,12})/g
+  for (const m of text.matchAll(re)) {
+    const id = m[1]
+    if (!id || !allow.has(id) || hits.includes(id)) continue
+    hits.push(id)
+  }
+  return hits
+}
+
+/** 称呼：名字单独成词，或后面紧跟「你」。顺口提起不算。 */
+function scanVocative(text: string, named: readonly NamedQQ[]): string[] {
+  return scanNameHits(text, named, 'vocative')
+}
+
+/** 触发消息里「回复/问/告诉某人」。这是要去找的人，不是这句的听众。 */
+function scanRequested(text: string, named: readonly NamedQQ[]): string[] {
+  return scanNameHits(text, named, 'request')
+}
+
+function scanNameHits(text: string, named: readonly NamedQQ[], mode: 'vocative' | 'request'): string[] {
+  const hits: string[] = []
+  const taken: Array<[number, number]> = []
+  const overlaps = (start: number, end: number) => taken.some(([s, e]) => start < e && end > s)
+  for (const { qq, name } of named) {
+    let from = 0
+    while (from <= text.length - name.length) {
+      const at = text.indexOf(name, from)
+      if (at < 0) break
+      const end = at + name.length
+      const prev = at === 0 ? '' : text[at - 1]
+      const next = end >= text.length ? '' : text[end]
+      const lead = at === 0 || MENTION_EDGE.test(prev) || prev === '@'
+      const tail = end === text.length || MENTION_EDGE.test(next) || next === '你' || next === '您'
+      const request = MENTION_REQUEST.test(text.slice(Math.max(0, at - 8), at))
+      const ok = mode === 'vocative' ? lead && tail : request
+      if (ok && !overlaps(at, end)) {
+        taken.push([at, end])
+        if (!hits.includes(qq)) hits.push(qq)
+      }
+      from = end
+    }
+  }
+  return hits
+}
+
+function talksToEveryone(text: string): boolean {
+  const t = text.trim()
+  return /^(大家|各位|大伙儿|同志们|所有人|群友们)/.test(t) || /^(跟|向)(大家|全群|群里)/.test(t)
+}
+
+/**
+ * 这条群回复应该 @ 谁。
+ * 回复里用称呼叫到的人优先。没叫人时，看触发消息在让机器人回谁、@ 了谁。
+ * 都没有，并且对方是在问机器人，才 @ 发消息的人。对全群说的话不 @。
+ * 顺口提起（「别叫张三」「张三说得对」）不 @。机器人自己永远不 @。
+ */
+export function resolveGroupMention(input: {
+  reply?: string | null
+  speakerQQ?: string | null
+  directed?: boolean
+  participants?: ReadonlyArray<GroupParticipant>
+  selfQQ?: string | null
+  /** 触发这轮的群消息原文，不是注入后的提示词 */
+  trigger?: string | null
+  /** 触发消息里 @ 到的 QQ，不含机器人自己 */
+  triggerAtQQs?: readonly string[] | null
+}): string[] {
+  const reply = String(input.reply ?? '').trim()
+  if (!reply || reply.startsWith('【不回复')) return []
+  const self = String(input.selfQQ ?? '').trim()
+  const speaker = String(input.speakerQQ ?? '').trim()
+  const participants = [...(input.participants ?? [])]
+  if (speaker && speaker !== self) participants.push({ qq: speaker })
+  for (const id of input.triggerAtQQs ?? []) participants.push({ qq: String(id ?? '') })
+  const { named, allow } = mentionNames(participants, self)
+  if (speaker && speaker !== self && /^\d{5,12}$/.test(speaker)) allow.add(speaker)
+
+  const replyHits = [...scanMentionQQs(reply, allow), ...scanVocative(reply, named)]
+  const uniqueReply: string[] = []
+  for (const id of replyHits) {
+    if (id !== self && allow.has(id) && !uniqueReply.includes(id)) uniqueReply.push(id)
+  }
+  if (uniqueReply.length > 0) return uniqueReply.slice(0, 3)
+  if (talksToEveryone(reply)) return []
+
+  const trigger = String(input.trigger ?? '').trim()
+  const fromTrigger = [
+    ...scanRequested(trigger, named),
+    ...scanVocative(trigger, named),
+    ...scanMentionQQs(trigger, allow),
+  ]
+  for (const id of input.triggerAtQQs ?? []) fromTrigger.push(String(id ?? '').trim())
+  const third: string[] = []
+  for (const id of fromTrigger) {
+    if (!id || id === self || id === speaker || !allow.has(id) || third.includes(id)) continue
+    third.push(id)
+  }
+  if (third.length > 0) return third.slice(0, 3)
+  if (input.directed && speaker && speaker !== self && allow.has(speaker)) return [speaker]
+  return []
 }
 
 // ---- 防重发判定 ----
@@ -128,16 +504,15 @@ export function isDirectedToBot(text: string, atMe?: boolean): boolean {
 
 // ---- 询问轮判定(给主人的话不外发;安全网启发式) ----
 const ASK_TURN_STRONG = [
-  /你说回/,
+  // 「你说回」必须接着回复对象/内容。光「回」会命中「你说回家吧」
+  /你说回(他|她|复|啥|什么|一句|一下|点)/,
   /你(想|要|说)怎么回/,
   /等你(的)?(指示|发话)/,
   /问(问|一下|下|个)?主人/,
-  // (?!给?你):排除第二人称——「要不要我发给你?」是发给对方的建议,
-  // 「要不要我回他?」才是询问主人(2026-08-14 修复"自主回复发给主人":
-  // LLM 自主回复常带"要不要我把链接发给你"自问句式,原规则误判询问
-  // → 回复被拦截并发到主人 QQ)
-  /要不要我(回|发|说)(?!给?你)/,
-  /我建议[^。!？]{0,12}(回|发|说)/,
+  // 必须点到第三人称对象。「要不要我说个笑话」「要不要我发给你」
+  // 是对对方说的话,整段转给主人会把私聊内容送错人
+  /要不要我(回|回复|发|发给|说)(给)?(他|她|他们|对方)/,
+  /我建议[^。!？]{0,16}(回|回复|发给|告诉)(他|她|他们|对方)/,
   /要(不)要我[^。!？]{0,10}(回|发|说)他/,
 ]
 const ASK_TURN_WEAK = [
@@ -164,8 +539,9 @@ export function looksLikeMasterAddressed(text: string): boolean {
   // 开头直接称呼主人(主人,/主人。/主人!等 + 标点)——第三人称提及
   // (「主人是谁」「我问主人」)后跟非标点,不命中
   if (/^(给|向)?主人[,，:：。!！\s~～]/.test(t)) return true
-  // 汇报/请示动词显式点名主人
-  if (/(向|给|跟)主人(汇报|说|报告|请示|问|讲)/.test(t)) return true
+  // 汇报/请示必须在句首。句中「我跟主人说了你明天有空」是讲给对方听的,
+  // 整段改投主人会把私聊原文送错
+  if (/^(给|向|跟)主人(汇报|说|报告|请示|问|讲)/.test(t)) return true
   return false
 }
 
@@ -275,9 +651,11 @@ export function newTurnFingerprint(): string {
  * 标记物理上到不了任何聊天对象;新协议下标记不参与路由,剥除不影响送达
  */
 export function stripFingerprintMarks(text: string): string {
-  return String(text ?? '')
-    .replace(/^【回复对方】\s*/, '')
-    .replace(/【(?:指纹|主人指纹):[2-9A-HJ-NP-Z]{6}】/g, '')
+  return stripMindMarks(
+    String(text ?? '')
+      .replace(/^【回复对方】\s*/, '')
+      .replace(/【(?:指纹|主人指纹):[2-9A-HJ-NP-Z]{6}】/g, ''),
+  )
 }
 
 // ---- 回复意图判定器(错配安全网) ----

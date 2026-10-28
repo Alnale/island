@@ -120,11 +120,30 @@ pub struct PlayUrls {
 pub struct Stream {
     pub id: i64,
     pub base_url: String,
+    /// 备用直链(2026-10-23):baseUrl 常是 PCDN 节点(*.mcdn.bilivideo.cn:8082),
+    /// 本机网络连不通会直接 "网络错误: error sending request",backupUrl 里的
+    /// upos 节点通常可用 → 下载层做节点兜底
+    pub backup_urls: Vec<String>,
     pub bandwidth: i64,
     pub width: i64,
     pub height: i64,
     pub codecs: String,
     pub mime: String,
+}
+
+/// 解析 backupUrl 数组(web 接口返回,键名 camelCase;缺失时为空)
+fn backups(v: &Value) -> Vec<String> {
+    v.get("backupUrl")
+        .or_else(|| v.get("backup_url"))
+        .and_then(|x| x.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|u| u.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 pub async fn get_playurl(api: &BiliApi, bvid: &str, cid: i64) -> Result<PlayUrls, ApiError> {
@@ -161,6 +180,7 @@ pub async fn get_playurl(api: &BiliApi, bvid: &str, cid: i64) -> Result<PlayUrls
             height: 0,
             codecs: s(a, "codecs"),
             mime: s(a, "mimeType"),
+            backup_urls: backups(a),
         });
     }
     for v in dash["video"].as_array().unwrap_or(&vec![]) {
@@ -172,6 +192,7 @@ pub async fn get_playurl(api: &BiliApi, bvid: &str, cid: i64) -> Result<PlayUrls
             height: i64_(v, "height"),
             codecs: s(v, "codecs"),
             mime: s(v, "mimeType"),
+            backup_urls: backups(v),
         });
     }
     let mut durl = Vec::new();
@@ -184,6 +205,7 @@ pub async fn get_playurl(api: &BiliApi, bvid: &str, cid: i64) -> Result<PlayUrls
             height: 0,
             codecs: String::new(),
             mime: String::new(),
+            backup_urls: backups(du),
         });
     }
     Ok(PlayUrls { audio, video, durl })

@@ -146,7 +146,11 @@ console.log()
 // "official 副本占锁"导致新实例静默退出(实测)。
 // 注意必须用 $_.Id——实测本机 PowerShell 5.1 上 $_.ProcessId 为空值,
 // Stop-Process -Id 传 null 会抛"参数不能为空"。
-const PS_FILTER = `$_.Path -like '*dynamic-island\\node_modules\\*electron*'`
+// **补丁本体 C:\electron-hevc-dist\electron.exe**(2026-10-23):开发启动改走
+// 这个目录(node_modules 里同一份 exe 会以 0x80000003 退出)。它的路径
+// 不含 dynamic-island,旧过滤器当它不存在,单实例锁还在,新进程要么
+// 崩要么马上退出。副本 dynamic-island-official 不使用这份 exe。
+const PS_FILTER = `$_.Path -like '*dynamic-island\\node_modules\\*electron*' -or $_.Path -like '*\\electron-hevc-dist\\electron.exe'`
 
 /** 结束本项目残留的 electron 实例(单实例锁:不结束则新启动只会唤起旧窗口,加载旧代码) */
 function killOldInstances() {

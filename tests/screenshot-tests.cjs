@@ -6,7 +6,7 @@
  * 保持 main.cjs 与测试代码零耦合。
  */
 
-function runScreenshotTests({ win, app, fs, path, settingsPath, runIslandSettings, resetSettingsCache, runProactiveGuess, startProactiveTurn, getLastProactiveTick, requestEvolution }) {
+function runScreenshotTests({ win, app, fs, path, settingsPath, runIslandSettings, resetSettingsCache, startProactiveTurn, getLastProactiveTick, requestEvolution }) {
     // 主人 QQ 从隐私配置运行时读取(2026-08-17 配置化:安装器不携带个人 QQ;
     // 未配置 = 空,主人场景断言自然不匹配,提示先配置 privacy.json 再跑巡检)
     let master = ''
@@ -678,6 +678,55 @@ function runScreenshotTests({ win, app, fs, path, settingsPath, runIslandSetting
               JSON.stringify(after.map((e, i) => `${i + 1}. [${e.type}] ${e.content.slice(0, 110)}`)),
             )
           }
+          if (process.env.WIDGET_SCREENSHOT_MODE === 'persona') {
+            // 人格卡 UI 巡检(2026-10-26):托盘设置 → Agent 设置 → 人格卡,
+            // 断言引导头部/折叠分区/当前卡摘要存在并截图(只读,不改配置)。
+            win.webContents.send('widget:open-settings')
+            await sleep(800)
+            const personaResult = await win.webContents.executeJavaScript(`(async () => {
+              const sleep = (ms) => new Promise((res) => setTimeout(res, ms))
+              const out = {}
+              const settingsItem = (text) =>
+                [...document.querySelectorAll('.island-settings-item')].find((s) => s.textContent.includes(text))
+              settingsItem('Agent 设置')?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+              await sleep(500)
+              const menu = document.querySelector('.island-quick-menu')
+              out.menuShown = !!menu
+              menu?.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }))
+              await sleep(350)
+              const item = [...(menu?.querySelectorAll('.island-quick-menu-item') ?? [])].find((b) =>
+                b.textContent.includes('人格卡'),
+              )
+              item?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+              await sleep(500)
+              const page = document.querySelector('.island-persona-page')
+              out.pageShown = !!page
+              out.heroShown = !!page?.querySelector('.island-persona-hero')
+              out.stepCount = page?.querySelectorAll('.island-persona-steps span').length ?? 0
+              out.activeShown = !!page?.querySelector('.island-persona-active')
+              out.sectionCount = page?.querySelectorAll('.island-persona-section').length ?? 0
+              out.cardCount = page?.querySelectorAll('.island-persona-card').length ?? 0
+              out.editorShown = !!page?.querySelector('.island-persona-editor')
+              out.bufferHeadShown = [...(page?.querySelectorAll('.island-persona-section-title') ?? [])].some((t) =>
+                t.textContent.includes('进化缓冲区'),
+              )
+              const view = document.querySelector('.island-agent-settings')
+              out.viewScroll = { h: view?.clientHeight ?? 0, sh: view?.scrollHeight ?? 0 }
+              return JSON.stringify(out)
+            })()`)
+            console.log('[widget] persona-view:', personaResult)
+            {
+              const image = await win.webContents.capturePage()
+              fs.writeFileSync(process.env.WIDGET_SCREENSHOT + '.persona.png', image.toPNG())
+              console.log('[widget] screenshot(persona) saved')
+            }
+            if (process.env.WIDGET_SCREENSHOT_QUIT === '1') {
+              await sleep(500)
+              app.quit()
+              return
+            }
+          }
+
           if (process.env.WIDGET_SCREENSHOT_MODE === 'agent') {
             // Agent 功能巡检(严格 UI 测试):托盘设置 → Agent 设置视图 →
             // 表单/MCP 双传输编辑/测试连接/技能目录/记忆增删/进化/保存。
@@ -1182,26 +1231,24 @@ function runScreenshotTests({ win, app, fs, path, settingsPath, runIslandSetting
               await sleep(300)
               out.evolveClicked = (evolveBtn?.textContent ?? '').includes('进化中') || (evoSection?.querySelector('.island-mcp-test-result')?.textContent ?? '').includes('已开始')
 
-              // ---- Sub Agent 设置(2026-08-07):文风/人格预设 + 自定义 ----
+              // ---- Sub Agent 设置(2026-08-07):总结文风预设 + 自定义;
+              //     她的心理刻画(2026-10-26:等回复落定再判断,无心理 Sub Agent) ----
               await switchTab('Sub Agent')
               const summaryField = [...view.querySelectorAll('.island-agent-section')].find((s) =>
                 s.textContent.includes('总结标题文风'),
               )
               const mindField = [...view.querySelectorAll('.island-agent-section')].find((s) =>
-                s.textContent.includes('心理揣测人格'),
+                s.textContent.includes('她的心理刻画'),
               )
               out.subAgentSectionsShown = !!summaryField && !!mindField
+              out.mindSectionHasSettleNote = !!mindField && mindField.textContent.includes('等回复落定再判断')
               const presetNames = (field) =>
                 [...(field?.querySelectorAll('.island-agent-scale-btn') ?? [])].map((b) => b.textContent.trim())
               const summaryPresets = presetNames(summaryField)
-              const mindPresets = presetNames(mindField)
               out.summaryPresetCount = summaryPresets.filter((t) =>
                 ['简洁明了', '活泼俏皮', '文艺诗意', '正式稳重'].includes(t),
               ).length
-              out.mindPresetCount = mindPresets.filter((t) =>
-                ['俏皮猫娘', '温柔贴心', '高冷克制', '知性风趣'].includes(t),
-              ).length
-              // 自定义输入框(≤100 字,两个区各一个)
+              // 自定义输入框(≤100 字;心理刻画无预设/输入,只有说明)
               out.subAgentCustomInputs = view.querySelectorAll('.island-agent-field input[maxlength="100"]').length
               // 选预设 → 按钮高亮;输入自定义 → 预设取消高亮(输入即切换)
               const literary = summaryField ? [...summaryField.querySelectorAll('.island-agent-scale-btn')].find((b) => b.textContent.trim() === '文艺诗意') : null
@@ -1688,7 +1735,10 @@ function runScreenshotTests({ win, app, fs, path, settingsPath, runIslandSetting
                 const bgVar = await js(
                   `document.querySelector('.island-bg-image')?.style.getPropertyValue('--bg-img-e') ?? '(无背景层)'`,
                 )
-                out.bgApplied = typeof bgVar === 'string' && bgVar.startsWith('url("data:image/png')
+                // 大图 data URL 放不进 CSS 变量,显示层改走 blob URL
+                out.bgApplied =
+                  typeof bgVar === 'string' &&
+                  (bgVar.includes('blob:') || bgVar.startsWith('url("data:image/png'))
                 const imgs = (await runIslandSettings('listLibraryImages', [])) ?? []
                 out.bgInLibrary = imgs.some((i) => i.id === imgRes.id && i.name === '巡检测试背景')
                 await runIslandSettings('renameLibraryImage', [imgRes.id, '巡检测试背景-改名'])
@@ -1755,17 +1805,18 @@ function runScreenshotTests({ win, app, fs, path, settingsPath, runIslandSetting
               console.log('[widget] agent-settings-tools:', JSON.stringify(out))
             }
             // 段 4.8:主动陪伴(2026-08-07)。注入主动消息事件 → 助手气泡
-            // 落定;直接调主进程 **runProactiveGuess**(onEvent 钩子的具名
-            // 抽取,巡检绕开引擎事件链路的确定性测试,同 runIslandSettings
-            // 先例)——真实 LLM 心理揣测(巡检环境有真实 API Key,同段 5)
-            // → ① **Windows 系统通知**(临时 stub Notification.prototype
-            // .show 捕获)② mind-proactive 事件 → 紧凑态文字区(localStorage
-            // widget-agent-mind)与通知同一句。注入文本必须 ≤10 字:段 5
+            // 落定;真实主动回合端到端(引擎 proactiveTurn,巡检环境有真实
+            // API Key,同段 5)——思考/流式/工具 → 消息落定(带 proactive
+            // 标记)→ 渲染端气泡 → 心理刻画(等回复落定再判断)→
+            // ① **Windows 系统通知**(临时 stub Notification.prototype
+            // .show 捕获)② mind-guess 事件 → 紧凑态文字区(localStorage
+            // widget-agent-mind)与通知同一句。心理刻画没有 Sub Agent,
+            // 只有引擎落定链路一条。注入文本必须 ≤10 字:段 5
             // 以"末条 assistant 文本 >10 字"判定自动回复,防误判。不 reload
             // (段 5 依赖展开的聊天视图);备份恢复三键,不残留。
             // 注意:不能靠注入 agent:event 触发主进程钩子——测试的注入
             // 直接走 webContents.send 到渲染端,绕过 main.cjs onEvent(实测)
-            console.log('[widget] 段4.8 开始:主动陪伴(真实 LLM 揣测 + 主动回合,最长 ~5 分钟,窗口可能静止属正常)')
+            console.log('[widget] 段4.8 开始:主动陪伴(主动回合 + 心理刻画,最长 ~5 分钟,窗口可能静止属正常)')
             {
               const js = (code) => win.webContents.executeJavaScript(code)
               const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -1813,29 +1864,11 @@ function runScreenshotTests({ win, app, fs, path, settingsPath, runIslandSetting
                   return JSON.stringify({ count: msgs.length, lastText: last?.textContent ?? '' })
                 })()`)
                 out.bubble = JSON.parse(bubble)
-                // 2. 直接调主进程主动揣测(与引擎 onEvent 钩子同一函数):
-                // 真实 LLM,最长 ~70s 含重试。**不能轮询 localStorage 判断
-                // 完成**——widget-agent-mind 跨运行持久化,残留旧值非空
-                // 会立即返回,断言全部落空(实测坑)
-                console.log('[widget] 段4.8 心理揣测(真实 LLM,最长 ~70s)…')
-                const guessT0 = Date.now()
-                const g = await runProactiveGuess(proactiveMessage)
-                console.log(`[widget] 段4.8 揣测完成: ${Math.round((Date.now() - guessT0) / 1000)}s,结果: ${g ? g.slice(0, 30) : '(空)'}`)
-                // 事件与通知同一 .then 发出;再多等一会儿让渲染端
-                // setMindGuess → 持久化 effect 落盘 localStorage
-                await sleep(1500)
-                const mind = await js(`localStorage.getItem('widget-agent-mind')`)
-                out.mind = mind
-                out.capturedNotifications = captured
-                // 3. 断言:气泡落定 + 系统通知弹出 + 文字区与通知同一句
-                out.guessReturned = typeof g === 'string' && g.length > 0
+                // 2. 断言:注入的主动消息气泡落定
                 out.bubbleLanded = out.bubble.count >= 1 && String(out.bubble.lastText).includes('在呢')
-                out.notificationShown = captured.length >= 1 && captured.some((n) => n.body && n.body.trim())
-                out.mindMatchesNotification = !!mind && captured.some((n) => n.body === mind)
-                out.mindPersisted = !!mind
-                // 4. 真实主动回合端到端(2026-08-07):引擎 proactiveTurn
+                // 3. 真实主动回合端到端(2026-08-07):引擎 proactiveTurn
                 // 走完整链路——思考/流式/工具 → 消息落定(带 proactive
-                // 标记)→ 渲染端气泡 → 主进程钩子 → 揣测通知 + 事件。
+                // 标记)→ 渲染端气泡 → 主进程钩子 → 心理刻画通知 + 事件。
                 // judge 不是本段职责(单测 parseJudgeJson 覆盖),直接调
                 // 回合;真实 LLM 回复,最长 ~90s
                 const bubbleBefore = out.bubble.count
@@ -1862,18 +1895,20 @@ function runScreenshotTests({ win, app, fs, path, settingsPath, runIslandSetting
                 console.log(`[widget] 段4.8 回合结果: ${realBubble.landed ? '落定' : '超时未落定'}(${Math.round((Date.now() - turnT0) / 1000)}s)`)
                 out.realTurnLanded = realBubble.landed
                 out.realTurnText = realBubble.text ?? ''
-                // 回合落定后主进程钩子自动跑揣测 → 第二条系统通知
-                // (与回合消息同链,最长 ~70s)
+                // 回合落定后引擎判断心理刻画 → 系统通知(与回合消息同链,
+                // 最长 ~70s)
                 const realNoticeDeadline = Date.now() + 70000
                 const noticeT0 = Date.now()
-                while (Date.now() < realNoticeDeadline && captured.length < 2) {
-                  logEvery(noticeT0, 70000, `等待第 2 条揣测通知(已捕获 ${captured.length}/2)`)
+                while (Date.now() < realNoticeDeadline && captured.length < 1) {
+                  logEvery(noticeT0, 70000, `等待心理刻画通知(已捕获 ${captured.length}/1)`)
                   await sleep(2000)
                 }
                 const mindAfterReal = await js(`localStorage.getItem('widget-agent-mind')`)
-                out.realNotificationShown = captured.length >= 2
+                out.capturedNotifications = captured
+                out.realNotificationShown = captured.length >= 1
                 out.realMindMatches =
-                  !!mindAfterReal && captured.slice(1).some((n) => n.body === mindAfterReal)
+                  !!mindAfterReal && captured.some((n) => n.body === mindAfterReal)
+                out.mindPersisted = !!mindAfterReal
               } catch (err) {
                 out.error = String((err && err.stack) || err)
                 console.error('[widget] agent-proactive failed:', err)
@@ -2328,7 +2363,8 @@ function runScreenshotTests({ win, app, fs, path, settingsPath, runIslandSetting
               const island = document.querySelector('.island-demo')
               // --bg-img-e 变量在背景图图层(.island-bg-image)上,不在根
               const bgLayer = document.querySelector('.island-bg-image')
-              const bgApplied = ((bgLayer && bgLayer.style.getPropertyValue('--bg-img-e')) || '').includes('data:image/png')
+              const bgVar = (bgLayer && bgLayer.style.getPropertyValue('--bg-img-e')) || ''
+              const bgApplied = bgVar.includes('blob:') || bgVar.includes('data:image/png')
               // 返回验证(2026-08-08 用户要求):背景编辑器返回键 → 直接
               // 回多媒体库(backgroundBackRef),而非设置视图
               const backBtn = document.querySelector('.island-bg-back')
@@ -4764,6 +4800,21 @@ function runScreenshotTests({ win, app, fs, path, settingsPath, runIslandSetting
                 time: Math.floor(Date.now() / 1000),
               })
             }
+            // 群聊推送(2026-10-25 切群会话贴底验证):群号 888001 由本轮
+            // 巡检独占,不污染 222/333 的既有场景
+            const pushGroup = (groupId, qq, text) => {
+              msgSeq += 1
+              wsSend({
+                post_type: 'message',
+                message_type: 'group',
+                group_id: Number(groupId),
+                user_id: Number(qq),
+                message_id: runSalt + msgSeq,
+                message: [{ type: 'text', data: { text } }],
+                raw_message: text,
+                time: Math.floor(Date.now() / 1000),
+              })
+            }
             try {
               // ---- 改写设置 → mock 端点 + 触发 NapCat 连接 ----
               let settings = {}
@@ -4796,9 +4847,9 @@ function runScreenshotTests({ win, app, fs, path, settingsPath, runIslandSetting
               resetSettingsCache()
               // **两段式重连(2026-08-13 实测坑)**:用户真实配置
               // napcatEnabled=true → whenReady 已连上**真实 NapCat**(3001)。
-              // syncNapcatLifecycle 只在 !active 时启动,直接改 wsUrl 不会
-              // 重连——且场景 C 的工具调用会经真实 NapCat 发出真消息!
-              // 先 disable 断开真实连接,再 enable 连上假 OneBot 服务器
+              // 2026-10-23 起改 wsUrl/enabled=true 会强制 start(),但仍须
+              // 先 disable 断开真实连接,再 enable 连上假 OneBot——否则
+              // 场景 C 的工具调用会经真实 NapCat 发出真消息。
               await js(`window.desktop?.agentSetConfig?.({ napcatEnabled: false })`)
               await sleep(900)
               await js(`window.desktop?.agentSetConfig?.({ napcatEnabled: true })`)
@@ -4955,6 +5006,64 @@ function runScreenshotTests({ win, app, fs, path, settingsPath, runIslandSetting
               log('scenarioC', c)
               assert('C1 假 OneBot 收到 send_private_msg(消息=测试消息C)', onebotReceived.some((r) => r.action === 'send_private_msg' && String(r.params && r.params.message).includes('测试消息C')), onebotReceived.map((r) => r.action + ':' + (r.params && r.params.message)))
               assert('C2 对应会话历史含已发消息(切会话可见)', c.sessionTexts.some((t) => t.includes('测试消息C')), c.sessionTexts)
+              }
+              // ===== 场景 C2:切换群聊会话后强制贴底(2026-10-25 用户实测"切群聊停在中间")=====
+              if (wsReady) {
+                // 逐条推送(350ms 间隔):连发会在首轮 busy 窗口内被引擎拒绝,
+                // 只留下 1 条用户消息 + 1 条回复,消息区不可滚动
+                for (let i = 0; i < 12; i++) {
+                  pushGroup('888001', '222', `群滚动测试消息 ${i}`)
+                  await sleep(350)
+                }
+                await sleep(8000)
+                const scrollSwitchResult = await js(`(async () => {
+                  const sleep = (ms) => new Promise((res) => setTimeout(res, ms))
+                  const clickSession = async (needle) => {
+                    const fold = document.querySelector('.island-session-fold')
+                    if (!document.querySelector('.island-session-dock.open')) fold?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+                    await sleep(500)
+                    const item = [...document.querySelectorAll('.island-session-item')].find((el) => (el.textContent || '').indexOf(needle) !== -1)
+                    item?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+                    await sleep(1000)
+                  }
+                  await clickSession('888001')
+                  const list = document.querySelector('.island-agent-messages')
+                  if (!list) return JSON.stringify({ fatal: 'no list' })
+                  const before = {
+                    sh: list.scrollHeight,
+                    ch: list.clientHeight,
+                    st: Math.round(list.scrollTop),
+                    count: document.querySelectorAll('.island-msgs-item').length,
+                  }
+                  // 模拟用户在原会话向上翻历史,再切走/切回
+                  list.scrollTop = 0
+                  await sleep(250)
+                  await clickSession('主对话')
+                  await clickSession('888001')
+                  // 收起会话坞,截取干净的聊天界面再测量
+                  const fold = document.querySelector('.island-session-fold')
+                  if (document.querySelector('.island-session-dock.open')) fold?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+                  await sleep(600)
+                  const list2 = document.querySelector('.island-agent-messages')
+                  const gap = list2 ? list2.scrollHeight - list2.scrollTop - list2.clientHeight : null
+                  return JSON.stringify({
+                    before,
+                    gap: gap === null ? null : Math.round(gap),
+                    sh: list2 ? list2.scrollHeight : null,
+                    ch: list2 ? list2.clientHeight : null,
+                    st: list2 ? Math.round(list2.scrollTop) : null,
+                    dockOpen: !!document.querySelector('.island-session-dock.open'),
+                  })
+                })()`)
+                const s = JSON.parse(scrollSwitchResult)
+                log('scenarioScroll', s)
+                assert('S1 群会话消息区可滚动(贴底断言前提)', !!(s.before && s.before.sh > s.before.ch + 40), s)
+                assert('S2 切回群 888001 后自动贴底(距底 ≤4px)', typeof s.gap === 'number' && s.gap <= 4, s)
+                if (process.env.WIDGET_SCREENSHOT) {
+                  const image = await win.webContents.capturePage()
+                  fs.writeFileSync(process.env.WIDGET_SCREENSHOT + '.scroll.png', image.toPNG())
+                  console.log('[widget] session-scroll screenshot saved')
+                }
               }
               // ===== 场景 D:单条消息会话收起面板 → 布局断言 =====
               // QQ 333 信任 + muted → 仅一条用户消息、无回复(精确复现单消息场景)

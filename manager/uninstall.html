@@ -7,7 +7,7 @@
 <style>
 /* ===== 灵动岛 卸载向导 · 与安装向导同一套 Apple 设计语言 =====
    暗色玻璃 / 克制的排版 / 柔和动效 / 品牌紫 #6e63ff
-   卸载界面以 electron.exe --uninstall 启动,加载本文件(随主应用打包) */
+   由安装管理器(灵动岛安装管理器.exe)加载,右上角可切回安装页 */
 
 :root {
   --accent: #6e63ff;
@@ -38,7 +38,7 @@ body {
   -webkit-user-select: none;
 }
 
-/* 背景:与安装向导同一张背景图(installer/bg.png 复制到本目录,打包随向导) */
+/* 背景:与安装向导同一张背景图(manager/bg.png,随管理器打包) */
 .bg {
   position: fixed;
   inset: 0;
@@ -86,6 +86,9 @@ body {
 }
 .titlebar .tb-btn:hover { background: rgba(255,255,255,.08); color: var(--text); }
 .titlebar .tb-btn.close:hover { background: rgba(255,69,58,.18); color: #ff9a94; }
+.titlebar .tb-link { width: auto; padding: 0 10px; font-size: 12px; font-weight: 500; }
+.titlebar .tb-link[hidden] { display: none; }
+.titlebar .tb-link:disabled { opacity: .35; cursor: default; }
 
 /* 主体 */
 .wrap {
@@ -298,8 +301,9 @@ body {
   <!-- 顶栏 -->
   <div class="titlebar">
     <div class="tb-dot"></div>
-    <span class="tb-title">灵动岛 · 卸载向导</span>
+    <span class="tb-title">灵动岛 · 安装管理器</span>
     <span class="tb-spacer"></span>
+    <button class="tb-btn tb-link" id="btn-reinstall" title="返回安装界面" hidden>重新安装</button>
     <button class="tb-btn" id="btn-min" title="最小化">
       <svg width="12" height="12" viewBox="0 0 12 12"><path d="M2 6h8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
     </button>
@@ -413,13 +417,15 @@ body {
 // ===== 卸载向导渲染逻辑(零框架) =====
 const $ = (s) => document.querySelector(s)
 const api = window.uninstaller || {
-  getInfo: async () => ({ appName: '灵动岛', version: '3.1.0', installDir: 'C:\\Users\\demo\\Programs\\灵动岛', userDataDir: 'C:\\Users\\demo\\AppData\\Roaming\\dynamic-island', hasData: true }),
+  getInfo: async () => ({ appName: '灵动岛', version: '3.1.0', installed: true, installDir: 'C:\\Users\\demo\\Programs\\灵动岛', userDataDir: 'C:\\Users\\demo\\AppData\\Roaming\\dynamic-island', hasData: true, canSwitchToInstall: true }),
   run: async () => ({ ok: true }),
   finish: async () => ({ ok: true }),
   cancel: async () => ({ ok: true }),
   onProgress: () => () => {},
   minimize: () => {},
 }
+// 安装管理器统一 API(浏览器预览时 no-op)
+const managerApi = window.manager || { switchMode: async () => ({ ok: true }) }
 
 const state = { step: 1, running: false, info: null, deleteData: false }
 const STEPS = ['welcome', 'options', 'install', 'done']
@@ -444,6 +450,8 @@ function showStep(n) {
   $('#btn-next').style.display = n === 3 || n === 4 ? 'none' : ''
   $('#btn-cancel').style.display = n === 3 || n === 4 ? 'none' : ''
   $('#btn-close').style.display = n === 3 ? 'none' : ''
+  // 卸载过程中禁止切回安装页
+  $('#btn-reinstall').disabled = n === 3 && state.running
   if (n === 1) $('#btn-back').style.visibility = 'hidden'
 }
 
@@ -502,6 +510,11 @@ function init() {
     if (state.step === 2) { startUninstall(); return }
   })
   $('#btn-done').addEventListener('click', () => api.finish())
+  // 切回安装页(已安装副本内的卸载入口不允许覆盖安装,由主进程拒绝并隐藏)
+  $('#btn-reinstall').addEventListener('click', async () => {
+    if (state.running) return
+    await managerApi.switchMode('install')
+  })
 
   api.onProgress(setProgress)
   api.getInfo().then((info) => {
@@ -518,6 +531,14 @@ function init() {
       : '无(未发现个人数据)'
     $('#welcome-install-dir').textContent = info.installDir || ''
     $('#opt-data-dir').textContent = info.userDataDir || ''
+    // 发行包内的管理器可直接切回安装页;安装目录内的卸载入口不提供(避免覆盖运行中的自身)
+    if (info.canSwitchToInstall) $('#btn-reinstall').hidden = false
+    // 未检测到安装:禁止卸载
+    if (info.installed === false) {
+      $('#info-dir').textContent = '未检测到已安装的灵动岛'
+      $('#welcome-install-dir').textContent = ''
+      $('#btn-next').disabled = true
+    }
     // 有个人数据才显示删除选项(无数据时自动保留,删除项置灰)
     if (!info.hasData) {
       $('#opt-delete').disabled = true

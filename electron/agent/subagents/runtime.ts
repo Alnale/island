@@ -9,7 +9,7 @@
  * 失败由工厂给 fallback,绝不外溢到主循环。
  */
 
-import { getDefaultLlmRuntime, type LlmStreamParams } from '../plugin/llm'
+import { getDefaultLlmRuntime, protocolOf, type LlmStreamParams } from '../plugin/llm'
 import { isLMStudioProvider } from '../providers/lmstudio-constants'
 import { formatMemoryBlock } from '../memory'
 import { getTasksStatusBlock } from '../tasks'
@@ -38,12 +38,24 @@ export function resolveSubConfig(config: AgentConfig): AgentConfig {
   const subModel = (config.subModel ?? '').trim()
   if (!creds || (!creds.model && !subModel)) return config
   if (pid === config.activeProvider && !subModel) return config
-  return {
+  const next: AgentConfig = {
     ...config,
     apiKey: creds.apiKey,
     baseURL: creds.baseURL,
     model: subModel || creds.model,
   }
+  // **厂商专属通道(2026-10-22)**:llmAdapter 是协议 id,resolve 按
+  // preferId 直接命中**不校验地址**——跨厂商换桶后必须丢弃,否则主供应商
+  // (如 DeepSeek)的 'responses' 会强绑到别家(MiMo/GLM)的 baseURL,别家
+  // 模型走错通道。同端点(只换子模型)保留;换桶但新地址协议恰好一致也保留
+  if (
+    config.llmAdapter &&
+    creds.baseURL.trim() !== (config.baseURL ?? '').trim() &&
+    protocolOf(creds.baseURL) !== config.llmAdapter
+  ) {
+    return { ...next, llmAdapter: undefined }
+  }
+  return next
 }
 
 /**
@@ -181,7 +193,7 @@ export interface RunSubJsonOpts<T> {
 /**
  * JSON 单轮 + 一次重试的共用执行器。
  * 解析失败/不可接受/调用失败 → 重试;全部失败返回 fallback(安全侧)。
- * 标题降级链与心理揣测反馈重试太特殊,不走本函数。
+ * 标题降级链的反馈重试太特殊,不走本函数。
  */
 export async function runSubJson<T>(opts: RunSubJsonOpts<T>): Promise<T> {
   const retries = opts.retries ?? 2
@@ -221,7 +233,7 @@ export async function runSubJson<T>(opts: RunSubJsonOpts<T>): Promise<T> {
   return opts.fallback
 }
 
-/** 文本 part 过滤(心理揣测:工具语法会诱发幻觉) */
+/** 文本 part 过滤(工具语法会诱发幻觉) */
 export function textReasoningOnly(messages: AgentMessage[]): AgentMessage[] {
   return messages.map((m) => ({
     ...m,

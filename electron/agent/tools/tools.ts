@@ -30,7 +30,14 @@ import { showNotify } from '../notify'
 import { setTaskDoneHandler } from '../tasks'
 import type { AgentTool, ToolParams } from '../types'
 // 已拆出的领域簇:本文件内部仍需使用的部分显式导入(barrel re-export 见下方)
-import { webSearch } from './tools-search'
+import { webSearch, fetchPageFallback, formatPageResult } from './tools-search'
+import {
+  assertWebFetchUrl,
+  deepseekWebFetchPage,
+  deepseekWebSearch,
+  formatDeepseekSearchResults,
+  type DeepseekWebCreds,
+} from '../providers/deepseek-web'
 import { extractMediaPathFromStart, mediaKindForPath } from './tools-media'
 import { toolsRoot, userDataDir, toolOutputDir, setOutputEnv } from './tools-env'
 import { biliQuery, BILI_CWD, setBiliConfirmAction, setBiliSessionKey } from './tools-bili'
@@ -38,6 +45,7 @@ import { docConvert, disposeDocflow } from './tools-docflow'
 import { createGlmTools, type GlmCreds } from './tools-glm'
 import { createMimoTools, type MimoCreds } from './tools-mimo'
 import { createMijiaTools } from './tools-mijia'
+import { createComputerTools } from './tools-computer'
 
 // ---- 已拆出簇 barrel 兼容 re-export(engine.ts/测试既有路径不变) ----
 export * from './tools-search'
@@ -47,6 +55,7 @@ export * from './tools-bili'
 export * from './tools-docflow'
 export * from './tools-glm'
 export * from './tools-mijia'
+export * from './tools-computer'
 
 
 /**
@@ -99,6 +108,8 @@ export function buildToolsGuideBlock(): string {
     `- xxt 超星学习通工具(引擎 xxt 工具的后端):${existsSync(xxtExe) ? xxtExe : xxtPy}(exe 不存在时用系统 python 跑 auto_answer.py)。`,
     `  子命令 login/crawl/fill/check/submit/screenshot,浏览器走系统 Edge`,
     `- 系统音量脚本:${path.resolve(process.cwd(), 'electron', 'system-volume.ps1')}(引擎 set_system_volume 工具的后端)`,
+    `- 电脑操控脚本:${path.resolve(process.cwd(), 'electron', 'window-shot.ps1')}(引擎 computer 工具的后端:窗口列表/置前/截图;` +
+      `截图经 DPI 感知取窗口完整边框。手动用法 powershell -NoProfile -ExecutionPolicy Bypass -File <脚本> -Mode list|shot|focus|screen [-Title 子串] [-Output png])`,
     `- 长期记忆文件:${path.join(userDataDir(), 'memory.json')}(引擎 remember/list_memory 工具操作它)`,
     `- 功能引导文档:${path.resolve(process.cwd(), 'docs', 'TECH.md')}(第 11 章 = 功能清单,get_feature_guide 工具读取)`,
     `- NapCat 配置文件(QQ 机器人引擎,位于 NapCat 安装目录的 config/napcat.json):监听群/信任人管理一律用 manage_sessions / set_napcat_config 工具,` +
@@ -337,6 +348,13 @@ export function createTools(deps: {
    */
   getMimoCreds?(): MimoCreds | null
   /**
+   * DeepSeek 官方网页工具凭据(2026-10-22:web_search/web_fetch 优先走
+   * 官方 tools/search|tools/fetch,按次计费约 0.005 元):每次执行实时
+   * 读取 providers.deepseek 桶(与激活供应商无关,同 GLM/MiMo 先例);
+   * null = 未配置 → Bing/DDG 搜索、直连抓取兜底
+   */
+  getDeepseekCreds?(): DeepseekWebCreds | null
+  /**
    * 米家写守卫来源(2026-09-22):getTurnKind = classifyTurn 八值
    * (window/panel/master-qq/master-group 可写);getTurnSource 三值兜底
    */
@@ -385,6 +403,8 @@ export function createTools(deps: {
         '命令输出会返回给你;非零退出码也会带输出返回。' +
         '适合:查进程、管理文件、运行脚本、系统维护、安装工具等。' +
         '注意:危险命令(删除、格式化、改系统配置)请谨慎执行。' +
+        '**截图/窗口管理(截窗口图、整屏图、把窗口置前)一律用 computer 工具,禁止手写 PowerShell/Python 截屏**' +
+        '(手写截屏在系统缩放 125%/150% 下会把窗口右边/下边裁掉,2026-10-22 用户实测"截图残缺"教训)。' +
         '媒体文件(图片/视频/音频)展示请勿用 start 打开外部播放器——' +
         '媒体会作为附件直接展示在对话窗口内播放,回复时告知用户"已打开"即可。',
       parameters: {
@@ -550,7 +570,9 @@ export function createTools(deps: {
     },
     {
       name: 'web_search',
-      description: '联网搜索网页信息(返回标题+链接+摘要列表)。搜索结果可能有限,可多试关键词。',
+      description:
+        '联网搜索网页信息(返回标题+链接+摘要列表)。搜索结果可能有限,可多试关键词;' +
+        '支持 site:/-site:/"精确短语"/after: 等搜索语法;需要网页全文时对结果链接用 web_fetch。',
       parameters: {
         type: 'object',
         properties: {
@@ -560,7 +582,50 @@ export function createTools(deps: {
         required: ['query'],
       },
       async execute(params: ToolParams) {
-        return webSearch(String(params.query ?? ''), Number(params.count) || 5)
+        const query = String(params.query ?? '')
+        const count = Math.min(Math.max(Math.round(Number(params.count)) || 5, 1), 10)
+        // DeepSeek 官方搜索优先(2026-10-22):自研搜索引擎,summary 长摘要
+        // 专供模型阅读、带相关度/权威分;未配 Key 或官方 API 失败回退 Bing/DDG
+        const creds = deps.getDeepseekCreds?.() ?? null
+        if (creds) {
+          try {
+            const results = await deepseekWebSearch(creds, { query, count })
+            return formatDeepseekSearchResults(results, query)
+          } catch (err) {
+            console.warn(`[agent] DeepSeek 搜索失败,回退 Bing/DDG:${(err as Error).message}`)
+          }
+        }
+        return webSearch(query, count)
+      },
+    },
+    {
+      name: 'web_fetch',
+      description:
+        '抓取网页正文(返回页面标题 + Markdown 正文,超长自动截断)。' +
+        '需要阅读某个网页的详细内容时用本工具(如 web_search 结果里的链接、用户给的网址);' +
+        '仅支持 http/https,需要登录或有反爬的页面可能抓不到。',
+      parameters: {
+        type: 'object',
+        properties: {
+          url: { type: 'string', description: '要抓取的完整网址(如 https://example.com/article)' },
+        },
+        required: ['url'],
+      },
+      async execute(params: ToolParams) {
+        const url = assertWebFetchUrl(String(params.url ?? ''))
+        // DeepSeek 官方抓取优先(2026-10-22):返回标题 + Markdown 正文;
+        // 未配 Key 或官方 API 失败回退直连抓取
+        const creds = deps.getDeepseekCreds?.() ?? null
+        if (creds) {
+          try {
+            const { title, content } = await deepseekWebFetchPage(creds, url)
+            return formatPageResult(title, content, url)
+          } catch (err) {
+            console.warn(`[agent] DeepSeek 抓取失败,回退直连:${(err as Error).message}`)
+          }
+        }
+        const { title, content } = await fetchPageFallback(url)
+        return formatPageResult(title, content, url)
       },
     },
     {
@@ -861,5 +926,8 @@ export function createTools(deps: {
     ...glmTools,
     ...mimoTools,
     ...mijiaTools,
+    // 电脑操控(2026-10-22):窗口列表/置前/截图——截图类请求专用,
+    // 杜绝 LLM 手写截屏在高 DPI 缩放下截残(右/下 1/3 被裁)
+    ...createComputerTools(),
   ]
 }

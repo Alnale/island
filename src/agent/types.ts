@@ -16,9 +16,16 @@ import type {
   AgentTool as EngineAgentTool,
   McpServerConfig,
   MemoryEntry,
+  PersonaBufferItem,
+  PersonaCard,
+  PersonaStyle,
   ProviderId,
   ProviderCredentials,
+  MindWhisper,
+  MindWhisperKind,
 } from '../../electron/agent/types'
+
+export type { MindWhisper, MindWhisperKind }
 
 /** 引擎状态 → 渲染端状态机 */
 export type AgentStatus = 'idle' | 'thinking' | 'running' | 'error'
@@ -82,6 +89,10 @@ export interface AgentSession {
   title: string
   updatedAt: number
   messages: AgentMessage[]
+  /** 存档时她留在岛上的那一句(旧档没有) */
+  mindGuess?: string | null
+  /** 存档时的输入框底字 */
+  mindWhisper?: MindWhisper | null
 }
 
 /** 工具信息(列表展示:名称/描述/参数 schema;引擎 listAllTools 返回,
@@ -105,8 +116,12 @@ export interface AgentPanelProps {
   tools: AgentToolInfo[]
   /** 当前对话实时总结标题(每轮回复后静默更新;入历史作会话标题) */
   currentTitle: string | null
-  /** 心理揣测(助手回复落定同步评估;紧凑态文字区优先展示) */
+  /** 她自己的心理刻画(主 Agent 写下的岛面一句,回复落定后判定;紧凑态文字区优先展示) */
   mindGuess: string | null
+  /** 输入框底字:她想说的 / 渴望你说的 / 纯粹心里话 */
+  mindWhisper: MindWhisper | null
+  /** 底字写下的时刻。0 = 从存档恢复,不再播放打印。 */
+  whisperRevealAt: number
   /** 发送一轮对话(2026-08-17 拖拽上传:opts.media = 媒体附件路径列表,
    * 作 media part 对话窗口展示;opts.paths = 全部附件路径(含媒体),
    * LLM 侧文本标注可读取分析;text 可为空 = 纯附件上传) */
@@ -159,6 +174,9 @@ export type { McpServerConfig }
 /** 记忆条目(记忆系统;类型 = 偏好/事实/工作流/教训) */
 export type { MemoryEntry }
 
+/** 人格卡(设置页多套人格;prompt 手写、notes = 进化整合区) */
+export type { PersonaCard, PersonaStyle, PersonaBufferItem }
+
 /** LLM 供应商独立凭据(API Key/Base URL/模型,2026-08-14 多供应商独立存储) */
 export type { ProviderId, ProviderCredentials }
 
@@ -168,14 +186,16 @@ export type { ProviderId, ProviderCredentials }
 export interface AgentConfig extends EngineAgentConfig {
   excludedTools: string[]
   excludedSkills: string[]
-  /** 主动陪伴开关(默认 true;用户无操作满 N 分钟后判断是否主动开口) */
+  /**
+   * 主动陪伴开关(默认 true;用户无操作满 N 分钟后判断是否主动开口)。
+   * 2026-10-22:判断"暂不开口/失败"只短冷却重试不重置时钟,连续 2 次
+   * 未开口后兜底强制开口一次
+   */
   proactiveEnabled: boolean
-  /** 主动陪伴间隔数值(默认 60,钳制 5–480;配合 proactiveIntervalUnit) */
+  /** 主动陪伴间隔数值(默认 15,钳制 5–480;配合 proactiveIntervalUnit) */
   proactiveInterval: number
   /** 主动陪伴间隔单位(s=秒 / m=分钟 / h=小时) */
   proactiveIntervalUnit: 's' | 'm' | 'h'
   /** 总结标题文风(Sub Agent 设置:预设 id 或自定义 ≤100 字) */
   summaryStyle: string
-  /** 心理揣测人格(Sub Agent 设置:预设 id 或自定义 ≤100 字) */
-  mindPersona: string
 }

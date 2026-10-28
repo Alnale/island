@@ -13,7 +13,16 @@ export const MAX_CONTEXT_TOKENS = 400_000
 export const MIN_KEEP_MESSAGES = 10
 
 /**
- * 估算消息 token 数(粗估:文本类按 0.6/字符,工具参数按 0.3/字符)
+ * 单张图片的粗估 token(官方 DeepSeek vision 指南:每张图片 token 上限
+ * 1024——小图等比放大、大图缩到约 1300×1300 后上限一致)。不计会让
+ * trimHistory 对图片历史完全失察(图片 part 记 0 token,长对话收图多了
+ * 历史只涨不裁)
+ */
+const IMAGE_TOKENS = 1024
+
+/**
+ * 估算消息 token 数(粗估:文本类按 0.6/字符,工具参数按 0.3/字符,
+ * 图片按 1024/张)
  */
 export function estimateMessageTokens(m: AgentMessage): number {
   let n = 0
@@ -21,6 +30,8 @@ export function estimateMessageTokens(m: AgentMessage): number {
     if (p.type === 'text' || p.type === 'reasoning') n += p.text.length * 0.6
     else if (p.type === 'tool-result') n += p.result.length * 0.6
     else if (p.type === 'tool-call') n += JSON.stringify(p.args ?? {}).length * 0.3
+    // 图片附件(image part / QQ 收图、拖拽上传的 img 媒体)按官方上限粗估
+    else if (p.type === 'image' || (p.type === 'media' && p.kind === 'img')) n += IMAGE_TOKENS
   }
   return Math.ceil(n)
 }

@@ -19,26 +19,88 @@ const crypto = require('node:crypto')
 
 const TTL_SEC = 105 // 展示有效期(真实有效期约 120s,提前换不死码)
 
-/** WebUI token 自动发现:环境变量 → 常见 NapCat 安装目录的 webui.json */
-function findWebuiToken() {
-  const env = process.env.NAPCAT_WEBUI_TOKEN
-  if (env && env.trim()) return env.trim()
+/**
+ * WebUI 地址候选(2026-10-22):NapCat webui.json 的 host 常配成 "::" ——
+ * Windows 上可能只监听 IPv6,死连 127.0.0.1 会 "fetch failed"(用户截图根因
+ * 之一)。这里按配置 host → 127.0.0.1 → [::1] 给出候选,登录流逐个尝试。
+ */
+function webuiBaseUrls(host, port) {
+  const p = Number(port) || 6099
+  const urls = []
+  const add = (u) => {
+    if (u && !urls.includes(u)) urls.push(u)
+  }
+  const h = String(host || '').trim()
+  if (h && h !== '::' && h !== '0.0.0.0' && h !== '*') {
+    const hostPart = h.includes(':') && !h.startsWith('[') ? `[${h}]` : h
+    add(`http://${hostPart}:${p}`)
+  }
+  add(`http://127.0.0.1:${p}`)
+  add(`http://[::1]:${p}`)
+  return urls
+}
+
+/**
+ * WebUI 配置自动发现(2026-10-22 起同时读 host/port,不再只会拼死 6099):
+ * 环境变量 → 常见 NapCat 安装目录的 webui.json。返回第一个带 token 的配置
+ * 的地址候选;没有 token 时也返回地址(供小窗错误文案显示实际连接目标)。
+ */
+function findWebuiConfig() {
+  const envToken = (process.env.NAPCAT_WEBUI_TOKEN || '').trim()
+  const envUrl = (process.env.NAPCAT_WEBUI_URL || '').trim()
   const home = os.homedir()
+  const napcatHome = (process.env.NAPCAT_HOME || '').trim()
+  const appData = (process.env.APPDATA || '').trim()
+  const localAppData = (process.env.LOCALAPPDATA || '').trim()
   const candidates = [
+    napcatHome && path.join(napcatHome, 'config', 'webui.json'),
+    napcatHome && path.join(napcatHome, 'napcat', 'config', 'webui.json'),
     path.join(home, 'NapCatQQNode', 'napcat', 'config', 'webui.json'),
     path.join(home, 'NapCatQQNode', 'config', 'webui.json'),
     path.join(home, 'NapCatQQ', 'config', 'webui.json'),
-    path.join(process.env.APPDATA || '', 'NapCat', 'config', 'webui.json'),
-  ]
+    appData && path.join(appData, 'NapCat', 'config', 'webui.json'),
+    localAppData && path.join(localAppData, 'NapCat', 'config', 'webui.json'),
+  ].filter(Boolean)
+
+  let fileToken = ''
+  let source = ''
+  let fileBaseUrls = []
   for (const p of candidates) {
+    let j = null
     try {
-      const j = JSON.parse(fs.readFileSync(p, 'utf8'))
-      if (j && typeof j.token === 'string' && j.token.trim()) return j.token.trim()
+      j = JSON.parse(fs.readFileSync(p, 'utf8'))
     } catch {
-      // 下一个候选
+      continue // 下一个候选
+    }
+    if (!j || typeof j !== 'object') continue
+    const urls = webuiBaseUrls(j.host, j.port)
+    if (fileBaseUrls.length === 0 && urls.length) fileBaseUrls = urls
+    const tk = typeof j.token === 'string' ? j.token.trim() : ''
+    if (tk) {
+      fileToken = tk
+      source = p
+      if (urls.length) fileBaseUrls = urls
+      break // 第一个带 token 的安装 = 用户当前用的那份
     }
   }
-  return ''
+
+  const envBase = envUrl ? [envUrl.replace(/\/+$/, '')] : []
+  const baseUrls = envBase.length
+    ? envBase
+    : fileBaseUrls.length
+      ? fileBaseUrls
+      : webuiBaseUrls('127.0.0.1', 6099)
+  return {
+    token: envToken || fileToken,
+    baseUrl: baseUrls[0],
+    baseUrls,
+    source: envToken ? 'NAPCAT_WEBUI_TOKEN' : source,
+  }
+}
+
+/** 兼容旧调用:只要 token(2026-10-22 起请用 findWebuiConfig) */
+function findWebuiToken() {
+  return findWebuiConfig().token
 }
 
 /**
@@ -82,13 +144,16 @@ function createNapcatLogin(deps) {
 
   const startFlow = (token) => {
     if (flow) flow.stop()
-    const tk = (typeof token === 'string' && token.trim()) || findWebuiToken()
+    const cfg = findWebuiConfig()
+    const tk = (typeof token === 'string' && token.trim()) || cfg.token
     if (!tk) {
       pushState({ phase: 'error', qrUrl: '', ageSec: 0, remainSec: 0, message: '未找到 WebUI token(检查 NapCat 配置 webui.json),可在下方粘贴后点「开始」' })
       return
     }
     flow = deps.agentEngineModule.createNapcatLoginFlow({
       token: tk,
+      baseUrl: cfg.baseUrl,
+      baseUrls: cfg.baseUrls,
       ttlSec: TTL_SEC,
       sha256Hex: (t) => crypto.createHash('sha256').update(t).digest('hex'),
       onUpdate: pushState,
@@ -171,4 +236,4 @@ function createNapcatLogin(deps) {
   }
 }
 
-module.exports = { createNapcatLogin, findWebuiToken }
+module.exports = { createNapcatLogin, findWebuiConfig, findWebuiToken, webuiBaseUrls }

@@ -9,8 +9,16 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { AgentConfig, AgentToolInfo, McpServerConfig, MemoryEntry, ProviderId, ProviderCredentials } from '../../../agent/types'
-import { MIND_PERSONAS, SUMMARY_STYLES } from '../../../../electron/agent/constants'
+import type {
+  AgentConfig,
+  AgentMessage,
+  AgentToolInfo,
+  McpServerConfig,
+  MemoryEntry,
+  ProviderId,
+  ProviderCredentials,
+} from '../../../agent/types'
+import { SUMMARY_STYLES } from '../../../../electron/agent/constants'
 import { MIMO_DEFAULT_BASE_URL, MIMO_DEFAULT_MODEL, MIMO_PLATFORM_URL, mimoProviderLabel } from '../../../../electron/agent/providers/mimo-constants'
 import { DEEPSEEK_DEFAULT_BASE_URL, DEEPSEEK_DEFAULT_MODEL, DEEPSEEK_TOPUP_URL, deepseekProviderLabel } from '../../../../electron/agent/providers/deepseek-constants'
 import { LMSTUDIO_DEFAULT_BASE_URL, LMSTUDIO_DEFAULT_MODEL, lmstudioProviderLabel } from '../../../../electron/agent/providers/lmstudio-constants'
@@ -19,6 +27,7 @@ import { useLeavingList } from '../../../hooks/useLeavingList'
 import { BackFoot, PanelHead } from './shared'
 import { QuickMenu } from './QuickMenu'
 import { DataManagementSettings } from './DataManagementSettings'
+import { PersonaCardsView } from './PersonaCardsView'
 
 /** 空凭据(DeepSeek 默认地址/模型) */
 const EMPTY_DEEPSEEK: ProviderCredentials = { apiKey: '', baseURL: DEEPSEEK_DEFAULT_BASE_URL, model: DEEPSEEK_DEFAULT_MODEL }
@@ -38,6 +47,8 @@ export interface AgentSettingsViewProps {
   onSave: (patch: Partial<AgentConfig>) => void
   /** 工具清单(已注册技能/MCP 的预览展示;agent:tools 异步加载) */
   tools?: AgentToolInfo[]
+  /** 当前窗口对话(人格卡评审:默认最近 30 条,也可勾选部分岛灵回复) */
+  messages?: AgentMessage[]
   /** 界面缩放(百分比 100-400,最低 100%) */
   scale: number
   onScaleChange: (scale: number) => void
@@ -50,9 +61,18 @@ export interface AgentSettingsViewProps {
 
 /** Agent 设置分组菜单(2026-08-07 布局重构:相似功能收进分组菜单,
  * 由整合按钮悬浮展开切换;保存脚全局共用。第 5 组「Sub Agent」=
- * 总结标题文风 + 心理揣测人格设置)。渲染用通用 QuickMenu 组件
+ * 总结标题文风设置)。渲染用通用 QuickMenu 组件
  * (整合按钮 + 同行联通展开 + 滚轮 + 高亮滑块 + 宽度过渡,同款设计) */
-const SETTINGS_TABS = ['账号', '模型分工', '行为与界面', '工具与能力', '记忆与进化', 'Sub Agent', '数据管理'] as const
+const SETTINGS_TABS = [
+  '账号',
+  '模型分工',
+  '行为与界面',
+  '工具与能力',
+  '人格卡',
+  '记忆与进化',
+  'Sub Agent',
+  '数据管理',
+] as const
 
 /** 供应商标签(模型分工页展示,2026-08-18) */
 const PROVIDER_LABELS: Record<ProviderId, string> = {
@@ -304,10 +324,6 @@ const SCALE_PRESETS = [100, 150, 200, 300, 400]
 const SUMMARY_STYLE_ITEMS: string[] = ['', ...SUMMARY_STYLES.map((s) => s.id)]
 const summaryStyleLabel = (id: string) =>
   id ? SUMMARY_STYLES.find((s) => s.id === id)?.name ?? id : '默认'
-const MIND_PERSONA_ITEMS: string[] = ['', ...MIND_PERSONAS.map((p) => p.id)]
-const mindPersonaLabel = (id: string) =>
-  id ? MIND_PERSONAS.find((p) => p.id === id)?.name ?? id : '默认'
-
 /** 媒体窗口默认宽档位(2026-08-08):QuickMenu 悬浮展开,可自定义 160-800 */
 const MEDIA_WINDOW_PRESETS = [240, 320, 480, 640]
 
@@ -487,6 +503,7 @@ export function AgentSettingsView({
   config,
   onSave,
   tools,
+  messages,
   scale,
   onScaleChange,
   mediaWindowWidth,
@@ -512,7 +529,6 @@ export function AgentSettingsView({
     // 最多 9 种;subModel 空 = 用该供应商桶在「账号」里已存的模型
     subProvider: 'deepseek' as ProviderId,
     subModel: '',
-    systemPrompt: '',
     reasoningEffort: 'high',
     // 主对话输出预算(2026-08-08):缺省 8192(与 main 默认一致;
     // 预算只是上限,LLM 任务巨大时经 set_output_budget 按需调大)
@@ -523,9 +539,8 @@ export function AgentSettingsView({
     proactiveEnabled: true,
     proactiveInterval: 15,
     proactiveIntervalUnit: 'm' as 's' | 'm' | 'h',
-    // Sub Agent 设置(2026-08-07):文风/人格预设 id 或自定义 ≤100 字
+    // Sub Agent 设置(2026-08-07):总结文风预设 id 或自定义 ≤100 字
     summaryStyle: '',
-    mindPersona: '',
     // 工具输出根目录(2026-08-12):空 = 未启用,工具保持默认位置
     outputDir: '',
     // 撤销监控目录(2026-08-14 停止与撤销分离):多行文本,每行一个
@@ -706,7 +721,7 @@ export function AgentSettingsView({
       .catch(() => {})
   }, [])
   useEffect(() => {
-    if (tab === 6) refreshSessionLog()
+    if (tab === 7) refreshSessionLog()
   }, [tab, refreshSessionLog])
   useEffect(() => {
     void window.desktop
@@ -789,16 +804,14 @@ export function AgentSettingsView({
             ? config.subProvider
             : activePid,
         subModel: config.subModel ?? '',
-        systemPrompt: config.systemPrompt,
         reasoningEffort: config.reasoningEffort || 'high',
         maxOutputTokens: config.maxOutputTokens ?? 8192,
         // 主动陪伴:旧 settings.json 无字段时按默认(true/15/分钟)兜底
         proactiveEnabled: config.proactiveEnabled !== false,
         proactiveInterval: config.proactiveInterval ?? 15,
         proactiveIntervalUnit: config.proactiveIntervalUnit ?? 'm',
-        // Sub Agent 设置:旧配置无字段 → 空(默认文风/人格)
+        // Sub Agent 设置:旧配置无字段 → 空(默认文风)
         summaryStyle: config.summaryStyle ?? '',
-        mindPersona: config.mindPersona ?? '',
         // 工具输出根目录(2026-08-12):旧配置无字段 → 空(未启用)
         outputDir: config.outputDir ?? '',
         // 撤销监控目录(2026-08-14):旧配置无字段 → 空(未启用)
@@ -1129,14 +1142,12 @@ export function AgentSettingsView({
       // 模型分工(2026-08-18):Sub Agent 供应商/模型(9 种组合)
       subProvider: form.subProvider,
       subModel: form.subModel.trim(),
-      systemPrompt: form.systemPrompt,
       reasoningEffort: form.reasoningEffort,
       maxOutputTokens: form.maxOutputTokens,
       proactiveEnabled: form.proactiveEnabled,
       proactiveInterval: form.proactiveInterval,
       proactiveIntervalUnit: form.proactiveIntervalUnit,
       summaryStyle: form.summaryStyle,
-      mindPersona: form.mindPersona,
       outputDir: form.outputDir.trim(),
       undoWatchDirs: form.undoWatchDirs.split('\n').map((d) => d.trim()).filter(Boolean),
       mcpServers: form.mcpServers.map(toConfigServer),
@@ -1761,7 +1772,7 @@ export function AgentSettingsView({
             {form.subProvider === 'lmstudio' ? (
               // Sub 本地模型下拉(2026-08-19):列出 LM Studio 已加载模型,
               // 选用即持久化——可与主 Agent 不同(本地分工省资源:大模型
-              // 对话、小模型跑总结/揣测);自绘弹层保证滚动条为定制样式
+              // 对话、小模型跑总结);自绘弹层保证滚动条为定制样式
               <div className="island-agent-field" ref={subLmsRef}>
                 <span>Sub Agent 本地模型(可与主 Agent 不同)</span>
                 <div className="island-agent-sublms">
@@ -1838,19 +1849,11 @@ export function AgentSettingsView({
         )}
         {tab === 2 && (
           <>
-            {/* 行为与界面:自定义提示词 / 主动陪伴 / 界面放大
-                (exec_command 确认门设置已移除,2026-08-07 用户要求) */}
-            <label className="island-agent-field island-agent-field--grow">
-              <span>自定义提示词(与长期记忆一起构成系统提示)</span>
-              <textarea
-                value={form.systemPrompt}
-                rows={3}
-                onChange={(event) => setForm((f) => ({ ...f, systemPrompt: event.target.value }))}
-              />
-            </label>
+            {/* 行为与界面:主动陪伴 / 界面放大(自定义提示词 2026-10-26
+                已整合进「人格卡 → 基础提示词」,所有人格卡共用) */}
         {/* 主动陪伴(2026-08-07):用户无操作满 N 后,由总结 Sub Agent
             独立判断语境是否需要主动开口(它有总结上下文的能力),是则
-            主 Agent 完整回合主动回复;回复落定后以系统通知展示心理揣测。
+            主 Agent 完整回合主动回复;回复落定后以系统通知展示心理刻画。
             **关闭时折叠隐藏间隔设置**(2026-08-07 用户要求,折叠动画) */}
         <label className="island-agent-field island-agent-field--toggle">
           <span>主动陪伴(无操作满 N 后主动开口)</span>
@@ -2167,6 +2170,9 @@ export function AgentSettingsView({
           </>
         )}
         {tab === 4 && (
+          <PersonaCardsView config={config} onSave={onSave} messages={messages} />
+        )}
+        {tab === 5 && (
           <>
             {/* 记忆与进化:长期记忆 / 自我进化 */}
         {/* 记忆系统:长期记忆条目(偏好/事实/工作流/教训),对话中 LLM
@@ -2174,7 +2180,7 @@ export function AgentSettingsView({
         <div className="island-agent-section">
           <span className="island-agent-section-title">长期记忆({memory.length} 条,自动附加到系统提示)</span>
           <span className="island-agent-section-hint">
-            对话中可直接说"记住:…"让 Agent 写入;记忆条目也参与自我进化——人设等主人指定条目建议点 🔒 锁定(进化不会改动锁定条目)
+            对话中可直接说"记住:…"让 Agent 写入;人设/人格/角色等设定请在「人格卡」维护,长期记忆只放偏好/事实/工作流/教训;锁定后自我进化不会改动该条
           </span>
           {memory.map((entry) => (
             <div
@@ -2212,7 +2218,7 @@ export function AgentSettingsView({
                     title={
                       entry.protected
                         ? '已锁定:自我进化不会修改/删除/合并这条记忆(点击解锁)'
-                        : '未锁定:自我进化可能整合/删除这条记忆(点击锁定,人设等主人设定建议锁定)'
+                        : '未锁定:自我进化可能整合/删除这条记忆(点击锁定)'
                     }
                     onClick={() => toggleMemoryLock(entry)}
                   >
@@ -2349,10 +2355,10 @@ export function AgentSettingsView({
         </div>
           </>
         )}
-        {tab === 5 && (
+        {tab === 6 && (
           <>
-            {/* Sub Agent(2026-08-07):总结标题文风 / 心理揣测人格。
-                预设(各 4 种,共 8)存 id;自定义 ≤100 字直接存文本;
+            {/* Sub Agent(2026-08-07):总结标题文风。
+                预设 4 种存 id;自定义 ≤100 字直接存文本;
                 引擎 resolveSubAgentStyle 解析注入系统提示。
                 输入框在预设选中时显示空(placeholder 提示自定义)——
                 输入即切换为自定义 */}
@@ -2386,37 +2392,15 @@ export function AgentSettingsView({
               </label>
             </div>
             <div className="island-agent-section">
-              <span className="island-agent-section-title">心理揣测人格(揣测 Sub Agent 的语气)</span>
+              <span className="island-agent-section-title">她的心理刻画</span>
               <span className="island-agent-section-hint">
-                每轮回复后揣测助手心态,显示在紧凑态文字区与主动陪伴系统通知
+                紧凑态那一句是她自己在回复末行写下的,等回复落定再判断,口吻跟当前人格卡走,不另开模型来猜。
+                输入框里的高饱和底字也是她写的:想对你说的、渴望你说的,或纯粹的心里话。你每打一个字盖住她一个字。
               </span>
-              {/* 心理揣测人格(2026-08-08 QuickMenu 化):默认 = 默认;
-                  自定义人格在下方输入框(输入即切自定义) */}
-              <div className="island-agent-scale-row">
-                <QuickMenu<string>
-                  items={MIND_PERSONA_ITEMS}
-                  value={form.mindPersona}
-                  onChange={(v) => setForm((f) => ({ ...f, mindPersona: v }))}
-                  getLabel={mindPersonaLabel}
-                  title="揣测人格(滚轮切换)"
-                  wheelWhenOpen
-                />
-              </div>
-              <label className="island-agent-field">
-                <span>自定义人格(≤100 字;留空 = 用预设/默认)</span>
-                <input
-                  type="text"
-                  value={MIND_PERSONAS.some((p) => p.id === form.mindPersona) ? '' : form.mindPersona}
-                  maxLength={100}
-                  placeholder="如:用深夜电台主播的语气揣测"
-                  spellCheck={false}
-                  onChange={(event) => setForm((f) => ({ ...f, mindPersona: event.target.value }))}
-                />
-              </label>
             </div>
           </>
         )}
-        {tab === 6 && (
+        {tab === 7 && (
           <DataManagementSettings
             confirming={confirmClear}
             message={clearMsg}

@@ -3,6 +3,7 @@ import {
   DEFAULT_BG_CROP,
   downscaleBackgroundImage,
   genImageId,
+  revealBackgroundOpacity,
   type ImageLibraryItem,
 } from '../../../media/backgroundStore'
 import { PanelHead } from './shared'
@@ -80,7 +81,7 @@ export function ImageLibraryView({
     onBackgroundChange({
       expandedImage: bgTarget === 'expanded' ? item.dataUrl : expandedImage,
       compactImage: bgTarget === 'compact' ? item.dataUrl : compactImage,
-      opacity: backgroundOpacity ?? { expanded: 0.4, compact: 0.4 },
+      opacity: revealBackgroundOpacity(backgroundOpacity ?? { expanded: 0.4, compact: 0.4 }, bgTarget),
       expanded: bgTarget === 'expanded' ? DEFAULT_BG_CROP : expandedCrop,
       compact: bgTarget === 'compact' ? DEFAULT_BG_CROP : compactCrop,
     })

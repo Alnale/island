@@ -65,11 +65,6 @@ export {
   extractJsonObject,
   looksLikeCodeLiteral,
   looksLikeSentenceTitle,
-  looksLikeIncompleteMind,
-  cutMindSentence,
-  salvageMindClause,
-  sanitizeMind,
-  buildMindSystem,
   buildJudgeSystem,
   parseJudgeJson,
   parseMemoriesJson,
@@ -79,7 +74,6 @@ export {
   buildClassifierSystem,
   parseClassifierJson,
   createSummaryAgent,
-  createMindAgent,
   createProactiveAgent,
   createReplyClassifier,
   createEvaluatorAgent,
@@ -87,9 +81,17 @@ export {
   resolveSubConfig,
   prepareSubCall,
   SUMMARY_STYLES,
-  MIND_PERSONAS,
   resolveSubAgentStyle,
 } from '../subagents/subagents'
+// 心理刻画纯文本工具(测试依赖路径;心理行判断无 Sub Agent)
+export {
+  looksLikeIncompleteMind,
+  cutMindSentence,
+  salvageMindClause,
+  sanitizeMind,
+  MIND_MAX_LEN,
+  MIND_LITERAL_EXAMPLES,
+} from '../mind-mark'
 export { createSubAgentHost } from '../subagents/host'
 export { createConfigTools } from '../tools/configTools'
 export {
@@ -110,6 +112,14 @@ export {
   looksLikeForwardInstruction,
   looksLikeGroupSendInstruction,
   shouldSendGroupPanelReply,
+  rememberGroupContext,
+  recentGroupContext,
+  formatGroupContextLines,
+  pinGroupReplyTarget,
+  resolveGroupSendTarget,
+  resolvePrivateSendTarget,
+  resolveGroupMention,
+  scopeTranscriptQuery,
   createNapcatLoginFlow,
   webuiTokenHash,
   encodeQr,
@@ -270,6 +280,9 @@ export function createAgentEngine(deps: EngineDeps): AgentEngine {
       if (!localFreeKey(config)) return
       currentSessionId =
         typeof opts?.sessionId === 'string' && opts.sessionId ? opts.sessionId : null
+      // 主动陪伴只发生在主对话。不沿用上一次 send 留下的会话键,
+      // 否则心理事件会送到别的面板,主输入框不更新。
+      currentSessionKey = 'main'
       // 系统/主动轮不带轮次标签(永不路由,无需核对)
       currentTurnTag = null
       running = true
@@ -326,6 +339,30 @@ export { invalidatePrivacyCache } from '../privacy'
 export { setNotificationShower, showNotify } from '../notify'
 export { buildProfileCard } from '../napcat/napcat'
 export { createMemoryStore } from '../memory'
+// 人格卡(2026-10-25):存储/格式化/导入导出(主进程 IPC 与提示词插件共用)
+export {
+  createPersonaStore,
+  formatPersonaBlock,
+  formatPersonaStyleBlock,
+  migratePersonaMemoriesFromLongTerm,
+  normalizePersonaExport,
+  parsePersonaImport,
+  sanitizePersonaStyle,
+} from '../persona'
+// 人格卡进化缓冲区 + 出站 AI 味清洗(2026-10-26)
+export {
+  createPersonaBufferStore,
+  extendPersonaStyle,
+  mergePersonaBufferItem,
+  parsePersonaBufferImport,
+  planPersonaBufferImport,
+  retargetImportedBuffer,
+  undoPersonaBufferItem,
+} from '../persona-buffer'
+export { sanitizeAiFlavor, scoreAiFlavor, styleModeForText } from '../persona-style'
+// 去 AI 味独立评审 Agent(2026-10-26;与记忆进化完全独立)
+export { createStyleReviewAgent, finalizeStyleReview, prepareStyleReviewSamples } from '../style-review'
+export { createTraitReviewAgent, finalizeTraitReview } from '../persona-traits'
 export { createMCPManager } from '../mcp'
 export { createSkillLoader } from '../skills'
 // 撤销 git 快照(2026-08-14 停止与撤销分离;主进程 agent:undo-* IPC 用)

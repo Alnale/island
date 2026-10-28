@@ -7,7 +7,11 @@ import {
   type PointerEvent,
   type WheelEvent,
 } from 'react'
-import { downscaleBackgroundImage } from '../../../media/backgroundStore'
+import {
+  backgroundDisplayUrl,
+  downscaleBackgroundImage,
+  revealBackgroundOpacity,
+} from '../../../media/backgroundStore'
 import { BackFoot } from './shared'
 
 /** 默认裁切(cover 居中) */
@@ -108,11 +112,16 @@ export function BackgroundView({
     sizePct: number | null,
     posX: number,
     posY: number,
-  ): CSSProperties => ({
-    backgroundImage: `url("${image}")`,
-    backgroundSize: sizePct ? `${sizePct}%` : 'cover',
-    backgroundPosition: sizePct ? `${posX}% ${posY}%` : '50% 50%',
-  })
+  ): CSSProperties => {
+    // 与岛体同一条短 URL。直接把数 MB 的 data URL 写进 style,
+    // 拖动不透明度时每帧都重写整段样式。
+    const shown = backgroundDisplayUrl(image)
+    return {
+      backgroundImage: shown ? `url("${shown}")` : 'none',
+      backgroundSize: sizePct ? `${sizePct}%` : 'cover',
+      backgroundPosition: sizePct ? `${posX}% ${posY}%` : '50% 50%',
+    }
+  }
   // 更新当前编辑目标的裁切参数(另一形态的图片与裁切均不受影响)
   const patchActiveCrop = (patch: Partial<{ zoom: number; posX: number; posY: number }>) => {
     const next = { ...activeCrop, ...patch }
@@ -230,7 +239,8 @@ export function BackgroundView({
           onBackgroundChange({
             expandedImage: bgTarget === 'expanded' ? small : expandedImage,
             compactImage: bgTarget === 'compact' ? small : compactImage,
-            opacity,
+            // 该槽位若是 0,新图会被蒙层完全盖住,看起来像上传没生效
+            opacity: revealBackgroundOpacity(opacity, bgTarget),
             expanded: bgTarget === 'expanded' ? DEFAULT_CROP : expandedCrop,
             compact: bgTarget === 'compact' ? DEFAULT_CROP : compactCrop,
           })

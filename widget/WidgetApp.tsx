@@ -875,6 +875,8 @@ export default function WidgetApp() {
     tools: agentTools,
     currentTitle,
     mindGuess,
+    mindWhisper,
+    whisperRevealAt,
     send: agentSend,
     abort: agentAbort,
     undo: agentUndo,
@@ -1043,6 +1045,8 @@ export default function WidgetApp() {
             tools: agentTools,
             currentTitle,
             mindGuess,
+            mindWhisper,
+            whisperRevealAt,
             onSend: agentSend,
             onAbort: agentAbort,
             // 撤销(2026-08-14 停止与撤销分离):用户气泡左侧按钮 →
@@ -1082,6 +1086,8 @@ export default function WidgetApp() {
       agentTools,
       currentTitle,
       mindGuess,
+      mindWhisper,
+      whisperRevealAt,
       agentSend,
       agentAbort,
       agentUndo,
@@ -1479,6 +1485,6 @@ function SessionHost({
   // 渲染后通知让父级重读最新状态(messages 变化/clear 清空同款机制)
   useEffect(() => {
     onTick?.()
-  }, [ctl.messages, ctl.status, onTick])
+  }, [ctl.messages, ctl.status, ctl.pendingConfirm, ctl.mindGuess, ctl.mindWhisper, ctl.whisperRevealAt, onTick])
   return null
 }

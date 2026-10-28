@@ -14,6 +14,10 @@ const APP_DATA_ENTRIES = Object.freeze([
   'memory-state.json',
   'evolution.json',
   'memory-snapshots',
+  'persona-cards.json',
+  'persona-cards.json.tmp',
+  'persona-evolution.json',
+  'persona-evolution.json.tmp',
   'settings.json',
   'settings.json.bak',
   'settings.json.tmp',
@@ -46,12 +50,58 @@ const RENDERER_DATABASES = Object.freeze([
   'island-video-library',
 ])
 
+/**
+ * 工具**运行时数据**(全部相对 userData)。只登记数据子路径,绝不登记
+ * 工具根目录——工具本体(tools/bili/bili-tool.exe、tools/docflow/*)在
+ * 安装目录,删掉 bili 根目录还会让 bili-tool 的 cwd 消失,表现为
+ * "工具被误删/二进制缺失"(2026-10-23 用户实测误以为 bili 工具被删)。
+ * 新增工具数据时按同样粒度登记具体子路径。
+ */
 const TOOL_DATA_ENTRIES = Object.freeze([
-  'bili',
+  // bili:登录态/下载/进度/二维码(工具本体在 tools/bili)
+  'bili/config',
+  'bili/downloads',
+  'bili/.progress',
+  'bili/login-qrcode.png',
+  'bili/cookies.json',
+  // xxt:登录档案与截图缓存
   'xxt-profile',
   'xxt-screenshots',
-  'docflow',
+  // docflow:运行产物(工具本体在 tools/docflow)
+  'docflow/output',
+  'docflow/temp',
+  'docflow/uploads',
+  'docflow/docflow.db',
+  'docflow/ocr_detail.json',
 ])
+
+/** 工具本体文件名(删除前防误伤:命中即跳过并报告失败) */
+const TOOL_BINARY_RE = /^(bili-tool|docflow|xxt-tool|xxt)(\.exe)?$/i
+
+/**
+ * 检查目标目录是否包含工具本体(限两层,覆盖 tools/bili/bili-tool.exe
+ * 与 tools/docflow/dist/docflow/docflow.exe)。命中时拒绝删除,避免任何
+ * 清单误配把可执行工具当数据清掉。
+ */
+function findToolBinary(dir) {
+  const walk = (d, depth) => {
+    let ents
+    try {
+      ents = fs.readdirSync(d, { withFileTypes: true })
+    } catch {
+      return ''
+    }
+    for (const ent of ents) {
+      if (ent.isFile() && TOOL_BINARY_RE.test(ent.name)) return ent.name
+      if (depth < 2 && ent.isDirectory()) {
+        const hit = walk(path.join(d, ent.name), depth + 1)
+        if (hit) return hit
+      }
+    }
+    return ''
+  }
+  return walk(dir, 0)
+}
 
 function entriesForScope(scope) {
   if (scope === 'app' || scope === 'factory') return APP_DATA_ENTRIES
@@ -101,6 +151,15 @@ function clearManagedData(userDataPath, scope, remove = fs.rmSync) {
     }
     const existed = fs.existsSync(target)
     try {
+      if (existed) {
+        const binary = findToolBinary(target)
+        if (binary) {
+          const error = `疑似工具本体(包含 ${binary}),已拒绝删除`
+          failures.push({ entry, error })
+          report.push({ id: entry, status: 'failed', error })
+          continue
+        }
+      }
       remove(target, { recursive: true, force: true })
       if (existed && fs.existsSync(target)) {
         const error = '删除后仍存在'

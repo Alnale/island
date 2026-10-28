@@ -48,6 +48,14 @@
     transform: none !important;
     filter: none !important;
   }
+  /* 进度填充的位移回退属于运动,减弱动效时直接落到新值 */
+  .island-progress-fill,
+  .island-panel-progress-fill::after {
+    transition: none;
+  }
+  .island-progress-rewind-particles {
+    display: none;
+  }
 }
 @media (prefers-reduced-transparency: reduce) {
   .island-bg,

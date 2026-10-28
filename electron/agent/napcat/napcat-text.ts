@@ -6,6 +6,8 @@
  * QQ空间 g_tk 计算。全部纯函数,无 IO/无状态。
  */
 
+import { BOT_SELF_NAMES } from './napcat-session'
+
 // ---- QQ空间 g_tk 计算 ----
 export function gtkFromCookie(cookie: string): string {
   const m = /p_skey=([^;]+)/.exec(cookie) ?? /skey=([^;]+)/.exec(cookie)
@@ -98,22 +100,99 @@ export interface OutgoingSeg {
 }
 
 /**
- * 组装 OneBot 11 出站消息:纯文本 → 字符串;含图/语音 → 段数组
- * (text 段在前 → image 段 → record 段;record.data.file = 路径/URL/base64,
- * NapCat 侧自动转 QQ silk 语音编码)。纯函数,单测钉段形状。
+ * 去掉群回复里艾特机器人自己的写法。
+ * 模型会把提示词里的 @岛灵 / @鲸鱼娘,或自己的 QQ、CQ 码 at,抄进正文;
+ * QQ 会把这些显示成艾特自己。只删 @ 这一下,句子里的自称留着。
+ * extraNames = 自己发出的群消息上见过的群名片、昵称。
+ */
+export function stripSelfMentions(text: string, selfQQ?: string | null, extraNames?: readonly string[]): string {
+  let t = String(text ?? '')
+  if (!t) return t
+  const self = String(selfQQ ?? '').trim()
+  if (/^\d{5,12}$/.test(self)) {
+    t = t.replace(new RegExp(`\\[CQ:at,qq=${self}(?:,[^\\]]*)?\\]`, 'g'), '')
+    t = t.replace(new RegExp(`(?<![0-9])[@＠]\\s*${self}(?![0-9])`, 'g'), '')
+  }
+  const names = [...BOT_SELF_NAMES, ...(extraNames ?? [])]
+    .map((n) => String(n ?? '').trim())
+    .filter((n) => n.length >= 2)
+    .sort((a, b) => b.length - a.length)
+  const seen = new Set<string>()
+  for (const name of names) {
+    if (seen.has(name)) continue
+    seen.add(name)
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    t = t.replace(new RegExp(`[@＠]\\s*${escaped}`, 'g'), '')
+  }
+  return t
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/^[，,、\s]+/, '')
+    .replace(/[，,、\s]+$/, '')
+    .trim()
+}
+
+/** 艾特名单里去掉机器人自己。at=all 保留。 */
+export function withoutSelfAt(
+  at: string | string[] | undefined,
+  selfQQ?: string | null,
+): string | string[] | undefined {
+  const self = String(selfQQ ?? '').trim()
+  const list = (Array.isArray(at) ? at : at ? [at] : [])
+    .map((x) => String(x ?? '').trim())
+    .filter((x) => x && x !== self)
+  if (list.length === 0) return undefined
+  return list.length === 1 ? list[0] : list
+}
+
+/**
+ * 组装 OneBot 11 出站消息:纯文本 → 字符串;含图/语音/@/引用 → 段数组
+ * (reply 段在最前 → at 段 → text 段 → image 段 → record 段;
+ * record.data.file = 路径/URL/base64,NapCat 侧自动转 QQ silk 语音编码)。
+ * selfQQ 给了就把艾特自己的段丢掉。纯函数,单测钉段形状。
  */
 export function buildOutgoingMessage(
   text: string,
   images: string[],
   voice?: string,
+  extra?: { at?: string | string[]; replyTo?: string; selfQQ?: string },
 ): string | OutgoingSeg[] {
   const v = typeof voice === 'string' && voice.trim() ? voice.trim() : ''
-  if (images.length === 0 && !v) return text
+  const replyTo = typeof extra?.replyTo === 'string' ? extra.replyTo.trim() : ''
+  const rawAt = withoutSelfAt(extra?.at, extra?.selfQQ)
+  const ats = (Array.isArray(rawAt) ? rawAt : rawAt ? [rawAt] : [])
+    .map((x) => String(x ?? '').trim())
+    .filter((x) => x && (x === 'all' || /^\d+$/.test(x)))
+    .slice(0, 10)
+  if (images.length === 0 && !v && !replyTo && ats.length === 0) return text
   const segs: OutgoingSeg[] = []
+  if (replyTo) segs.push({ type: 'reply', data: { id: replyTo } })
+  for (const qq of ats) segs.push({ type: 'at', data: { qq } })
   if (text) segs.push({ type: 'text', data: { text } })
   for (const img of images) segs.push({ type: 'image', data: { file: img } })
   if (v) segs.push({ type: 'record', data: { file: v } })
   return segs
+}
+
+/** 合并转发节点(gocq 标准 uin/name/content) */
+export interface OutgoingForwardNode {
+  type: 'node'
+  data: { uin: string; name: string; content: string | OutgoingSeg[] }
+}
+
+/** 文本列表 → 合并转发节点(2026-10-25:napcat forward send) */
+export function buildForwardNodes(
+  texts: string[],
+  botQQ: string,
+  botName = '岛灵',
+): OutgoingForwardNode[] {
+  return texts
+    .map((t) => String(t ?? '').trim())
+    .filter(Boolean)
+    .slice(0, 50)
+    .map((t) => ({
+      type: 'node' as const,
+      data: { uin: String(botQQ || '0'), name: botName, content: t },
+    }))
 }
 
 /** 内部独白/思维链泄漏**疑似**粗筛(2026-08-17):只返回是否疑似,**

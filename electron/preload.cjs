@@ -20,6 +20,10 @@ contextBridge.exposeInMainWorld('desktop', {
   pointer(active) {
     ipcRenderer.send('widget:pointer', Boolean(active))
   },
+  /** 把挂件窗口拉到前台(确认卡弹出时调用,避免第一下点击被系统吃掉) */
+  focusWindow() {
+    ipcRenderer.send('widget:focus')
+  },
   /* 死通道已删(审计 P2-1):hide/quit/setAlwaysOnTop 渲染端零调用,
    * 托盘退出走 app.quit、置顶走 tray 直调 */
   /** 托盘菜单"设置":订阅回调(渲染端在岛内展开设置视图)。
@@ -49,9 +53,24 @@ contextBridge.exposeInMainWorld('desktop', {
   },
   /** 窗口层级(2026-08-10 用户要求):展开态不严格置顶。渲染端在展开/
    * 收起时上报形态——紧凑(灵动岛/多媒体岛)= true 置顶,展开面板 =
-   * false 不置顶。主进程尊重托盘"总在最前"开关(用户显式关闭时不动作) */
+   * false 不置顶。主进程尊重托盘"总在最前"开关,并在"置于桌面最上方"
+   * 开启时无视形态强制置顶 */
   setTopmost(on) {
     ipcRenderer.send('widget:topmost', Boolean(on))
+  },
+  /** 置于桌面最上方(2026-10-24 用户要求):设置页开关读/写主进程
+   * settings.desktopTopmost;开启后展开面板同样保持所有窗口之上,
+   * 与托盘菜单项联动(主进程广播 app:desktop-topmost-changed) */
+  getDesktopTopmost() {
+    return ipcRenderer.invoke('app:get-desktop-topmost')
+  },
+  setDesktopTopmost(on) {
+    return ipcRenderer.invoke('app:set-desktop-topmost', Boolean(on))
+  },
+  onDesktopTopmostChange(callback) {
+    const listener = (_event, on) => callback(Boolean(on))
+    ipcRenderer.on('app:desktop-topmost-changed', listener)
+    return () => ipcRenderer.removeListener('app:desktop-topmost-changed', listener)
   },
   /** 全屏状态上报(2026-08-08):fullscreenchange 时通知主进程,主进程
    * 在全屏期间兜底忽略 widget:set-size——全屏层(100% viewport)跟随
@@ -232,6 +251,50 @@ contextBridge.exposeInMainWorld('desktop', {
   agentMemorySet(patch) {
     return ipcRenderer.invoke('agent:memory-set', patch)
   },
+  /** Agent:读取人格卡列表(2026-10-25) */
+  agentPersonaGet() {
+    return ipcRenderer.invoke('agent:persona-get')
+  },
+  /** Agent:写人格卡(upsert/remove/clearNotes/replaceAll,返回最新列表) */
+  agentPersonaSet(patch) {
+    return ipcRenderer.invoke('agent:persona-set', patch)
+  },
+  /** Agent:导出人格卡(id 缺省 = 全部) */
+  agentPersonaExport(id) {
+    return ipcRenderer.invoke('agent:persona-export', id)
+  },
+  /** Agent:导入人格卡文件(合并去重) */
+  agentPersonaImport() {
+    return ipcRenderer.invoke('agent:persona-import')
+  },
+  /** Agent:去 AI 味 + 新性格评审。消息数组=最近 30 条;{ messages, ids }=只评审勾选的助手回复 */
+  agentStyleReview(messages) {
+    return ipcRenderer.invoke('agent:style-review', messages)
+  },
+  /** Agent:人格卡进化缓冲区列表(2026-10-26) */
+  agentPersonaBufferGet() {
+    return ipcRenderer.invoke('agent:persona-buffer-get')
+  },
+  /** Agent:合并一条人格卡建议(写 notes + 删源记忆) */
+  agentPersonaBufferMerge(id) {
+    return ipcRenderer.invoke('agent:persona-buffer-merge', id)
+  },
+  /** Agent:合并全部待处理人格卡建议 */
+  agentPersonaBufferMergeAll() {
+    return ipcRenderer.invoke('agent:persona-buffer-merge-all')
+  },
+  /** Agent:丢弃一条人格卡建议 */
+  agentPersonaBufferDiscard(id) {
+    return ipcRenderer.invoke('agent:persona-buffer-discard', id)
+  },
+  /** Agent:撤销一次已合并的建议(恢复 notes + 导回记忆) */
+  agentPersonaBufferUndo(id) {
+    return ipcRenderer.invoke('agent:persona-buffer-undo', id)
+  },
+  /** Agent:清空人格卡建议缓冲区 */
+  agentPersonaBufferClear() {
+    return ipcRenderer.invoke('agent:persona-buffer-clear')
+  },
   /** Agent:触发记忆自我进化(后台,完成发系统通知) */
   agentEvolve(focus) {
     return ipcRenderer.invoke('agent:evolve', typeof focus === 'string' ? focus : undefined)
@@ -290,23 +353,21 @@ contextBridge.exposeInMainWorld('desktop', {
   agentSummarize(messages) {
     return ipcRenderer.invoke('agent:summarize', messages)
   },
-  /** Agent:心理揣测(独立 Sub Agent,紧凑态文字区展示) */
-  agentMindGuess(messages) {
-    return ipcRenderer.invoke('agent:mind-guess', messages)
-  },
   /** Agent:写入配置(增量补丁) */
   agentSetConfig(patch) {
     return ipcRenderer.invoke('agent:config-set', patch)
   },
   /** Agent:主动陪伴 tick(渲染端调度器触发;返回 {started, reason?}
-   * 供 in-flight 复位与 judge 否决回退时钟;sessionId = 当前会话 ID,
-   * 主动回合的工具输出归属该对话,2026-08-12) */
-  agentProactiveTick(messages, idleMinutes, sessionId) {
+   * 供 in-flight 复位与未开口计数;sessionId = 当前会话 ID,主动回合的
+   * 工具输出归属该对话,2026-08-12。opts.force = 兜底强制开口(连续 2 次
+   * 判定未开口后跳过 judge 直接开回合,2026-10-22) */
+  agentProactiveTick(messages, idleMinutes, sessionId, opts) {
     return ipcRenderer.invoke(
       'agent:proactive-tick',
       messages,
       Number(idleMinutes) || 0,
       typeof sessionId === 'string' ? sessionId : undefined,
+      opts && typeof opts === 'object' ? { force: !!opts.force } : undefined,
     )
   },
   /** 模式切换(托盘右键菜单):订阅回调(payload = { mode, source })。

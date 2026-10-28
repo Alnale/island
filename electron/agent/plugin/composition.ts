@@ -29,6 +29,7 @@ import {
   externalToolsSourcePlugin,
   memoryToolsPlugin,
   musicToolsPlugin,
+  personaToolsPlugin,
   napcatToolsPlugin,
   sessionToolsPlugin,
   settingsToolsPlugin,
@@ -37,9 +38,11 @@ import {
   bgTasksPromptPlugin,
   evolutionPromptPlugin,
   memoryPromptPlugin,
+  mindPromptPlugin,
+  personaPromptPlugin,
   toolsGuidePromptPlugin,
 } from './prompt-plugins'
-import { mindGuessPlugin } from './subagent-plugins'
+import { subagentOnReplyPlugin } from './subagent-plugins'
 import { AGENT_COMPOSITION_ID_DUP, AGENT_COMPOSITION_LINE_UNKNOWN, CodedError } from './errors'
 import type { Plugin } from './kernel'
 import type { SessionStateService } from './host'
@@ -72,7 +75,7 @@ export interface Profile {
 /**
  * 工厂注册表(name → factory)——组合层唯一的实现解析点。
  * 换实现 = 换行的 name;新增能力 = 注册工厂并在 Profile 加一行。
- * 缺省 19 行(含 subagent-on-reply:助手回复落定同步评估标题+心理揣测)。
+ * 缺省 20 行(含 prompt-mind:主 Agent 自己写心理刻画;subagent-on-reply 只留标题)。
  */
 export const PLUGIN_REGISTRY: Record<string, PluginFactory> = {
   'host-bridge': (_c, env) => hostBridgePlugin(env.deps, env.emit, env.outputBudget, env.sessionState),
@@ -86,14 +89,17 @@ export const PLUGIN_REGISTRY: Record<string, PluginFactory> = {
   'tools-session': () => sessionToolsPlugin(),
   'tools-delegate': () => delegateToolPlugin(),
   'tools-memory': () => memoryToolsPlugin(),
+  'tools-persona': () => personaToolsPlugin(),
   'tools-config': () => configToolsPlugin(),
   'tools-builtin': () => builtinToolsPlugin(),
   'tools-external-source': () => externalToolsSourcePlugin(),
+  'prompt-persona': () => personaPromptPlugin(),
   'prompt-memory': () => memoryPromptPlugin(),
   'prompt-evolution': () => evolutionPromptPlugin(),
   'prompt-bg-tasks': () => bgTasksPromptPlugin(),
   'prompt-tools-guide': () => toolsGuidePromptPlugin(),
-  'subagent-on-reply': (c) => mindGuessPlugin(c),
+  'prompt-mind': () => mindPromptPlugin(),
+  'subagent-on-reply': (c) => subagentOnReplyPlugin(c),
 }
 
 /** 引擎缺省 Profile(与既有 builtinPlugins 的装配顺序逐位一致) */
@@ -111,13 +117,16 @@ export function defaultProfile(): Profile {
       { id: 'tools-session', name: 'tools-session' },
       { id: 'tools-delegate', name: 'tools-delegate' },
       { id: 'tools-memory', name: 'tools-memory' },
+      { id: 'tools-persona', name: 'tools-persona' },
       { id: 'tools-config', name: 'tools-config' },
       { id: 'tools-builtin', name: 'tools-builtin' },
       { id: 'tools-external-source', name: 'tools-external-source' },
+      { id: 'prompt-persona', name: 'prompt-persona' },
       { id: 'prompt-memory', name: 'prompt-memory' },
       { id: 'prompt-evolution', name: 'prompt-evolution' },
       { id: 'prompt-bg-tasks', name: 'prompt-bg-tasks' },
       { id: 'prompt-tools-guide', name: 'prompt-tools-guide' },
+      { id: 'prompt-mind', name: 'prompt-mind' },
       { id: 'subagent-on-reply', name: 'subagent-on-reply' },
     ],
   }
