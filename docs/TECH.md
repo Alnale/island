@@ -1,13 +1,25 @@
 # 灵动岛挂件 · 技术文档
 
-> 版本:**V3.1** · 更新:2026-08-18 · 配套代码:dynamic-island(桌面挂件 + Web 演示版双入口)
+> 版本:**V3.5** · 更新:2026-10-26 · 配套代码:dynamic-island(桌面挂件 + Web 演示版双入口)
 >
 > 本文档是灵动岛桌面挂件(Windows)的完整技术说明——架构设计、模块实现、
 > 交互细节、踩坑记录、测试体系与调试工具。同时作为 Agent 模式的功能引导
 > 知识库:LLM 对话中可调用 `get_feature_guide` 工具按话题读取本文档章节,
 > 向用户介绍灵动岛有什么功能、怎么用(见「第 11 章 功能清单与使用引导」)。
 >
-> **2026-08-19 工程重点**(本版文档新增专章):
+> **2026-10-26 工程重点**(本版文档新增专章):
+> [第 48 章 人格卡(2026-10-26)](#第-48-章-人格卡2026-10-26)——
+> 多套可热切换的岛灵人格(手写提示词 + 结构化说话风格 + 进化整合区)、
+> 进化缓冲区与去 AI 味评审、出站清洗,以及 replace/delete 只在主人明确
+> 要求覆盖整张或删除时才确认。
+>
+> **2026-10-25 工程重点**:
+> [第 47 章 NapCat QQ 机器人接入(2026-10-25 全量适配与反向 WS)](#第-47-章-napcat-qq-机器人接入2026-10-25-全量适配与反向-ws)——
+> OneBot 11 全量接口适配(群文件 / 群管扩展 / 好友与群请求 / 合并转发 /
+> 原生 raw 逃生口) + 反向 WebSocket 模式(本机监听 / 单活跃连接 / token
+> 鉴权) + 连接熔断与保活 + 消息归属路由与出站清洗。
+>
+> 2026-08-19 工程重点保留专章:
 > [第 45 章 智谱 GLM 云端供应商与 GLM 工具族](#第-45-章-智谱-glm-云端供应商与-glm-工具族2026-08-19)——
 > 智谱 GLM 云端 Chat Completions 供应商(第七适配器) + GLM 云端文档工具簇
 > (`glm_ocr` / `glm_file_parse`) + LM Studio 本地 GLM-4-9B 系专属档位(第五
@@ -15,8 +27,8 @@
 >
 > V3.1 工程重点保留专章:
 > [第 43 章 安装器与发行(V3.1 重点)](#第-43-章-安装器与发行v31-重点)——
-> 自绘安装向导(Apple 设计语言重绘) + 绿色发布打包 + 独立安装器 exe,
-> 以及 asar 复制 / 可写性兜底 / 权限降级三个关键踩坑。
+> 自绘安装管理器(Apple 设计语言重绘,安装/卸载合一) + 绿色发布打包 +
+> 独立管理器 exe,以及 asar 复制 / 可写性兜底 / 权限降级三个关键踩坑。
 >
 > V3.0 工程重点保留专章:
 > [第 42 章 插件化架构重构(V3.0 重点)](#第-42-章-插件化架构重构v30-重点)。
@@ -75,6 +87,8 @@
 - [第 44 章 2026-08-18 动画与交互优化专题](#第-44-章-2026-08-18-动画与交互优化专题)
 - [第 45 章 智谱 GLM 云端供应商与 GLM 工具族(2026-08-19)](#第-45-章-智谱-glm-云端供应商与-glm-工具族2026-08-19)
 - [第 46 章 米家智能家居工具簇(2026-09-22)](#第-46-章-米家智能家居工具簇2026-09-22)
+- [第 47 章 NapCat QQ 机器人接入(2026-10-25 全量适配与反向 WS)](#第-47-章-napcat-qq-机器人接入2026-10-25-全量适配与反向-ws)
+- [第 48 章 人格卡(2026-10-26)](#第-48-章-人格卡2026-10-26)
 - [结语](#结语)
 - [附录 A:Agent 事件一览](#附录-aagent-事件一览)
 - [附录 B:常量与阈值表](#附录-b常量与阈值表)
@@ -136,6 +150,7 @@ dynamic-island/
 │   │   │   ├── AgentView.tsx           # Agent 聊天面板
 │   │   │   ├── AgentMessages.tsx       # 消息组件群(气泡/工具卡片)
 │   │   │   ├── AgentSettingsView.tsx   # Agent 设置(连接/行为/工具/记忆)
+│   │   │   ├── PersonaCardsView.tsx    # 人格卡设置页(第 48 章)
 │   │   │   ├── AgentMediaMini.tsx      # 收起面板后的媒体小窗(视频岛/图片岛)
 │   │   │   ├── Markdown.tsx            # Markdown 渲染 + 媒体窗口/视频播放器
 │   │   │   ├── MediaLibraryView.tsx    # 多媒体库(图片/音频/视频三库)
@@ -189,12 +204,17 @@ dynamic-island/
 │       ├── providers/          # LLM 供应商域(deepseek/chat/anthropic/mimo-*
 │       │                       #  lmstudio-*/glm-cloud + sse 公共层 + provider 分发)
 │       ├── tools/              # 工具族域(tools.ts 主入口 + env/bili/docflow/
-│       │                       #  search/media/glm 分簇 + settingsTools 四文件
-│       │                       #  + sessionTools/configTools/tool-args)
+│       │                       #  search/media/glm/persona 分簇 + settingsTools
+│       │                       #  四文件 + sessionTools/configTools/tool-args)
 │       ├── napcat/             # QQ 通道域(napcat.ts 入口 + client/message/
 │       │                       #  session/store/text + wsclient 手写 WS)
 │       ├── subagents/          # 后台子代理域(subagents.ts + helpers)
-│       └── (根层共享模块)       # constants/evolution/mcp/memory/notify/
+│       ├── persona.ts          # 人格卡存储 / 提示块 / 导入导出(第 48 章)
+│       ├── persona-buffer.ts   # 进化缓冲区(合并 / 撤销)
+│       ├── persona-style.ts    # 出站 AI 味清洗
+│       ├── style-review.ts     # 去 AI 味独立评审
+│       ├── persona-traits.ts   # 近 30 条聊天提取新性格
+│       └── (其余根层模块)       # constants/evolution/mcp/memory/notify/
 │                               #  skills/tasks/types/undo
 ├── tools/                      # 外部工具(源码/脚本,dev 直跑)
 │   ├── bili/                   # bili-tool(Rust 单二进制)
@@ -205,7 +225,7 @@ dynamic-island/
 │   ├── test-agent-core.ts      # 引擎测试源码
 │   ├── test-agent-live.mjs/.ts # 真实 LLM 集成测试(隔离目录)
 │   ├── test-markdown.mjs       # Markdown 解析器测试(44 断言)
-│   ├── test-title-live.cjs     # 标题/心理揣测真实 API 测试(electron 跑)
+│   ├── test-title-live.cjs     # 标题/心理刻画真实 API 测试(electron 跑)
 │   ├── test-bili-download.cjs  # bili 下载端到端测试
 │   ├── screenshot-tests.cjs    # UI 巡检(截图/断言,~1160 行,deps 注入)
 │   └── mocks/                  # mock MCP 服务器 + electron stub
@@ -217,9 +237,18 @@ dynamic-island/
 ├── scripts/
 │   ├── build-electron.mjs      # esbuild 打包 agent/bridge
 │   └── system-media-bridge.ts  # SMTC 桥源码
-├── docs/TECH.md                # ★ 本文档
-├── README.md                   # 用户向说明
-└── WIDGET-README.md            # 挂件部署/调试说明
+├── docs/                       # ★ 文档目录(除根目录 README 外的全部文档)
+│   ├── TECH.md                 # 本文档
+│   ├── CLAUDE.md               # 引擎级操作手册
+│   ├── CLAUDE-HISTORY.md       # 踩坑实录原文存档
+│   ├── WIDGET-README.md        # 挂件部署/调试说明
+│   ├── PRIVACY.md              # 隐私说明
+│   ├── SECURITY.md             # 安全说明
+│   ├── THIRD_PARTY_NOTICES.md  # 第三方依赖与许可声明
+│   ├── DATA-LIFECYCLE.md       # 数据生命周期
+│   ├── RELEASE.md              # 发行流程
+│   └── REMEDIATION-SPEC.md     # 整改规格
+└── README.md                   # 用户向说明(根目录)
 ```
 
 ### 1.4 双入口共享一个组件
@@ -338,6 +367,14 @@ useExternalSource` 决定数据与控制走哪一边。
 2. 播放状态变化(暂停冻结在本地时钟位置、恢复继续,均不采信可能过期的上报);
 3. 位置偏离 > 5s **且**上报位置距上次轮询移动 ≥ 2s("活着"判定,真实外部
    seek 才满足;浏览器冻结期移动≈0、更新瞬间偏差≈0,永远不满足)。
+4. **单曲循环折回**(2026-10-23):同一首重播时曲目键不变。QQ 音乐的
+   时间线常常停在结尾且轮询间移动 < 2s,第 3 条永远不成立,本地时钟
+   就越过时长一直涨(进度条卡满、右上角计时不停)。`repeat-one` 下一过
+   时长就按时长取模;模式没写进 SMTC 时,同一首仍在播且越过时长 2s
+   同样折回(顺序切歌会在这 2s 内换曲目或停下)。折回后,落在时长末尾
+   8s 内的上报视为上一轮残留,不再把进度拉回去;时间线若真的跳回曲首
+   (回退 > 5s 且落在前半段)则改采信上报。时长本身不可信(上报超过时长
+   5s 以上)时不折回。
 
 **恢复播放必须重置流逝基准**(`baseAtRef = now`):暂停冻结后 baseAt 停在暂停
 时刻,恢复时 `position = base + (now - baseAt)/1000` 会把**暂停时长算进去**,
@@ -496,10 +533,14 @@ seek 并返回 false。验证结果按 sourceAppId 持久化(localStorage
 | agent:tools/mcp-test | 渲染→主 | 工具列表/MCP 连通测试 |
 | agent:memory-get/set/export/import | 渲染↔主 | 记忆管理 |
 | agent:evolve/evolution-log/rollback/reset | 渲染↔主 | 自我进化 |
-| agent:summarize/mind-guess | 渲染→主 | 标题总结/心理揣测 |
+| agent:summarize | 渲染→主 | 标题总结 |
 | agent:proactive-tick | 渲染→主 | 主动陪伴调度 |
 | agent:skill-import | 渲染→主 | 技能包导入 |
 | agent:skill-delete | 渲染→主 | 彻底删除技能(userData/skills,不进恢复区) |
+| agent:persona-get/set | 渲染↔主 | 人格卡列表 / 新建编辑删除 / 清空整合区 |
+| agent:persona-export/import | 渲染↔主 | 人格卡 JSON 导入导出(文件对话框) |
+| agent:persona-buffer-get/merge/merge-all/discard/undo/clear | 渲染↔主 | 进化缓冲区 |
+| agent:style-review | 渲染→主 | 最近 30 条评审(去 AI 味 + 新性格 → 缓冲区) |
 | app:pick-media-files | 渲染→主 | 视频导入对话框(返回绝对路径) |
 | app:island-pick-files | 渲染→主 | 音频导入对话框 |
 
@@ -582,6 +623,18 @@ MiMo Responses / MiMo Chat / LM Studio Chat / GLM Chat 云端)同构返回
 `ProviderOutcome {calls, text, usage, aborted}`,
 引擎循环共用;工具结果截断 8000 字符回填上下文(各 provider 一致)。
 
+**厂商专属通道(2026-10-22)**:每家厂商只走自家适配器与自家实现——
+适配器按 baseURL 互斥解析(protocolOf:anthropic→mimo→lmstudio→glm→
+deepseek 兜底;DeepSeek 地址永不会解析到 mimo 适配器,反之亦然,有测试
+锁死);序列化/图像编码/错误映射互不借用(deepseek-media / mimo-media /
+lmstudio-chat 各一套;deepseekModelForInput 换视觉模型只发生在 DeepSeek
+适配器内);厂商专属工具固定走自家凭据桶(与激活供应商无关):web_search/
+web_fetch/get_deepseek_balance → providers.deepseek,glm_ocr/glm_file_parse
+→ providers.glm,mimo_media/mimo_batch → providers.mimo;Sub Agent 跨厂商
+换桶时丢弃 llmAdapter(resolveSubConfig——llmAdapter 是协议 id,resolve 按
+preferId 命中不校验地址,不丢会把 DeepSeek 的 'responses' 强绑到 MiMo/GLM
+的 baseURL = 别家模型走错通道)。
+
 #### 5.3.1 DeepSeek Responses API(默认)
 
 - `streamResponse`,裸 fetch + SSE,POST {baseURL}/responses,默认
@@ -595,12 +648,24 @@ MiMo Responses / MiMo Chat / LM Studio Chat / GLM Chat 云端)同构返回
   字样)/ json_schema(结构化输出,name + schema 必填)——总结标题走
   json_object。
 - **输入 items**:message(角色 user/assistant/system/developer 视同 system;
-  content 仅 input_text/output_text,**reasoning 内容块 400** "unknown
-  variant" 实测)、function_call(call_id 必填唯一,每个 call 必须有对应
-  function_call_output)、function_call_output(output 字段)、reasoning(明文
-  content 归并相邻 assistant 消息;**必须回传**,缺失 400 "The reasoning_text
-  in the thinking mode must be passed back")、web_search_call(原样回传自动
-  恢复搜索结果)。
+  content 支持 input_text/output_text/**input_image**(图像理解,2026-10-22),
+  **reasoning 内容块 400** "unknown variant" 实测)、function_call(call_id
+  必填唯一,每个 call 必须有对应 function_call_output)、function_call_output
+  (output 字段)、reasoning(明文 content 归并相邻 assistant 消息;**必须
+  回传**,缺失 400 "The reasoning_text in the thinking mode must be passed
+  back";对话气泡改写成中文:思考链没有带回,请重发,仍失败则点「清空」
+  或把思考强度改成「关」,不再附英文原文和 request_id。Chat 的
+  reasoning_content 同句同样改写)、web_search_call(原样回传自动恢复搜索结果)。
+- **图像理解(2026-10-22)**:user 消息内容块 `{type:'input_image',
+  image_url: <URL|data URI **字符串**>}`(与 file_id 互斥;官方 vision 指南,
+  仅 user/developer 消息与工具输出项可带图,system/assistant 带图 400)。
+  历史图片 part(QQ 收图/拖拽上传的 img 媒体本地路径读盘转 base64、公网
+  URL 透传)由 deepseek-media.ts 统一编码;请求内联图片按 base64 字符
+  32MiB 预算**新图优先**(请求体硬上限 48MiB,预算外旧图降级文本占位,
+  单条消息最多 8 张);**带图请求自动换 deepseek-flash**(官方
+  create-response:图片仅该模型支持——配置模型非 flash/vision 家族时换,
+  纯文本请求不动,deepseekModelForInput);图片 token 按 1024/张计入
+  trimHistory(官方上限,原先图片记 0 = 图片历史只涨不裁)。
 - **usage**:input_tokens_details.cached_tokens(上下文缓存命中)/
   output_tokens_details.reasoning_tokens(思维链 token 数)。
 - **工具参数流式累积**:DeepSeek 的 `response.function_call_arguments.delta`
@@ -615,6 +680,10 @@ MiMo Responses / MiMo Chat / LM Studio Chat / GLM Chat 云端)同构返回
   v4-flash 与 v4-pro;response_format json_object(实测含工具历史约 60%
   空白 content——官方"有概率返回空 content",Responses 的 json_object
   实测空返回率远低)。
+- **图像理解(2026-10-22)**:user 消息带图片 part 时 content 为内容块数组
+  `[{type:'text'},{type:'image_url', image_url:{url}}]`(官方 vision 指南
+  OpenAI 兼容格式;detail 缺省 auto);图片编码/预算/换模与 Responses 同一套
+  (deepseek-media.ts),纯文本消息保持字符串 content 不变(前缀缓存)。
 
 #### 5.3.3 Anthropic Messages API
 
@@ -627,6 +696,10 @@ MiMo Responses / MiMo Chat / LM Studio Chat / GLM Chat 云端)同构返回
   序列化时重排);同一条助手消息里 tool_use 之后不能再有文本;工具参数是
   流式 JSON delta(input_json_delta.partial_json);reasoning parts 回放时
   丢弃(thinking 块需要 signature,两端兼容性取舍)。
+- **图像理解(2026-10-22)**:user 消息图片 part → `image` 块(source
+  type=base64 拆 media_type+data / type=url 透传,vision 指南"Anthropic
+  兼容端点"节;claude 系与 DeepSeek 兼容端点均接受)——编码/预算同
+  deepseek-media.ts,claude 系模型原生支持视觉**不换模型**。
 
 #### 5.3.4 公共层
 
@@ -656,10 +729,14 @@ MiMo Responses / MiMo Chat / LM Studio Chat / GLM Chat 云端)同构返回
   BUDGET_TRUNCATE_HINT system 提示(每回合一次,不进渲染端历史):LLM
   自主判断——任务需要更长输出 → set_output_budget 按需调大后续写;已基本
   完成 → 收尾。
-- **thinking 模式 reasoning 必须回传**:引擎每轮(含工具循环)把思维链
-  reasoning part 存入助手消息 parts,历史序列化按 provider 输出——Responses
-  = 独立 reasoning item;Chat = assistant 消息 reasoning_content 字段;
-  Anthropic 路径 thinking 块需 signature 不可回放,已丢弃。
+- **thinking 模式 reasoning 回传(2026-10-19 官方思考模式)**:请求**带 tools
+  且思考开着**时,历史每一轮助手消息都要带回思维链,没调用工具的轮次也要;
+  缺字段或空串 → 400。Responses = 该轮最前面的 reasoning item,content 为
+  `reasoning_text`(summary / encrypted_content 不支持,写了等于没带回);
+  Chat = 该轮 assistant 的 `reasoning_content`。历史里没存到原文时回一个
+  空格。不带 tools,或本请求思考关闭时不回传。多步工具轮按「助手消息 →
+  工具结果 → 下一条助手消息」拆开,思维链跟自己那一轮。Anthropic 路径
+  thinking 块需 signature 不可回放,已丢弃。
 
 #### 5.3.5 MiMo 大模型(小米,第三供应商;2026-09-22 官网接入文档专项适配)
 
@@ -872,13 +949,13 @@ MiMo Responses / MiMo Chat / LM Studio Chat / GLM Chat 云端)同构返回
   工具,但调用格式无法识别,已忽略)"而非空白。
 - **Sub Agent 本地模型适配三防线(2026-08-19)**:① `resolveSubConfig`
   Sub 桶 model 与 subModel 都空时**回退主配置**(旧版拿空 model 硬撞
-  LM Studio 报"未选择模型",总结/心理揣测全部静默失败——"Sub Agent
+  LM Studio 报"未选择模型",总结/心理刻画全部静默失败——"Sub Agent
   失效"的根因之一);② `subTimeout`——Sub 指向 LM Studio 时后台标签
   任务超时统一放宽到 300s(本地推理模型思维链动辄数分钟,云端 60-90s
   全部掐死;classify/monologue 等**发送前同步判定不放宽**,超时回退
   放行不阻塞 QQ 路由);③ 模型分工页 Sub(lmstudio)专供**下拉菜单**
   (自绘垂直弹层列已加载模型,选用即持久化,可与主 Agent 不同——
-  大模型对话/小模型跑总结揣测的本地分工;原生 select 无法定制滚动条,
+  大模型对话/小模型跑总结的本地分工;原生 select 无法定制滚动条,
   弹层 max-height 176px + thin/`::-webkit-scrollbar` 定制滚动)。
   **Sub LM Studio 端点凭据修复(2026-08-19)**:主 Agent 激活时顶层镜像
   (form.baseURL/apiKey)是主供应商的;Sub 选了 lmstudio 但主在别的供应商
@@ -915,13 +992,15 @@ MiMo Responses / MiMo Chat / LM Studio Chat / GLM Chat 云端)同构返回
 | exec_command | 本机 shell(无沙箱);**媒体文件拦截**——`start <媒体>` 解析出媒体路径时返回 media 附件窗口内播放,不弹外部播放器 |
 | read_file / write_file / list_dir | 文件读写与目录 |
 | open_url / open_file | 打开链接 / 文件;**open_file 媒体拦截**——图片/视频/音频扩展名命中时不调 shell.openPath,返回 media 附件窗口内播放 |
-| web_search | Bing 主用、DDG 回退(duckduckgo 在中国不可达,实测 fetch failed) |
+| web_search | DeepSeek 官方搜索优先(summary 供模型阅读/相关度·权威标注),Bing 主用、DDG 回退(duckduckgo 在中国不可达,实测 fetch failed) |
+| web_fetch | 抓取网页正文(DeepSeek 官方 fetch 返回 Markdown 优先,直连去标签兜底;2026-10-22) |
 | get_time / system_info / notify | 时间 / 系统信息 / 系统通知 |
 | switch_to_music | 切回音乐模式(source: 'tool',不中止本轮);**play:true = 切换后立即开始播放当前播放列表(2026-08-11 用户"让 LLM 切音乐模式听歌没有自动播放"——外部平台走 SMTC 播放控制,本地播放器 player.play)** |
 | bili | B站数据查询与视频下载(内置 bili-tool) |
 | doc_convert | 文档转换(内置 DocFlow 服务,首次调用自动拉起) |
 | xxt | 超星学习通自动答题 |
 | get_feature_guide | 读取内置技术文档,向用户介绍功能(见第 11 章) |
+| persona | 人格卡与进化缓冲区(list/get/create/edit/replace/delete/activate/风格模板/导入导出/buffer_*);见第 48 章 |
 | + 灵动岛设置工具 / 自我配置工具 / 记忆工具 | 见第 7 章 / 5.8 / 5.7 |
 
 #### 5.4.1 bili(B站)
@@ -985,6 +1064,12 @@ MiMo Responses / MiMo Chat / LM Studio Chat / GLM Chat 云端)同构返回
 - **其它加固(2026-08-11)**:拼接分片完整性校验(不匹配报错,防静默损坏);
   `config` action(LLM 对话改默认 quality/codec/outdir,clap `--set` 需
   num_args=2);download 未登录提示;`saved --clear` 清记录不删文件。
+- **数据清除边界(2026-10-23)**:「清除工具数据」只删 userData 下的数据
+  子路径(`bili/config`、`bili/downloads`、`bili/.progress`、二维码等),
+  **不再删 userData/bili 根目录**——根目录是 bili-tool 的 spawn cwd,
+  删除后后续调用会 ENOENT 并被误报为"二进制缺失/工具被误删";每次
+  spawn 前 `ensureBiliCwd()` 兜底重建,错误信息区分工具缺失与工作目录问题;
+  data-manifest 另加"目标含 bili-tool.exe/docflow.exe 时拒绝删除"防护。
 
 #### 5.4.2 doc_convert(文档转换)
 
@@ -1013,10 +1098,14 @@ done|failed|cancelled, detail}` 后:
 1. **状态实时注入系统提示**(`getTasksStatusBlock`,替代原 bili 专用
    getBiliBackgroundStatus,engine/subagents 三处共用;文案稳定不破坏前缀
    缓存,含「等待人工操作的任务要提醒用户当前需要做什么」指导);
+   **2026-10-23 起只注入非终态任务**——终态结果只由 background-done 在
+   当轮对话告知一次;旧实现把已完成任务保留 24h 并每轮写进系统提示,
+   LLM 会把"B站下载:已完成"当成刚发生的事件,反复播报"某个视频下载完毕"
+   (用户实测幻觉)。bili `progress` action 同步只列 running/waiting;
 2. **进入终态触发 done 回调一次**(`updateTask` 终态后忽略再更新;已终态
-   任务 TTL 24h 清理,进行中 6h 失联标注)——createTools 接线
-   setTaskDoneHandler → background-done → 渲染端自动触发一轮对话,LLM
-   主动告知用户结果(完成/失败/取消都有,不再"通知完就结束、LLM 无感知")。
+   任务 TTL 24h 清理但**不再注入状态块**,进行中 6h 失联标注)——createTools
+   接线 setTaskDoneHandler → background-done → 渲染端自动触发一轮对话,
+   LLM 主动告知用户结果(完成/失败/取消都有,不再"通知完就结束、LLM 无感知")。
 
 bili 迁移:登录注册「B站扫码登录」waiting(独立任务 id `bili-login-<key>`,
 重新扫码不互相覆盖),成功 done/失败 failed 都有对话反馈;下载注册「B站下载」
@@ -1052,13 +1141,13 @@ running(detail 带进程与输出目录),完成/失败进终态——**顺带修
   按 code point 截 20 码元。
 - **确定性兜底(2026-08-07)**:全部尝试失败返回 `fallbackTitle(messages)`——
   取**首条用户消息**文本截 10 码元作标题,保证标题永不为空。
-- **Sub Agent 设置**:总结标题**文风**(summaryStyle)与心理揣测**人格**
-  (mindPersona),各 4 种预设 + 自定义 ≤100 字——预设表 SUMMARY_STYLES /
-  MIND_PERSONAS 定义在 constants.ts(零 node 依赖,渲染端设置界面与引擎
-  共用,subagents.ts re-export);resolveSubAgentStyle 解析为提示词片段注入。
+- **Sub Agent 设置**:总结标题**文风**(summaryStyle),4 种预设 + 自定义
+  ≤100 字——预设表 SUMMARY_STYLES 定义在 constants.ts(零 node 依赖,
+  渲染端设置界面与引擎共用,subagents.ts re-export);resolveSubAgentStyle
+  解析为提示词片段注入。
 - 每轮回复完成后自动总结(message 事件落定即触发,后台静默),结果存
   currentTitle(localStorage `widget-agent-title` 持久化);紧凑态文字区 idle
-  时按 **心理揣测 → 标题 → 最后回复预览** 优先显示。
+  时按 **心理刻画 → 标题 → 最后回复预览** 优先显示。
 - **会话版本号防竞态**(sessionVersionRef):仅在 clear/loadSession(会话真正
   切换)时递增——send 递增会把每轮总结全部作废;总结触发为 effect
   (messages 落定 + status idle 后),**排队追平**(in-flight 时标记 pending,
@@ -1067,7 +1156,8 @@ running(detail 带进程与输出目录),完成/失败进终态——**顺带修
   最新消息;loadSession 跳过下次总结。
 - 渲染端 mindGuess 状态(localStorage `widget-agent-mind`);标题仍走
   **泛化标签 runner**(createLabelRunner:入口守卫/排队追平/1.5s 重试/
-  10s 补跑)。心理揣测改为回复落定同步评估,runner 仅 loadSession 补跑。
+  10s 补跑)。心理刻画为回复落定后判断,不经 runner;loadSession 从存档
+  恢复最近一次(AgentSession.mindGuess/mindWhisper),不补跑。
 - **静默记忆提取(2026-08-10 新增职能,用户要求"自动根据对话的整个上下文
   提取适合作为记忆的内容入长期记忆,静默,仅主动陪伴开启时")**:
   `extractMemories(messages)`——完整历史(最多 40 条,reasoning/工具结果/
@@ -1077,41 +1167,33 @@ running(detail 带进程与输出目录),完成/失败进终态——**顺带修
   **仅 proactiveEnabled 且消息数变化才调**(防白花 token),后台异步不阻塞
   IPC,经 store.add(source:'agent',内容级去重)写库,失败静默。
 
-### 5.7 心理揣测 Sub Agent
+### 5.7 心理刻画(岛面一句 + 输入框底字;2026-10-26,无 Sub Agent)
 
-- `createMindAgent`(与总结/主动陪伴/主对话引擎均零共享)——根据当前对话
-  **揣测 LLM 本轮回复时的心态**,≤16 汉字俏皮话(推荐 10 字左右,如
-  「表面淡定,内心在慌」),显示在灵动岛紧凑态文字区。
-- **同步评估**:助手最终回复落定时 loop 发 `agent/assistant-settled`,
-  `subagent-on-reply` 插件立刻跑揣测+标题(fire-and-forget),经 `mind-guess`
-  / `conversation-title` 回推渲染端。IPC `agent:mind-guess` 仅 loadSession 补跑。
-- **能力内核**(subagents/runtime.ts):配置解析/超时/鉴权/压缩/JSON 重试
-  五厂共用;createSubAgentHost 一份单例给 IPC 与插件(ctx.subagents)。
-  进化评估 createEvaluatorAgent 迁入同一内核,由 evolution 持有生命周期。
-- 用户风格分析已迁出 `createProactiveAgent`(不再挂在心理揣测工厂上)。
-- **系统提示与主引擎同源**(buildMindSystem 拼装「自定义提示词 + 长期记忆块
-  + 进化状态 + 后台任务状态 + 人格预设」再接揣测指令)——揣测必须知道助手
-  "是谁、记得什么、在忙什么",否则心理是猜的空气。
-- **超长自查重生成**:生成结果超 16 码元 = 文字区截断残片 → 重新组织直到
-  不截断(重试上限 MIND_MAX_RETRIES=5 次防死循环,全部失败返回空串由调用方
-  回退);空/垃圾/照抄示例同样重试;**措辞强化一轮过**:系统提示明确"必须
-  严格控制在 16 个汉字以内 + 输出前先数一遍字数,超过就删减"。
-- **超长截取的二级兜底(2026-08-14 实机修复"重试 5 次均不合格返回空")**:
-  人格风格(粤语/猫娘等)持续输出逗号串长句、全程无句末标点,
-  cutMindSentence 无从截取、盲重试同风格同病——salvageMindClause 取 ≤16
-  码元内以逗号/顿号收尾的最长前缀小句兜底;重试反馈注入**精确判废原因**
-  (笼统措辞实测无效);语义有效但细节判废(残句/照抄示例)的结果留档
-  次优兜底,重试耗尽后优先回退(空串退回标题观感更差)。
-- sanitizeMind 剥「心理揣测:」前缀/尾随标点、**剥离任意位置的
-  [揣测：xxx] 括号标注**(模型常输出"喵～我已经瞄到主人了哦[揣测：表情…]")、
-  **首尾括号**(2026-08-14 实机"（这下总该明白了吧":开头全角左括号无闭合
-  透传显示——字符类补 （(【[ 与 ）)】]);超长截取路径(cutMindSentence/
-  salvageMindClause)的结果同样过 sanitizeMind 清洗。
-- **文字区回退 Bug 修复**:loadSession 清 mindGuess 且 skipNextLabelRef
-  跳过生成 → 文字区回退"最后回复预览";修复:skip 块**只跳过总结标题,
-  心理揣测照跑**。
-- 触发改为回复落定同步评估后,loadSession 仍清 mindGuess 并经 IPC 补跑一次
-  (历史消息不会再走落定插件,否则文字区回退回复预览)。
+- **她自己写**(mind-reflect.ts):主 Agent 在回复末行独占一行写下
+  `‹心|岛上一句|种类|底字›`——岛上一句(4–16 码元)进灵动岛紧凑态文字区,
+  底字(8–36 码元)印在输入框背后(MindWhisperField:种类「说/望/纯」三色
+  墨水按字打印,用户每输入一个码元盖住她一个字,盖满后粒子转主题色)。
+  引擎剥掉这一行:不进气泡、不进历史、不进 QQ。
+- **等回复落定再判断**(2026-10-26 二轮):流式中途只把标记从气泡里藏住
+  (MindMarkStripper 防闪现),判断只在回复落定那一刻做一次——只认最终
+  回复全文里的合格标记(takeMindFromText,最后一条生效);工具中途步骤写下
+  的心理行只剥不采信。她没写下心理行时,才从落定的思考里收一句「没说出口
+  的话」(mind-mark.ts depictTurn:echo 判废,不拿回复原文截句充数)。
+- **协议防漏**:MIND_REFLECT_LINE 拼进主对话系统提示,MIND_TURN_NUDGE 每步
+  贴在模型历史末尾(必须落在回复正文最后一行,只写在思考里不算);写断的
+  标记由流式剥离器吞行、stripMindMarks 兜底剥净。
+- **清洗与截取**(mind-mark.ts,纯函数零依赖,渲染端可直接 import):
+  sanitizeMind 剥前缀/首尾括号/尾随标点与 [揣测：xxx] 类标注、按码元截 16;
+  cutMindSentence / salvageMindClause 超长语义截取;looksLikeIncompleteMind
+  残句判废;isMindLabel 协议标签拦截(「种类：纯」漏进正文时不印)。
+- **心理 Sub Agent 已彻底取消**(2026-10-26):createMindAgent、心理揣测人格
+  (mindPersona / MIND_PERSONAS)、IPC `agent:mind-guess`、runProactiveGuess
+  整链移除——心理刻画不经过任何旁观者模型,口吻跟当前人格卡走
+  (persona-style 出站清洗同一拍)。
+- **时序**:mind-guess / mind-whisper 与 message 事件同拍发出(落定插件
+  subagent-on-reply 只管标题与记忆);渲染端先缓存、消息落定再应用
+  (pendingMindRef/pendingWhisperRef 时序兜底)。主动回合的 mind-guess 带
+  proactive 标记,主进程同句弹系统通知「岛灵 · 心理刻画」。
 
 ### 5.8 主动陪伴(2026-08-07 用户要求"LLM 主动向用户发送消息")
 
@@ -1119,12 +1201,17 @@ running(detail 带进程与输出目录),完成/失败进终态——**顺带修
   proactiveInterval 默认 15,钳制 5-480 / proactiveIntervalUnit s·m·h
   默认分钟;旧 proactiveIntervalMinutes 由 main.cjs currentAgentConfig
   统一迁移)后,**独立的主动陪伴 Sub Agent**(`createProactiveAgent`,
-  2026-09-01 从总结/心理揣测拆出)判断语境是否需要主动开口
+  2026-09-01 从总结/心理刻画拆出)判断语境是否需要主动开口
   (`judgeProactive`)并分析用户风格(`analyzeUserStyle`):JSON 输出 `{should, hint?}`,
-  parseJudgeJson 严格解析(复用 extractJsonObject 候选链),失败/无 Key →
-  should:false(安全侧,一次都不主动打扰);判断上下文与主引擎同源
-  (自定义提示词 + 记忆块 + 进化状态 + 后台状态 + 当前时间,buildJudgeSystem
-  拼装),noThinking 低强度 60s 超时单措辞一次重试。
+  parseJudgeJson 严格解析(复用 extractJsonObject 候选链)。**三态结果
+  (2026-10-22)**:解析出结论(含 should:false 的"现在别开口")→ `reason:
+  'decided'`;无 Key/超时/垃圾输出 → `should:false, reason:'error'`——
+  **"判断说不"与"判断没跑成"可区分**,后者不得被当否决吃满陪伴间隔
+  (Sub 侧一坏主动陪伴就整段哑火,用户实测"基本不触发"的根因之一);
+  判断上下文与主引擎同源(自定义提示词 + 记忆块 + 进化状态 + 后台状态 +
+  当前时间,buildJudgeSystem 拼装),noThinking 低强度 60s 超时单措辞一次
+  重试;判断措辞纠偏(2026-10-22):用户主动开启陪伴 = 期待偶尔被关心,
+  拿不准时倾向开口(旧措辞"判断偏保守 = 不打扰"被证明过保守)。
 - **工具积极性强化(2026-08-10 用户要求"更拟人,人是会用工具的")**:
   ① 判断措辞新增"值得用工具动手/查证的事"判据——后台任务状态块中有等待
   人工操作的任务(扫码登录)或进行中下载/转换时尤其适合开口、话题需要实时
@@ -1142,17 +1229,29 @@ running(detail 带进程与输出目录),完成/失败进终态——**顺带修
   prompt**(动态段拼进去断缓存前缀,50 倍价差);与 send 共享 running 互斥,
   busy 时静默拒绝不排队;共享 ctl abort 链路;确认门行为不变。
 - **系统消息 = Windows 系统通知**(用户明确:不是对话内气泡):主动回合
-  与普通回复同一条心理揣测路径(落定同步评估 → `mind-guess` 事件);
-  `proactive:true` 时主进程另 `showMainNotify('岛灵 · 心理揣测', guess)`
+  与普通回复同一条心理刻画路径(等回复落定再判断 → `mind-guess` 事件);
+  `proactive:true` 时主进程另 `showMainNotify('岛灵 · 心理刻画', guess)`
   ——与文字区同一句,不重复调用 LLM。
 - **风格分析**(2026-08-10,现挂 createProactiveAgent):`analyzeUserStyle`
-  与 `judgeProactive` 并行(Promise.all),风格描述拼进 hint 内部指令。
-- **调度器在渲染端**(useAgent,每 60s 检查:agent 模式 / 配置开启 /
-  status idle / 有历史 / 距上次"有操作"≥N 分钟 / in-flight 守卫)→
-  `agent:proactive-tick(messages, idleMinutes)`(IPC resolve 时机 = judge
-  完成后,渲染端 in-flight 覆盖 judge 全程,期间用户 send 天然优先);
-  judge-no 回退 idle 时钟;"有操作" = 用户 send / 清空 / 切换会话 / 主动
-  回复落定。
+  风格描述拼进 hint 内部指令。**仅 judge 判"是"后才调**(2026-10-22 从
+  Promise.all 并行改顺序——judge 说不时风格分析纯浪费,白烧一次 LLM;
+  兜底强制开口也跳过:Sub 可能正是坏掉的链路,别让它的超时重试拖慢)。
+- **调度器在渲染端**(useAgent,轮询周期 = 间隔钳 5s-60s;检查:agent
+  模式 / 配置开启 / status idle / 有历史 / 距上次"有操作"≥N 分钟 /
+  in-flight 守卫 / 判定冷却结束)→
+  `agent:proactive-tick(messages, idleMinutes, sessionId, {force})`(IPC
+  resolve 时机 = judge 完成后,渲染端 in-flight 覆盖 judge 全程,期间
+  用户 send 天然优先);"有操作" = 用户 send / 清空 / 切换会话 / 撤销 /
+  主动回复落定。
+- **触发策略(2026-10-22 重构,修"基本不触发")**:间隔 = 主动联系的
+  **最小间隔**,不再是"判一次不就作废整段间隔"——judge-no/judge-error
+  不重置 idle 时钟,只记一次未开口 + 进短冷却(间隔/3,钳 2-5 分钟)重试
+  判断;**连续 2 次未开口 → force 兜底强制开口一次**(主进程跳过 judge
+  与风格分析直接 `proactiveTurn`,hint 给"久未互动简短关心"语境)。最坏
+  沉默 = 间隔 + 2×冷却(如 15 分钟间隔约 25 分钟内必开口),主动陪伴不再
+  整段死在保守判断/Sub 故障上;开口落定仍重置 idle 时钟(间隔限频不变)。
+  未开口计数按"沉默窗口"自动归零(窗口指纹 = lastUserSendRef 取值,
+  任何"有操作"即换窗)。
 - AgentSettingsView「主动陪伴」区:开关 + 关闭时折叠隐藏间隔设置(grid-rows
   0fr↔1fr 折叠动画)+ 触发间隔与单位两个 QuickMenu 按钮(间隔默认 15,
   预设 15/30/60/120 + 自定义内联输入 5-480 钳制;单位默认分钟,秒/分钟/
@@ -1174,10 +1273,17 @@ running(detail 带进程与输出目录),完成/失败进终态——**顺带修
   旧数据迁移补锁;自我进化不可修改/删除/合并(见 5.10 与 10.10),forget
   工具拒绝删除锁定条目,记忆块标 `[类型·锁定]`;设置界面记忆行 🔒/🔓
   切换。详见 10.10 踩坑记录。
-- **系统提示拼装**:`自定义提示词 + 记忆块 + 进化状态 + 后台任务状态`
-  (记忆块按类型分组、截 6000,静态段——变更才断缓存前缀)。
+- **系统提示拼装**:基础段(自定义提示词 + 主人身份 + 回复克制)经
+  `agent/pre-step` 瀑布追加。注册顺序 = 拼装顺序:**人格卡块(有激活卡
+  时,在记忆之前)** → 记忆块 → 进化状态 → 后台任务状态 → 工具指南。
+  记忆块按类型分组、截 6000。人格卡与长期记忆的风格要求冲突时以人格卡
+  为准,事实类记忆仍然有效。详见第 48 章。
 - **LLM 记忆工具**:remember(沉淀,自动去重)/ forget / list_memory /
   update_memory——对话中"记住:…"即写长期记忆。
+- **人设不进长期记忆(2026-10-26)**:`remember` 遇到人设/人格/角色/岛灵
+  标签,或命中人设内容关键词(`isPersonaClassified`),直接拒绝并引导
+  `persona` 工具。已启用人格卡时,启动迁移把这类旧条目逐条写入该卡的
+  进化整合区,写成功后再从长期记忆删除;无激活卡或整合区已满则保留原条目。
 - **近重复合并(2026-09-22 用户反馈"自动记录了特别多重复的")**:原 add()
   只做全等比对,提取 Sub Agent 的同义改写拦不住 → 重复堆积。现 add()/
   importEntries 走三层近重复判定(`findNearDuplicate`,纯函数有单测):
@@ -1278,7 +1384,14 @@ running(detail 带进程与输出目录),完成/失败进终态——**顺带修
   ③ 评审被要求一轮整合全部主题,条目多时既易爆输出又降质——评审提示词
   加「输出预算」(单次 ≤12 条 changes,只清最严重的 2~3 个主题),轮数
   按条目数放大(resolveRoundBudget:约每 15 条一轮,上限 6,多轮渐进收敛)。
-- **CONTRACT**:进化只改记忆(可编辑资产),不触碰引擎/工具代码。
+- **人格卡建议(2026-10-26)**:`agent.personaEvolveEnabled` 开启且存在
+  激活卡时,评审可以输出 `personaMerge`(整合区要点,以及可选的完整
+  prompt/style 提案)。建议只写入 `persona-evolution.json`;本轮被拒绝
+  则丢弃,不改卡、不删源记忆。主人在设置页或 `persona` 工具里合并后才
+  落卡。进化快照不含人格卡;回滚不覆盖卡片,只清掉目标版本之后尚未合并
+  的建议。详见第 48 章。
+- **CONTRACT**:进化改长期记忆,并可向人格卡缓冲区提交建议;不直接改写
+  人格卡的 prompt/style,不触碰引擎/工具代码。
 - **后台任务语义**:工具/设置按钮触发后立即返回,完成发系统通知 + 状态
   注入系统提示(getStatus 块);日志 evolution.json(上限 20 条,含版本号,
   设置界面展示 + 「回滚到上一版本」+「清除所有版本」)。
@@ -1358,7 +1471,7 @@ running(detail 带进程与输出目录),完成/失败进终态——**顺带修
   新增服务/目录下一轮对话起生效。
 - **set_proactive_config**:enabled/interval(5-480 钳制)/unit(s·m·h 枚举)。
 - **set_output_budget**:action=get / action=set(persist 可选写配置)。
-- **set_sub_agent_config**:summaryStyle/mindPersona(预设 id 或自定义,
+- **set_sub_agent_config**:summaryStyle(预设 id 或自定义,
   空串恢复默认)。
 - **配置刷新**:useAgent 的 config 只在挂载时读一次——DynamicIsland 切到
   agent-settings 视图前触发 refreshConfig()(不能在 AgentSettingsView 挂载
@@ -1752,8 +1865,11 @@ DOCEOF
   槽位同值;参数 localStorage widget-background);背景图层经 CSS 变量按
   形态切换(--bg-img-e/--bg-size-e/--bg-pos-e、--bg-img-c/--bg-size-c/
   --bg-pos-c);视口切形态时圆角瞬切(不做圆角动画,避免"矩形裁切到圆角"
-  观感),高度与取景弹簧过渡;**背景图必须经 downscaleBackgroundImage 降
-  采样(长边 ≤1024px)**:岛体形变逐帧重栅格化大图是带背景切换卡顿的主因。
+  观感),高度与取景弹簧过渡。不透明度不写在图层的 CSS opacity 上(透明
+  窗口会透出桌面,约 90% 发灰),而是 `--bg-veil-*` 深色蒙层与图片画在
+  同一元素内;有背景图时面板蒙版固定 `rgba(8,10,14,0.16)`,不跟随浅色
+  UI 的近白 veil。背景图经 downscaleBackgroundImage(当前保留原图,避免
+  2K 窗口把 1024 长边放大后发糊)。
 - **主题色 / 字体 / 字体颜色**:主题色 localStorage widget-theme-color;
   字体库 IndexedDB island-font(10MB 上限,ttf/otf/woff/woff2)+ 参数
   localStorage widget-font;字体颜色 auto = 合成亮度算法(背景图以 opacity
@@ -1787,7 +1903,7 @@ DOCEOF
   连接(协议提示/API Key/Base URL/模型/思考强度/输出预算)、行为与界面
   (自定义提示词/主动陪伴/界面放大/媒体窗口默认宽)、工具与能力(MCP 服务/
   技能目录)、记忆与进化(长期记忆/自我进化)、Sub Agent(总结标题文风 +
-  心理揣测人格);**界面放大**(QuickMenu 化,默认 200,档位 100/150/200/
+  她的心理刻画说明);**界面放大**(QuickMenu 化,默认 200,档位 100/150/200/
   300 + 自定义内联输入 100-300 钳制):宽度 = expandedWidth × 缩放(JS,
   .island-agent-view 与 .island-agent-settings-view 都要 max-width: none
   放开基础 500px 上限——否则在设置视图切缩放看不到效果),高度仍由内容
@@ -1869,7 +1985,7 @@ direction?('right'|'left'), wheelWhenOpen?}>`,四处复用:Agent 设置菜单 /
 - **歌词折叠**:折叠条件 `lyricFold = !lyricShown || (歌词查询完成且无结果)`
   (查询中保持展开防闪动);折叠时岛体加 island-lyric-off 类,挂件版高度
   244→202px;展开用回弹曲线、收起用无过冲缓动。
-- **紧凑态文字区**:歌名/回复文案/心理揣测/标题共用一套切换动画,宽度随
+- **紧凑态文字区**:歌名/回复文案/心理刻画/标题共用一套切换动画,宽度随
   内容扩展;emoji 按字素截断(Intl.Segmenter)。
 - **Agent 面板高度联动**:--agent-h 变量驱动 + onAgentPanelHeight 上报
   (见 6.2);窗口经 handleAgentPanelSize 动态跟随。
@@ -1947,7 +2063,7 @@ direction?('right'|'left'), wheelWhenOpen?}>`,四处复用:Agent 设置菜单 /
 | list_conversation_media | 对话窗口媒体清单(图片/视频/音频),视频带播放状态(播放中/音量/速度/循环/全屏/进度/时长)——LLM 据此回答"对话里有什么媒体、哪个在播、音量多大",配合 set_video_config 调整 |
 | set_system_volume | 系统主音量(winmm waveOutGetVolume/SetVolume 脚本,0-100;与灵动岛独立音量互不影响) |
 | set_proactive_config | 主动陪伴开关/间隔/单位(LLM 自我配置) |
-| set_sub_agent_config | Sub Agent 文风/人格预设或自定义(总结标题/心理揣测) |
+| set_sub_agent_config | Sub Agent 文风预设或自定义(总结标题) |
 
 - 文件读取/校验在工具层(扩展名/存在性/大小/hex/名称长度),桥错误统一
   {error} 抛给引擎按"工具执行失败"回填。
@@ -1956,15 +2072,18 @@ direction?('right'|'left'), wheelWhenOpen?}>`,四处复用:Agent 设置菜单 /
 
 ### 7.3 NapCat QQ 机器人(electron/agent/napcat/ 域,2026-08-12;V3.0 五期拆分)
 
+> 完整技术说明(代码地图、正向/反向连接、消息全链路、工具面、持久化、
+> 登录、配置、排障)见 [第 47 章](#第-47-章-napcat-qq-机器人接入2026-10-25-全量适配与反向-ws)。
+
 用户要求"灵动岛 LLM 接管 QQ 回复:同步上下文、调用长期记忆、偏袒主人、分会话人格、工具记忆备份"。在旧 Python 桥(NapCatQQNode/bridge/qq_bridge.py)的基础上整合,桥退役。
 
 #### 架构
 
-- **客户端**:OneBot 11 WS(全局 WebSocket 零依赖,断线指数退避重连,动作 echo 匹配 + 15s 超时);
+- **客户端**:OneBot 11 WS(手写传输,断线指数退避重连 + 连续失败熔断后半开探测;2026-10-23:熔断探测间隔改为 30s 起、最长 60s,连接建立后每 20s 发 ping 并在 65s 无任何数据时判定半开连接主动重连——修复"启动连上、稍后自己熔断且长时间连不上";LLM `napcat action=reconnect` 或 `set_napcat_config enabled=true`/改 wsUrl 立即 `start()`,旧 socket 迟到 onClose/onError 不计失败;`napcat action=status` 输出最近断开 code/reason 便于定位;动作 echo 匹配 + 15s 超时);
 - **消息流**:QQ 私聊/群消息 → 系统通知 + 对话窗口(来源标签 `island-agent-msg-qq-tag`,注入指令段【群聊指令】/【私聊指令】渲染端剥离,LLM 可见)→ useAgent send(模式无关,音乐模式后台照常)→ LLM 回复;
 - **来源分级**(agent:send source):`qq` 白名单(privacy.json 的 allowed,含主人)自主回复发回;`group` 群消息**回复 = 向主人汇报**(不发群),回复群友由 LLM 调 `napcat` 工具 `send_group`(对公,两条消息各归其位);`ask` 陌生人私聊询问轮——回复发到主人 QQ 同步询问,pendingQQReply 待回复,主人 QQ/对话窗口指示后回复发回陌生人;
 - **群消息**:全部进对话(不预判断),LLM 看场合决定是否回复(@/提到/主人被贬低必回,回护找回场子;普通闲聊只汇报);带群上下文注入(最近 8 条);
-- **记忆**:QQ 轮强制记忆提取(`lastQQTurnAt` 标记,不受主动陪伴开关限制);联系人档案 `napcat-contacts.json` + 聊天记录备份 `napcat-chats.json`(appendNapcatChat 串行写队列,上限 500)+ 会话人格 `napcat-personas.json`(scope = private:<QQ>|group:<群号>);
+- **记忆**:QQ 轮强制记忆提取(`lastQQTurnAt` 标记,不受主动陪伴开关限制);联系人档案 `napcat-contacts.json` + 聊天记录备份 `napcat-chats.json`(appendNapcatChat 串行写队列,上限 500)+ 会话人格 `napcat-personas.json`(scope = private:<QQ>|group:<群号>;这是某个私聊或群的档案字段。岛灵自己的人格卡见第 48 章);
 - **文件发送**:`send/send_group` 带 file → `upload_private_file`/`upload_group_file` **上传文件本体**(非路径文本,中文名 JSON 直传无编码问题,视频 .mp4 同走此通道),文件存在校验;**上传超时独立 180s**(2026-08-14 修复:大视频上传动辄几十秒,原统一 ACTION_TIMEOUT_MS=15s 先触发超时——QQ 实际收到了视频但工具报失败,LLM 误报没发成功;callAction 支持逐调用超时,napcat 工具另声明 timeoutMs=200s 覆盖引擎 60s 兜底);
 - **语音发送**(2026-09-22):`send/send_group` 带 voice → 消息体 **`record` 段**
   `{type:'record',data:{file}}`(不是文件柜上传),file 收本地路径/
@@ -2018,7 +2137,7 @@ direction?('right'|'left'), wheelWhenOpen?}>`,四处复用:Agent 设置菜单 /
   列表格式化/名称与 id 校验/play_library_video 透传与空 id 拒绝)、
   extractJsonTitle 严格解析(回归 "['data']"/Python 单引号 dict)、
   sanitizeTitle 前缀剥离/fallbackTitle 首条用户消息派生/sanitizeMind 清洗/
-  总结与心理揣测无 Key 优雅失败、raceWithTimeout 超时/中止贯通、三 provider
+  总结与主动陪伴无 Key 优雅失败、raceWithTimeout 超时/中止贯通、三 provider
   历史序列化形状 + 8000 截断 + 角色交替 + detectProvider + trimHistory、
   settings-store 原子写/防抖合帧/.bak 恢复/加密往返/resetCache、tasks 任务
   注册表(waiting/running 状态块实时可见/终态触发回调一次/回调载荷拼
@@ -2063,7 +2182,7 @@ direction?('right'|'left'), wheelWhenOpen?}>`,四处复用:Agent 设置菜单 /
   --bg-img-e 生效 + 图库条目;字体导入 → 断言库条目;改名 → 断言;不存在的
   id 改名 → 断言拒绝;前后状态备份恢复);段 4.8 主动陪伴消息事件注入 +
   stub Notification;段 4.9 10 秒真实调度链路(agentSetConfig 写 10 秒 →
-  渲染端调度器 tick → judge(真实 LLM)→ 主动回合落定 → 揣测通知);
+  渲染端调度器 tick → judge(真实 LLM)→ 主动回合落定 → 心理刻画通知);
 - chat-media:对话媒体 UI 巡检(MediaRecorder 录真实 webm → 注入 agent:event
   message(media part)→ 断言消息气泡 + video 元素 + 可见高度;优先扫描
   `C:\Program Files\JiJiDown\Download` 第一个 mp4/mp3 注入——真实 mp4
@@ -2292,6 +2411,10 @@ main.cjs 的 safeHandle 实现);渲染端错误要挂 `unhandledrejection` 捕�
 - **测试**:+7 用例(isProtectedEntry 判定含误判回归/自动锁定与显式豁免/
   加载迁移落盘/applyChanges 三类 change 硬跳过/片段回退过滤/记忆块标记/
   工具锁定-拒删-解锁全链路),149 通过。
+- **后续归属(2026-10-26)**:新的人设写入人格卡,`remember` 拒绝再新增。
+  受保护机制继续拦截进化对残留锁定记忆的 delete/update。人设类旧记忆的
+  迁出路径是人格卡整合(启动迁移,或进化建议进缓冲区后由主人合并),见
+  第 48 章。
 
 ### 10.11 补丁版 Electron 段错误(2026-08-13,排障实录:toast + llhttp 双坑)
 
@@ -2371,7 +2494,7 @@ showNotify**,给 fetch 加 signal 前重读本条。
   即可让它执行本机操作:运行命令、读写文件、打开网页、搜索、系统信息、
   发通知、B站查询/下载、文档转换、超星答题、修改灵动岛设置、播放媒体等。
 - **用户怎么说**:"帮我看看这个文件""搜一下XX的新闻""打开B站热榜"
-  "把桌面截图保存一下"(需要先问清楚目标)。
+  "截一张米家扫码登录窗口的图发我""把桌面截图保存一下"。
 - **入口**:展开岛体 → Agent 面板;输入框 Enter 发送、Shift+Enter 换行;
   运行中变"停止";⋯ 菜单有新对话/历史/工具列表/多媒体库/设置/收起。
 - **本地模型(离线可用)**:安装 LM Studio 并启动 Developer 服务器(默认
@@ -2393,6 +2516,15 @@ showNotify**,给 fetch 加 signal 前重读本条。
   外部播放器);
 - web_search:网页搜索(免 Key);
 - notify:系统通知;
+- computer:电脑操控(2026-10-22)——window_list 列可见窗口 / window_shot
+  窗口**完整**截图(标题栏+四边框完整,任何系统缩放/多显示器不裁切,
+  窗口被遮挡也能截)/ window_focus 窗口还原置前 / screen_shot 整屏截图
+  (多显示器拼接);截图自动作为图片附件在对话里展示,QQ 会话把输出
+  文件路径写进回复即自动发图。**截图/窗口管理请求一律走它,LLM 不再
+  手写截屏代码**——此前手写 PowerShell 截屏在 125%/150% 系统缩放下按
+  逻辑像素分配位图,窗口右 1/3、下 1/3 被裁(2026-10-22 用户实测
+  "截图残缺"根因,后端 electron/window-shot.ps1 已做 Per-Monitor V2
+  DPI 感知);
 - bili:B站搜索/热门/视频信息/下载(支持扫码登录后下载高清视频,下载到
   userData/bili/downloads/);
 - doc_convert:文档转换(Word/PDF 等 → Markdown,输出到文档同目录);
@@ -2466,7 +2598,8 @@ showNotify**,给 fetch 加 signal 前重读本条。
 
 - **功能**:对话中"记住:…"写入长期记忆(偏好/事实/工作流/教训四类),
   设置界面可视化增删改查、导入导出;记忆内容参与每轮系统提示(助手
-  "记得你是谁")。
+  "记得你是谁")。人设、人格、角色、说话风格归人格卡,不写进长期记忆
+  (见 11.19 / 第 48 章)。
 - **用户怎么说**:"记住我喜欢深色主题""忘了那条关于XX的记忆吧"。
 - **入口**:Agent 设置 → 长期记忆;对话里直接说(remember/forget 工具)。
 
@@ -2477,14 +2610,16 @@ showNotify**,给 fetch 加 signal 前重读本条。
   落地),版本化快照可回滚;后台运行,完成系统通知。**受保护(锁定)条目
   不参与进化**(2026-08-13:主人指定的人设/岛灵设定——记忆行点 🔒 锁定,
   带人设标签/内容自动锁定——进化不会修改/删除/合并它们)。
-- **用户怎么说**:"运行记忆进化""回滚上次进化""把岛灵的人设锁起来别被进化改掉"。
-- **入口**:Agent 设置 → 自我进化;记忆行 🔒/🔓 按钮切换锁定。
+- **用户怎么说**:"运行记忆进化""回滚上次进化"。人设本身去人格卡改;
+  开启「自动优化」后,进化只会把建议放进缓冲区,主人点合并才改卡。
+- **入口**:Agent 设置 → 自我进化;记忆行 🔒/🔓 按钮切换锁定;人格卡页
+  的「开启自动优化」控制是否产出人格卡建议。
 
 ### 11.14 主动陪伴
 
 - **功能**:用户长时间无操作时,岛灵主动开口(基于对话语境判断是否值得
   打扰);需要真实信息时会主动调用工具查证/办事(2026-08-10 起更拟人);
-  主动消息 = 系统通知 + 紧凑态文字区心理揣测。
+  主动消息 = 系统通知 + 紧凑态文字区心理刻画。
 - **用户怎么说**:"把主动陪伴关掉""间隔改成 10 分钟"。
 - **入口**:Agent 设置 → 主动陪伴(开关/间隔/单位);对话里直接说
   (set_proactive_config)。
@@ -2492,7 +2627,7 @@ showNotify**,给 fetch 加 signal 前重读本条。
 ### 11.15 对话历史与标题
 
 - **功能**:多对话存档(自动保存,最多 20 条);每轮回复完成后自动总结标题
-  (紧凑态文字区显示心理揣测/标题/回复预览);「新对话」开启新会话。
+  (紧凑态文字区显示心理刻画/标题/回复预览);「新对话」开启新会话。
 - **用户怎么说**:"打开之前的对话""新对话"。
 
 ### 11.16 灵动岛设置工具(对话直达)
@@ -2520,7 +2655,27 @@ showNotify**,给 fetch 加 signal 前重读本条。
   分别用 open_file / play_library_video / bili 处理;
 - 用户说"这个岛能干什么" → 读 11.4,强调"能干活":执行命令/文件/搜索/
   下载/转换,并给一个具体可试的例子("比如我可以帮你把桌面的文档转成
-  Markdown")。
+  Markdown");
+- 用户说"换个人设 / 建一张人格卡 / 说话太像 AI" → 读 11.19 与第 48 章。
+  新建或改语气用 `persona` 的 create/edit;启用用 activate。用户没明确说
+  覆盖整张或删除时,不要调用 replace/delete。优化建议进缓冲区,等主人合并。
+
+### 11.19 人格卡
+
+- **功能**:给岛灵准备多套身份与说话方式。启用一张后,下一轮对话按这张卡
+  说话(手写提示词 + 说话风格 + 进化整合区)。同时只启用一张;停用后恢复
+  基础提示词。进化、性格提取和「去 AI 味」评审只提建议,放进缓冲区,主人点合并才
+  写入。不勾选时看最近 30 条;设置页可以勾选当前窗口里的岛灵回复,只评审那几条。
+  新性格写成「性格:词——怎么体现」,合并后下一轮织进人格叙事,不改手写提示词。
+  启用后出站会按风格档去掉助手腔:闲聊遵守句数上限,列表策略为「绝不」时任务正文也不分点。
+  日常改语气用局部修改;只有明确说「覆盖整张 / 重写整张 / 删除人格卡」
+  才会弹出确认。
+- **用户怎么说**:"建一个毒舌人格卡并启用""把现在这张改得温柔一点"
+  "看看进化缓冲区""从最近聊天里提取新性格""分析最近的回复有没有 AI 味"。
+- **入口**:Agent 设置 → 人格卡;对话里用 `persona` 工具。细节见第 48 章。
+- **和 QQ 会话人格是两套数据**:某个私聊或群的会话人格存在
+  `napcat-personas.json`,只出现在该会话的档案卡里。岛灵自己的身份、称谓
+  与说话方式在人格卡。
 
 ---
 
@@ -2554,7 +2709,7 @@ showNotify**,给 fetch 加 signal 前重读本条。
   MCP_SERVICE_LABEL_PREFIX + stripMcpServiceLabel(引擎 mcp.ts 生成 /
   AgentView 候选列表剥除共用,原渲染端正则硬编码引擎格式)、
   detectProvider + providerLabel(设置界面协议提示与引擎分发共用)、
-  SUMMARY_STYLES / MIND_PERSONAS(设置界面与引擎共用)。
+  SUMMARY_STYLES(设置界面与引擎共用)。
 - settingsBridge 单一来源:readAgentScale(缩放读现值)/ readMediaWindowWidth
   (媒体窗口宽读现值),收敛两处独立 clamp;MEDIA_WINDOW_STORAGE_KEY /
   AGENT_SCALE_STORAGE_KEY 键名单一来源(MediaFrame / useAgentPanelLayout
@@ -2618,15 +2773,18 @@ showNotify**,给 fetch 加 signal 前重读本条。
 | 键 | 说明 |
 | --- | --- |
 | alwaysOnTop | 置顶开关(托盘) |
+| desktopTopmost | 置于桌面最上方开关(设置页/托盘;开启后展开面板同样保持所有窗口之上) |
 | mode | music / agent(托盘模式切换,启动恢复) |
 | agent.apiKey | API Key(safeStorage DPAPI 加密,enc: 前缀) |
 | agent.baseURL / model | Base URL(自动判定 provider)/ 模型名 |
-| agent.systemPrompt | 自定义提示词(与记忆共同构成系统提示) |
+| agent.systemPrompt | 基础提示词(所有人格卡共用;人格卡页可编辑,上限 20000 字) |
+| agent.activePersonaId | 当前启用的人格卡 id(空 = 不注入;下一轮生效) |
+| agent.personaEvolveEnabled | 允许记忆进化向人格卡缓冲区提建议(默认关) |
 | agent.reasoningEffort | 思考强度 none/low/medium/high |
 | agent.maxOutputTokens | 输出预算(4096-262144,缺省 8192) |
 | agent.confirmExec | exec_command 确认门(默认关,字段保留兼容) |
 | agent.proactiveEnabled / proactiveInterval / proactiveIntervalUnit | 主动陪伴(默认开 / 15 / 分钟) |
-| agent.summaryStyle / mindPersona | Sub Agent 文风/人格(预设 id 或自定义) |
+| agent.summaryStyle | Sub Agent 文风(预设 id 或自定义) |
 | agent.mcpServers | MCP 服务配置(name/type/command/args/env/url/headers) |
 | agent.skillsDirs | 技能扫描目录 |
 | agent.excludedSkills | 排除的技能 slug 数组 |
@@ -2644,7 +2802,7 @@ showNotify**,给 fetch 加 signal 前重读本条。
 | widget-lyric-provider / widget-lyric-auto | 歌词 API 厂商/自动切换 |
 | widget-agent-messages | 对话消息(同步写不防抖) |
 | widget-agent-sessions | 会话历史(上限 20 条) |
-| widget-agent-title / widget-agent-mind | 标题/心理揣测 |
+| widget-agent-title / widget-agent-mind | 标题/心理刻画 |
 | widget-video-prefs | 视频偏好(音量/倍速/循环,三处同步) |
 | island-seek-support | seek 能力记忆(按 sourceAppId) |
 
@@ -2663,8 +2821,10 @@ showNotify**,给 fetch 加 signal 前重读本条。
 | 文件 | 说明 |
 | --- | --- |
 | settings.json | 引擎/挂件配置(见 14.1) |
-| memory.json | 长期记忆(200 条上限) |
-| memory-snapshots/ | 进化版本快照 v<N>.json |
+| memory.json | 长期记忆(200 条上限;人设类不再新增) |
+| persona-cards.json | 人格卡本体(上限 50 张;见第 48 章) |
+| persona-evolution.json | 人格卡进化缓冲区(上限 50 条) |
+| memory-snapshots/ | 进化版本快照 v<N>.json(不含人格卡) |
 | memory-state.json | 进化版本号/评分 |
 | evolution.json | 进化日志(20 条上限) |
 | bili/ | B站登录态/下载(下载在 bili/downloads/) |
@@ -2761,10 +2921,14 @@ disableHardwareAcceleration(两处注释已写)。
 ### 16.2 主引擎系统提示分层拼装
 
 ```
-config.systemPrompt(自定义提示词,用户可改)
-+ MASTER_IDENTITY_LINE(主人身份逐条判定,静态常量,constants.ts)
-+ formatMemoryBlock(长期记忆块,锁定条目 [类型·锁定],截 6000)
-+ 进化状态 + 后台任务状态块 + buildToolsGuideBlock(工具路径清单)
+基础段(engine-loop 固定):
+  config.systemPrompt(基础提示词,人格卡页可改;空则「你是桌面灵动岛挂件里的个人助手。」)
+  + masterIdentityLine(主人身份逐条判定)
+  + REPLY_RESTRAINT_LINE(回复克制)
+agent/pre-step 瀑布(plugin/composition.ts 的 defaultProfile,注册顺序 = 拼装顺序):
+  + formatPersonaBlock(激活人格卡:提示词 + 说话方式 + 进化整合区;无卡则跳过)
+  + formatMemoryBlock(长期记忆块,锁定条目 [类型·锁定],截 6000)
+  + 进化状态 + 后台任务状态块 + buildToolsGuideBlock(工具路径清单)
 ```
 
 - QQ 触发的轮次与窗口轮次**同一条拼装路径**:长期记忆与当次对话上下文
@@ -2816,8 +2980,8 @@ send_group 对公 / 对话回复对私双通道、看场合回复、【不回复
 | Agent | 约束要点(多轮实测收敛) |
 | --- | --- |
 | 总结标题 | 名词短语、推荐 10 字 ≤20 字、禁回应词/摘抄/套话、闲聊=场景情绪短语;JSON 主措辞 + 纯文本兜底(2 级链,原 3 级精简);严格解析 + 判效(示例词/代码字面量/句子式/超长过短)+ fallbackTitle 确定性兜底 |
-| 心理揣测 | 4 规则:内心 OS 非回复 / 旁观者视角 / ≤16 字完整句 / 直接输出;超长先语义截取(cutMindSentence)、重试反馈注入上次原文、3 次后回退无人格版;**回复落定同步评估**(assistant-settled 插件),不与主动陪伴共用工厂 |
-| 主动陪伴 | 独立 `createProactiveAgent`:判断 JSON {should, hint}(失败 = 不打扰)+ 风格 {style ≤120 字};与心理揣测零共享 |
+| 心理刻画 | 她在回复末行写 `‹心|岛上一句|种类|底字›`;**等回复落定再判断**(只认最终回复全文里的标记,工具中途步骤只剥不采信;没写时才从落定思考里收没说出口的一句);sanitizeMind/cutMindSentence/salvageMindClause 清洗截取 + 残句判废;**无 Sub Agent**,口吻跟当前人格卡 |
+| 主动陪伴 | 独立 `createProactiveAgent`:判断 JSON {should, hint}(失败 = 不打扰)+ 风格 {style ≤120 字};与心理刻画零共享 |
 | 记忆提取 | {memories:[]};仍挂总结工厂;回复落定且 proactiveEnabled 时由 subagent-on-reply 同步沉淀 |
 | 进化评估 | `createEvaluatorAgent` 走同一 runtime;失败上抛(不能空转);由 evolution 持有 |
 
@@ -2979,10 +3143,13 @@ LLM 服从性上(真实 API 实测 ~50%),忘带扣留丢消息、误带/抄旧�
    napcat send/send_group;安全网启发式优先、判定器只走稀有路径(日常零
    LLM 开销)——A 执行内容兜底(主人指示轮 `isReplyInstruction`(触发侧,
    looksLikeForwardInstruction 超集:回他:/跟X说/就这么回)+ pending 存活
-   + 工具没发过 → 判定 other 发 pending 对象);B 转达草稿扣留(无 pending
+   + 工具没发过 → 判定 other 发 pending 对象;hold/判定失败扣留,不把草稿
+   落到主人 QQ);B 转达草稿扣留(无 pending
    指示轮短回复 ≤60 码元 → master-other-no-target);C 别人轮泄露网
-   (isAskTurnToMaster / `looksLikeMasterAddressed` 开头称呼「主人,」→
-   转交主人);D 防重发(工具已发过 → 回复=汇报发主人/留窗口);E 群面板
+   (isAskTurnToMaster / `looksLikeMasterAddressed` 开头称呼「主人,」或句首
+   「给/向/跟主人说」→ 转交主人;句中提及不整段改投);D 防重发(群:工具已发过
+   → 回复当汇报私发主人;对方私聊:工具已发过则回复留在会话窗口。send 省略
+   user_id 只缺省当前对方,主人会话不缺省到主人 QQ);E 群面板
    外发硬门(shouldSendGroupPanelReply,去指纹门参数)。
 
 **踩坑**:① 触发侧启发式必须用 `triggerRaw`——QQ/群触发文本是注入模板
@@ -3027,6 +3194,19 @@ qrcodeurl,**过期不换新、不提示**(实测同一码 6 分钟原样返回�
    + 倒计时 + 状态行,托盘「QQ 扫码登录…」与 LLM 工具 `napcat login` 双入口;
    WebUI token 自动发现(env NAPCAT_WEBUI_TOKEN → 常见 NapCat 目录 webui.json,
    页面可手填);成功自动关窗 + 通知,OneBot 3001 随即可用。
+
+**2026-10-22 补(用户截图「无法获取二维码 / fetch failed」)**:二维码不出的
+根因不在编码/渲染,而是 **WebUI 连不上**(NapCat 未启动、QQ 未经 NapCat
+启动器注入、端口不符,或 webui.json 的 host="::" 只监听 IPv6)。旧实现把
+undici 的 `TypeError: fetch failed` 原样抛成 error 态并停死——之后 NapCat
+起来也不会再取码,用户只能对着报错和 105s 倒计时干等。现:
+① 连接层故障(初始连接/轮询中掉线)不再进死错误态:丢旧码、保持 waiting、
+按 `retryMs`(默认 2.5s)自动重连,窗口开着等 NapCat 启动即自动出码;
+② 错误文案展开 fetch 的 cause(ECONNREFUSED/超时/DNS)+ 实际地址,不再只有
+"fetch failed";无码时倒计时显示 "--"(旧版错误态仍挂 105s,像还有码可扫);
+③ WebUI 地址从 webui.json 的 host/port 发现,并同时尝试 127.0.0.1 与
+[::1](host="::" 的机器也能连);鉴权/接口错误仍进 error 态保留 token 手填
+(不做无意义重试)。
 
 快捷登录现状(实测 GetQuickLoginListNew):本机缓存只有 1178821869 /
 59781796,机器人 108724305 需先扫码登录一次落快捷凭据,start-napcat.vbs
@@ -3084,7 +3264,7 @@ qrcodeurl,**过期不换新、不提示**(实测同一码 6 分钟原样返回�
   最旧)——每会话独立 AgentEngine 实例 = 真并行;`agent:send` 第 6 参
   sessionKey 路由到对应引擎;
 - 事件路由:引擎 emit 给所有事件附 sessionKey(AgentEvent 交叉类型),渲染端
-  各 useAgent 按 key 过滤;主对话接受无键事件(总结/揣测等后台标签);
+  各 useAgent 按 key 过滤;主对话接受无键事件(总结/心理刻画等后台标签);
 - 确认门 per-session(route.confirmSlot),IPC 带 sessionKey 找槽。
 
 ### 17.3 UI(2026-08-13 二轮,用户澄清:一体式胶囊 + 不替换主对话)
@@ -3097,7 +3277,7 @@ qrcodeurl,**过期不换新、不提示**(实测同一码 6 分钟原样返回�
   红点)→ 点击进入**会话小窗态**(返回键 + 标题 + 消息气泡流 + 输入框
   「以主人身份回复」,Enter 发送;面板消息经 Proxy 控制器实时读 +
   sessionTick 刷新);
-- 主对话的总结标题/心理揣测/主动陪伴仅 main 实例运行(外部会话无文字区
+- 主对话的总结标题/心理刻画/主动陪伴仅 main 实例运行(外部会话无文字区
   展示,白跑 LLM 无意义);
 - **监听会话启动即入面板(2026-08-13 用户要求"只要是监听的,自动加入"——
   每次进程序只有两个群没有私聊)**:会话条目预注册两条路径都扩展私聊——
@@ -3115,7 +3295,8 @@ qrcodeurl,**过期不换新、不提示**(实测同一码 6 分钟原样返回�
 
 - napcat 工具新 action:`sessions`(列会话)/ `session_mute`(屏蔽,写配置
   `agent.mutedSessions`,屏蔽后该会话消息只显示进窗口不触发回复)/
-  `session_bind`(绑定,主进程 island:session-bind 事件 → 渲染端切换);
+  `session_bind`(绑定,主进程 island:session-bind 事件 → 渲染端切换)/
+  `reconnect`(2026-10-23:熔断冷却中立即重连 OneBot,调用 `client.start()`);
 - 主对话不可屏蔽(主人会话)。
 
 ### 17.5 已知取舍
@@ -3133,7 +3314,8 @@ qrcodeurl,**过期不换新、不提示**(实测同一码 6 分钟原样返回�
 > 对方的话以「【指纹:xxxx】」开头回显**(指纹协议,取最后一个匹配——
 > 历史残留旧指纹会干扰)+ 假 OneBot WS 服务器(ACK send_private_msg)+
 > 两段式 napcat 重连(先 disable 断开真实 NapCat 再 enable 连假服务器——
-> whenReady 已连真实 NapCat,直接改 wsUrl 不重连);
+> whenReady 已连真实 NapCat;2026-10-23 起改 wsUrl/enabled=true 会强制
+> start(),巡检仍先 disable,避免工具调用打到真实 NapCat);
 > 35 断言覆盖 收消息→会话→LLM→回发 / 会话输入→LLM→回发 / 主对话让 LLM
 > 发→会话可见 / 单消息会话收起面板布局 / **场景 E(2026-08-13 询问轮泄露
 > 根治)**:询问轮回复不发对方(留窗口)+ 同步主人 QQ + 执行回复带指纹剥
@@ -3217,7 +3399,7 @@ qrcodeurl,**过期不换新、不提示**(实测同一码 6 分钟原样返回�
   性不稳定——忘带主人指纹 = master-no-fp/group-no-master-fp 扣留(该发给
   主人的消息到不了主人);主人日常轮无指纹回复**无条件直发主人**(发给别人
   的话被当回复发到主人 QQ)。修复 = **指纹优先 + 意图判定器兜底**:① **独立
-  意图判定 Sub Agent**(subagents.ts `createReplyClassifier`,与总结/揣测
+  意图判定 Sub Agent**(subagents.ts `createReplyClassifier`,与总结
   同构:零共享、单轮、20s 超时、noThinking 低强度、JSON 严格解析
   `parseClassifierJson`,失败返回 null):落定路由对**指纹缺失/歧义**的轮次
   调用它判定回复发送意图(master=给主人的话 / other=发给对方的话 / hold=
@@ -3526,7 +3708,7 @@ parts 重复回填(上下文成倍膨胀)。
   set_output_budget 或把思考强度调低);
 - **回复被截断**:max_output_tokens 不足——对话里说"调大输出预算"或手动
   改 Agent 设置;
-- **总结标题/心理揣测不出现**:看是否 Agent 模式 + API 配置正常;标签
+- **总结标题/心理刻画不出现**:看是否 Agent 模式 + API 配置正常;标签
   runner 有 1.5s 重试/10s 补跑兜底;全部失败回退首条用户消息标题;
 - **主动陪伴不触发**:检查 主动陪伴开关、间隔(默认 15 分钟)、是否有对话
   历史、judge 是否 should:false(安全侧保守);
@@ -3764,11 +3946,23 @@ WidgetApp
 
 ## 第 28 章 引擎工具实现细节补充
 
-### 28.1 web_search
+### 28.1 web_search / web_fetch
 
-- Bing 主用、DDG 回退(duckduckgo 在中国不可达,实测 fetch failed);
-- Bing 解析 li.b_algo 的 h2 链接 + p 摘要;HTML 端点免 Key;
-- 结果截断 8000 回填。
+- **web_search(2026-10-22 起 DeepSeek 官方搜索优先)**:providers.deepseek
+  桶配了 Key 就走官方 `POST /v1/tools/search`(自研搜索引擎,summary 长摘要
+  专供模型阅读 + rerank_score/authority 可信度标注;按次计费约 0.005 元,
+  need_content 缺省 false——正文让 LLM 用 web_fetch 按需抓);未配 Key 或
+  官方 API 失败回退 Bing 主用、DDG 回退(duckduckgo 在中国不可达,实测
+  fetch failed);Bing 解析 li.b_algo 的 h2 链接 + p 摘要;HTML 端点免 Key;
+- **web_fetch(2026-10-22 新增,网页抓取)**:官方 `POST /v1/tools/fetch`
+  优先(URL ≤8192、http/https、不能带凭据——assertWebFetchUrl 统一校验),
+  返回标题 + Markdown 正文;未配 Key 或官方失败回退直连抓取(HTML 去
+  脚本/样式/标签留段落感,text/plain 等原文);结果格式化 formatPageResult,
+  正文 7600 字符内主动截断并注明总长(回填 truncateResult = 8000);
+- 官方 API 错误映射中文(402 充值 / 403 安全策略 / 404 无可用内容 /
+  429 QPS:搜索 100、抓取 25),实现 providers/deepseek-web.ts;
+- 凭据 getDeepseekCreds 实时读 providers.deepseek 桶,与激活供应商无关
+  (同 GLM/MiMo 先例);结果截断 8000 回填。
 
 ### 28.2 notify
 
@@ -3874,8 +4068,8 @@ WidgetApp
    含失败原因);解析器改动补 test-markdown.mjs;
 6. **fs 导入纪律**:promises as fs,existsSync/mkdirSync 从 node:fs 顶层
    导入;
-7. **文档同步**:README(用户)/ WIDGET-README(部署)/ docs/TECH.md(技术)/
-   CLAUDE.md(引擎与架构细节)——完成功能改动后同步,本模板见附录 D;
+7. **文档同步**:README(根目录,用户)/ docs/WIDGET-README.md(部署)/ docs/TECH.md(技术)/
+   docs/CLAUDE.md(引擎与架构细节)——完成功能改动后同步,本模板见附录 D;
 8. **明确不做项**记录在案(见 22.2),避免反复评估同一决策。
 
 ---
@@ -4104,17 +4298,17 @@ WidgetApp handlePanelViewChange 按视图查表调 set-height;大面板(440/540/
 ```json
 {"input": [
   {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "…"}]},
-  {"type": "reasoning", "summary": [{"type": "summary_text", "text": "思维链明文"}]},
-  {"type": "message", "role": "assistant", "content": [
-    {"type": "output_text", "text": "我先查一下"},
-    {"type": "function_call", "call_id": "c-1", "name": "web_search", "arguments": "{}"}
-  ]},
+  {"type": "reasoning", "content": [{"type": "reasoning_text", "text": "思维链明文"}]},
+  {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "我先查一下"}]},
+  {"type": "function_call", "call_id": "c-1", "name": "web_search", "arguments": "{}"},
   {"type": "function_call_output", "call_id": "c-1", "output": "搜索结果"}
 ]}
 ```
 
-规则:reasoning 必须回传(缺失 400);function_call_output 的 call_id 必须
-与 function_call 对应;相邻 assistant 消息归并。
+规则:请求带 tools 且思考开着时,每一轮都以 reasoning item 开头(明文
+`reasoning_text`;summary 不支持)。function_call 是独立 item,不塞进
+message content。function_call_output 的 call_id 必须与 function_call 对应。
+没存到思维链时 text 用一个空格。不带 tools 或思考关闭时不回传 reasoning。
 
 ### 38.2 Chat Completions
 
@@ -4127,8 +4321,9 @@ WidgetApp handlePanelViewChange 按视图查表调 set-height;大面板(440/540/
 ]}
 ```
 
-规则:reasoning 走 reasoning_content 字段;工具结果打包进 role:"tool"
-消息;角色严格交替(相邻同角色合并)。
+规则:请求带 tools 且思考开着时,每一轮 assistant 都带 reasoning_content
+(没调用工具的轮次也带;缺了或空串 400)。工具结果是紧跟该轮的 role:"tool"
+消息。同一段历史里的多步调用按轮拆开,不并成一条。
 
 ### 38.3 Anthropic Messages
 
@@ -4214,7 +4409,8 @@ LLM:get_island_settings → 缩放 100%
 | list_dir | path | 列目录 |
 | open_url | url | 打开链接 |
 | open_file | path | 打开文件(媒体拦截) |
-| web_search | query | Bing 搜索 |
+| web_search | query / count | 网页搜索(官方搜索优先,Bing/DDG 回退) |
+| web_fetch | url | 抓取网页正文(标题 + Markdown) |
 | get_time | - | 当前时间 |
 | system_info | - | 系统信息 |
 | notify | title / body | 系统通知 |
@@ -4233,7 +4429,7 @@ LLM:get_island_settings → 缩放 100%
 | mcp_config | list/add/remove/test MCP 服务 |
 | skills_config | list/add/remove 技能目录;create 技能;exclude/include |
 | set_proactive_config | 主动陪伴 enabled/interval/unit |
-| set_sub_agent_config | summaryStyle / mindPersona |
+| set_sub_agent_config | summaryStyle |
 
 ### 记忆(memory.ts 经 engine 注册)
 
@@ -4253,7 +4449,7 @@ remember / forget / list_memory / update_memory / evolve_memory
 | 2026-08 前期 | 灵动岛雏形:透明窗口 + SMTC 监听 + 音乐控制 + 歌词 |
 | 2026-08-05 | Agent 模式:引擎(Responses/Anthropic 双 provider)、工具系统、记忆、进化 harness、MCP、技能、手动调用(/ 与 @)、核心测试 71 用例 |
 | 2026-08-06 | 架构优化(三代理审计):electron TS 纳入编译、settings.json 加固、dev 链路修复、双宿主共享 hook、设置桥 typed 事件、确认门、Agent 消息组件群搬移、设置工具首版 |
-| 2026-08-07 | 四路审计六轮优化:engine 拆分/subagents/configTools、provider 公共层、useWheelSwap/useLeavingList/useAgentPanelLayout、死通道清理、类型镜像;主动陪伴(判断/回合/通知/调度/设置)、心理揣测、B站扫码登录、技能分区/导入、MCP 分组、记忆导入导出、进化日志/回滚/重置、设置视图四组菜单 + QuickMenu 七轮优化 |
+| 2026-08-07 | 四路审计六轮优化:engine 拆分/subagents/configTools、provider 公共层、useWheelSwap/useLeavingList/useAgentPanelLayout、死通道清理、类型镜像;主动陪伴(判断/回合/通知/调度/设置)、心理刻画、B站扫码登录、技能分区/导入、MCP 分组、记忆导入导出、进化日志/回滚/重置、设置视图四组菜单 + QuickMenu 七轮优化 |
 | 2026-08-08 | 工具参数校验(LLM 自纠)、输出预算动态调整、多媒体库(图片/音频/视频)、island-media 流式协议、对话媒体窗口、Markdown 渲染器、媒体拦截(open_file/exec_command start)、消息气泡 mermaid/表格、播放列表 ↔ 音频库同步、HEVC 硬解、智能截图修复 |
 | 2026-08-09 | 媒体小窗(视频岛/图片岛)、全屏(工作区扩展/退出缩回)、进度双向同步、封面抓帧、chat-media 巡检 |
 | 2026-08-10 | 定制视频控件(VideoExtras 音量/更多,三处同步)、帮助手册移除、收起语义拆分(灵动岛/多媒体岛)、**主动陪伴工具积极性(拟人)**、**设置工具白名单修复 + play_library_video 跳转播放**、**本文档(技术文档 3000 行)+ get_feature_guide 引导工具 + README 重写** |
@@ -4267,6 +4463,7 @@ remember / forget / list_memory / update_memory / evolve_memory
 | 2026-09-22(3) | **B站登录态整合**(用户反馈"明明登录了,查询收藏夹又说没有登录信息"):根因 = cookie 键名 to_uppercase 落盘(DEDEUSERID)而 Rust 按 DedeUserID 精确查找全 miss(实测 whoami"已登录 (UID )")+ 凭据位置分裂(exe 旁 WebUI/qr-helper 与 userData)+ 三套判定各自为政——consolidateBiliCookies 键名规范化 + 遗留收编(单一来源 userData/bili/config/cookies.json)+ nav 实时探针(权威 UID/过期判定)biliLoginState 全 action 统一话术 + logout 全位置清除;实测 whoami 恢复"已登录 (UID 85900351)" |
 | 2026-09-22(2) | **歌曲卡片气泡**(用户反馈"LLM 自主放歌,对话窗口里没有歌的消息气泡"):music_control 每次操作附 song 附件(新 `type:'song'` part,SongInfo)→ 引擎注入 → SongBubble 唱片卡(歌名/歌手/专辑/状态/来源,播放中旋转;只展示不内播防双响);工具文本带歌名 + textFromParts 折 🎵 行;next/previous 后 1.2s 再取快照防打上上一首歌名;无曲目不出卡片 |
 | 2026-09-22 | **MiMo 官网接入文档专项适配(第 5.3.5 章)**:**Responses API 第一优先**(用户定调,Chat Completions 过旧)——多模态原生进 /v1/responses input items(input_image/input_audio/input_video+fps/media_resolution,活体探针实证;本地文件→data URI,历史韧性占位,mimo-v2.5-pro 能力拦截 404 实证)+ Batch API 工具簇(mimo_media/mimo_batch 均走 /v1/responses,批量 JSONL Responses 格式→批任务→轮询→结果落盘,实时 50% 价)+ 模型清单 v2.6 化(缺省 mimo-v2.6-pro);**parseSse 修复**:Chat Completions 无 type 帧原被整帧丢弃(chat/mimo-chat/lmstudio/glm-cloud 流式恒空文本,LM Studio 靠非流式降级掩盖)→ 无 type 帧以空串事件名产出;工具总数 74→76|
+| **V3.5** 2026-10-26 | **人格卡(第 48 章)**:多套可热切换人格(手写 prompt + 结构化风格 + 进化整合区)、进化缓冲区与去 AI 味评审、出站清洗;人设不再写入长期记忆;replace/delete 仅主人明确覆盖整张或删除时确认 |
 
 
 ---
@@ -4481,7 +4678,7 @@ builtinPlugins(deps, emit, outputBudget, sessionState, opts?)
   tools-napcat → tools-music-control → tools-session → tools-delegate →
   tools-memory → tools-config → tools-builtin → tools-external-source →
   prompt-memory → prompt-evolution → prompt-bg-tasks → prompt-tools-guide →
-  subagent-on-reply(助手回复落定同步评估标题+心理揣测)。
+  subagent-on-reply(助手回复落定同步评估标题+心理刻画)。
 
 **新增能力的纪律**:在对应领域文件写一个插件 + PLUGIN_REGISTRY 注册工厂 +
 Profile 加一行——不改 loop、不改其他插件;装配清单在 defaultProfile 单点
@@ -4532,34 +4729,47 @@ oxlint 无告警。
 
 ## 第 43 章 安装器与发行(V3.1 重点)
 
-V3.1 让项目从"源码运行"走向"可安装发行":自绘安装向导(零 UI 框架) +
-绿色发布打包 + 独立安装器 exe 打包。涉及四个文件域:`installer/`(向导
-主进程/界面/preload)、`scripts/build-release.mjs`(绿色发布)、
-`scripts/build-installer.mjs`(独立安装器)、以及 `release/`(产物目录)。
+V3.1 让项目从"源码运行"走向"可安装发行":自绘安装管理器(零 UI 框架) +
+绿色发布打包 + 独立管理器 exe 打包。2026-10-23 起安装与卸载整合为同一个
+「灵动岛安装管理器」:涉及文件域 `manager/`(管理器主进程/安装页/卸载页/
+preload)、`scripts/build-release.mjs`(绿色发布)、`scripts/build-manager.mjs`
+(安装管理器)、以及 `release/`(产物目录)。
 
 ### 43.1 定位与产物
 
 | 产物 | 路径 | 结构 | 用途 |
 | --- | --- | --- | --- |
 | 绿色发布目录 | `release/灵动岛/` | `electron/`(运行时) + `electron/resources/app/`(应用) | 绿色版,拷走即用 |
-| 独立安装器 | `release/灵动岛安装器/` | `灵动岛安装器.exe` + `resources/app/`(向导) + `resources/release/灵动岛/`(安装源) | 双击启动向导,可分发 |
+| 安装管理器 | `release/灵动岛安装管理器/` | `灵动岛安装管理器.exe` + `resources/app/`(安装/卸载向导) + `resources/release/灵动岛/`(安装源) | 双击启动,自动进入安装或卸载 |
 
-两级打包依赖关系:`build-installer.mjs` 把 `build-release.mjs` 的产物
-`release/灵动岛/` 作为安装源打进安装器。开发期可直接 `npx electron
-installer/main.cjs` 预览向导(不打包)。
+两级打包依赖关系:`build-manager.mjs` 把 `build-release.mjs` 的产物
+`release/灵动岛/` 作为安装源打进管理器。开发期可直接 `npx electron
+manager/main.cjs` 预览(不打包)。
 
-### 43.2 安装向导结构与流程
+**安装/卸载合一与模式判定**(`manager/main.cjs`):普通启动默认安装页;
+参数含 `--uninstall`、exe 位于 `<安装目录>/uninstaller`、或检测到已安装
+(注册表 `InstallLocation` → 默认安装目录)时进入卸载页;界面右上角可双向
+切换(已安装副本内不允许切回安装,避免覆盖运行中的自身)。安装时管理器把
+自身完整运行时复制到 `<安装目录>/uninstaller`,注册表 `UninstallString`
+指向该副本,因此卸载不依赖主应用(主应用损坏也能卸载);发行包内不再单独
+打包第二套卸载器运行时。
 
-`installer/` 是独立的 Electron 应用:
+### 43.2 安装管理器结构与流程
 
-- **main.cjs** 主进程:`BrowserWindow`(无边框,940×660)加载 `installer.html`;
-  安装逻辑 `performInstall` 四步——逐文件复制发布产物到安装目录(`copyTree`
-  带实时进度) → 校验 `electron/electron.exe` → 创建桌面/开始菜单快捷方式
-  (PowerShell `WScript.Shell`) → 可选开机自启(HKCU Run) + 写卸载项并生成
-  `uninstall.cmd`;
-- **installer.html** 渲染端:四步向导(欢迎/安装选项/安装中/完成),零框架
-  手写 JS(`window.installer` preload API 提供 getInfo/pickDir/install/
-  finish/onProgress 等;纯浏览器打开时自动用 mock,便于不安装预览界面);
+`manager/` 是独立的 Electron 应用:
+
+- **main.cjs** 主进程:`BrowserWindow`(无边框,940×660)按模式加载
+  `installer.html` 或 `uninstall.html`;安装逻辑 `performInstall` 四步——
+  逐文件复制发布产物到安装目录(`copyTree` 带实时进度) → 校验
+  `electron/electron.exe` → 创建桌面/开始菜单快捷方式(PowerShell
+  `WScript.Shell`) → 可选开机自启(HKCU Run) + 复制管理器副本并写卸载项;
+  卸载逻辑先按可执行路径精确结束安装目录内的主应用(`Get-Process` +
+  `$_.Path` 过滤,不误杀其它 Electron 应用),再删快捷方式/注册表/可选
+  个人数据,最后延迟删除安装目录;
+- **installer.html / uninstall.html** 渲染端:四步向导(欢迎/选项/进行中/
+  完成),零框架手写 JS(`window.installer` / `window.uninstaller` preload
+  API;`window.manager.switchMode` 切换模式;纯浏览器打开时自动用 mock,
+  便于不安装预览界面);
 - **preload.cjs**:contextBridge 暴露最小 API,渲染端零 Node 依赖。
 
 ### 43.3 三个关键踩坑(必须记住)
@@ -4584,29 +4794,29 @@ installer/main.cjs` 预览向导(不打包)。
 配套 UI 细节:安装失败**留在安装页直接显示错误**(不闪回第 2 步,避免
 "点了没反应"假象);失败时「上一步」可从第 3 步回退到第 2 步修改目录。
 
-### 43.4 安装向导 UI(Apple 设计语言)
+### 43.4 安装管理器 UI(Apple 设计语言)
 
-界面按 Apple 设计规范重绘(`installer.html` 全部 CSS):单一收敛强调色
+界面按 Apple 设计规范重绘(`installer.html` / `uninstall.html` 全部 CSS):单一收敛强调色
 `#6e63ff`(弃用霓虹发光/紫蓝渐变)、内容卡毛玻璃
 `backdrop-filter: blur(36px) saturate(1.7)` + 18px 圆角 + 顶部亮边、
 系统字体层级(大标题负字距 / secondary-tertiary 三级文字)、克制的 pane
 切换(0.38s `cubic-bezier(.25,1,.5,1)` 位移+淡入)、按钮 `:active` 即时
 `scale(.98)` 反馈、复选框 6px 圆角 accent 填充白勾、完成页 systemGreen
-圆盘(无 glow)。背景与图标用原始资源 `installer/bg.png` / `installer/icon.png`
-(根目录 `bg.png` / `icon.png` 的副本,保证安装器自包含)。
+圆盘(无 glow)。背景与图标用原始资源 `manager/bg.png` / `manager/icon.png`
+(根目录 `bg.png` / `icon.png` 的副本,保证管理器自包含)。
 支持 `prefers-reduced-motion` / `prefers-reduced-transparency` 兜底。
 
 ### 43.5 打包命令与分发
 
 ```bash
 node scripts/build-release.mjs     # ① 绿色发布 → release/灵动岛
-node scripts/build-installer.mjs   # ② 独立安装器 → release/灵动岛安装器
-npx electron installer/main.cjs    # 开发期直接跑向导
+node scripts/build-manager.mjs     # ② 安装管理器 → release/灵动岛安装管理器
+npx electron manager/main.cjs      # 开发期直接跑管理器
 ```
 
-分发:把整个 `release/灵动岛安装器/` 目录压缩发给别人,解压后双击
-「灵动岛安装器.exe」(由 `electron.exe` 重命名)即启动向导,对方无需 Node
-环境。注意:独立安装器自动加载 `resources/app` 依赖其 `package.json` 的
+分发:把整个 `release/灵动岛安装管理器/` 目录压缩发给别人,解压后双击
+「灵动岛安装管理器.exe」(由 `electron.exe` 重命名)即启动管理器,对方无需
+Node 环境。注意:管理器自动加载 `resources/app` 依赖其 `package.json` 的
 `main` 字段(指向 `main.cjs`),打包脚本会生成该文件。
 
 ---
@@ -4619,10 +4829,10 @@ npx electron installer/main.cjs    # 开发期直接跑向导
 知识库(get_feature_guide 工具读取)。
 
 本文档覆盖:架构总览、构建运行、音乐模式、主进程、Agent 引擎(循环/
-provider/工具/任务/总结/揣测/主动陪伴/记忆/进化/MCP/技能/预算)、渲染端
+provider/工具/任务/总结/心理刻画/主动陪伴/记忆/进化/人格卡/MCP/技能/预算)、渲染端
 (状态机/面板/媒体/多媒体库/设置/动画/性能)、设置工具、类型系统、架构
 优化史、配置一览、测试体系、调试速查、FAQ、How-To 指南与功能引导知识库
-(第 11 章,get_feature_guide 工具读取)。
+(第 11 章,get_feature_guide 工具读取)。人格卡见第 48 章与 11.19。
 
 维护约定:每次功能改动按附录 D 清单同步本文档对应章节;第 11 章功能清单
 保持用户话术最新(它是 LLM 引导用户的一手资料)。文档遵循"一次维护,
@@ -4644,7 +4854,7 @@ provider/工具/任务/总结/揣测/主动陪伴/记忆/进化/MCP/技能/预�
 | message | {id, role, parts, usage, proactive?} | **权威落定** |
 | tool-confirm-request | {seq, command} | 确认门请求 |
 | background-done | {title, message} | 后台任务终态 → 自动触发对话 |
-| mind-proactive | {messageId, guess} | 主动回合心理揣测 |
+| mind-proactive | {messageId, guess} | 主动回合心理刻画 |
 
 > 上表为**引擎 → 渲染端**的对外事件(AgentEvent)。插件内核另有一套
 > **ctx 内部事件通道**(agent/pre-step、agent/turn-start/end、
@@ -4667,7 +4877,7 @@ provider/工具/任务/总结/揣测/主动陪伴/记忆/进化/MCP/技能/预�
 | 工具兜底超时 | 60s(AgentTool.timeoutMs 可覆盖) | doc_convert 200s / xxt 310s |
 | 迭代上限 | 25 轮 | 防死循环 |
 | 总结/判断超时 | 90s / 60s | Sub Agent |
-| MIND_MAX_LEN / MAX_RETRIES | 16 码元 / 5 次 | 心理揣测 |
+| MIND_MAX_LEN / MAX_RETRIES | 16 码元 / 5 次 | 心理刻画 |
 | 标题长度 | 推荐 10 字,≤20 码元 | sanitizeTitle 硬截断 |
 | 记忆 | 200 条 / 单条 500 字 | memory.json |
 | 技能 SKILL.md | 注入截 8000 / desc 截 300 | |
@@ -4693,7 +4903,7 @@ provider/工具/任务/总结/揣测/主动陪伴/记忆/进化/MCP/技能/预�
 | media part | AgentPart 的媒体附件类型(窗口内播放) |
 | 确认门 | exec_command 首轮执行确认(createTurnConfirmGate) |
 | 后台任务注册表 | tasks.ts 通用任务(waiting/running/done/failed/cancelled) |
-| Sub Agent | 独立实例的辅助 LLM 调用(总结标题/心理揣测/判断/进化评估/子代理) |
+| Sub Agent | 独立实例的辅助 LLM 调用(总结标题/心理刻画/判断/进化评估/子代理) |
 | 棘轮 | 进化评分严格高于原分才接受新版本 |
 | 前缀缓存 | DeepSeek 上下文缓存(前缀完整匹配才命中) |
 | trimHistory | 历史预算裁剪(400K) |
@@ -4706,6 +4916,10 @@ provider/工具/任务/总结/揣测/主动陪伴/记忆/进化/MCP/技能/预�
 | SETTINGS_VIEWS | 设置类视图集合(屏蔽一切缩回操作) |
 | 巡检 | WIDGET_SCREENSHOT UI 测试(截图 + 断言) |
 | 双岛并存 | 设计文档中的 dual 模式(未实现) |
+| 人格卡 | 岛灵自己的身份与说话方式(persona-cards.json);同时启用一张,见第 48 章 |
+| 进化整合区 | 人格卡 notes:进化建议合并后追加的要点,prompt 原文另存 |
+| 进化缓冲区 | persona-evolution.json:记忆进化与去 AI 味评审的待合并建议 |
+| 会话人格 | 某个 QQ 私聊或群的档案字段(napcat-personas.json),与人格卡分开 |
 
 ---
 
@@ -4719,8 +4933,8 @@ provider/工具/任务/总结/揣测/主动陪伴/记忆/进化/MCP/技能/预�
 4. `pnpm test:markdown`(解析器改动);
 5. `pnpm dev:widget` 实机验证(默认完成标准,配 timeout 自动退出;
    完整巡检只在用户明确要求时跑,需 WIDGET_SCREENSHOT_QUIT=1);
-6. 同步文档:README(用户向)/ WIDGET-README(部署)/ docs/TECH.md(技术);
-   引擎/工具/常量改动同步 CLAUDE.md 对应章节与本文档第 5/7 章;
+6. 同步文档:README(用户向)/ docs/WIDGET-README.md(部署)/ docs/TECH.md(技术);
+   引擎/工具/常量改动同步 docs/CLAUDE.md 对应章节与本文档第 5/7 章;
 7. 新增渲染端设置工具操作 → settingsTools.ts op 类型 + 桥方法 +
    main.cjs ISLAND_SETTINGS_OPS 白名单三处同步(漏白名单 = 安全侧失败);
 8. 新增 IPC → preload + desktop.d.ts + main.cjs safeHandle 三处同步。
@@ -4749,9 +4963,20 @@ provider/工具/任务/总结/揣测/主动陪伴/记忆/进化/MCP/技能/预�
 | agent:evolve | {rounds} | - |
 | agent:evolution-log / rollback / reset | - | {entries} / {ok,error} |
 | agent:summarize | {messages} | {title} |
-| agent:mind-guess | {messages} | {guess} |
+| (已移除)agent:mind-guess | — | 心理刻画无 Sub Agent,IPC 已删(2026-10-26) |
 | agent:proactive-tick | {messages, idleMinutes} | {should, hint?} |
 | agent:skill-import | - | {imported, skipped} |
+| agent:persona-get | - | PersonaCard[] |
+| agent:persona-set | {upsert?\|remove?\|clearNotes?\|replaceAll?} | PersonaCard[] / {error} |
+| agent:persona-export | id?(缺省=全部) | {path, bytes, cards, buffer} / {canceled} / {error} |
+| agent:persona-import | - | {imported, skipped, bufferImported, bufferSkipped} / {canceled} / {error} |
+| agent:persona-buffer-get | - | PersonaBufferItem[] |
+| agent:persona-buffer-merge | id | {ok, added?, removed?, error?} |
+| agent:persona-buffer-merge-all | - | {ok, merged, added, removed, failed, errors?} |
+| agent:persona-buffer-discard | id | {ok} / {error} |
+| agent:persona-buffer-undo | id | {ok, removed?} / {error} |
+| agent:persona-buffer-clear | - | {ok} / {error} |
+| agent:style-review | messages | {ok, buffered, issues?, notes?, antiExamples?, bannedPhrases?, message?, error?} |
 | app:open-external | {url} | - |
 | app:open-media-external | {kind, src} | - |
 | app:pick-media-files | {exts, maxBytes} | {paths} |
@@ -4780,19 +5005,27 @@ provider/工具/任务/总结/揣测/主动陪伴/记忆/进化/MCP/技能/预�
 ## 附录 G:主动陪伴全链路时序
 
 ```
-用户无操作 ≥ N 分钟
-  → useAgent 调度器(60s 周期检查,agent 模式/配置开/idle/有历史/in-flight
-    守卫)
-  → agent:proactive-tick(messages, idleMinutes)
-  → main.cjs → createProactiveAgent.judgeProactive(同源上下文:提示词+记忆+进化+
-    后台任务+当前时间;JSON {should, hint};失败 → should:false)
-  → should:true → engine.proactiveTurn(history, {hint})
+用户无操作 ≥ N 分钟(间隔 = 主动联系最小间隔)
+  → useAgent 调度器(轮询周期 = 间隔钳 5s-60s;agent 模式/配置开/idle/
+    有历史/in-flight 守卫/判定冷却结束)
+  → agent:proactive-tick(messages, idleMinutes, sessionId, {force})
+  → main.cjs:
+      force=false → createProactiveAgent.judgeProactive(同源上下文:提示词+
+        记忆+进化+后台任务+当前时间;JSON {should, hint})
+          decided 含否决 / error = 没跑成(2026-10-22 三态,可区分)
+      force=true(连续 2 次未开口兜底)→ 跳过 judge 与风格分析
+  → should:true(或 force)→ engine.proactiveTurn(history, {hint})
       → PROACTIVE_INSTRUCTION 追加 input 末尾(system 请求项,不进历史)
       → 完整回合(思考/流式/工具/子代理)
       → message 事件落定(proactive: true)
-  → 主进程 getMindAgent().guess([消息]) → Notification('岛灵 · 心理揣测')
+  → 主进程 getMindAgent().guess([消息]) → Notification('岛灵 · 心理刻画')
     + mind-proactive 事件 → 紧凑态文字区
   → 渲染端重置 idle 时钟(proactive 末条跳过 mindRunner,标题照常)
+
+未开口路径(2026-10-22,不再重置 idle 时钟):
+  judge-no / judge-error → 未开口计数 +1,短冷却(间隔/3,钳 2-5 分钟)后
+  重判;计数 ≥ 2 → 下一拍 force 兜底强制开口。最坏沉默 = 间隔 + 2×冷却
+  busy / mode / disabled / empty → 情境性,下个轮询周期自然重查,不计数
 ```
 
 
@@ -4811,16 +5044,17 @@ provider/工具/任务/总结/揣测/主动陪伴/记忆/进化/MCP/技能/预�
 | 关键约束(提示文本/透明窗口/歌词折叠/竞态/悬停校准) | 踩坑 | 第 10 章 |
 | 双岛并存模式(设计文档) | 未实现设计 | 22.1 |
 | 米家智能家居(工具簇/登录/协议/安全边界) | 米家接入 | 第 46 章 |
+| 人格卡(存储/提示块/缓冲区/出站清洗/工具门控) | 岛灵人格 | 第 48 章 / 11.19 |
 
 ---
 
 ## 附录 I:全部工具一览
 
-引擎注册的全部工具(**76 个** `name:` 定义,按域分组;`createSettingsTools` 注入设置桥后注册
+引擎注册的全部工具(**80 个** `name:` 定义,按域分组;`createSettingsTools` 注入设置桥后注册
 **31 个**设置工具 + `music_control` 走独立音乐控制桥 `createMusicControlTools`,测试断言见
-tests/test-agent-core.ts「注入后 31 个工具齐」)。
+tests/test-agent-core.ts「注入后 31 个工具齐」。2026-10-26 补 `persona`;配置族含 `set_owner_qq`)。
 
-### 基础工具族(tools/tools.ts,18)
+### 基础工具族(tools/tools.ts,20)
 
 | 工具 | 一句话 |
 | --- | --- |
@@ -4828,11 +5062,13 @@ tests/test-agent-core.ts「注入后 31 个工具齐」)。
 | read_file / write_file / list_dir | 文件读写与目录列举 |
 | open_url | 打开 URL |
 | open_file | 打开文件(媒体扩展名拦截为对话内播放附件) |
-| web_search | 网络搜索(Bing 主用 / DDG 回退) |
+| web_search | 网络搜索(DeepSeek 官方搜索优先 / Bing 主用 · DDG 回退) |
+| web_fetch | 网页抓取正文(DeepSeek 官方 fetch 优先 / 直连去标签兜底) |
 | get_feature_guide | 读取 docs/TECH.md 按话题引导功能 |
 | set_system_volume | 系统主音量读写(winmm waveOut) |
 | get_time / system_info | 时间与系统信息 |
 | notify | 系统通知 |
+| computer | 电脑操控:window_list 列窗口 / window_shot 窗口完整截图(DPI 感知不裁切)/ window_focus 置前 / screen_shot 整屏;后端 window-shot.ps1,见 11.6 |
 | switch_to_music | 切回音乐模式(play 参数) |
 | doc_convert | 文档转换(DocFlow 服务) |
 | xxt | 超星学习通自动答题 |
@@ -4840,17 +5076,18 @@ tests/test-agent-core.ts「注入后 31 个工具齐」)。
 | glm_ocr | 图片文字识别 OCR(智谱 GLM 云端,含手写体/多语言;见 45.2) |
 | glm_file_parse | 文档解析提取文本(智谱 GLM 云端,sync/async;见 45.2) |
 
-### 配置工具族(tools/configTools.ts,7)
+### 配置工具族(tools/configTools.ts,8)
 
 | 工具 | 一句话 |
 | --- | --- |
 | mcp_config | MCP 服务增删改/测试 |
 | skills_config | 技能管理(create/exclude/include/list) |
-| set_sub_agent_config | 总结文风 / 揣测人格(预设或自定义) |
+| set_sub_agent_config | 总结文风(预设或自定义) |
 | set_proactive_config | 主动陪伴开关/间隔/单位 |
 | tools_config | 工具启用/排除 |
 | set_output_dir | 工具输出目录 |
 | set_napcat_config | QQ 机器人开关/端口/群白名单 |
+| set_owner_qq | 写 privacy.json 的主人 QQ;仅主人在对话窗口直发的轮次可用 |
 
 ### 会话工具族(tools/sessionTools.ts,3)
 
@@ -4875,13 +5112,19 @@ get_session_note / set_session_note / clear_session_context
 ### 引擎内置工具(engine/,4)
 
 - engine-builtins.ts(3):evolve_memory(记忆进化,action=quick 同步单轮/run 后台多轮/status) / set_output_budget(输出预算动态调整) /
-  get_deepseek_balance(DeepSeek 余额查询)
+  get_deepseek_balance(DeepSeek 余额查询——**厂商专属通道**:固定走 providers.deepseek 桶凭据,与激活供应商无关;2026-10-22 补 GLM 地址守卫防打错通道)
 - engine-tool-execution.ts(1):delegate(子代理,嵌套 agent 循环)
+
+### 人格卡(tools/tools-persona.ts,1;见第 48 章)
+
+| 工具 | 一句话 |
+| --- | --- |
+| persona | 人格卡与进化缓冲区:list/get/create/edit/replace/delete/activate/deactivate/set_notes/clear_notes/export/import/buffer_list/buffer_merge/buffer_discard/buffer_undo/buffer_clear。replace/delete 受主人本轮原文门控 |
 
 ### 记忆与 QQ 通道
 
 - memory.ts(4):remember / forget / list_memory / update_memory
-- napcat.ts(2):napcat(发消息/发图/发文件/发语音条/撤回/查成员/群管理等) / manage_sessions(会话绑定/静音)
+- napcat.ts(2):napcat(status/reconnect 立即重连 OneBot/发消息/发图/发文件/发语音条/撤回/查成员/群管理等) / manage_sessions(会话绑定/静音)
 
 ### 灵动岛设置工具族(31 + 1)
 
@@ -4895,7 +5138,8 @@ get_session_note / set_session_note / clear_session_context
   remove_video_library / play_library_video / set_video_config / set_audio_config
 - **createMusicControlTools**(独立音乐控制桥,1):music_control(播放/暂停/切歌/查状态;放歌自动附**歌曲卡片气泡**——歌名/歌手/播放状态,2026-09-22)
 
-合计:18 + 7 + 3 + 4 + 4 + 4 + 2 + 31 + 1 = **74 个工具定义**。
+合计:20 + 8 + 3 + 2 + 4 + 4 + 4 + 2 + 1 + 31 + 1 = **80 个工具定义**
+(基础 / 配置 / 会话 / MiMo / 米家 / 引擎 / 记忆 / QQ / 人格卡 / 设置 / 音乐)。
 
 ---
 
@@ -4920,7 +5164,7 @@ get_session_note / set_session_note / clear_session_context
 ## 第 44 章 2026-08-18 动画与交互优化专题
 
 本章记录 2026-08-18 对 Agent 模式对话窗口进行的大规模动画与交互优化,涵盖
-滚动机制、手势系统、动效曲线、工具面板动画、会话切换、以及心理揣测文本清洗。
+滚动机制、手势系统、动效曲线、工具面板动画、会话切换、以及心理刻画文本清洗。
 
 ### 44.1 会话切换滚动(彻底重写)
 
@@ -5144,11 +5388,11 @@ auto→auto(内容变化)不触发 transition——纯 CSS 无解,必须 JS 显�
 | 记录/清除按钮 | 交错 0.2s(记录先行,清除 40ms 后) |
 | 清除按钮 armed 态 | `color` 加入 `transition`,红底红字平滑过渡 |
 
-### 44.6 心理揣测文本清洗(sanitizeMind)
+### 44.6 心理刻画文本清洗(sanitizeMind)
 
 #### 问题
 
-LLM 输出的心理揣测文本格式如 `[推测]她可能很高兴`。清洗函数 `sanitizeMind`
+LLM 输出的心理刻画文本格式如 `[推测]她可能很高兴`。清洗函数 `sanitizeMind`
 的标签白名单未覆盖 `推测`/`猜测` → 步骤①不匹配 → 步骤③剥掉 `[` →
 残留 `推测]她可能很高兴`(左括号没了右括号还在,显示呆板)。
 
@@ -5448,3 +5692,714 @@ re-export,主进程经 `agentEngineModule` 取用(createMijiaStore/createMijiaCl
   摄像头音视频流 v1 不做(ha_xiaomi_home 同口径)。
 - 登录风控(异地拦截等)原样透出服务端文案,不自动打码;凭证仅存本机
   DPAPI 密文,换机/重装系统需重新扫码。
+
+---
+
+## 第 47 章 NapCat QQ 机器人接入(2026-10-25 全量适配与反向 WS)
+
+> 本章是 NapCat 接入的完整技术专章,把此前散落在 7.3(域结构)、16.2-16.9
+> (注入模板 / 剥离链 / 回复路由)、17(会话隔离)、44.7(会话删除)的说明
+> 收拢为一条完整链路。2026-10-25 两项工程重点:**OneBot 11 全量接口适配**
+> (群文件、群管扩展、好友/群请求、合并转发、账号/好友、表情回应、戳一戳、
+> `raw` 逃生口)与**反向 WebSocket 模式**(挂件本机监听,NapCat 主动连入)。
+
+### 47.1 定位与代码地图
+
+NapCat 是外部 QQ 客户端,通过 OneBot 11 WebSocket 暴露事件与动作。灵动岛
+把 QQ 私聊/群聊接入主引擎:消息进入对话窗口,LLM 用同一套长期记忆、人格与
+工具回复,回复按归属路由回 QQ 或留在窗口。整条链路**零第三方依赖**——WS
+传输、二维码编码、消息解析、持久化全部自写。
+
+| 文件(electron/agent/napcat/) | 职责 | 边界 |
+| --- | --- | --- |
+| napcat.ts | 领域入口 + `createNapcatTools` + barrel re-export | 只依赖 types / privacy |
+| napcat-client.ts | OneBot 11 客户端:连接 / 重连熔断 / 去重 / 收发 / 媒体落地 | 持有全部运行时状态 |
+| napcat-message.ts | 消息段文本化,图片/语音/视频/文件/转发/@/引用提取 | 纯函数,无 IO |
+| napcat-text.ts | 出站清洗(思考腔/工具叙述/主人转述)、图片引用提取、g_tk | 纯函数,无 IO |
+| napcat-session.ts | 会话键、8 类轮次、消息归属、防重发 | 纯函数,无 IO |
+| napcat-store.ts | 联系人 / 聊天记录 / 人格 / 去重 ID 持久化 + 档案卡 | 只做磁盘 IO |
+| napcat-extras.ts | 群文件 / 群管 / 账号 / 好友 / 合并转发 / 请求处理动作封装 | 零 IO,注入 callAction |
+| napcat-wsserver.ts | 反向 WS 服务端:握手 / 鉴权 / 帧编解码 / 保活 | 复用 wsclient 解析器 |
+| napcat-login.ts | WebUI 扫码登录客户端 + 自动换码状态机 | 注入 fetch / sha256 / now |
+| wsclient.ts | 手写 WebSocket 客户端 + 帧解析/编码 | 传输层,绕开 llhttp |
+| qr.ts | 零依赖二维码编码(byte / EC-M / v1-10) | 纯函数 |
+
+模块纪律:`napcat-extras` 不碰连接与状态,只把动作名+参数交给注入的
+`callAction`;`napcat-client` 独占连接、去重、媒体与熔断;`napcat-store` 只管
+`userData/napcat-*.json`。拆分后 `napcat.ts` 保留 barrel re-export,`engine.ts`
+与 `main.cjs` 的既有导入路径零改动。
+
+集成点(均为项目原文件):
+
+| 位置 | 接线 |
+| --- | --- |
+| electron/main.cjs | 懒加载客户端单例、`napcat:*` IPC、登录小窗、消息注入与分流、会话表权威持久化 |
+| electron/preload.cjs | `onNapcatMessage` / `onNapcatGroupMessage` / `onNapcatSessionActivity` / `napcatDeleteSession` / `getNapcatSessions` |
+| electron/agent/types.ts | `napcat*` 配置字段与引擎 `napcat` 注入接口 |
+| electron/agent/tools/configTools.ts | `set_napcat_config`(开关 / wsUrl / 模式 / 白名单 / 自动回复) |
+| electron/agent/plugin/* | `tools-napcat` 插件;`napcatClient` / `napcatLogin` 注入宿主 |
+| src/hooks/useAgent.ts | 消息排队、双通道去重、会话过滤、来源标记 |
+| widget/WidgetApp.tsx | 会话面板种子、删除联动、会话活动处理 |
+| src/components/.../AgentMessages.tsx | QQ 来源头 + 档案卡分层展示 |
+
+### 47.2 连接模式与连接管理
+
+#### 47.2.1 正向 WS(默认)
+
+- **地址**:`napcatWsUrl`,缺省 `ws://127.0.0.1:3001`(NapCat 的 WebSocket
+  服务器端口);URL 可带 `?access_token=xxx`,日志与工具回显一律打码。
+- **传输**:`wsclient.ts` 手写实现(net.Socket + 手写 HTTP Upgrade + RFC6455
+  帧编解码),不经 llhttp——补丁版 Electron 的 llhttp 段错误见 10.11。
+- **握手**:10s 超时;建连后每 20s 发 ping,**65s 无任何入站数据**判定半开连接
+  并主动断开重连(2026-10-23,修复"启动连上、稍后自己熔断且长时间连不上")。
+- **重连**:指数退避 1s 起、上限 30s;连续失败 10 次进入熔断,冷却 30s 后
+  半开探测,冷却上限 60s。连接建立即重置熔断;旧 socket 的迟到
+  onClose/onError 走连接守卫,不覆盖新连接状态、不计失败。
+- **动作调用**:echo 匹配 + 15s 超时;文件/视频上传单独 180s;`napcat` 工具
+  声明 `timeoutMs=200_000`,覆盖引擎 60s 兜底,避免大视频"QQ 已收到但工具
+  报失败"。
+- **手动恢复**:`napcat action=reconnect` 立即 `start()`(不必等冷却);
+  `set_napcat_config enabled=true` 或修改 wsUrl 同样立即重连。
+
+#### 47.2.2 反向 WS(2026-10-25)
+
+NapCat 反向 WS 模式让挂件变服务端、NapCat 主动连入,事件与动作共用同一条
+连接(OneBot 11 双向通道)。适合 NapCat 在容器/远端、无法从挂件侧主动
+连入的场景。
+
+- **配置**:`napcatWsMode='reverse'`,`napcatWsUrl` 语义变为本机监听地址。
+  `set_napcat_config mode=reverse` 未显式给地址时默认改用
+  `ws://127.0.0.1:3002`——3001 是 NapCat 正向 WS 端口,反向监听必须避开。
+- **服务端**:`napcat-wsserver.ts` 用 `net.createServer` + 手写 Upgrade 校验:
+  非 GET/Upgrade 400、路径不符 404、`access_token` 不符 401(同时支持
+  `?access_token=` 与 `Authorization: Bearer`);握手超时 10s。
+- **单活跃连接**:新连接通过握手后静默关闭旧 socket(旧连接迟到 close 不回调
+  `onClose`),避免旧连接覆盖新状态;401/404/端口探测不算"NapCat 断开"。
+- **保活**:每 20s 发 ping,65s 无入站数据判定超时;服务端帧按 RFC6455 不掩码。
+- **切换与重建**:切到反向时先关旧的正向 socket,避免双通道并存;反向服务按
+  `host:port|path|token` 指纹检测,配置变化即整体重建并等待 NapCat 重连。
+- **状态**:`status()` 输出 `mode` 与 `listening`(服务端是否在监听)、
+  `lastError`、最近断开 `lastClose{code,reason,at,wasConnected}`。
+- **NapCat 侧**:反向 WS 地址填同一 URL(带 token 时两边一致);端口需被
+  防火墙放行;同一端口同时只保留最近一条连接。
+
+### 47.3 消息流全链路
+
+```
+NapCat ──WS 事件──▶ napcat-client
+                      │ ① 去重(napcat-seen.json,持久化)
+                      │ ② 空包/子类型噪声过滤 + 群准入
+                      │ ③ 媒体落地(userData/napcat-media/)
+                      ▼
+                 main.cjs 注入模板(类别行/原文/媒体/档案卡/回复规则)
+                      │ ④ 主人私聊 → 主对话;其余 → private:/group: 外部会话
+                      ▼
+          preload napcat:message / napcat:group-message
+                      ▼
+       useAgent ⑤ 双通道去重 → busy 排队(上限 50)或直接 send
+                      ▼
+                 引擎单轮(长期记忆/人格/工具)
+                      ▼
+        ⑥ 归属路由:留窗口 / 回 QQ / 发群 / 询问主人
+```
+
+**① 去重(三层)**:
+
+- 主进程:`napcat-seen.json`,键 `private:<message_id>` / `group:<message_id>`
+  ——私聊与群聊的 message_id 可能同值,必须分通道;TTL 1h、总量 5000
+  (超限删最旧一半)、每 10 分钟清理一次。
+- 渲染端:同一消息可能经实例订阅与父级 ingest 双通道到达,按
+  `p:/g:<message_id>` 再判一次(集合上限 100)。
+- 无 messageId 兜底:来源 + QQ + 群号 + 文本前 50 字 + 5 秒窗口(列表上限 50)。
+- 空壳消息(`isEmptyNapcatDisplayText`)在窗口入口丢弃,避免空气泡进对话。
+
+**② 过滤与群准入**:
+
+- 空包(零宽字符/无图)丢弃;`notice` / `poke` 等子类型噪声不计入消息流。
+- 群准入(`shouldAdmitGroupMessage`):`napcatAllowedGroups` 为空 = 监听所有
+  群;非空 = 只收名单内群;额外监听集合(如 `send_group` 成功后自动加入)优先。
+- `napcatBotQQ` 用于识别机器人自己发的消息,防自问自答循环。
+
+**③ 媒体落地**:
+
+| 类型 | 上限 | 处理 |
+| --- | --- | --- |
+| 图片 | 20MB / 下载 10s | 直下 `napcat-media/`,进 media part 显示 |
+| 语音 | — | `get_record out_format=mp3` 转码(QQ 多为 silk/amr,浏览器播不了);失败回退原文件 |
+| 视频 / 文件 | 200MB / 60s | 视频进 media part;文件只落盘并在注入文本标注路径 |
+| 图片引用 | — | `extractImageRefs` 把回复文本里的本地图片路径提取为真图发送 |
+
+**④ 注入模板**(与 16.3 同款,逐条消息):
+
+```
+【QQ私聊/QQ群聊 · QQ 号 · 称呼】
+原文 + 【媒体已下载】路径列表
+【档案卡】称呼/已知/会话人格/记忆相关/最近发言
+【回复规则】编号规则
+```
+
+- 群消息额外注入**最近 8 条群上下文**(每条带 QQ 号与档案名)、真实群名
+  (`get_group_info`,失败兜底群号并明确禁止编造群名)。
+- 主人 QQ 私聊 2026-10-23 起并入**主对话**(`routeKey='main'`),不再生成
+  `private:<主人QQ>` 外部会话,避免与主对话重复。
+- 当 `napcatPrivateAutoReply=false` 时,陌生人私聊走 `ask` 询问轮:消息注入
+  `sessionKey='ask'`,回复发到主人 QQ 同步询问,`pendingQQReply` 保留 30 分钟。
+
+**⑤ 渲染端**:`useAgent` 按 `sessionKey` 过滤,只处理属于本实例的消息;
+busy(thinking/running)时入队,idle 后按到达顺序逐条补发,队列上限 50;
+`mutedSessions` 命中的会话只显示气泡、不触发 LLM。
+
+**⑥ 路由**:见 47.4;发送成功后 `napcat:session-activity` 回显,外部会话
+面板即时建条目。
+
+### 47.4 归属、路由与出站清洗
+
+#### 47.4.1 会话键与轮次分类
+
+会话键:`private:<QQ>` / `group:<群号>`,主对话固定 `main`。入口
+(`classifyTurn`)按触发来源 + 消息归属推出 8 类轮次:
+
+| TurnKind | 触发 | 默认落点 |
+| --- | --- | --- |
+| window | 主对话窗口输入 | 留窗口 |
+| panel | 外部会话面板输入 | 留窗口 |
+| master-qq | 主人 QQ 私聊 | 回主人 QQ(2026-10-23 起并入主对话) |
+| master-group | 主人在群里且消息指向 LLM | 私发主人 QQ |
+| contact | 扩展信任私聊 | 回对方 |
+| group | 群友发言(含主人未指向 LLM 的闲聊) | 回群 |
+| ask | 陌生人询问轮 | 私发主人 QQ 询问 |
+| silent | 系统 / 主动陪伴轮 | 永不路由 QQ |
+
+#### 47.4.2 归属指纹(程序侧,2026-09-22)
+
+- **归属由入口判定**:窗口/面板/主人私聊 = master;主人在群里只有被
+  `isDirectedToBot`(@、称呼、第二人称疑问/祈使)识别为指向 LLM 才算 master,
+  否则按 peer;联系人与群友 = peer。
+- **LLM 文本指纹协议已退役**:原【指纹:xxx】文本标记服从性约 50%,导致扣留
+  丢消息/串台(21 轮修不完)。现由程序签发轮次指纹 `turnTag`,附在事件元数据,
+  回复落定时核对——对不上即扣留,"指纹对不上就不发送"语义保留在程序侧。
+- **跨归属外发只走工具**:替主人转达、向主人汇报一律用 `napcat send` /
+  `send_group` 真实发出;对话回复只落本归属默认落点,判定器仅作安全网。
+- `pendingQQReply` 只由主人窗口直发轮一次性消费;系统通知轮、主动陪伴轮
+  永不路由 QQ(见 16.7)。
+
+#### 47.4.3 出站清洗链
+
+非主人目标(扩展信任/群友/陌生人)发送前串行执行:
+
+1. `stripThinkingPreamble`:剥第一段思考腔;
+2. `stripToolNarration`:剥工具调用叙述(连续 ≥2 句才删);
+3. `stripMasterNarration`:剥第三人称转述/向主人汇报/内部工作流;全剥空时提取
+   「回他「…」」引号内的真回复;
+4. `extractImageRefs`:文本夹带图片路径转真图;
+5. `stripFingerprintMarks`:发送前剥掉轮次指纹标记(标记物理上到不了对方)。
+
+主人目标保留过程(窗口本就是过程展示)。`sendToQQ` 与 `sendToGroup` 共用
+`buildOutgoingMessage`:段序固定 text → image → record → 文件上传。
+
+启用人格卡时,`prepareOutgoingText` 在上述剥离之后再跑 `cleanStyle`
+(主进程按激活卡调用 `sanitizeAiFlavor`,见第 48 章)。主人与非主人出站
+都清洗;清洗失败保留剥离后的原文,不阻断发送。
+
+### 47.5 LLM 工具面
+
+`createNapcatTools` 注册 2 个工具:`napcat`(34 个 action)与
+`manage_sessions`(list/watch/unwatch/mute/unmute/bind)。
+
+| 分组 | action |
+| --- | --- |
+| 状态 / 查询 | status / reconnect / recent / sent / msg |
+| 发消息 | send / send_group / recall / react / poke / forward |
+| 组织与成员 | groups / members / friends / profile / group_info / group_manage / group_admin |
+| 群文件 | group_file(op=list/url/delete/mkdir/rmdir/upload) |
+| 请求处理 | requests / request_handle |
+| 账号 / 好友 | account / friend_manage |
+| 档案 / 记忆 | contacts / contact_update / chats / persona / persona_set |
+| 会话 | sessions / session_mute / session_bind |
+| 其他 | zone / login / raw |
+
+关键约束:
+
+- `send_group` 成功后**自动把该群加入监听名单**——未监听的群后续消息会被
+  准入过滤丢弃;接入新群先 `action=groups` 拿真实群号,禁止凭群名猜。
+- `send` / `send_group` 省略目标 = 当前会话对象;主对话里省略不会发给主人。
+- 群管理(踢人/禁言/全员禁言)、`request_handle`、`raw` 经
+  `confirmDangerous` 要求主人确认;危险动作不静默执行。
+- `send` / `send_group` 支持 `at`(QQ 号或 all)与 `reply_to`(引用消息 ID),
+  图片 `image`、文件 `file`(上传本体,中文名直传)、语音 `voice`
+  (`record` 段,NapCat 自动转 silk)。
+- `raw` 是任意接口逃生口(`raw_action` + `raw_params`),覆盖未命名封装的
+  低频接口(如 `send_like` / `get_group_msg_history` / `ocr_image`)。
+- 工具回显统一截断:文件大小格式化,原始 JSON 超 2000 字符截断,防撑爆上下文。
+
+### 47.6 持久化与会话权威
+
+| 文件(userData) | 内容 | 约束 |
+| --- | --- | --- |
+| napcat-contacts.json | 联系人档案 qq/name/info/source/updatedAt | name ≤50、info ≤500;串行写 + 临时文件 rename |
+| napcat-chats.json | 聊天记录备份(工具记忆) | 默认 200 条,单条 2000 字截断;串行写队列 |
+| napcat-personas.json | 某个私聊/群的会话人格(scope=`private:<QQ>`/`group:<群号>`) | 档案卡展示截 200 字;与岛灵人格卡(persona-cards.json,第 48 章)分开 |
+| napcat-seen.json | 去重 ID | TTL 1h,总量 5000,10 分钟清理 |
+| napcat-media/ | 图片 / 语音 / 视频 / 文件 | 图片 20MB,音视频文件 200MB |
+| napcat-sessions.json | 会话列表 + 已删除列表 | 主进程唯一权威,节流 150ms 原子写 |
+
+- **会话表权威**:`knownSessions` 与 `deletedSessionsSet` 合并写单文件;渲染端
+  不再从 localStorage 恢复,挂载时 `napcat:get-sessions` 主动拉取。删除 =
+  从 sessions 物理移除 + deleted 屏蔽消息/seed/activity 重建,重启不复活。
+- **上限**:会话表最多 100 条(超限裁最旧);外部会话引擎池最多 12 个,超出
+  丢最旧 idle 实例;每会话独立引擎 = 并行处理与状态隔离(见第 17 章)。
+- **清除所有数据**:`resetNapcatStore` + 清空 known/deleted + 停连接,防止
+  清空后旧消息重建会话(见 44.7)。
+
+### 47.7 扫码登录
+
+NapCat 本体不动(更新免覆盖),登录全部在灵动岛侧完成:
+
+- **WebUI 客户端**:鉴权散列 `SHA256(token + '.napcat')` + Bearer;调用
+  `GetQQLoginQrcode` / `CheckLoginStatus` / `RefreshQRcode`。
+- **状态机两条硬规则**:到期前自动换码(`ttlSec=105s`);秒级轮询跟随,
+  服务端换码即重置计时。纯逻辑注入 fetch/sha256/now,单测全覆盖。
+- **零依赖 QR**:`qr.ts` byte 模式 / EC-M / v1-10,含 v7+ 版本信息块 BCH(18,6)
+  与多校正图形;与 python qrcode 逐格对拍(`tests/qr-crosscheck.mjs`)。
+- **入口**:托盘「QQ 扫码登录…」与 `napcat action=login` 双入口,共用懒加载
+  单例小窗;token 自动发现(env `NAPCAT_WEBUI_TOKEN` → NapCat 目录
+  `webui.json` → 页面手填);成功自动关窗 + 通知。
+- **连接层故障不锁死**(2026-10-22):WebUI 未启动/端口不符/`host="::"` 只监听
+  IPv6 时,不再进死亡 error 态——丢旧码、保持 waiting、按 2.5s 重试,并同时
+  尝试 `127.0.0.1` 与 `[::1]`;错误文案展开 fetch 的 cause(ECONNREFUSED/
+  超时/DNS)与实际地址。鉴权/接口错误仍进 error 态保留 token 手填。
+- 细节与实测记录见 16.7b。
+
+### 47.8 配置项
+
+| 字段(AgentConfig) | 默认 | 说明 |
+| --- | --- | --- |
+| napcatEnabled | false | 开关;开启后挂件启动即连接,变更立即 start/stop |
+| napcatWsUrl | ws://127.0.0.1:3001 | 正向: NapCat 地址;反向: 本机监听地址 |
+| napcatWsMode | forward | forward 主动连 / reverse 本机监听 |
+| napcatAllowed | [] | 私聊扩展信任;空 = 只信任主人(主人恒信任) |
+| napcatAllowedGroups | [] | 群白名单;空 = 监听所有群 |
+| napcatPrivateAutoReply | true | 私聊默认全部自主回复;false = 陌生人先询问主人 |
+| napcatBotQQ | '' | 机器人自身 QQ,用于识别自己发的消息 |
+| mutedSessions | [] | 屏蔽会话键,只显示不触发 LLM |
+
+- **privacy.json 回填**:`allowed` / `allowedGroups` / `botQQ` / `masterQQ`
+  缺省由 `userData/privacy.json` 提供;源码与安装器不携带任何个人 QQ。
+- **主人不可配置**:`masterQQ` 只从 privacy.json 运行时读取;`napcat` status
+  明示"主人 + 私聊扩展信任(空 = 仅主人)";`allowed` 语义已降级为扩展信任。
+- **写入路径**:LLM 的 `set_napcat_config` 与渲染端 IPC 都经
+  `applyAgentConfigPatch` → 触发连接 start/stop、白名单种子广播与会话面板更新。
+
+### 47.9 集成点与扩展
+
+IPC 与事件:
+
+| 通道 | 方向 | 内容 |
+| --- | --- | --- |
+| napcat:message | 主 → 渲染 | 私聊:`{qq,text,trusted,owner,media,profileCard,muted,sessionKey}` |
+| napcat:group-message | 主 → 渲染 | 群聊:同上 + `groupId` |
+| napcat:session-activity | 主 → 渲染 | 会话活动(发送回显/群名补全),渲染端建条目 |
+| napcat:session-deleted | 主 → 渲染 | 会话已删除,渲染端移除 |
+| napcat:session-delete | 渲染 → 主 | 物理删除会话 + 删引擎/NapCat 数据 |
+| napcat:get-sessions | 渲染 → 主 | 拉取权威会话列表 |
+
+新增一个 OneBot 动作的固定步骤:
+
+1. `napcat-extras.ts` 加动作封装(只调注入的 `callAction`,零 IO/零状态);
+2. `NapcatClient` 接口暴露并委托 extras(客户端不重复实现协议细节);
+3. `napcat.ts` 工具补 `action` 枚举、参数与描述;危险动作接
+   `confirmDangerous`,并明确是否需要主人身份;
+4. `tests/test-agent-core.ts` 用 mock client 加断言(透传参数/回显/拒绝路径);
+5. 涉及新消息段时先补 `napcat-message.ts` 纯函数与单测,再接客户端下载。
+
+### 47.10 测试与排障
+
+`tests/test-agent-core.ts` 覆盖:
+
+- 消息解析:string / CQ 码 / 段数组,@ 与引用、视频/文件/转发/卡片;
+- 工具:`status` / `reconnect` / `recent` / `send` / `send_group`(图/文件/语音)/
+  `recall` / `members` / `friends` / `profile` / `group_info` / `group_manage` /
+  `contacts` / `chats` / `persona` / `sessions` / `sent` / `zone`;
+- 登录流:过期码不落屏、到期自动换码、错误态整体重试、WebUI 断线自动重连、
+  IPv6 候选地址;
+- 连接:熔断后 `start()` 立即重连、旧 socket 迟到 close 不再二次熔断、
+  半开探测在服务端恢复后自动恢复;
+- 反向 WS:握手 / 鉴权 / 双向收发(2026-10-25);
+- 全量适配:at/reply 段 + 视频/文件/转发/卡片解析。
+
+| 现象 | 排查顺序 |
+| --- | --- |
+| 连不上 / 反复熔断 | 先看模式与端口:forward 连 NapCat 的 3001,reverse 挂件监听 3002 且 NapCat 填反向地址;`napcat action=status` 看 `lastError` / `lastClose`;`action=reconnect` 立即重连 |
+| 反向模式 NapCat 接不进 | path 与 token 两边一致;防火墙放行端口;确认没有旧正向连接占用;服务只保留一个活跃连接 |
+| 群消息收不到 | `napcatAllowedGroups` 非空且不含该群;先 `action=groups` 拿真实群号再 watch;`send_group` 成功会自动加入监听 |
+| 大视频发送报超时 | 上传 180s、工具 200s;仍失败查 NapCat 侧文件大小/网络,不要误判为"没发出去" |
+| QQ 收到重复回复 | 检查三层去重(messageId 分通道/无 id 兜底)与轮次归属(turnTag);确认同一消息未经双通道各触发一轮 |
+| 图片 / 语音不显示 | 图片 >20MB、音视频文件 >200MB 会被拒;语音转 mp3 失败会回退原文件,浏览器可能不可播 |
+| 二维码不出 / 一直过期 | 见 16.7b:WebUI 未启动、端口不符、`host="::"` 只监听 IPv6、token 错误;窗口会保持 waiting 自动重试,不必反复重开 |
+| 主人私聊没进外部会话 | 2026-10-23 起主人私聊并入主对话,这是预期行为,不是丢消息 |
+
+### 47.11 演进时间线
+
+| 日期 | 变更 |
+| --- | --- |
+| 2026-08-12 | 接入 OneBot 11,替换旧 Python 桥;私聊/群消息进对话,档案与聊天记录落盘 |
+| 2026-08-13 | 手写 WS 传输(绕 llhttp);来源分级、注入模板与出站剥离链 |
+| 2026-08-14 | 五期拆分 napcat 域;文件上传 180s;会话工具与写队列 |
+| 2026-08-17 | 主人 / 白名单 / 机器人 QQ / 群白名单全部 privacy.json 配置化 |
+| 2026-08-18 | 会话列表改主进程单文件权威持久化,删除=物理移除 |
+| 2026-09-22 | 扫码登录 + 零依赖 QR;归属指纹重设计(LLM 文本指纹退役) |
+| 2026-10-22 | 登录窗 WebUI 断线自动重连 / IPv6 候选 / 错误 cause 展开 |
+| 2026-10-23 | 保活 20s/65s 与熔断探测 30-60s;私聊默认自主回复;主人私聊并入主对话 |
+| 2026-10-25 | 全量接口适配(群文件/群管/请求/转发/账号/表情/戳一戳/raw)+ 反向 WS + 音视频文件 200MB |
+
+
+---
+
+## 第 48 章 人格卡(2026-10-26)
+
+岛灵自己的身份、称谓与说话方式。设置页可维护多张卡,同时启用一张,
+下一轮对话热切换。提示词与结构化风格由主人掌握;记忆进化、近 30 条性格提取和去 AI 味
+评审只产生建议,进缓冲区,主人合并后才写入。性格合并进整合区后,系统提示改用第二人称叙事。
+
+代码:
+
+| 文件 | 职责 |
+| --- | --- |
+| `electron/agent/persona.ts` | 存储、提示块、风格档规范化、导入导出、旧记忆迁移 |
+| `electron/agent/persona-buffer.ts` | 进化缓冲区,合并与撤销 |
+| `electron/agent/persona-style.ts` | 出站 AI 味清洗(`sanitizeAiFlavor`) |
+| `electron/agent/style-review.ts` | 去 AI 味独立评审 |
+| `electron/agent/persona-traits.ts` | 近 30 条聊天提取新性格 |
+| `electron/agent/tools/tools-persona.ts` | `persona` 工具与 replace/delete 门控 |
+| `electron/agent/plugin/prompt-plugins.ts` | `prompt-persona` 注入系统提示 |
+| `electron/agent/plugin/tool-plugins.ts` | `tools-persona` 注册工具 |
+| `src/components/DynamicIsland/views/PersonaCardsView.tsx` | 设置页 |
+
+主进程在 `electron/main.cjs` 持有两个单例,并在启动时做一次旧记忆迁移。
+
+### 48.1 三套「人格」各管一块
+
+| 名称 | 文件 | 管什么 |
+| --- | --- | --- |
+| 人格卡 | `userData/persona-cards.json` | 岛灵自己。全局一份激活 id,每轮系统提示与出站清洗都读它 |
+| 长期记忆 | `userData/memory.json` | 偏好 / 事实 / 工作流 / 教训。人设类内容不再写入 |
+| 会话人格 | `userData/napcat-personas.json` | 某个私聊或群的档案字段,`napcat` 的 `persona` / `persona_set`,档案卡展示截 200 字 |
+
+会话人格换不了岛灵人格卡,人格卡也不写入某个 QQ 的档案。功能引导见 11.19。
+
+### 48.2 卡片与风格档
+
+`PersonaCard`(`electron/agent/types.ts`):
+
+| 字段 | 约束 |
+| --- | --- |
+| id | UUID;导入可保留原 id |
+| name | 必填,≤60 字 |
+| prompt | 主人手写的人格提示词,≤8000 字。进化不直接改写 |
+| notes | 进化整合区,≤12000 字。建议合并后按行追加,可清空 |
+| style | 结构化说话方式,见下表。缺省保留;工具传 `null` 清空 |
+| createdAt / updatedAt | 毫秒时间戳。列表按 updatedAt 新到旧 |
+
+全库上限 **50 张**。新建超出时淘汰 `updatedAt` 最旧的一张,新卡保留。
+
+`PersonaStyle`(空对象规范化后变为缺省,不落盘):
+
+| 字段 | 约束 |
+| --- | --- |
+| tone / sentence / address | 各 ≤200 字 |
+| particles | 最多 10 个,每个 ≤10 字 |
+| emoji | `none` / `rare` / `normal` |
+| listPolicy | `never`(闲聊和任务正文都不分点,代码除外) / `task-only`(只有任务步骤可分点) |
+| maxSentences | 1–10。闲聊出站按句末标点截断;任务回复不截 |
+| bannedPhrases | 最多 30 个,每个 ≤30 字;出站清洗会从正文删掉这些词 |
+| examples | 最多 6 组,user ≤200 / assistant ≤300。模仿语气与节奏 |
+| antiExamples | 最多 6 条,每条 ≤300 |
+
+字符串列表兼容工具传入的逗号、顿号或空白分隔字符串。
+
+五套预设模板(`PERSONA_STYLE_TEMPLATES`,设置页芯片与 `template` 参数同名):
+`natural` 自然口语、`gentle` 温柔、`tsundere` 傲娇、`cold` 冷淡、
+`energetic` 元气。模板给出语气、句式、语气词、emoji、列表策略、句数上限
+和一批书面客套禁用词。`create` / `edit` 缺 prompt 时,可用 `description`
++ `traits` + 模板自动拼一段「你是「名称」。…日常交流始终保持这个人格」。
+
+### 48.3 存储与激活
+
+- 卡片本体:`userData/persona-cards.json`,形状 `{ cards: [...] }`。
+  与 `memory.ts` 同款:内存态、串行写队列、临时文件 rename 原子落盘。
+  读接口返回深拷贝。损坏或缺失文件当作空库。
+- 激活 id:`settings.json` 的 `agent.activePersonaId`。空字符串 = 不注入。
+  引擎每轮读配置,设置页切换后**下一轮**生效。id 对不上任何卡时静默跳过。
+- 进化开关:`agent.personaEvolveEnabled`,默认 `false`。关闭时评审不得输出
+  `personaMerge`。
+- 删除当前启用卡时,设置页 IPC 与 `persona` 工具都会把 `activePersonaId` 清掉。
+- 插件未注入 `personaStore` 时,`persona` 工具不注册,提示段落跳过。
+
+`upsert` 的缺省语义:不传 `notes` 保留原整合区;不传 `style` 保留原风格;
+`style: null` 清空风格。编辑提示词不会顺手清掉进化结果。
+
+### 48.4 系统提示
+
+`prompt-persona` 挂在 `agent/pre-step` 瀑布的第一段,位于长期记忆之前
+(装配顺序见 16.2)。`formatPersonaBlock(cards, activeId)`:
+
+1. 无激活 id、id 失效、或 prompt / style / notes 全空 → 返回空串,不阻断对话。
+2. 否则拼成一块,顺序固定:
+   - `【当前人格卡 · 名称】`
+   - 第二人称:你就是这个人,不要解释设定、不要跳出角色、不要把规则念出来
+   - 冲突规则:说话风格以人格卡为准,事实类记忆仍然有效
+   - `prompt` 原文(不改写)
+   - `formatPersonaStyleBlock`:【说话方式(硬约束)】+ 一句「这是你的口气」+【说话正例】+【反例】
+   - 整合区里 `性格:` / `特质:` 开头的行抽成 `【你近来的性格】`(第二人称叙事,不逐条宣布)
+   - 其余 notes 仍追加 `【人格卡 · 进化整合区】`
+3. 整块超过 **12000** 字截断,并附「人格卡过长,已截断」。
+
+风格段固定附一条:不客套、不反问「还需要我…」、不复述用户问题、不解释自己正在做什么。
+正例要求模仿语气,不复制内容。
+
+基础提示词仍是 `agent.systemPrompt`,所有人格卡共用,在瀑布之前就拼进基础段。
+设置页「基础提示词」就是原来的「行为与界面 → 自定义提示词」,界面上限 20000 字。
+
+### 48.5 出站清洗
+
+提示词只约束模型,模型仍会冒助手腔。启用人格卡时,两处在边界做确定性清洗
+(`persona-style.ts` 的 `sanitizeAiFlavor`,纯函数):
+
+1. **对话落定**(`engine-loop.ts` `applyPersonaStyleToParts`):本轮没有工具调用、
+   回复即将落成助手消息时,只改 `text` part。reasoning、工具、媒体不动。
+2. **QQ 出站**(`napcat-client.ts` `prepareOutgoingText`):剥离链之后调用主进程
+   注入的 `cleanStyle`。主人与非主人都清洗。失败保留剥离结果,不阻断发送。
+
+无激活卡时两处都不改模型原文。
+
+清洗规则:
+
+- 任何文本:去掉「作为一个 AI」类自述、开头的「当然可以,我来帮你」、结尾客套
+  (希望有帮助 / 随时告诉我)、未被请求的「需要我…吗」,以及风格档里的禁用词。
+- `styleModeForText` 见到代码块、行内代码、表格行或 URL → `task`:默认保留清单和排版,
+  只做上面的边界清洗。`listPolicy: never` 时,代码块、行内代码和 URL 仍原样,
+  其余正文脱掉标题、分点和书面连接词。`task-only` 或未设置时,任务清单保留。
+  否则 → `chat`:再去掉标题、分点、加粗、书面连接词
+  (首先 / 其次 / 综上所述…);500 字以内且没有空行的短闲聊把换行压成口语;
+  感叹号只留第一个。`maxSentences` 只在闲聊里按句末标点截到上限,不按字数硬切。
+- emoji:`none` 全删,`rare` 最多留 1 个,`normal` 或未设置不动。代码块、行内代码、URL 原样保留。
+- 清洗两遍,保证幂等。洗完变空则回退原文,不把有效内容删光。
+
+称呼、语气词和正例仍只在系统提示里约束。清洗器不改写用词,也不按句数截断任务回复。
+
+### 48.6 `persona` 工具
+
+`tools-persona` 在注入了 `personaStore` 后注册一个工具,action:
+
+| action | 作用 |
+| --- | --- |
+| list / get | 列表(标出已启用、风格摘要、整合区条数)/ 单卡全文 |
+| create | 要 name,以及 prompt,或 description / traits / template 至少一项 |
+| edit | 局部修改。缺省字段保留;传了 style 或 template 则替换风格 |
+| replace | 仅主人本轮明确要覆盖整张时才确认后覆盖提示词与风格;**整合区保留** |
+| delete | 仅主人明确要删除时才确认。删的是当前卡则停用 |
+| activate / deactivate | 写 `activePersonaId`;启用后下一轮生效 |
+| set_notes / clear_notes | 覆盖或清空整合区 |
+| export / import | 工具通道走 JSON 文本,不弹文件对话框。导入按 id 与 name+prompt 去重 |
+| buffer_list / buffer_merge / buffer_discard / buffer_undo / buffer_clear | 缓冲区。`buffer_merge` 用 `buffer_id`,或 `all: true` |
+
+`edit` 与降级后的 `replace` 都会把没写到的风格留住:只有显式 `style` 对象、
+`template`,或 `style: null` 才动风格档。
+
+### 48.7 replace / delete 门控
+
+意外弹出「整体替换人格卡」来自模型自己调用 `replace`。门在
+`decidePersonaDanger` / `personaTurnUtterance`(`tools-persona.ts`),
+确认窗仍走既有 `confirmDangerous` → `confirmAction` → 主进程
+`requestUserConfirm`,画在 AgentView 上。
+
+本轮上下文来自 `ownerConfig.getTurnKind` / `getTurnText`
+(`route.lastTriggerText`)。插件没注入 `ownerConfig` 时不传上下文,
+保持旧行为:replace/delete 一律弹确认(单测兼容,决策值 `legacy`)。
+
+| 本轮 | replace | delete |
+| --- | --- | --- |
+| `contact` / `group` / `ask` / `silent` | 拒绝,不弹窗,不改卡 | 同左 |
+| 主人原文含「整体替换 / 覆盖整张 / 重写整张 / 整张卡 / 整张人格卡 / 清空重写 / 全部换掉·覆盖·替换」 | 弹「整体替换人格卡」。确认后覆盖提示词与风格,整合区保留 | — |
+| 主人原文含「删除人格卡 / 删掉人格卡」(可带这张、该、当前、全部) | — | 弹「删除人格卡」 |
+| 主人在改卡,但不是覆盖整张(「人格卡 / 改人设 / 换人设 / 优化人设 / 改提示词…」) | **降级为 edit**:不弹窗,整合区保留,没写到的风格保留 | 拒绝 |
+| 其余主人轮(闲聊、没提改卡) | 拒绝,并告诉模型不要改去 edit 或 set_notes | 拒绝 |
+
+QQ 入站正文后面拼着档案卡和回复规则。`personaTurnUtterance` 只取
+`【QQ私聊…】` / `【QQ群聊…】` / `【主人窗口…】` 标记后、`【档案卡】`
+或 `【回复规则】` 之前的那一句。档案里出现「人格卡」或「优化人格卡」
+不算主人这轮要改卡。`【系统通知】` 开头的文本视为没有主人发言。
+
+拒绝时工具返回说明文本,卡片不变,确认门不被调用。
+
+### 48.8 进化缓冲区
+
+文件 `userData/persona-evolution.json`,形状 `{ items: [...] }`,上限 50 条。
+记忆进化不再直接改人格卡。
+
+`PersonaBufferItem` 要点:
+
+- `kind`: `memory`(记忆进化整合)、`style`(去 AI 味评审)或 `trait`(近 30 条聊天抽出的新性格)。
+- `notes`: 建议追加到整合区的要点。
+- `sources` / `sourceIds`: 源记忆快照。合并时按快照内容删除;撤销时原样导回。
+- `cardPatch`: 可选的完整 prompt 和/或 style。合并时才落到卡上。
+- `evolutionVersion`: 产生该建议的进化版本。回滚到更早版本时清掉之后**尚未合并**的建议。
+- `mergedAt` + `before*` / `after*`: 合并前内容与合并后指纹,撤销前用来核对。
+- `undoneAt`: 已撤销。已撤销的条目不能再合并。
+
+同一张卡、同一 `kind`、尚未合并也未撤销的建议再次 `add` 时合并进同一条:
+要点按行去重,源记忆按 id 去重,避免进化或评审反复跑堆出多条。
+
+**合并**(`mergePersonaBufferItem`):
+
+1. 已合并或已撤销 → 拒绝。目标卡不存在 → 拒绝。
+2. 新要点与现有整合区去重。加上去重后的要点会超过 12000 字 → 整批不写,返回「整合区已满」。
+3. 要点、prompt、style 与当前卡都一致 → 「无需合并」。
+4. 先 `upsert` 落 prompt/style 提案(notes 先保持原样),再 `appendNotes` 追加新要点。
+5. 源记忆只删除「当前内容仍等于建议快照」的条目。主人中途改过的记忆留下。
+6. `markMerged` 记下 before/after 与实际删除的快照。
+
+**撤销**(`undoPersonaBufferItem`):合并后若 notes、prompt 或 style 的指纹
+和 `after*` 不一致(主人又改过),拒绝自动撤销,避免盖掉后续修改。
+通过则把卡恢复到 before,并用 `memoryStore.importEntries` 导回被删记忆。
+
+**进化怎么产生建议**(`evolution.ts`,仅 `personaEvolveEnabled === true`
+且激活卡仍在):
+
+1. 评审输入带【当前人格卡】(名称、prompt 截 4000、风格段、整合区截 3000)
+   和同卡待处理建议(避免重复提)。未开开关或未激活时,输入写明禁止 `personaMerge`。
+2. 记忆清单里,`isPersonaMergeCandidate` 为真的条目标【可整合·人设/风格】:
+   人格分类条目,或 `preference` 且命中说话风格关键词(说话、语气、口癖、
+   人设、毒舌、傲娇等)。普通 fact / workflow / lesson 不纳入。显式锁定的
+   非人格条目(例如授权)也不算人格分类。
+3. `personaMerge` 可含 `notes`、`sourceIds`(评审输入里的 1 基序号,最多 20)、
+   可选的完整 `prompt`(≤8000)和 `style`。`sourceIds` 只能落到候选条目。
+   新性格写成 `性格:词——怎么体现在说话里`,已有性格不要重复。
+4. `buildPersonaProposal` 不落盘。受保护人设条目的原文若评审没写进 notes,
+   代码逐字补上。与现有整合区重复则跳过;容量不够整批放弃(`notes-full`)。
+5. 这些源 id 放进 `applyChanges` 的 `preserveIds`:普通 delete/update
+   碰不到它们,避免「还没进人格卡就被清理掉」。受保护条目本身仍然不能
+   出现在 changes 的 delete/update 里;列入 `sourceIds` 是它们迁出长期记忆的路径。
+6. 建议算清理类改动,免复评。轮次被接受后才 `buffer.add`;拒绝则丢弃建议,
+   卡和源记忆都不变。
+7. 进化快照只有记忆条目,不含人格卡。`restoreFromSnapshot` 回滚记忆,
+   并 `removeAfterVersion` 清掉该版本之后尚未合并的建议。已经合并的内容
+   由缓冲区撤销,不由快照覆盖。
+
+### 48.9 近 30 条评审(去 AI 味 + 新性格)
+
+与记忆进化分开。设置页「分析最近 30 条」走 IPC `agent:style-review`。
+也可以先「选择回复」,只把当前窗口里勾选的岛灵消息送去评审。
+去 AI 味和新性格**并行**各跑一次 Sub Agent。两边都空才告诉主人没有建议;
+一边失败时,另一边的建议仍然写入缓冲区。
+
+**新性格**(`persona-traits.ts`):
+
+1. 与去 AI 味共用 `prepareStyleReviewSamples`。不勾选时取最近 30 条;设置页「选择回复」勾选当前窗口里的岛灵回复后,只评审这些消息(仍最多 30 条),并带上各自前一条用户原话。代码换成 `[代码略]`。
+2. 只收人格卡上还没有的具体性格。证据必须是某条用户或岛灵原文里的连续片段(至少 4 字);
+   「更自然 / 有人味」这类空话丢掉。单次任务步骤不当成性格。
+3. 写成 `性格:词——这个性格在说话里怎么体现`,最多 5 条。缓冲区 `kind: 'trait'`,
+   无源记忆,不带 prompt/style 提案。合并只追加整合区,手写提示词不动。
+4. 合并后 `formatPersonaBlock` 把这些行织进 `【你近来的性格】`,不再在整合区里重复成清单。
+
+记忆进化的 `personaMerge.notes` 若写出同样的 `性格:` 行,叙事层同样会织进去。
+记忆进化本身读不到聊天记录;聊天里的新性格只走这一次「分析最近 30 条」。
+
+**去 AI 味**仍是原来的路径:
+
+1. 必须已启用一张仍然存在的人格卡。评审会读到这张卡的提示词摘要、语气、
+   已有禁用词、反例和整合区,避免把已经写过的规则再提一遍。
+2. `prepareStyleReviewSamples` 只取助手消息的 text part。缺省最近 30 条;
+   请求带 `ids` 时只取这些 id,不再先截最近 30 条。代码块换成
+   `[代码略]` 后再截 800 字,这样结尾客套不会被长代码挤掉。每条带上前一条用户
+   原话,并标成闲聊或任务(含代码、表格、链接即为任务)。工具调用、结果、媒体
+   不参与。没有文本则直接返回空结果。
+3. Sub 供应商做一次无工具 JSON 评审(`createStyleReviewAgent`,超时 90s,
+   输出预算 2048)。未配置 Sub API Key 则报错。空数组是合法结论,不再为了
+   「模型说没有问题」重试第二次。
+4. `finalizeStyleReview` 再收一遍:禁用词必须在回复原文里出现,且不与卡上已有
+   项重复;「要自然一点」这类空话丢掉;「当然可以 / 希望这对你有帮助 / 我来帮你」
+   等套话出现过就会补上,闲聊里的「首先 / 其次」至少出现两次才补。任务回复里的
+   步骤清单不拿来禁「首先」。
+5. 输出 `issues` / `notes` / `antiExamples` / `bannedPhrases`。四者皆空时不写
+   `kind: 'style'`。只有新性格也空,才告诉主人没有建议。
+6. 有内容则写入缓冲区,`kind: 'style'`,无源记忆。反例同时写进 notes 和
+   `cardPatch.style.antiExamples`;禁用词写进 `cardPatch.style.bannedPhrases`。
+   不改提示词,也不改语气、emoji、正例。
+
+合并 `kind: 'style'` 的建议时,notes 仍追加到整合区;风格只把禁用词和反例
+追加到现有风格档,不覆盖主人已经写好的其它字段。记忆进化的 `cardPatch.style`
+仍是整体替换。
+
+### 48.10 人设离开长期记忆
+
+`isPersonaClassified`(`constants.ts`):标签含「人设 / 人格 / 角色 / 岛灵」,
+或内容命中保守正则(句首「人设」、主人/岛灵/指定等人设语境、角色形象、
+人格设定等)。「人设之外的普通条目」这类字面包含不误判。
+
+- `remember` 命中即拒绝,错误文本引导 `persona` 的 create / edit / set_notes。
+- 启动时 `migrateLegacyPersonaMemories` 跑一次:有激活卡才迁;每条拆行
+  `appendNotes`,写入成功(或已是重复)后才从长期记忆删除。无卡或整合区
+  满则保留原条目,日志打 `[persona]`。条目删完后再次启动是空操作。
+- 设置页长期记忆的说明同样指向人格卡。
+
+受保护记忆机制(10.10)继续拦截进化对残留锁定条目的直接改写。新的人设走人格卡。
+
+### 48.11 设置页
+
+Agent 设置的「人格卡」页(`PersonaCardsView.tsx`),经 preload 调 4.6 / 附录 E 的 IPC:
+
+1. 顶部三步:写基础提示词 → 新建并启用 → 用对话或缓冲区微调。
+2. 当前启用摘要,可停用。未启用时岛灵不按卡说话。
+3. 基础提示词默认折叠,保存进 `agent.systemPrompt`。
+4. 新建/编辑是独立面板:名称、人格提示词、五套风格模板,以及可折叠的
+   说话方式、正例与反例。保存走 `agent:persona-set` 的 `upsert`。
+5. 卡片列表:启用/编辑在主行,导出与删除在次级行。整合区可双击编辑,
+   也可一键清空。
+6. 进化缓冲区默认折叠,有待处理项时展开。页内开关即
+   `personaEvolveEnabled`(文案「开启自动优化」)。操作:分析最近 30 条或评审勾选回复(新性格 + 去 AI 味)、
+   合并全部、单条合并、丢弃、撤销合并、清空缓冲。
+
+导入导出走系统对话框。导出包:
+
+```json
+{
+  "format": "island-persona-cards",
+  "version": 2,
+  "exportedAt": "ISO 时间",
+  "cards": [],
+  "buffer": []
+}
+```
+
+`version: 2` 的 `buffer` 是这些卡的进化缓冲区,待处理、已合并、已撤销都保留。
+单卡导出只带这张卡的条目;全部导出带上所有仍挂在这些卡上的条目。
+`version: 1` 或裸数组没有 `buffer`,导入时缓冲区按空处理。
+
+单卡默认文件名 `island-persona-YYYY-MM-DD.json`,全部为 `island-personas-…`。
+`parsePersonaImport` 接受导出包或裸数组;缺 name 的条目计入 skipped。
+`importCards` 按 id、以及 name+prompt 去重;同名不同内容追加「(导入)」。
+缓冲区按原 id 导入:同 id 跳过;卡已因 name+prompt 重复而没再导入时,
+建议改挂到现有那张卡上。导入不自动启用。
+
+`data-manifest.cjs` 把 `persona-cards.json` 与 `persona-evolution.json`
+(含 `.tmp`)列入用户数据清单。
+
+### 48.12 测试与排障
+
+`tests/test-agent-core.ts` 有独立人格卡段,覆盖:落盘与上限、风格档往返、
+提示块、导入导出、内容提案的合并与撤销、缓冲区合并后删源记忆且撤销能导回、
+`preserveIds`、进化回滚不覆盖人格卡、replace 在群聊/档案卡尾巴/「优化人格卡」
+下不弹确认、明确「重写整张」才确认、remember 拒绝人设、启动迁移。
+
+| 现象 | 先看 |
+| --- | --- |
+| 换了卡,这一轮还是旧人格 | 激活在下一轮生效;确认 `activePersonaId` 已写入且卡还在 |
+| 说话仍像默认助手 | 未启用卡则清洗不运行;启用后看 style.emoji / bannedPhrases,以及回复是否被判成 task(含代码或 URL 时保留清单)。去 AI 味的禁用词、近 30 条抽出的性格,都要在缓冲区点合并才会写进卡。性格合并后下一轮才进入叙事 |
+| 弹出「整体替换人格卡」 | 模型调用了 replace。查本轮原文是不是主人明确要覆盖整张;群聊、联系人、询问、系统轮应直接拒绝 |
+| 说「优化人格卡」却被整张覆盖 | 应降级为 edit 并保留整合区。确认运行中的 `electron/agent.cjs` 已用含门控的源码重新 `pnpm build:electron`,并重启挂件 |
+| 进化没改人格卡 | 默认关闭。打开「自动优化」后建议在缓冲区,要点合并 |
+| 合并失败「整合区已满」 | notes 上限 12000 字,超限整批不写,源记忆仍在。先清空或精简再合并 |
+| 撤销失败 | 合并后又改过提示词、风格或整合区。自动撤销会拒绝,避免盖掉后续修改 |
+| 人设记进了长期记忆 | `remember` 应拒绝。旧条目要有激活卡才会在启动时迁入整合区 |
+

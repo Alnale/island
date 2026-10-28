@@ -1,7 +1,7 @@
 {
   "name": "dynamic-island",
   "private": true,
-  "version": "3.1.0",
+  "version": "3.5.0",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
@@ -10,9 +10,11 @@
     "lint": "oxlint",
     "typecheck": "tsc -b tsconfig/tsconfig.json tsconfig/tsconfig.app.json tsconfig/tsconfig.electron.json tsconfig/tsconfig.node.json",
     "test": "pnpm test:unit && pnpm test:core",
-    "test:unit": "pnpm test:settings && pnpm test:markdown",
+    "test:unit": "pnpm test:settings && pnpm test:background && pnpm test:markdown && pnpm test:repeat",
+    "test:repeat": "node tests/test-repeat-position.mjs",
     "test:markdown": "node tests/test-markdown.mjs",
     "test:settings": "node tests/test-settings-store.cjs",
+    "test:background": "node tests/test-background-store.cjs",
     "test:core": "node tests/test-agent-core.mjs",
     "test:runtime": "node scripts/test-electron-node.mjs",
     "check": "pnpm typecheck && pnpm lint && pnpm test && pnpm test:runtime",
@@ -21,8 +23,8 @@
     "bridge": "node scripts/system-media-bridge.ts",
     "build:widget": "vite build --mode widget --config vite.widget.config.ts",
     "build:electron": "node scripts/build-electron.mjs",
-    "make:icon": "electron scripts/make-icon.cjs",
-    "dev:widget": "pnpm build:electron && vite build --mode widget --config vite.widget.config.ts && electron .",
+    "make:icon": "node scripts/launch-dev-electron.mjs scripts/make-icon.cjs",
+    "dev:widget": "pnpm build:electron && vite build --mode widget --config vite.widget.config.ts && node scripts/launch-dev-electron.mjs .",
     "watch:electron": "node scripts/watch-electron.mjs"
   },
   "dependencies": {

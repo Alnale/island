@@ -1,16 +1,16 @@
-# 灵动岛桌面挂件 V3.1 — 部署与调试说明
+# 灵动岛桌面挂件 V3.5 — 部署与调试说明
 
 本文档是**桌面挂件版**(widget/ 入口 + Electron 主进程)的运行、开发与
-调试说明,面向维护者。V3.1 重点:**安装器与发行**——自绘安装向导
-`installer/` + 绿色发布打包 `scripts/build-release.mjs` + 独立安装器打包
-`scripts/build-installer.mjs`(完整设计见 TECH.md 第 43 章,命令见下文
+调试说明,面向维护者。当前 V3.5(2026-10-26)·人格卡版本;V3.1 重点:**安装器与发行**——自绘安装向导
+`manager/` + 绿色发布打包 `scripts/build-release.mjs` + 安装管理器打包
+`scripts/build-manager.mjs`(完整设计见 TECH.md 第 43 章,命令见下文
 「开发调试」);后续迭代(2026-08-18/19):**LM Studio 本地模型接入**
 (第 4 章,适配器 + 挂载管理 + 小模型文本工具调用解析,完整设计见
 TECH.md 5.3)与**工具面板动画打磨**(TECH.md 44.4)。V3.0 重点:
 **插件化架构重构概览**(第 1 章,完整设计见 TECH.md 第 42 章);V2.0
 重点保留:**HEVC 补丁操作手册**(第 2 章)与**提示词约束工程概览**
-(第 3 章)。用户使用指南见 [README.md](README.md);
-完整技术文档见 [docs/TECH.md](docs/TECH.md)(V3.1,第 43 章为安装器与
+(第 3 章)。用户使用指南见 [README.md](../README.md);
+完整技术文档见 [TECH.md](TECH.md)(V3.5,第 43 章为安装器与
 发行专章、第 42 章为插件化架构重构专章);引擎级操作手册见
 [CLAUDE.md](CLAUDE.md)。
 
@@ -36,9 +36,9 @@ TECH.md 5.3)与**工具面板动画打磨**(TECH.md 44.4)。V3.0 重点:
 
 | 文档 | 面向 | 内容 |
 | --- | --- | --- |
-| README.md | 用户 | 功能/使用指南/FAQ(V3.1 安装器与发行、V3.0 插件化架构导读) |
+| README.md(根目录) | 用户 | 功能/使用指南/FAQ(V3.1 安装器与发行、V3.0 插件化架构导读) |
 | **本文档** | 挂件维护者 | 运行、调试、巡检、HEVC 补丁、安装器与发行 |
-| docs/TECH.md | 工程师 | 完整技术文档(V3.1;第 43 章安装器与发行、第 42 章插件化架构重构、第 15/16 章 V2.0 工程专章) |
+| TECH.md | 工程师 | 完整技术文档(V3.5;第 43 章安装器与发行、第 42 章插件化架构重构、第 15/16 章 V2.0 工程专章) |
 | CLAUDE.md | Claude Code | 引擎级操作手册(踩坑实录/测试断言/约束) |
 
 ---
@@ -232,12 +232,12 @@ pnpm dev:widget        # 构建挂件页 + 启动 Electron(日常调试主入口
 pnpm watch:electron    # 热重建 Agent 引擎/桥(改 electron/agent/ 下源码用)
 pnpm bridge            # 独立运行 SMTC 桥
 node tests/test-agent-core.mjs   # 引擎核心测试(247 用例,含插件内核/lms 解析套件)
-npx electron --disable-gpu tests/test-title-live.cjs  # 标题/揣测真实 API 测试
+npx electron --disable-gpu tests/test-title-live.cjs  # 标题真实 API 测试
 
 # V3.1 安装器与发行
 node scripts/build-release.mjs     # ① 生成绿色发布目录 release/灵动岛
-node scripts/build-installer.mjs   # ② 生成独立安装器 release/灵动岛安装器(需先跑 ①)
-npx electron installer/main.cjs    # 开发期直接运行安装向导(不打包,便于预览)
+node scripts/build-manager.mjs     # ② 生成安装管理器 release/灵动岛安装管理器(需先跑 ①)
+npx electron manager/main.cjs      # 开发期直接运行安装管理器(不打包,便于预览)
 ```
 
 ## UI 巡检(WIDGET_SCREENSHOT)
