@@ -4800,7 +4800,12 @@ await test('computer:window_shot 实机冒烟——截图尺寸=物理窗口尺�
     const h = buf.readUInt32BE(20)
     assert(w === expW && h === expH, `截图尺寸 ${w}x${h} 应等于窗口物理尺寸 ${expW}x${expH}(不等 = DPI 又截残了)`)
     assert(raw.image?.startsWith('data:image/png;base64,'), '应返回图片附件供对话内展示')
-    assert(raw.text.includes(out), '文本应带输出文件路径(QQ 发图兜底靠路径)')
+    const reportedPath = /^文件:(.+)$/m.exec(raw.text)?.[1]?.trim()
+    assert(reportedPath && path.isAbsolute(reportedPath), '文本应带绝对输出路径(QQ 发图兜底靠路径)')
+    // CI 的 TEMP 可含 RUNNER~1 等短路径，PowerShell Get-Item 会返回展开后的长路径。
+    // 核对实际文件，不能要求两种合法路径写法逐字相同。
+    const [reportedFile, requestedFile] = await Promise.all([fs.realpath(reportedPath), fs.realpath(out)])
+    assert(path.relative(reportedFile, requestedFile) === '', '文本中的路径应指向实际截图文件')
   } finally {
     await fs.rm(out, { force: true })
   }
