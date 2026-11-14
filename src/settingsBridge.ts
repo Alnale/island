@@ -21,6 +21,7 @@ import {
   loadBackgroundImage,
   loadImageItems,
   readBackgroundParams,
+  revealBackgroundOpacity,
   saveBackgroundImage,
   saveBackgroundParams,
   saveImageItem,
@@ -619,6 +620,15 @@ export function registerIslandSettingsBridge(): void {
         saveBackgroundImage(small, 'expanded'),
         saveBackgroundImage(small, 'compact'),
       ])
+      // 槽位不透明度为 0 时新图被蒙层盖住,导入后看起来没生效
+      const params = readBackgroundParams()
+      const opacity = revealBackgroundOpacity(
+        revealBackgroundOpacity(params.opacity, 'expanded'),
+        'compact',
+      )
+      if (opacity.expanded !== params.opacity.expanded || opacity.compact !== params.opacity.compact) {
+        saveBackgroundParams({ ...params, opacity })
+      }
       const item: ImageLibraryItem = {
         id: genImageId(),
         name: String(name ?? '导入背景').slice(0, 50),

@@ -3,11 +3,11 @@
 <head>
 <meta charset="UTF-8" />
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data: file:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'" />
-<title>灵动岛 · 安装向导</title>
+<title>灵动岛 · 安装管理器</title>
 <style>
-/* ===== 灵动岛 安装向导 · Apple 设计语言重绘 =====
+/* ===== 灵动岛 安装管理器 · Apple 设计语言重绘 =====
    克制的排版 / 毛玻璃材质 / 柔和的动效 / 单一强调色(去霓虹与渐变游戏感)
-   背景图 installer/bg.png + 原始图标 installer/icon.png
+   背景图 manager/bg.png + 原始图标 manager/icon.png
    强调色 #6e63ff(收敛的品牌紫) */
 
 :root {
@@ -84,6 +84,9 @@ html, body {
 }
 .titlebar .tb-btn:hover { background: rgba(255,255,255,.08); color: var(--text); }
 .titlebar .tb-btn.close:hover { background: rgba(255,69,58,.18); color: #ff9a94; }
+.titlebar .tb-link { width: auto; padding: 0 10px; font-size: 12px; font-weight: 500; }
+.titlebar .tb-link[hidden] { display: none; }
+.titlebar .tb-link:disabled { opacity: .35; cursor: default; }
 
 /* 主体 */
 .wrap {
@@ -400,8 +403,9 @@ html, body {
 <!-- 顶栏 -->
 <header class="titlebar">
   <span class="tb-dot"></span>
-  <span class="tb-title">灵动岛 · 安装向导</span>
+  <span class="tb-title">灵动岛 · 安装管理器</span>
   <span class="tb-spacer"></span>
+  <button class="tb-btn tb-link" id="btn-uninstall" title="卸载已安装的灵动岛" hidden>卸载</button>
   <button class="tb-btn" id="btn-min" title="最小化">
     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M5 12h14"/></svg>
   </button>
@@ -442,6 +446,7 @@ html, body {
     <section class="pane active" id="pane-welcome">
       <h2>欢迎使用灵动岛</h2>
       <div class="lead">灵动岛是一个常驻桌面的微型交互舞台 —— 音乐媒体控制、QQ 智能会话、系统工具调用,全部收纳在一枚悬浮的"岛"里。向导将带你完成安装,整个过程只需几十秒。</div>
+      <div class="og-hint" id="existing-hint" hidden></div>
       <div class="features">
         <div class="feature">
           <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 18v-6a9 9 0 0 1 18 0v6"/><path d="M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3zM3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3z"/></svg></div>
@@ -559,7 +564,7 @@ const $ = (s) => document.querySelector(s)
 // 浏览器预览 fallback(Electron 内 window.installer 为真实 preload API;
 // 纯浏览器打开时用 mock,便于不安装直接预览界面)
 const api = window.installer || {
-  getInfo: async () => ({ appName: '灵动岛', version: '3.1.0', defaultInstallDir: 'C:\\Users\\demo\\AppData\\Local\\Programs\\灵动岛', hasSource: true }),
+  getInfo: async () => ({ appName: '灵动岛', version: '3.1.0', defaultInstallDir: 'C:\\Users\\demo\\AppData\\Local\\Programs\\灵动岛', hasSource: true, installed: false, installedDir: '' }),
   pickDir: async () => null,
   listTools: async () => [
     { id: 'bili', name: '哔哩哔哩下载工具', desc: 'B站视频/弹幕/搜索下载(bili-tool.exe + Rust 源码)' },
@@ -571,6 +576,8 @@ const api = window.installer || {
   minimize: () => {},
   close: () => {},
 }
+// 安装管理器统一 API(浏览器预览时 no-op)
+const managerApi = window.manager || { switchMode: async () => ({ ok: true }) }
 
 const state = {
   step: 1,
@@ -604,6 +611,8 @@ function showStep(n) {
   // "立即启动/完成"按钮,避免出现无效的"下一步"死按钮)
   $('#btn-next').style.display = n === 4 || busyInstalling ? 'none' : ''
   $('#btn-cancel').style.display = n === 3 || n === 4 ? 'none' : ''
+  // 安装过程中禁止切到卸载页(会中断复制)
+  $('#btn-uninstall').disabled = busyInstalling
   if (n === 1) $('#btn-back').style.visibility = 'hidden'
 }
 
@@ -670,6 +679,13 @@ async function init() {
   if (!state.info.hasSource) {
     log('⚠ 未找到可安装的发布产物(release/灵动岛),请先运行发布打包脚本', 'warn')
   }
+  // 已安装:提供右上角「卸载」入口,并在欢迎页提示覆盖安装
+  if (state.info.installed) {
+    $('#btn-uninstall').hidden = false
+    const hint = $('#existing-hint')
+    hint.hidden = false
+    hint.textContent = '检测到已安装的灵动岛(' + (state.info.installedDir || '') + ')。继续将覆盖安装到该目录,也可点右上角「卸载」。'
+  }
   // 外部工具列表(按需勾选;缺省全选)
   state.tools = await api.listTools().catch(() => [])
   renderTools()
@@ -731,6 +747,11 @@ $('#btn-pickdir').addEventListener('click', async () => {
 
 $('#btn-min').addEventListener('click', () => api.minimize())
 $('#btn-close').addEventListener('click', () => api.close())
+// 切到卸载页(安装中禁用)
+$('#btn-uninstall').addEventListener('click', async () => {
+  if (state.installing) return
+  await managerApi.switchMode('uninstall')
+})
 
 $('#btn-launch').addEventListener('click', () => api.finish(true))
 $('#btn-close2').addEventListener('click', () => api.finish(false))

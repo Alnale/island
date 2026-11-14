@@ -1,7 +1,7 @@
 /**
  * 灵动岛发布打包脚本 —— 产出可安装的绿色版发布目录
  *
- * 产出 release/灵动岛/(供 installer/main.cjs 安装):
+ * 产出 release/灵动岛/(供 manager/main.cjs 安装):
  *   electron/                  ← 复制 node_modules/electron/dist(electron.exe + dll + resources)
  *     resources/app/           ← 主应用文件(应用加载同目录 resources/app)
  *       electron/              ← 主进程(electron/ 目录整体)
@@ -59,7 +59,7 @@ async function ensureWidgetBuild() {
     return
   }
   console.log('[release] 构建渲染端(vite --mode widget)…')
-  const r = spawnSync('npx', ['vite', 'build', '--mode', 'widget', '--config', 'vite.widget.config.ts'], {
+  const r = spawnSync(process.execPath, [path.join(root, 'scripts', 'vite-build.mjs'), '--mode', 'widget', '--config', 'vite.widget.config.ts'], {
     cwd: root,
     stdio: 'inherit',
     env: process.env,
@@ -184,7 +184,7 @@ async function main() {
   await walk(releaseDir)
 
   console.log(`[release] 完成 → ${releaseDir} (${(total / 1024 / 1024).toFixed(1)} MB)`)
-  console.log('[release] 现在可运行: npx electron installer/main.cjs 打开安装向导')
+  console.log('[release] 现在可运行: npx electron manager/main.cjs 打开安装管理器')
 }
 
 main().catch((e) => {

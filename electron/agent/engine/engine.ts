@@ -14,6 +14,7 @@
  * engine-builtins.ts / engine-confirm-gate.ts。
  */
 
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { createContext } from '../plugin/kernel'
 import type { AgentContext } from '../plugin/kernel'
 import { builtinPlugins } from '../plugin'
@@ -65,11 +66,6 @@ export {
   extractJsonObject,
   looksLikeCodeLiteral,
   looksLikeSentenceTitle,
-  looksLikeIncompleteMind,
-  cutMindSentence,
-  salvageMindClause,
-  sanitizeMind,
-  buildMindSystem,
   buildJudgeSystem,
   parseJudgeJson,
   parseMemoriesJson,
@@ -79,7 +75,6 @@ export {
   buildClassifierSystem,
   parseClassifierJson,
   createSummaryAgent,
-  createMindAgent,
   createProactiveAgent,
   createReplyClassifier,
   createEvaluatorAgent,
@@ -87,9 +82,17 @@ export {
   resolveSubConfig,
   prepareSubCall,
   SUMMARY_STYLES,
-  MIND_PERSONAS,
   resolveSubAgentStyle,
 } from '../subagents/subagents'
+// 心理刻画纯文本工具(测试依赖路径;心理行判断无 Sub Agent)
+export {
+  looksLikeIncompleteMind,
+  cutMindSentence,
+  salvageMindClause,
+  sanitizeMind,
+  MIND_MAX_LEN,
+  MIND_LITERAL_EXAMPLES,
+} from '../mind-mark'
 export { createSubAgentHost } from '../subagents/host'
 export { createConfigTools } from '../tools/configTools'
 export {
@@ -100,16 +103,28 @@ export {
   isValidSessionKey,
   turnAlreadySentToPending,
   turnAlreadySentToTarget,
+  turnAlreadySentGroupText,
+  sentMessageIsText,
+  shouldHandGroupReplyToMaster,
   isAskTurnToMaster,
   newTurnFingerprint,
   stripFingerprintMarks,
   classifyTurn,
+  isMasterTurnKind,
   isDirectedToBot,
   isReplyInstruction,
   looksLikeMasterAddressed,
   looksLikeForwardInstruction,
   looksLikeGroupSendInstruction,
   shouldSendGroupPanelReply,
+  rememberGroupContext,
+  recentGroupContext,
+  formatGroupContextLines,
+  pinGroupReplyTarget,
+  resolveGroupSendTarget,
+  resolvePrivateSendTarget,
+  resolveGroupMention,
+  scopeTranscriptQuery,
   createNapcatLoginFlow,
   webuiTokenHash,
   encodeQr,
@@ -185,6 +200,9 @@ export function createAgentEngine(deps: EngineDeps): AgentEngine {
   // 全部事件元数据上(与 sessionKey 同款注入)——主进程落定核对
   // event.turnTag === route.turnTag,对不上 = 陈旧/跨轮投递,不发送
   let currentTurnTag: string | null = null
+  const turnStorage = new AsyncLocalStorage<{
+    sessionId: string | null; sessionKey: string; turnTag: string | null; signal: AbortSignal
+  }>()
 
   // 可变输出预算(用对象包装以便各插件经 ctx.outputBudget 服务共享读写)
   const configuredBudget = deps.getConfig().maxOutputTokens
@@ -204,12 +222,17 @@ export function createAgentEngine(deps: EngineDeps): AgentEngine {
   // currentSessionKey 覆盖(多会话引擎并存时,任务终态回调由最后装配的
   // 引擎发出,其 currentSessionKey 未必是发起下载的会话);普通事件
   // (message/status 等)不带显式键,沿用引擎当前会话键
-  const emit = (event: AgentEvent) =>
+  const emit = (event: AgentEvent) => {
+    const turn = turnStorage.getStore()
+    // 中止后的异步清洗/工具回调不能借用新轮身份，也不能把新轮 UI 设成 idle。
+    if (turn?.signal.aborted && event.type !== 'background-done') return
     deps.onEvent({
       ...event,
-      sessionKey: event.sessionKey ?? currentSessionKey,
-      turnTag: event.turnTag ?? currentTurnTag ?? undefined,
+      sessionKey: event.sessionKey ?? turn?.sessionKey ?? currentSessionKey,
+      // 无轮次上下文的后台回调不能借用当前轮标签。
+      turnTag: event.turnTag ?? turn?.turnTag ?? undefined,
     })
+  }
 
   // per-agent 上下文:每引擎一份(主对话与每个外部会话天然隔离)
   const ctx: AgentContext = createContext('agent-engine')
@@ -218,8 +241,8 @@ export function createAgentEngine(deps: EngineDeps): AgentEngine {
   // → 外部工具源 → pre-step 提示段落插件(顺序 = 拼装顺序)
   // 完整有序清单由 plugin/index.ts 的 builtinPlugins() 单点声明
   for (const plugin of builtinPlugins(deps, emit, outputBudgetRef, {
-    getSessionId: () => currentSessionId,
-    getSessionKey: () => currentSessionKey,
+    getSessionId: () => turnStorage.getStore()?.sessionId ?? currentSessionId,
+    getSessionKey: () => turnStorage.getStore()?.sessionKey ?? currentSessionKey,
   })) {
     ctx.plugin(plugin)
   }
@@ -251,7 +274,8 @@ export function createAgentEngine(deps: EngineDeps): AgentEngine {
       running = true
       const turnCtl = new AbortController()
       ctl = turnCtl
-      void ctx.get('agentLoop')(text, history, { config, signal: turnCtl.signal })
+      void turnStorage.run({ sessionId: currentSessionId, sessionKey: currentSessionKey, turnTag: currentTurnTag, signal: turnCtl.signal }, () =>
+        ctx.get('agentLoop')(text, history, { config, signal: turnCtl.signal })
         .catch((err: unknown) => {
           if ((err as Error).name !== 'AbortError') {
             emit({ type: 'error', message: (err as Error).message || String(err) })
@@ -262,7 +286,7 @@ export function createAgentEngine(deps: EngineDeps): AgentEngine {
             running = false
             ctl = null
           }
-        })
+        }))
     },
     proactiveTurn(history, opts) {
       if (running) return
@@ -270,12 +294,16 @@ export function createAgentEngine(deps: EngineDeps): AgentEngine {
       if (!localFreeKey(config)) return
       currentSessionId =
         typeof opts?.sessionId === 'string' && opts.sessionId ? opts.sessionId : null
+      // 主动陪伴只发生在主对话。不沿用上一次 send 留下的会话键,
+      // 否则心理事件会送到别的面板,主输入框不更新。
+      currentSessionKey = 'main'
       // 系统/主动轮不带轮次标签(永不路由,无需核对)
       currentTurnTag = null
       running = true
       const turnCtl = new AbortController()
       ctl = turnCtl
-      void ctx.get('agentLoop')('', history, { config, signal: turnCtl.signal }, { proactive: true, hint: opts?.hint })
+      void turnStorage.run({ sessionId: currentSessionId, sessionKey: currentSessionKey, turnTag: null, signal: turnCtl.signal }, () =>
+        ctx.get('agentLoop')('', history, { config, signal: turnCtl.signal }, { proactive: true, hint: opts?.hint })
         .catch((err: unknown) => {
           if ((err as Error).name !== 'AbortError') {
             emit({ type: 'error', message: (err as Error).message || String(err) })
@@ -286,14 +314,14 @@ export function createAgentEngine(deps: EngineDeps): AgentEngine {
             running = false
             ctl = null
           }
-        })
+        }))
     },
     abort() {
       if (!running) return
       ctl?.abort()
       running = false
       ctl = null
-      emit({ type: 'status', status: 'idle' })
+      deps.onEvent({ type: 'status', status: 'idle', sessionKey: currentSessionKey, turnTag: currentTurnTag ?? undefined })
     },
     listTools() {
       return ctx.get('tools').builtin().map((t) => ({ name: t.name, description: t.description, parameters: t.parameters }))
@@ -314,6 +342,9 @@ export function createAgentEngine(deps: EngineDeps): AgentEngine {
       return fetchDeepseekBalance({ baseURL: config.baseURL, apiKey: config.apiKey })
     },
     dispose() {
+      ctl?.abort()
+      running = false
+      ctl = null
       // 注册即可逆效果:一切注册按逆序回滚(MCP 进程/工具/docflow 子进程)
       ctx.dispose()
     },
@@ -326,6 +357,30 @@ export { invalidatePrivacyCache } from '../privacy'
 export { setNotificationShower, showNotify } from '../notify'
 export { buildProfileCard } from '../napcat/napcat'
 export { createMemoryStore } from '../memory'
+// 人格卡(2026-10-25):存储/格式化/导入导出(主进程 IPC 与提示词插件共用)
+export {
+  createPersonaStore,
+  formatPersonaBlock,
+  formatPersonaStyleBlock,
+  migratePersonaMemoriesFromLongTerm,
+  normalizePersonaExport,
+  parsePersonaImport,
+  sanitizePersonaStyle,
+} from '../persona'
+// 人格卡进化缓冲区 + 出站 AI 味清洗(2026-10-26)
+export {
+  createPersonaBufferStore,
+  extendPersonaStyle,
+  mergePersonaBufferItem,
+  parsePersonaBufferImport,
+  planPersonaBufferImport,
+  retargetImportedBuffer,
+  undoPersonaBufferItem,
+} from '../persona-buffer'
+export { sanitizeAiFlavor, scoreAiFlavor, styleModeForText } from '../persona-style'
+// 去 AI 味独立评审 Agent(2026-10-26;与记忆进化完全独立)
+export { createStyleReviewAgent, finalizeStyleReview, prepareStyleReviewSamples } from '../style-review'
+export { createTraitReviewAgent, finalizeTraitReview } from '../persona-traits'
 export { createMCPManager } from '../mcp'
 export { createSkillLoader } from '../skills'
 // 撤销 git 快照(2026-08-14 停止与撤销分离;主进程 agent:undo-* IPC 用)

@@ -23,12 +23,20 @@ import {
 } from '../../data/islandStates'
 import { formatTime } from '../../utils/format'
 import type { PlaybackMode } from '../../media/playbackModes'
-import { DEFAULT_BG_CROP, type ImageLibraryItem } from '../../media/backgroundStore'
+import {
+  backgroundCssUrl,
+  backgroundVeilColor,
+  DEFAULT_BG_CROP,
+  releaseBackgroundDisplayUrls,
+  revealBackgroundOpacity,
+  type ImageLibraryItem,
+} from '../../media/backgroundStore'
 import { FONT_WEIGHTS, type FontColorMode, type FontLibraryItem } from '../../media/fontStore'
 import { useAgentPanelLayout } from '../../hooks/useAgentPanelLayout'
 import type { AudioLibraryItem, VideoLibraryItem } from '../../media/libraryStore'
 import { loadImageNaturalSize, sampleImageBrightness } from '../../media/imageUtils'
 import { ParticleTime } from './ParticleTime'
+import { ProgressRewindLayer } from './ProgressRewind'
 import { ErrorBoundary } from '../ErrorBoundary'
 import { AgentView } from './views/AgentView'
 import { ControlView } from './views/ControlView'
@@ -387,12 +395,12 @@ function cutLabel(text: string, max: number): string {
  * - 深度思考中:thinking + 仅有 reasoning 流(无文本输出);
  * - 正在回复:thinking + 文本流已开始(流式增量实时可见);
  * - 正在执行:工具循环阶段(带当前工具名);
- * - 回复已完成:优先显示独立 Sub Agent 对 LLM 回复的心理揣测
- *   (每轮回复后静默更新,如「表面淡定,内心在慌」,替代标题更有人味),
+ * - 回复已完成:优先显示她的心理刻画
+ *   (等回复落定再判断,取她写下的末行,如「心里在偷乐」,不另开模型来猜),
  *   其次当前对话实时总结标题,再回退最近一条助手文本预览;
  * - 出错 → 提示展开查看;无回复 → 待命
  * 2026-08-16 用户实测"出现非常长的文本句子,右侧被截断":三条路径全部
- * 按码元设上限——揣测 16 / 标题 20 / 回复预览 20+省略号(预览是超长
+ * 按码元设上限——心理刻画 16 / 标题 20 / 回复预览 20+省略号(预览是超长
  * 文本的主要来源,原实现整段回复全文直入文字区,岛宽 500px 封顶后
  * 右侧被静默裁剪、无省略号)
  */
@@ -408,8 +416,7 @@ function agentCompactLabel(agent: AgentPanelProps): string {
     const last = tools && tools.length > 0 ? tools[tools.length - 1] : null
     return last ? `正在执行:${last.name}` : 'Agent 正在执行…'
   }
-  // 回复已完成:心理揣测(独立 Sub Agent 根据当前对话揣测 LLM 回复时的
-  // 心态,俏皮话 10 字左右、上限 16 字)→ 实时总结标题(≤20)→
+  // 回复已完成:她自己的岛面一句(≤16)→ 实时总结标题(≤20)→
   // 最近一条助手文本预览(截 20 + 省略号)。展示层再兜一次码元上限:
   // 引擎/runner 的截断不是唯一来源,localStorage 残留/事件注入都可能超长
   if (agent.mindGuess) return cutLabel(agent.mindGuess, 16)
@@ -465,6 +472,21 @@ function mediaTextFor(
     return `${state === 'playing' ? '正在播放' : '已暂停'}: ${track.title ?? ''}`
   }
   return ISLAND_STATES[state].text
+}
+
+/**
+ * 岛体是 role=button,Enter/空格会激活它。文本框里的同名按键会冒泡上来,
+ * preventDefault 之后换行和空格都插不进去。编辑中的输入框不拦截。
+ */
+function isTextEditingTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof Element)) return false
+  const field = target.closest('textarea, input, select, [contenteditable="true"]')
+  if (!field) return false
+  if (field instanceof HTMLInputElement) {
+    const skip = new Set(['button', 'checkbox', 'radio', 'submit', 'reset', 'file', 'range', 'color', 'image'])
+    return !skip.has(field.type)
+  }
+  return true
 }
 
 /**
@@ -604,6 +626,15 @@ export const DynamicIsland = memo(function DynamicIsland({
   const textRef = useRef<HTMLSpanElement>(null)
   const barRef = useRef<HTMLDivElement>(null)
   const panelBarRef = useRef<HTMLDivElement>(null)
+  // 切歌:当前进度缓出回 0,粒子沿这条进度脱落。
+  // run = 动画中(脚本写比例);hold = 已回到 0,等新歌进度真的落到开头,
+  // 不在曲名先变、进度还停在旧位置时把条弹回去。
+  const [rewind, setRewind] = useState<null | {
+    id: number
+    from: number
+    phase: 'run' | 'hold'
+  }>(null)
+  const rewindIdRef = useRef(0)
   const hoveredRef = useRef(false)
   const scrubbingRef = useRef(false) // 拖动中:悬停移出不收缩,防进度条中途被收回
   const displayTextRef = useRef('')
@@ -813,7 +844,7 @@ export const DynamicIsland = memo(function DynamicIsland({
     const fullTextWidth = measureTextWidth(displayText, font)
 
     // 第一轮:非悬停时的字符截断(用 canvas 测量完整文字,不依赖 DOM 渲染状态)。
-    // Agent 模式(2026-08-07):紧凑态文字(揣测 ≤16 码元/标题/回复)已按码元
+    // Agent 模式(2026-08-07):紧凑态文字(心理刻画 ≤16 码元/标题/回复)已按码元
     // 截断,且无进度条——岛宽随文字长度自适应扩展,正常不按像素截断
     // (用户要求:文字区随对应字数扩展岛宽;16 字约 340px < MAX_WIDTH_PX)。
     // **像素兜底(2026-08-16)**:码元上限挡不住自定义宽字体/中西混排
@@ -870,6 +901,72 @@ export const DynamicIsland = memo(function DynamicIsland({
   // 确定进度:拖动中显示临时比例,否则按 position/duration;无 duration 时退回扫光
   const fillRatio = duration > 0 ? Math.min(position / duration, 1) : 0
   const displayRatio = scrubbing && scrubRatio !== null ? scrubRatio : fillRatio
+  const barProgressStyle: CSSProperties | undefined =
+    rewind?.phase === 'hold'
+      ? ({ '--progress-ratio': 0 } as CSSProperties)
+      : rewind
+        ? undefined
+        : ({ '--progress-ratio': displayRatio } as CSSProperties)
+  // 切歌(上一首 / 下一首,按钮或滑动)。进度用当前播放比例,不读进度条上
+  // 可能残留的 0(回退刚写完、外部平台还没换轨时内联样式是 0,读它会把
+  // 这次切歌整段跳过)。正在回退时才读动画中的比例,连按从眼前的位置接着收。
+  const armRewind = () => {
+    const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    if (reduce || agentActiveRef.current || !(duration > 0)) return
+    let from = rewind?.phase === 'hold' ? 0 : displayRatio
+    if (rewind?.phase === 'run') {
+      const host = expandedRef.current ? panelBarRef.current : barRef.current
+      const parsed = Number(host?.style.getPropertyValue('--progress-ratio'))
+      if (parsed > 0.02) from = parsed
+    }
+    if (from > 0.02) {
+      setRewind({ id: ++rewindIdRef.current, from, phase: 'run' })
+    }
+  }
+  const requestNext = () => {
+    armRewind()
+    onSwipeRight?.()
+  }
+  const requestPrev = () => {
+    armRewind()
+    onSwipeLeft?.()
+  }
+  const settleRewind = () => {
+    setRewind((cur) => (cur && cur.phase === 'run' ? { ...cur, phase: 'hold' } : cur))
+  }
+  // 交回真实进度的条件:比例连续停在开头附近。只看到一帧 0 就松手的话,
+  // 下一拍旧进度(本地 timeupdate 残留 / 外部平台慢一拍)会把条弹回去。
+  const displayRatioRef = useRef(displayRatio)
+  displayRatioRef.current = displayRatio
+  const rewindId = rewind?.id
+  const rewindPhase = rewind?.phase
+  useEffect(() => {
+    if (rewindPhase !== 'hold' || rewindId == null) return
+    let lowSince: number | null = null
+    let timer = 0
+    const started = performance.now()
+    const check = () => {
+      const ratio = displayRatioRef.current
+      const now = performance.now()
+      if (ratio < 0.12) {
+        if (lowSince == null) lowSince = now
+        else if (now - lowSince >= 1100) {
+          setRewind(null)
+          return
+        }
+      } else {
+        lowSince = null
+      }
+      // 切歌失败时不能一直钉在 0;到点仍是旧位置才放开
+      if (now - started > 8000) {
+        setRewind(null)
+        return
+      }
+      timer = window.setTimeout(check, 80)
+    }
+    timer = window.setTimeout(check, 80)
+    return () => window.clearTimeout(timer)
+  }, [rewindPhase, rewindId])
   // 拖动中左侧文字切换为当前拖拽的时间预览(粒子效果,居中显示;
   // 不触发切换动画、不动岛宽,进度条位置保持稳定;松手后经 onSeek 提交并回到歌曲名)
   // 展开面板中拖动同样走 scrubbing 管线,但粒子时间只属于紧凑布局
@@ -927,6 +1024,10 @@ export const DynamicIsland = memo(function DynamicIsland({
         bgNaturalC.h,
       )
     : null
+  // 换图后丢掉不再显示的 blob URL。滑杆只改不透明度,不进这个依赖。
+  useEffect(() => {
+    releaseBackgroundDisplayUrls([expandedImage, compactImage])
+  }, [expandedImage, compactImage])
 
   const ratioFromPointer = (event: PointerEvent<HTMLDivElement>, bar: HTMLDivElement): number => {
     const rect = bar.getBoundingClientRect()
@@ -953,6 +1054,7 @@ export const DynamicIsland = memo(function DynamicIsland({
     bar.setPointerCapture(event.pointerId)
     scrubbingRef.current = true
     setScrubbing(true)
+    setRewind(null)
     setScrubRatio(ratioFromPointer(event, bar))
     // 速度采样历史起点(松手动量投影)
     barHistRef.current = [{ t: performance.now(), x: event.clientX }]
@@ -1088,8 +1190,8 @@ export const DynamicIsland = memo(function DynamicIsland({
       onAgentSwipeToMusic?.()
       return
     }
-    if (dx > 0) onSwipeRight?.()
-    else onSwipeLeft?.()
+    if (dx > 0) requestNext()
+    else requestPrev()
   }
   const handleTextPointerUp = (event: PointerEvent<HTMLSpanElement>) => {
     const gesture = swipeRef.current
@@ -1532,6 +1634,9 @@ export const DynamicIsland = memo(function DynamicIsland({
   }
 
   const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    // 人格卡禁用词、提示词、设置里的多行输入、会话备注、Shift+Enter 换行
+    // 都走这里。不拦的话父级 button 会吃掉 Enter 和空格。
+    if (isTextEditingTarget(event.target)) return
     if (event.key === 'Escape' && expandedRef.current) {
       // 设置类视图 / Agent 模式:Esc 不收起(设置类只能通过返回键,
       // Agent 模式只保留长按收回)
@@ -1643,26 +1748,38 @@ export const DynamicIsland = memo(function DynamicIsland({
     return () => style.remove()
   }, [fontDataUrl])
 
-  // 自动字体颜色(auto 模式):从**当前形态**的背景图(展开态用展开图,
-  // 紧凑态用紧凑图,缺图时退另一形态)采样**原图**平均亮度。
-  // 用原图而非合成亮度(opacity 叠加后纯白图也只有 ~108 亮度,永远判暗
-  // → 白字不可读);白底图原图亮度高 → 黑字,暗色图 → 白字,
-  // 阈值 130 兼顾"大部分白底"与纯深色图;无背景图时按深色底(白字)
+  // 自动字体颜色(auto 模式):按**当前形态实际显示的合成亮度**判定黑白
+  // (合成 = 该形态背景图 × 该形态不透明度 + 深底,即 CLAUDE.md 约定的
+  // "图×opacity+深底")。只看当前形态的图:缺图即深底白字——原先缺图
+  // 退另一形态的亮图采样,会把紧凑态(无图、纯深底)判成黑字,黑压黑
+  // 发灰看不清(2026-10-22 桌面端反馈);亮图低不透明度时实际显示偏暗,
+  // 按原图判定同样会误出黑字。
+  // 阈值 130 ≈ 黑/白字等对比度交点(与 prefersLightUiSurface 同源)
   const [autoDarkText, setAutoDarkText] = useState(false)
   useEffect(() => {
     if (fontColor?.mode !== 'auto') return
-    const bg = expanded
-      ? backgroundExpandedImage ?? backgroundCompactImage
-      : backgroundCompactImage ?? backgroundExpandedImage
+    const bg = expanded ? backgroundExpandedImage : backgroundCompactImage
+    const opacity = (expanded ? backgroundOpacity?.expanded : backgroundOpacity?.compact) ?? 1
     if (!bg) {
       setAutoDarkText(false)
       return
     }
     // 采样失败(null)→ 按深色底白字(与内联时 onerror 语义一致)
     void sampleImageBrightness(bg).then((avg) => {
-      setAutoDarkText(avg != null && avg > 130)
+      if (avg == null) {
+        setAutoDarkText(false)
+        return
+      }
+      const composite = avg * opacity + 8 * (1 - opacity)
+      setAutoDarkText(composite > 130)
     })
-  }, [backgroundExpandedImage, backgroundCompactImage, expanded, fontColor?.mode])
+  }, [
+    backgroundExpandedImage,
+    backgroundCompactImage,
+    backgroundOpacity,
+    expanded,
+    fontColor?.mode,
+  ])
 
   // 面板视图变化通知宿主(背景视图需要更高的岛体与窗口)
   // 进入 Agent 设置视图前刷新配置:LLM 对话中 mcp_config/skills_config
@@ -1741,11 +1858,15 @@ export const DynamicIsland = memo(function DynamicIsland({
 
   // 字体颜色解析:custom = 自定义色;auto = 背景亮度判定的黑白;默认不覆盖
   // (CSS fallback 白色系)。--text-dim 为次级文字色(主色 55% 透明度)
+  // 设置类视图控件压在深色蒙版上。亮图不透明度到约 90% 时合成亮度
+  // 越过阈值,自动黑字再配上浅色表面,按钮和标签会沉进深色蒙版里。
+  // 蒙版已经固定为深色,控件颜色跟着锁住;紧凑态和 Agent 仍按背景亮度黑白。
+  const settingsChromeLocked = expanded && panelView !== 'control' && panelView !== 'agent'
   const resolvedTextColor =
     fontColor?.mode === 'custom' && fontColor.value
       ? fontColor.value
       : fontColor?.mode === 'auto'
-        ? autoDarkText
+        ? !settingsChromeLocked && autoDarkText
           ? '#0b0b0f'
           : '#ffffff'
         : null
@@ -1886,14 +2007,16 @@ export const DynamicIsland = memo(function DynamicIsland({
             className="island-bg-image"
             style={
               {
-                // 不透明度按形态取(展开态 / 紧凑态各自独立)
-                opacity:
-                  (expanded ? backgroundOpacity?.expanded : backgroundOpacity?.compact) ?? 1,
-                // 展开态 / 紧凑态各自独立的图片与裁切参数(CSS 按形态切换)
-                '--bg-img-e': expandedImage ? `url("${expandedImage}")` : 'none',
+                // 不透明度做成蒙层颜色,不设元素 opacity(透明窗口会透出桌面发灰)
+                '--bg-veil-e': backgroundVeilColor(backgroundOpacity?.expanded),
+                '--bg-veil-c': backgroundVeilColor(backgroundOpacity?.compact),
+                // 展开态 / 紧凑态各自独立的图片与裁切参数(CSS 按形态切换)。
+                // 用 blob URL:原始 data URL 超过 CSS 变量长度上限时整条被丢弃,
+                // 岛体只剩实底,裁切框却能看到图。
+                '--bg-img-e': backgroundCssUrl(expandedImage),
                 '--bg-size-e': bgSizeExpanded ? `${bgSizeExpanded}%` : undefined,
                 '--bg-pos-e': `${expandedCrop.posX}% ${expandedCrop.posY}%`,
-                '--bg-img-c': compactImage ? `url("${compactImage}")` : 'none',
+                '--bg-img-c': backgroundCssUrl(compactImage),
                 '--bg-size-c': bgSizeCompact ? `${bgSizeCompact}%` : undefined,
                 '--bg-pos-c': `${compactCrop.posX}% ${compactCrop.posY}%`,
               } as CSSProperties
@@ -1961,6 +2084,10 @@ export const DynamicIsland = memo(function DynamicIsland({
               position={position}
               duration={duration}
               displayRatio={displayRatio}
+              progressStyle={barProgressStyle}
+              rewindRun={rewind?.phase === 'run' ? rewind : null}
+              progressPinned={rewind != null}
+              onRewindDone={settleRewind}
               scrubbing={scrubbing}
               scrubRatio={scrubRatio}
               hint={hint}
@@ -1978,8 +2105,8 @@ export const DynamicIsland = memo(function DynamicIsland({
               onToggleSource={onToggleSource}
               onPlayTrack={onPlayTrack}
               onCycleMode={onCycleMode}
-              onPrev={onSwipeLeft}
-              onNext={onSwipeRight}
+              onPrev={requestPrev}
+              onNext={requestNext}
               onPlayPause={onTextDoubleClick}
               onChangeView={setPanelView}
               onCollapse={() => changeExpanded(false)}
@@ -2086,7 +2213,10 @@ export const DynamicIsland = memo(function DynamicIsland({
                 onBackgroundChange({
                   expandedImage: (target === 'expanded' ? dataUrl : backgroundExpandedImage) ?? null,
                   compactImage: (target === 'compact' ? dataUrl : backgroundCompactImage) ?? null,
-                  opacity: backgroundOpacity ?? { expanded: 0.4, compact: 0.4 },
+                  opacity: revealBackgroundOpacity(
+                    backgroundOpacity ?? { expanded: 0.4, compact: 0.4 },
+                    target,
+                  ),
                   expanded: target === 'expanded' ? DEFAULT_BG_CROP : crop.expanded,
                   compact: target === 'compact' ? DEFAULT_BG_CROP : crop.compact,
                 })
@@ -2167,6 +2297,7 @@ export const DynamicIsland = memo(function DynamicIsland({
               // tools 单通道:AgentPanelProps(与 AgentView 工具列表同源,
               // 审计 P1 #4 消双通道冗余)
               tools={agent?.tools}
+              messages={agent?.messages}
               scale={agentScale}
               onScaleChange={handleAgentScaleChange}
               mediaWindowWidth={mediaWindowWidth}
@@ -2268,7 +2399,7 @@ export const DynamicIsland = memo(function DynamicIsland({
       {!expanded && showBar && (
         <div
           ref={barRef}
-          className={`island-extra${duration > 0 ? ' seekable' : ''}${scrubbing ? ' scrubbing' : ''}`}
+          className={`island-extra${duration > 0 ? ' seekable' : ''}${scrubbing ? ' scrubbing' : ''}${rewind?.phase === 'run' ? ' is-rewinding' : ''}`}
           role={duration > 0 ? 'slider' : undefined}
           tabIndex={duration > 0 ? 0 : undefined}
           aria-label="播放进度"
@@ -2278,8 +2409,8 @@ export const DynamicIsland = memo(function DynamicIsland({
           aria-valuetext={
             duration > 0 ? `${formatTime(position)} / ${formatTime(duration)}` : undefined
           }
-          // --progress-ratio 供填充比例使用
-          style={{ '--progress-ratio': displayRatio } as CSSProperties}
+          // --progress-ratio 供填充比例使用。回退进行中不写,交给粒子层逐帧更新。
+          style={barProgressStyle}
           onClick={(event) => event.stopPropagation()}
           onKeyDown={(event) => {
             event.stopPropagation()
@@ -2290,9 +2421,12 @@ export const DynamicIsland = memo(function DynamicIsland({
           onPointerUp={(event) => barRef.current && handleBarPointerUp(event, barRef.current)}
           onPointerCancel={(event) => barRef.current && handleBarPointerUp(event, barRef.current)}
         >
-          <div className={`island-progress${duration > 0 ? ' island-progress--determinate' : ''}`}>
-            {duration > 0 && <div className="island-progress-fill" />}
+          <div className={`island-progress${duration > 0 || rewind ? ' island-progress--determinate' : ''}`}>
+            {(duration > 0 || rewind) && <div className="island-progress-fill" />}
           </div>
+          {rewind?.phase === 'run' && (
+            <ProgressRewindLayer key={rewind.id} from={rewind.from} onDone={settleRewind} />
+          )}
         </div>
       )}
     </div>

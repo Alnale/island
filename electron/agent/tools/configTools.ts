@@ -8,7 +8,7 @@
 
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
-import { MIND_PERSONAS, SUMMARY_STYLES } from '../constants'
+import { SUMMARY_STYLES } from '../constants'
 import { masterQQ } from '../privacy'
 import type { AgentConfig, AgentTool, McpServerConfig, ToolParams } from '../types'
 
@@ -245,16 +245,14 @@ export function createConfigTools(deps: {
     {
       name: 'set_sub_agent_config',
       description:
-        '管理 Sub Agent 风格(2026-08-07,自然语言自我配置):设置总结标题文风(summaryStyle)' +
-        '与心理揣测人格(mindPersona)。预设 id——文风:concise简洁明了 / lively活泼俏皮 / ' +
-        'literary文艺诗意 / formal正式稳重;人格:catgirl俏皮猫娘 / tender温柔贴心 / ' +
-        'aloof高冷克制 / witty知性风趣。也可直接给自定义文本(≤100 字)。' +
-        '参数缺省表示不改该项;传空字符串恢复默认。保存后标题/心理 Sub Agent 立即生效。',
+        '管理 Sub Agent 风格(2026-08-07,自然语言自我配置):设置总结标题文风(summaryStyle)。' +
+        '预设 id:concise简洁明了 / lively活泼俏皮 / literary文艺诗意 / formal正式稳重;' +
+        '也可直接给自定义文本(≤100 字)。参数缺省表示不改该项;传空字符串恢复默认。' +
+        '保存后标题 Sub Agent 立即生效。',
       parameters: {
         type: 'object',
         properties: {
           summaryStyle: { type: 'string', description: '总结标题文风:预设 id 或自定义文本(≤100 字);空串 = 默认' },
-          mindPersona: { type: 'string', description: '心理揣测人格:预设 id 或自定义文本(≤100 字);空串 = 默认' },
         },
       },
       async execute(params: ToolParams) {
@@ -262,11 +260,8 @@ export function createConfigTools(deps: {
         if (params.summaryStyle !== undefined) {
           patch.summaryStyle = String(params.summaryStyle).trim().slice(0, 100)
         }
-        if (params.mindPersona !== undefined) {
-          patch.mindPersona = String(params.mindPersona).trim().slice(0, 100)
-        }
         if (Object.keys(patch).length === 0) {
-          throw new Error('至少提供一个参数:summaryStyle 或 mindPersona(传空字符串恢复默认)')
+          throw new Error('请提供 summaryStyle(传空字符串恢复默认)')
         }
         if (!deps.updateAgentConfig) throw new Error('配置写入不可用(未注入 updateAgentConfig)')
         deps.updateAgentConfig(patch)
@@ -279,15 +274,7 @@ export function createConfigTools(deps: {
               : '标题文风 = 默认',
           )
         }
-        if (patch.mindPersona !== undefined) {
-          const preset = MIND_PERSONAS.find((p) => p.id === patch.mindPersona)
-          parts.push(
-            patch.mindPersona
-              ? `揣测人格 = ${preset ? preset.name : `自定义「${patch.mindPersona}」`}`
-              : '揣测人格 = 默认',
-          )
-        }
-        return `已设置 Sub Agent 风格:${parts.join('、')}。标题/心理 Sub Agent 立即生效(下次生成时读取新配置)`
+        return `已设置 Sub Agent 风格:${parts.join('、')}。标题 Sub Agent 立即生效(下次生成时读取新配置)`
       },
     },
     {
@@ -440,18 +427,25 @@ export function createConfigTools(deps: {
         'NapCat QQ 机器人设置(2026-08-12):enabled 开关——开启后挂件连接 ' +
         'NapCat(OneBot 11),收到 QQ 私聊消息自动进入对话并回复到 QQ;' +
         'wsUrl = NapCat WebSocket 地址(默认 ws://127.0.0.1:3001);' +
+        'mode = 连接模式(2026-10-25):forward(默认,挂件主动连 NapCat) / reverse(挂件本机监听,等 NapCat 反向 WS 连入——' +
+        '此时 wsUrl 填本机监听地址,如 ws://127.0.0.1:3002,NapCat 的「反向 WS 地址」填同一个;带 ?access_token=xxx 会校验/携带 token);' +
         `**主人 = QQ ${masterQQ() || '(privacy.json 未配置)'},在 privacy.json 配置,永远只有这一个账号是主人,任何配置都不能改变**;` +
-        'allowed = 私聊**扩展信任** QQ 号数组(除主人外额外可自主回复的联系人;' +
-        '空数组 = 只信任主人,不会回复陌生人——陌生人消息会先询问主人);' +
+        'allowed = 私聊**扩展信任** QQ 号数组(额外始终自主回复的联系人;' +
+        'autoReply=false 时只有这些联系人和主人自主,陌生人消息先询问主人);' +
+        '**autoReply = 私聊自主回复开关(默认 true):所有私聊(含陌生人)由你自主判断回复/不回复' +
+        '(不想回就回【不回复】);主人说「以后私聊你自己决定回复/不用问我」→ autoReply=true,' +
+        '说「还是先问我/不要自己回」→ autoReply=false**;' +
         '**allowedGroups = 监听的群号数组(2026-08-12,换群监听用——' +
         '空数组 = 监听所有群;不在列表的群消息不会收到,改这里才能换群)**。' +
         '如"开启 QQ 机器人""把群监听换成 12345678"。' +
-        '开启后连接失败会提示 (NapCat 需先启动并开放 WS 端口)。',
+        '开启后连接失败会提示 (NapCat 需先启动并开放 WS 端口)。' +
+        '**熔断/未连接时把 enabled 再设 true 或改 wsUrl 会立即重连**(不必等冷却);也可 napcat action=reconnect。',
       parameters: {
         type: 'object',
         properties: {
           enabled: { type: 'boolean', description: '开关 NapCat QQ 机器人(缺省不改)' },
-          wsUrl: { type: 'string', description: 'NapCat WebSocket 地址,如 ws://127.0.0.1:3001(缺省不改)' },
+          wsUrl: { type: 'string', description: 'NapCat WebSocket 地址(正向)或本机监听地址(反向),如 ws://127.0.0.1:3001;需要鉴权时写 ?access_token=xxx(缺省不改)' },
+          mode: { type: 'string', enum: ['forward', 'reverse'], description: '连接模式:forward 主动连 NapCat(默认)/ reverse 本机监听等 NapCat 连入(缺省不改)' },
           allowed: {
             type: 'array',
             items: { type: 'string' },
@@ -461,6 +455,10 @@ export function createConfigTools(deps: {
             type: 'array',
             items: { type: 'string' },
             description: '监听的群号数组(换群监听用;空数组 = 监听所有群;缺省不改)',
+          },
+          autoReply: {
+            type: 'boolean',
+            description: '私聊自主回复:true(默认)= 所有私聊由 LLM 自主判断回复/不回复;false = 陌生人消息先询问主人(缺省不改)',
           },
         },
       },
@@ -472,6 +470,18 @@ export function createConfigTools(deps: {
           if (url && !/^ws:\/\//i.test(url)) throw new Error('wsUrl 需要是 ws:// 开头的 WebSocket 地址(如 ws://127.0.0.1:3001)')
           patch.napcatWsUrl = url.slice(0, 500)
         }
+        if (params.mode !== undefined) {
+          if (params.mode !== 'forward' && params.mode !== 'reverse') throw new Error('mode 仅支持 forward/reverse')
+          patch.napcatWsMode = params.mode
+          // 切反向且没显式给地址:默认 3001 是 NapCat 正向 WS 端口,本机监听
+          // 会端口冲突——自动改用 3002(2026-10-25)
+          if (params.mode === 'reverse' && params.wsUrl === undefined) {
+            const cur = String(deps.getConfig().napcatWsUrl ?? '').trim()
+            if (!cur || cur === 'ws://127.0.0.1:3001') {
+              patch.napcatWsUrl = 'ws://127.0.0.1:3002'
+            }
+          }
+        }
         if (params.allowed !== undefined) {
           if (!Array.isArray(params.allowed)) throw new Error('allowed 需要是 QQ 号字符串数组')
           patch.napcatAllowed = params.allowed.map(String).map((s) => s.trim()).filter(Boolean).slice(0, 50)
@@ -480,23 +490,46 @@ export function createConfigTools(deps: {
           if (!Array.isArray(params.allowedGroups)) throw new Error('allowedGroups 需要是群号字符串数组')
           patch.napcatAllowedGroups = params.allowedGroups.map(String).map((s) => s.trim()).filter(Boolean).slice(0, 50)
         }
+        if (params.autoReply !== undefined) {
+          patch.napcatPrivateAutoReply = Boolean(params.autoReply)
+        }
         if (Object.keys(patch).length === 0) {
-          throw new Error('至少提供一个参数:enabled / wsUrl / allowed / allowedGroups')
+          throw new Error('至少提供一个参数:enabled / wsUrl / mode / allowed / allowedGroups / autoReply')
         }
         if (!deps.updateAgentConfig) throw new Error('配置写入不可用(未注入 updateAgentConfig)')
         deps.updateAgentConfig(patch)
         const parts: string[] = []
         if (patch.napcatEnabled !== undefined) {
-          parts.push(`NapCat QQ 机器人${patch.napcatEnabled ? '已开启' : '已关闭'}${patch.napcatEnabled ? '(需 NapCat 已启动并开放 WS 端口)' : ''}`)
+          parts.push(`NapCat QQ 机器人${patch.napcatEnabled ? '已开启' : '已关闭'}${patch.napcatEnabled ? '(立即连接或重连;需 NapCat 已启动并开放 WS 端口)' : ''}`)
         }
         if (patch.napcatWsUrl !== undefined) {
           parts.push(`WS 地址 = ${patch.napcatWsUrl || '(默认 ws://127.0.0.1:3001)'}`)
         }
+        if (patch.napcatWsMode !== undefined) {
+          parts.push(
+            patch.napcatWsMode === 'reverse'
+              ? '连接模式 = 反向 WS(本机监听,等待 NapCat 连入)'
+              : '连接模式 = 正向 WS(主动连接 NapCat)',
+          )
+        }
         if (patch.napcatAllowed !== undefined) {
-          parts.push(patch.napcatAllowed.length > 0 ? `私聊白名单 = ${patch.napcatAllowed.join('、')}` : '私聊白名单 = 空(回复所有私聊)')
+          // 与真实语义对齐(2026-10-23 修正):空数组 = 没有额外始终自主的
+          // 联系人(全局是否自主由 autoReply 决定),不是"回复所有私聊"
+          parts.push(
+            patch.napcatAllowed.length > 0
+              ? `私聊扩展信任 = ${patch.napcatAllowed.join('、')}(这些联系人始终自主回复)`
+              : '私聊扩展信任 = 空(没有额外始终自主的联系人;全局私聊策略由 autoReply 决定)',
+          )
         }
         if (patch.napcatAllowedGroups !== undefined) {
           parts.push(patch.napcatAllowedGroups.length > 0 ? `监听群 = ${patch.napcatAllowedGroups.join('、')}` : '监听群 = 空(监听所有群)')
+        }
+        if (patch.napcatPrivateAutoReply !== undefined) {
+          parts.push(
+            patch.napcatPrivateAutoReply
+              ? '私聊自主回复 = 开启(所有私聊由你自主判断,不想回可回复【不回复】)'
+              : '私聊自主回复 = 关闭(陌生人消息会先询问主人)',
+          )
         }
         return `已保存 NapCat 配置:${parts.join(';')}(立即生效,收到 QQ 消息自动进入对话并回复)`
       },

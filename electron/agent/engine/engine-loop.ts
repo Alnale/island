@@ -11,7 +11,9 @@
  * 回合文案 → engine-turn-text.ts、执行辅助复用 engine-tool-execution.ts。
  * 十一期:回合/步边界发 turn/step 生命周期事件(plugin/lifecycle-events.ts)——
  * 观测/审计插件平行挂载监听即可,loop 只多出 emit 点。
- * 2026-09-01:最终回复落定另发 agent/assistant-settled,心理揣测插件同步评估。
+ * 2026-09-01:最终回复落定另发 agent/assistant-settled,标题插件同步评估。
+ * 2026-10-26:心理刻画从她的回复末行剥离(mind-reflect),等回复落定再判断
+ * ——中途步骤写下的心理行只从正文剥掉、不采信,落定回复才是判断依据。
  * 十二期:Model-visible⟺Logged——每次调 LLM 前记完整模型可见快照、
  * 助手消息落定记一条(plugin/session-log.ts);loop 只多出两个 append 点。
  */
@@ -21,6 +23,7 @@ import { parseToolArgs } from '../tools/tool-args'
 import { detectProvider } from '../providers/provider'
 import { masterIdentityLine, REPLY_RESTRAINT_LINE } from '../constants'
 import { masterQQ } from '../privacy'
+import { sanitizeAiFlavor, styleModeForText } from '../persona-style'
 import {
   executeToolBatch,
   raceWithTimeout,
@@ -32,6 +35,14 @@ import { createTurnConfirmGate } from './engine-confirm-gate'
 import { trimHistory } from './engine-history'
 import { parseManualCall, findManualTool, matchManualToolPrefix } from './engine-manual-call'
 import { BUDGET_TRUNCATE_HINT, PROACTIVE_INSTRUCTION } from './engine-turn-text'
+import {
+  MIND_TURN_NUDGE,
+  MindMarkStripper,
+  depictTurn,
+  stripMindMarks,
+  takeMindFromText,
+  type MindReflection,
+} from '../mind-reflect'
 import { PRE_STEP_EVENT } from '../plugin/prompt'
 import { toolExecHooksOf } from '../plugin/tool-events'
 import { ASSISTANT_SETTLED, STEP_END, STEP_START, TURN_END, TURN_START } from '../plugin/lifecycle-events'
@@ -52,6 +63,64 @@ import type {
 interface TurnCtx {
   config: AgentConfig
   signal: AbortSignal
+}
+
+/**
+ * 落定前按人格卡清洗文本 part(2026-10-26):
+ * - 激活卡存在才清洗(无卡不碰模型默认输出);
+ * - 只改 text part,reasoning/工具/媒体原样;
+ * - 代码块/表格/URL 由 styleModeForText 判为 task:默认只清边界客套;
+ *   listPolicy=never 时正文分点也脱掉,代码与链接保留。闲聊另遵守 maxSentences。
+ */
+async function applyPersonaStyleToParts(
+  parts: AgentPart[],
+  config: AgentConfig,
+  ctx: AgentContext,
+): Promise<void> {
+  const activeId = String(config.activePersonaId ?? '').trim()
+  if (!activeId) return
+  let style: import('../types').PersonaStyle | undefined
+  try {
+    const card = await ctx.get('personaStore')?.get(activeId)
+    style = card?.style
+  } catch {
+    style = undefined
+  }
+  for (const part of parts) {
+    if (part.type !== 'text') continue
+    const text = String(part.text ?? '')
+    if (!text.trim()) continue
+    part.text = sanitizeAiFlavor(text, { style, mode: styleModeForText(text) })
+  }
+}
+
+/**
+ * 心理文本也过人格风格清洗(2026-10-28):岛面/底字此前绕过出站清洗,
+ * AI 腔直出。task 模式只清边界客套/禁词/emoji,不动句式——16/40 码元
+ * 的短句经不起 chat 模式的句数/感叹号整形;清洗后过短则保留原文。
+ */
+async function styleMind(
+  mind: MindReflection | null,
+  config: AgentConfig,
+  ctx: AgentContext,
+): Promise<MindReflection | null> {
+  if (!mind) return null
+  const activeId = String(config.activePersonaId ?? '').trim()
+  if (!activeId) return mind
+  let style: import('../types').PersonaStyle | undefined
+  try {
+    style = (await ctx.get('personaStore')?.get(activeId))?.style
+  } catch {
+    style = undefined
+  }
+  if (!style) return mind
+  const island = sanitizeAiFlavor(mind.island, { style, mode: 'task' }).trim()
+  const whisper = sanitizeAiFlavor(mind.whisper, { style, mode: 'task' }).trim()
+  return {
+    kind: mind.kind,
+    island: island && Array.from(island).length >= 4 ? island : mind.island,
+    whisper: whisper && Array.from(whisper).length >= 4 ? whisper : mind.whisper,
+  }
 }
 
 /**
@@ -220,15 +289,31 @@ export function createRunTurn(ctx: AgentContext) {
         history: sanitizeMessagesForLog(historyIn),
         tools: turnTools.map((t) => t.name),
       })
+      const mindStrip = new MindMarkStripper()
+      const modelHistory: AgentMessage[] = [
+        ...historyIn,
+        {
+          id: 'mind-nudge',
+          role: 'system',
+          parts: [{ type: 'text', text: MIND_TURN_NUDGE }],
+        },
+      ]
       const result = await ctx.get('llm').stream({
         config,
         system,
-        history: historyIn,
+        history: modelHistory,
         tools: turnTools,
         signal,
         maxOutputTokens: ctx.get('outputBudget').value,
         onEvent: (event) => {
           if (event.type === 'reasoning-delta') reasoningText += event.text
+          if (event.type === 'text-delta') {
+            // 流式只把心理行从气泡里藏住;判断等回复落定再做
+            const safe = mindStrip.feed(event.text)
+            mindStrip.take()
+            if (safe) emit({ ...event, text: safe })
+            return
+          }
           emit(event)
         },
       })
@@ -238,15 +323,25 @@ export function createRunTurn(ctx: AgentContext) {
         usage.output += result.usage.output_tokens
         if (result.usage.cached_tokens) usage.cached = (usage.cached ?? 0) + result.usage.cached_tokens
       }
+      const reasoningSnapshot = reasoningText
       if (reasoningText) {
-        msgParts.push({ type: 'reasoning', text: reasoningText })
+        msgParts.push({ type: 'reasoning', text: stripMindMarks(reasoningText) })
         reasoningText = ''
       }
-      const replyText = result.text
+      // 流里扣住的尾巴放回;全文再剥一次(权威),标记不进历史、不进气泡、不进 QQ。
+      const tail = mindStrip.flush()
+      mindStrip.take()
+      if (tail) emit({ type: 'text-delta', text: tail })
+      const extracted = takeMindFromText(result.text)
+      const replyText = extracted.text
       if (replyText) msgParts.push({ type: 'text', text: replyText })
       const calls = result.calls
       if (calls.length === 0 && !result.truncated) {
         ctx.emit(STEP_END, { step, callCount: 0, truncated: false, durationMs: Date.now() - stepStartedAt })
+        // 人格卡出站清洗(2026-10-26):激活卡存在时去 AI 腔;代码/表格
+        // 走 task 模式只清边界客套,闲聊走 chat 模式去分点与客套。
+        await applyPersonaStyleToParts(msgParts, config, ctx)
+        if (signal.aborted) return
         const msgId = randomUUID()
         const landed = {
           id: msgId,
@@ -259,13 +354,35 @@ export function createRunTurn(ctx: AgentContext) {
           kind: 'assistant-message',
           message: landed,
         })
-        // 心理揣测与回复同步评估:落定瞬间发生命周期事件(fire-and-forget,
-        // 插件不阻塞消息出口);再推 message + idle 给渲染端
+        // 标题仍由落定插件同步评估(fire-and-forget,不阻塞出口)。
+        // 心理刻画等回复落定再判断:只认最终回复里的那一行;她没写下
+        // 心理行时,才从落定的思考里收一句没说出口的话。中途步骤写的
+        // 心理行只从正文剥掉、不采信——判断依据是落定的回复。
+        const mind: MindReflection | null = await styleMind(
+          extracted.mind ?? depictTurn(replyText, reasoningSnapshot),
+          config,
+          ctx,
+        )
+        if (signal.aborted) return
         ctx.emit(ASSISTANT_SETTLED, {
           message: landed,
           history: [...historyIn, landed],
           proactive: !!opts.proactive,
         })
+        if (mind) {
+          emit({
+            type: 'mind-guess',
+            messageId: msgId,
+            guess: mind.island,
+            proactive: opts.proactive || undefined,
+          })
+          emit({
+            type: 'mind-whisper',
+            messageId: msgId,
+            kind: mind.kind,
+            text: mind.whisper,
+          })
+        }
         emit({ type: 'message', message: landed, usage })
         emit({ type: 'status', status: 'idle' })
         turnOk = true

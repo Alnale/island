@@ -58,13 +58,20 @@ export function hostBridgePlugin(
                 deps.setOwnerQQ ??
                 (() => ({ ok: false, error: '未注入 setOwnerQQ(宿主未提供)' })),
               getTurnKind: deps.getTurnKind,
+              getTurnText: deps.getTurnText,
             }
           : undefined,
       )
       ctx.register('napcatClient', deps.napcat as never)
+      ctx.register('groupRoute', {
+        listParticipants: deps.listGroupParticipants,
+        getTurn: deps.getGroupTurn,
+      })
       ctx.register('napcatLogin', deps.openNapcatLogin)
       ctx.register('mijiaLogin', deps.openMijiaLogin)
       ctx.register('memoryStore', deps.getMemoryStore?.() ?? null)
+      ctx.register('personaStore', deps.getPersonaStore?.() ?? null)
+      ctx.register('personaBufferStore', deps.getPersonaBufferStore?.() ?? null)
       ctx.register('evolution', deps.getEvolution?.() ?? null)
       ctx.register('subagents', deps.getSubAgents?.() ?? null)
 

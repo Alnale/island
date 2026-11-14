@@ -18,6 +18,9 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      # Electron 43 按需下载二进制；运行时检查直接启动 exe，须在干净环境先安装。
+      - run: pnpm exec install-electron
       - run: pnpm check
+      - run: pnpm build
       - run: pnpm build:electron
       - run: pnpm build:widget

@@ -8,6 +8,7 @@
 import { isMimoProvider } from '../providers/mimo-constants'
 import { deepseekErrorMessage } from '../providers/deepseek-constants'
 import { isLMStudioProvider } from '../providers/lmstudio-constants'
+import { isGlmCloudProvider } from '../providers/glm-cloud-constants'
 import type { AgentConfig, AgentTool, EvolutionLike, ToolParams } from '../types'
 
 /** 主对话输出预算缺省值(含思维链 token) */
@@ -45,6 +46,11 @@ async function fetchDeepseekBalance(config: {
   }
   if (isLMStudioProvider(config.baseURL)) {
     throw new Error('当前 API 是 LM Studio 本地部署,本地推理没有余额概念')
+  }
+  // 厂商专属通道(2026-10-22):GLM 云端此前漏拦——会拿智谱地址 + 智谱 Key
+  // 去打 DeepSeek 的 /user/balance(把 DeepSeek 余额接口打到 GLM 通道)
+  if (isGlmCloudProvider(config.baseURL)) {
+    throw new Error('当前 API 是智谱 GLM 云端,GLM 没有 DeepSeek 余额接口,请前往智谱开放平台查看余额')
   }
   const base = config.baseURL.trim().replace(/\/+$/, '')
   const key = config.apiKey.trim()
@@ -105,7 +111,9 @@ export function createBuiltinTools(
       '复评 → 只接受评分严格更高的候选(接受 = 新版本存档,拒绝 = 恢复原版本)。' +
       'action=quick(缺省)= **快捷单轮,同步等待完成,进化结果直接返回**——用户说"进化一下""整理/去重记忆""运行记忆进化"就用它,' +
       '把返回的摘要如实转述即可;action=run = 后台多轮深度整理(记忆条目多/很乱时用,完成有系统通知);' +
-      'action=status = 查询进化状态与最近结果。受保护条目(人设)进化永不改动,放心运行。',
+      'action=status = 查询进化状态与最近结果;action=log = 查看最近进化日志;' +
+      'action=rollback = 回滚到最近一个已接受版本;action=reset = 清除全部进化版本(记忆本身保留)。' +
+      '受保护/锁定条目进化永不改动,放心运行。人格卡建议会进缓冲区(用 persona 工具查看/合并)。',
     // quick 同步轮含评审+复评各最多 2 次 LLM 调用(评估超时随条目数放大,
     // 单次上限 180s)——工具兜底超时须盖过最坏链路
     timeoutMs: 600_000,
@@ -114,8 +122,9 @@ export function createBuiltinTools(
       properties: {
         action: {
           type: 'string',
-          enum: ['quick', 'run', 'status'],
-          description: 'quick = 快捷单轮同步进化(缺省);run = 后台多轮;status = 查询状态',
+          enum: ['quick', 'run', 'status', 'log', 'rollback', 'reset'],
+          description:
+            'quick = 快捷单轮同步进化(缺省);run = 后台多轮;status = 查询状态;log = 最近日志;rollback = 回滚;reset = 清除全部版本',
         },
         focus: { type: 'string', description: '可选:本次进化的关注点(如"去重""补充偏好")' },
         rounds: { type: 'number', description: 'action=run 的候选轮数,缺省 2,最大 6(条目多时按需自动放大,约每 15 条一轮)' },
@@ -130,6 +139,26 @@ export function createBuiltinTools(
         const s = await evolution.getStatus()
         return s || '(暂无进化记录——可 action=quick 立即运行一次快捷记忆进化)'
       }
+      if (action === 'log') {
+        if (!evolution.getLog) return '(当前宿主不支持进化日志)'
+        const logs = await evolution.getLog()
+        if (logs.length === 0) return '(暂无进化日志——可 action=quick 立即运行一次)'
+        return logs
+          .slice(0, 10)
+          .map((l) => {
+            const t = new Date(l.at).toLocaleString()
+            return `- ${t} v${l.version} ${l.before}→${l.after} ${l.applied ? '已接受' : '未应用'}:${l.summary}`
+          })
+          .join('\n')
+      }
+      if (action === 'rollback') {
+        if (!evolution.rollback) throw new Error('当前宿主不支持进化回滚')
+        return evolution.rollback()
+      }
+      if (action === 'reset') {
+        if (!evolution.resetAll) throw new Error('当前宿主不支持清除进化版本')
+        return evolution.resetAll()
+      }
       if (action === 'run') {
         return (
           await evolution.requestEvolve(focus, params.rounds ? Number(params.rounds) : undefined)
@@ -142,7 +171,7 @@ export function createBuiltinTools(
           await evolution.requestEvolve(focus, 1)
         ).message
       }
-      throw new Error(`未知 action:${action}(仅支持 quick/run/status)`)
+      throw new Error(`未知 action:${action}(支持 quick/run/status/log/rollback/reset)`)
     },
   }
 
@@ -208,11 +237,29 @@ export function createBuiltinTools(
     description:
       '查询 DeepSeek API 账户余额(按币种列出:总余额 = 充值余额 + 赠送余额,单位元/美元)。' +
       '适合:用户问"账户还有多少钱""余额够不够""快没钱了没"时调用。' +
-      '仅 DeepSeek API 可用(Anthropic 兼容端点无余额接口)。',
+      '查的是 **DeepSeek 自己的账号**(走 DeepSeek 供应商的 Key,与当前对话用哪家模型无关);' +
+      'MiMo/GLM/LM Studio 没有本接口。仅 DeepSeek API 可用(Anthropic 兼容端点无余额接口)。',
     parameters: { type: 'object', properties: {} },
     async execute() {
+      // **厂商专属通道(2026-10-22)**:余额是 DeepSeek 专属接口,固定走
+      // providers.deepseek 桶凭据——此前拿激活供应商的地址 + Key 打
+      // /user/balance,激活的是 GLM 时会把 DeepSeek 的余额接口打到智谱
+      // 通道(404/401);同理不能拿 MiMo 的凭据去打。桶没 Key 时仅
+      // activeProvider=deepseek 用顶层镜像兜底(两者设计上同步)
       const config = deps.getConfig()
-      const { balances } = await fetchDeepseekBalance({ baseURL: config.baseURL, apiKey: config.apiKey })
+      const ds = config.providers?.deepseek
+      const creds =
+        ds && ds.apiKey.trim()
+          ? { baseURL: ds.baseURL, apiKey: ds.apiKey }
+          : config.activeProvider === 'deepseek'
+            ? { baseURL: config.baseURL, apiKey: config.apiKey }
+            : null
+      if (!creds) {
+        throw new Error(
+          '未配置 DeepSeek API Key(本工具查 DeepSeek 余额;请到 设置 → Agent 设置 选 DeepSeek 供应商填 Key,与当前对话供应商无关)',
+        )
+      }
+      const { balances } = await fetchDeepseekBalance(creds)
       if (balances.length === 0) return '(余额接口返回为空,可稍后重试)'
       return balances
         .map(

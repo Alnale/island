@@ -1,7 +1,53 @@
+import type { NapcatGroupTurn } from '../electron/agent/types'
+
 /**
  * Electron 桌面预加载脚本暴露的桌面 API。
  * 由 electron/preload.cjs 注入,Web 演示环境(纯浏览器)不存在,访问时可选链。
  */
+/** 人格卡结构化风格档(2026-10-26;与引擎 PersonaStyle 同构) */
+type IslandPersonaStyle = {
+  tone?: string
+  sentence?: string
+  address?: string
+  particles?: string[]
+  emoji?: 'none' | 'rare' | 'normal'
+  listPolicy?: 'never' | 'task-only'
+  maxSentences?: number
+  bannedPhrases?: string[]
+  examples?: Array<{ user: string; assistant: string }>
+  antiExamples?: string[]
+}
+
+/** 人格卡(2026-10-25;与引擎 PersonaCard 同构,desktop.d.ts 自包含):
+ * prompt = 主人手写提示词,notes = 进化建议合并后的整合区 */
+type IslandPersonaCard = {
+  id: string
+  name: string
+  prompt: string
+  notes?: string
+  style?: IslandPersonaStyle
+  createdAt: number
+  updatedAt: number
+}
+
+/** 人格卡进化缓冲区条目(2026-10-26) */
+type IslandPersonaBufferItem = {
+  id: string
+  /** memory = 记忆进化整合;style = 去 AI 味;trait = 近 30 条聊天抽出的新性格 */
+  kind?: 'memory' | 'style' | 'trait'
+  cardId: string
+  cardName: string
+  notes: string
+  sourceIds: string[]
+  sources: Array<{ id: string; content: string; type: string; tags?: string[]; protected?: boolean; createdAt: number; updatedAt: number }>
+  createdAt: number
+  evolutionVersion?: number
+  mergedAt?: number
+  beforeNotes?: string
+  removed?: Array<{ id: string; content: string; type: string; tags?: string[]; protected?: boolean; createdAt: number; updatedAt: number }>
+  undoneAt?: number
+}
+
 /** Agent 配置(与 src/agent/types.ts 的 AgentConfig 同构;desktop.d.ts
  * 自包含,不跨层 import——审计 P2 #5 抽具名类型供读写共用) */
 type IslandAgentConfig = {
@@ -9,6 +55,10 @@ type IslandAgentConfig = {
   baseURL: string
   model: string
   systemPrompt: string
+  /** 当前激活的人格卡 id(2026-10-25;空 = 不注入,切换下一轮生效) */
+  activePersonaId?: string
+  /** 允许记忆进化优化人格卡(2026-10-26;建议进缓冲区按需合并) */
+  personaEvolveEnabled?: boolean
   reasoningEffort: string
   /** 最大输出 token 数(2026-08-14 模型参数面板,默认 8192) */
   maxOutputTokens: number
@@ -69,6 +119,8 @@ interface DesktopApi {
   getPathForFile(file: File): string
   /** 鼠标进入/离开灵动岛交互区:通知主进程开关"点击穿透"(挂件核心体验) */
   pointer(active: boolean): void
+  /** 把挂件窗口拉到前台(确认卡弹出时调用) */
+  focusWindow(): void
   /** 托盘菜单"设置":订阅回调(渲染端在岛内展开设置视图);返回取消订阅函数 */
   onOpenSettings(callback: () => void): () => void
   /** 打开外部链接(http/https 经主进程校验后 shell.openExternal) */
@@ -84,6 +136,13 @@ interface DesktopApi {
   /** 窗口层级(2026-08-10 用户要求):紧凑态(灵动岛/多媒体岛)= 置顶,
    * 展开面板 = 不置顶。主进程尊重托盘"总在最前"开关 */
   setTopmost(on: boolean): void
+  /** 置于桌面最上方(2026-10-24):读取主进程持久化的开关
+   * (settings.desktopTopmost);开启后展开面板同样保持所有窗口之上 */
+  getDesktopTopmost(): Promise<boolean>
+  /** 置于桌面最上方:设置开关(主进程立即应用并广播,托盘勾选态同步) */
+  setDesktopTopmost(on: boolean): Promise<boolean>
+  /** 置于桌面最上方:托盘/设置页联动订阅;返回取消订阅函数 */
+  onDesktopTopmostChange(callback: (on: boolean) => void): () => void
   /** 全屏状态上报(2026-08-08):主进程在全屏期间兜底忽略 set-size,
    * 防全屏层(100% viewport)跟随窗口 resize 放大。
    * inMini(2026-08-10):全屏元素是否在媒体岛内——岛全屏放大窗口到
@@ -100,7 +159,7 @@ interface DesktopApi {
    * source='qq'(target = QQ 号)/'group'(target = 群号)/'ask'(询问轮,
    * target = 陌生人 QQ——回复发到主人 QQ 同步询问)= NapCat 触发轮,
    * 2026-08-12) */
-  agentSend(text: string, history: unknown[], sessionId?: string, source?: 'qq' | 'group' | 'ask' | 'window' | 'system', target?: string, sessionKey?: string, noteText?: string, owner?: 'master' | 'peer'): void
+  agentSend(text: string, history: unknown[], sessionId?: string, source?: 'qq' | 'group' | 'ask' | 'window' | 'system', target?: string, sessionKey?: string, noteText?: string, owner?: 'master' | 'peer', groupTurn?: NapcatGroupTurn): void
   /** NapCat 私聊消息订阅(2026-08-12):payload = {qq, text, messageId,
    * time, trusted};渲染端作为用户消息进入对话(同步上下文)。
    * trusted: true = 白名单 QQ(自主回复,回复发回);false = 陌生人
@@ -108,14 +167,14 @@ interface DesktopApi {
    * media(2026-08-12 收图):消息携带的图片已下载到本地的路径列表,
    * 渲染端注入对话图片附件。返回取消订阅函数 */
   onNapcatMessage(
-    callback: (msg: { qq: string; text: string; messageId: string; time: number; trusted?: boolean; media?: string[]; profileCard?: string; muted?: boolean; sessionKey?: string; owner?: 'master' | 'peer' }) => void,
+    callback: (msg: { qq: string; text: string; messageId: string; time: number; trusted?: boolean; media?: string[]; profileCard?: string; muted?: boolean; sessionKey?: string; owner?: 'master' | 'peer'; groupTurn?: NapcatGroupTurn }) => void,
   ): () => void
   /** NapCat 群消息订阅(2026-08-12):payload = {groupId, qq, text,
    * atMe};群消息经自主判断接话后进入对话(回复发回群)。
    * media(2026-08-12 收图):同上,群消息图片路径列表;
    * profileCard(2026-08-13):发言人档案卡 → 气泡头部分层展示 */
   onNapcatGroupMessage(
-    callback: (msg: { groupId: string; qq: string; text: string; atMe: boolean; media?: string[]; profileCard?: string; muted?: boolean; sessionKey?: string; owner?: 'master' | 'peer' }) => void,
+    callback: (msg: { groupId: string; qq: string; text: string; atMe: boolean; media?: string[]; profileCard?: string; muted?: boolean; sessionKey?: string; owner?: 'master' | 'peer'; groupTurn?: NapcatGroupTurn }) => void,
   ): () => void
   /** 会话绑定(2026-08-13 会话隔离):主进程通知渲染端切换当前显示
    * 会话('main' = 主人主对话;private:<QQ>/group:<群号> = 外部会话) */
@@ -203,12 +262,17 @@ interface DesktopApi {
         proactiveIntervalUnit?: 's' | 'm' | 'h'
         summaryStyle?: string
         mindPersona?: string
+        /** 激活的人格卡 id(2026-10-25;空串 = 不注入) */
+        activePersonaId?: string
+        /** 允许记忆进化优化人格卡(2026-10-26) */
+        personaEvolveEnabled?: boolean
         /** 工具输出根目录(2026-08-12,Agent 设置「工具与能力」配置) */
         outputDir?: string
         /** 撤销监控目录(2026-08-14 停止与撤销分离,须为 git 仓库) */
         undoWatchDirs?: string[]
         /** NapCat QQ 机器人(2026-08-12) */
         napcatWsUrl?: string
+        napcatWsMode?: 'forward' | 'reverse'
         napcatEnabled?: boolean
         napcatAllowed?: string[]
         napcatAllowedGroups?: string[]
@@ -291,6 +355,69 @@ interface DesktopApi {
     skipped?: number
     error?: string
   }>
+  /** Agent:读取人格卡列表(人格卡设置用;2026-10-25) */
+  agentPersonaGet(): Promise<IslandPersonaCard[]>
+  /** Agent:写人格卡(upsert/remove/clearNotes/replaceAll,返回最新列表) */
+  agentPersonaSet(patch: {
+    upsert?: { id?: string; name: string; prompt: string; notes?: string; style?: IslandPersonaStyle | null }
+    remove?: string
+    clearNotes?: string
+    replaceAll?: IslandPersonaCard[]
+  }): Promise<IslandPersonaCard[]>
+  /** Agent:导出人格卡(id 缺省 = 全部;保存对话框写 JSON) */
+  agentPersonaExport(id?: string): Promise<{
+    canceled: boolean
+    path?: string
+    bytes?: number
+    /** 本次写出的人格卡张数 */
+    cards?: number
+    /** 本次写出的缓冲区条数(只含这些卡的建议) */
+    buffer?: number
+    error?: string
+  }>
+  /** Agent:导入人格卡文件(卡与缓冲区一起合并去重) */
+  agentPersonaImport(): Promise<{
+    canceled: boolean
+    imported?: number
+    skipped?: number
+    bufferImported?: number
+    bufferSkipped?: number
+    error?: string
+  }>
+  /** Agent:最近 30 条,或当前窗口勾选的回复(去 AI 味 + 新性格 → 缓冲区) */
+  agentStyleReview(payload: unknown[] | { messages: unknown[]; ids?: string[] }): Promise<{
+    ok: boolean
+    buffered?: boolean
+    message?: string
+    error?: string
+    issues?: string[]
+    notes?: string[]
+    antiExamples?: string[]
+    bannedPhrases?: string[]
+    traits?: Array<{ label: string; detail: string; evidence?: string }>
+    styleError?: string
+    traitError?: string
+  }>
+  /** Agent:人格卡进化缓冲区列表 */
+  agentPersonaBufferGet(): Promise<IslandPersonaBufferItem[]>
+  /** Agent:合并一条人格卡建议(写 notes + 删源记忆) */
+  agentPersonaBufferMerge(id: string): Promise<{ ok: boolean; error?: string; added?: number; removed?: number }>
+  /** Agent:合并全部待处理建议 */
+  agentPersonaBufferMergeAll(): Promise<{
+    ok: boolean
+    error?: string
+    merged?: number
+    added?: number
+    removed?: number
+    failed?: number
+    errors?: string[]
+  }>
+  /** Agent:丢弃一条人格卡建议 */
+  agentPersonaBufferDiscard(id: string): Promise<{ ok: boolean; error?: string; added?: number; removed?: number }>
+  /** Agent:撤销一次已合并的建议(恢复 notes + 导回记忆) */
+  agentPersonaBufferUndo(id: string): Promise<{ ok: boolean; error?: string; added?: number; removed?: number }>
+  /** Agent:清空人格卡建议缓冲区 */
+  agentPersonaBufferClear(): Promise<{ ok: boolean; error?: string }>
   /** Agent:触发记忆自我进化(后台,完成发系统通知) */
   agentEvolve(focus?: string): Promise<{ started: boolean; message: string }>
   /** Agent:自我进化日志(version = 候选版本号) */
@@ -341,14 +468,17 @@ interface DesktopApi {
   agentSummarize(messages: unknown[]): Promise<string>
   /** Agent:心理揣测(独立 Sub Agent,紧凑态文字区展示) */
   agentMindGuess(messages: unknown[]): Promise<string>
-  /** Agent:主动陪伴 tick(渲染端调度器触发;{started} 供 in-flight 复位,
-   * reason 'judge-no' 供回退 idle 时钟防高频判断调用;sessionId =
-   * 当前会话 ID——主动回合的工具输出归属该对话,2026-08-12) */
+  /** Agent:主动陪伴 tick(渲染端调度器触发;{started} 供 in-flight 复位;
+   * reason 'judge-no'(判断说不)/'judge-error'(判断没跑成)只进短冷却
+   * 重试计数,'busy'/'mode'/'disabled'/'empty' 情境性下轮自然重查;sessionId =
+   * 当前会话 ID——主动回合的工具输出归属该对话,2026-08-12。opts.force =
+   * 连续 2 次未开口后的兜底强制开口(2026-10-22),响应带 forced 标记 */
   agentProactiveTick(
     messages: unknown[],
     idleMinutes: number,
     sessionId?: string,
-  ): Promise<{ started: boolean; reason?: string }>
+    opts?: { force?: boolean },
+  ): Promise<{ started: boolean; reason?: string; forced?: boolean }>
   /** 模式切换(托盘右键菜单):订阅回调(payload = 目标模式 + 切换来源;
    * source 'tool' = Agent 工具 switch_to_music 触发的切换) */
   onSetMode(

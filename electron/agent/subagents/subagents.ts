@@ -12,18 +12,12 @@ import {
   buildClassifierSystem,
   buildJudgeSystem,
   buildMemoryExtractSystem,
-  buildMindSystem,
   buildMonologueJudgeSystem,
   buildUserStyleSystem,
-  cutMindSentence,
   extractJsonTitle,
   fallbackTitle,
   looksLikeCodeLiteral,
-  looksLikeIncompleteMind,
   looksLikeSentenceTitle,
-  MIND_LITERAL_EXAMPLES,
-  MIND_MAX_LEN,
-  MIND_MAX_RETRIES,
   parseClassifierJson,
   parseJudgeJson,
   parseMonologueJson,
@@ -31,8 +25,6 @@ import {
   parseStyleJson,
   parseTitleJson,
   resolveSubAgentStyle,
-  salvageMindClause,
-  sanitizeMind,
   sanitizeTitle,
   TITLE_LITERAL_EXAMPLES,
 } from './subagents-helpers'
@@ -46,7 +38,6 @@ import {
   runSubJson,
   singleUserHistory,
   subTimeout,
-  textReasoningOnly,
 } from './runtime'
 import type { AgentConfig, AgentMessage, EvolutionLike, MemoryEntry, MemoryStoreLike, ProviderOutcome } from '../types'
 
@@ -111,7 +102,7 @@ export function createSummaryAgent(deps: {
         const recent = recentMessages(messages)
         // Sub Agent 设置(2026-08-07):总结标题文风(预设 id 或自定义 ≤100 字)
         // 注入三级措辞,全部生效
-        const styleBlock = resolveSubAgentStyle('summary', config.summaryStyle)
+        const styleBlock = resolveSubAgentStyle(config.summaryStyle)
         const withStyle = (sys: string) => (styleBlock ? `${sys}\n${styleBlock}` : sys)
         // json_object 官方已知问题"有概率返回空 content"(实测约 60%
         // 空白、含工具历史时尤甚):**2026-08-13 精简重构**——原三级降级
@@ -232,162 +223,8 @@ export function createSummaryAgent(deps: {
 
 
 /**
- * 独立的心理揣测后台 Sub Agent:与主对话引擎、总结标题、主动陪伴 Agent
- * 均零共享。根据当前对话,揣测 LLM **本轮回复**时的心态,输出 ≤16 汉字
- * 俏皮话(推荐 10 字左右,如「表面淡定,内心在慌」),显示在灵动岛紧凑态
- * 文字区。失败/超时返回空串,由调用方回退(标题 → 回复预览)。
- * 2026-09-01:用户风格分析迁出 createProactiveAgent;本工厂只做 guess。
- * 触发改为助手消息落定同步评估(agent/assistant-settled 插件),不再等
- * 渲染端 idle 后再 IPC 补跑。
- */
-export function createMindAgent(deps: {
-  getConfig: () => AgentConfig
-  /** 长期记忆(与主引擎同源:记忆块进系统提示,揣测才知道助手记得什么) */
-  getMemoryStore?(): MemoryStoreLike | null
-  /** 自我进化 harness(状态块进系统提示;未注入则省略) */
-  getEvolution?(): EvolutionLike | null
-  /** LLM 流式调用(可注入;缺省经 LLM 接缝默认运行时) */
-  stream?(params: LlmStreamParams): Promise<ProviderOutcome>
-}): {
-  /** 静默揣测(无工具单轮,事件不转发 UI);失败/未配置返回空串 */
-  guess(messages: AgentMessage[]): Promise<string>
-} {
-  const stream = deps.stream ?? defaultSubStream
-  return {
-    async guess(messages: AgentMessage[]) {
-      const { config, ready } = prepareSubCall(deps.getConfig)
-      if (!ready || messages.length === 0) return ''
-      try {
-        // 输入特化:心理揣测只需要文本语义,剥离工具调用/结果 parts——
-        // ① 工具语法噪音干扰揣测(心态在文本里,不在参数里);
-        // ② 模型看到历史里的 <tool_calls>/<invoke> 格式会**模仿输出**
-        // 工具调用幻觉(2026-08-12 实测诊断:重试时大量 raw 是
-        // "<tool_calls><invoke name=…>",清洗后乱码残片全废)
-        const recent = textReasoningOnly(recentMessages(messages))
-        const { memoryBlock, evolutionStatus, bgStatus } = await loadSubContext(deps)
-        // Sub Agent 设置(2026-08-07):心理揣测人格(预设 id 或自定义 ≤100 字)
-        // 拼进同源上下文,块为空时 buildMindSystem 静默跳过
-        const personaBlock = resolveSubAgentStyle('mind', config.mindPersona)
-        // 人格风格与 16 字硬约束冲突时,持续重试只会持续失败(实测粤语/
-        // 猫娘风格偶发连续 5 次超长/残句耗尽返回空)——重试 3 次后**退回
-        // 无人格版本**(2026-08-12):先保证有正常揣测输出(无风格但有内容),
-        // 好过空揣测让文字区回退标题
-        const personaSystem = buildMindSystem([
-          config.systemPrompt,
-          memoryBlock,
-          evolutionStatus,
-          bgStatus,
-          personaBlock,
-        ])
-        const baseSystem = buildMindSystem([
-          config.systemPrompt,
-          memoryBlock,
-          evolutionStatus,
-          bgStatus,
-        ])
-        // 单措辞 + 重试:心理揣测是增强显示,失败由调用方回退
-        // (标题/回复预览),不值得总结标题的三级降级链;
-        // 60s 超时(短输出任务,低于总结的 90s),noThinking 提速。
-        // **超长自查重试直到不截断**(2026-08-07 用户要求):生成结果超
-        // 16 码元 = 文字区截断残片(实测"知道了喵～…其实已"每次都截断),
-        // 重新组织更短的,上限 MIND_MAX_RETRIES 次;空/垃圾(代码字面量)/
-        // 照抄示例/残句同样重试;全部失败返回空串(调用方回退,不显示残片)。
-        // **重试反馈注入(2026-08-12)**:盲重试对模型固有模式无效(人格
-        // 风格下模型持续输出超长,实测 tender 连续 5 次超长耗尽返回空;
-        // 粤语风格输出 19-20 码元语义完整句,差 3 个字)——重试时把**上次
-        // 输出原文**给模型,让它精确删减(比"写短点"有效,模型看到自己的
-        // 句子会删到 16 字内保留核心意思)
-        let lastRaw = ''
-        // **次优揣测兜底(2026-08-14)**:语义有效但细节判废(残句收尾/照抄
-        // 示例)的结果留档,重试耗尽后优先回退它——空串让文字区退回标题,
-        // 观感比略带瑕疵的内心独白更差
-        let bestGuess = ''
-        // **精确判废原因(2026-08-14)**:注入重试反馈——笼统措辞"超过 16 字
-        // 或句子没说完"实测无效(模型持续重复同一错误模式,5 次全废)
-        let lastReason = ''
-        for (let retry = 0; retry < MIND_MAX_RETRIES; retry++) {
-          try {
-            // 重试 3 次仍失败 → 去掉人格块(风格与长度约束持续冲突,
-            // 先保证有输出;反馈注入照常)
-            const currentSystem = retry >= 3 ? baseSystem : personaSystem
-            const result = await stream({
-              config,
-              system:
-                retry === 0
-                  ? currentSystem
-                  : currentSystem +
-                    `\n(你上次的输出「${lastRaw.slice(0, 60)}」不合格——${lastReason || '超过 16 字或句子没说完'}。` +
-                    '请重新写一句:**严格 ≤16 汉字、说完的完整一句**,不要逗号/连词收尾、不要照抄示例)',
-              history: recent,
-              tools: [],
-              signal: subTimeout(config, 60000),
-              onEvent: () => {},
-              noThinking: true,
-            })
-            const raw = result.text.trim()
-            lastRaw = raw
-            // 超长时先语义截取(取第一个句末标点前的完整小句,实机
-            // 2026-08-12:模型超长输出 = 完整小句+续写,第一小句直接可用,
-            // 省掉重试);无句末标点(逗号串长句)再走逗号小句兜底截取
-            // (2026-08-14);都截取失败判废进重试
-            const tooLong = Array.from(raw).length > MIND_MAX_LEN
-            const guess = tooLong
-              ? sanitizeMind(cutMindSentence(raw) ?? salvageMindClause(raw) ?? '')
-              : sanitizeMind(raw)
-            // 工具调用幻觉(2026-08-12 实测诊断):失败重试时模型可能输出
-            // "<tool_calls>/<invoke>" 工具调用语法,清洗后是乱码残片——
-            // 直接判废,不进入判效链
-            const toolCallHalluc = /<[\s\S]{0,200}(?:tool_calls|invoke|command)[\s\S]{0,60}>/i.test(raw)
-            // 判效:空/垃圾/照抄示例/残句都重试(重新组织);tooLong 时
-            // guess 已是语义截取结果(≤16 或空),不再单列超长条件。
-            // 判废同时记录精确原因供下轮反馈注入;语义有效但细节不合格的
-            // 留档次优兜底(首个,重试耗尽后优先回退)
-            if (guess && !toolCallHalluc && !looksLikeCodeLiteral(guess)) {
-              if (MIND_LITERAL_EXAMPLES.has(guess)) {
-                lastReason = '照抄了示例原句,要写全新的'
-                bestGuess = bestGuess || guess
-              } else if (looksLikeIncompleteMind(guess)) {
-                lastReason = '句子没说完(以逗号/连词收尾)'
-                bestGuess = bestGuess || guess
-              } else {
-                return guess
-              }
-            } else if (!guess) {
-              lastReason = tooLong ? '超过 16 字且截取不出完整小句' : '输出为空'
-            } else {
-              lastReason = '输出是工具调用语法或代码字面量,不是内心独白'
-            }
-            // 超长/空/垃圾/残句/工具调用幻觉:重试(重新组织)。**不在
-            // 循环内打日志**(2026-08-12 用户实测反馈:每次重试都打
-            // console.warn 刷屏,观感像功能坏了)——只在全部重试耗尽后
-            // 打一条摘要,便于诊断且不打扰
-          } catch {
-            if (retry < MIND_MAX_RETRIES - 1) continue
-            break
-          }
-        }
-        if (bestGuess) {
-          console.warn(
-            `[mind-guess] 重试 ${MIND_MAX_RETRIES} 次均不合格(${lastReason}),回退次优揣测:${JSON.stringify(bestGuess)}`,
-          )
-          return bestGuess
-        }
-        console.warn(
-          `[mind-guess] 重试 ${MIND_MAX_RETRIES} 次均不合格,返回空(文字区回退标题;原因=${lastReason};lastRaw=${JSON.stringify(
-            lastRaw.slice(0, 60),
-          )})`,
-        )
-        return ''
-      } catch {
-        return ''
-      }
-    },
-  }
-}
-
-/**
- * 独立的主动陪伴 Sub Agent(2026-09-01 从总结/心理揣测拆出):
- * 只负责「该不该开口」与「开口时模仿谁的嘴癖」——与心理揣测(回复心态)
+ * 独立的主动陪伴 Sub Agent(2026-09-01 从总结拆出):
+ * 只负责「该不该开口」与「开口时模仿谁的嘴癖」——与心理刻画(回复心态)
  * 、标题总结零共享。判断失败 = 不打扰(安全侧);风格分析失败 = 不注入。
  */
 export function createProactiveAgent(deps: {
@@ -403,10 +240,16 @@ export function createProactiveAgent(deps: {
 }): {
   /**
    * 主动陪伴判断:用户无操作满 idleMinutes 分钟时,根据当前语境判断是否
-   * 需要主动开口。失败/未配置返回 {should:false}(安全侧,零 LLM 调用);
-   * should:true 时 hint 为建议话题(≤200 字)
+   * 需要主动开口。should:true 时 hint 为建议话题(≤200 字)。
+   * **reason 区分"判断说不"与"判断没跑成"(2026-10-22)**:'decided' =
+   * LLM 真给了结论;'error' = 未配置/超时/垃圾输出(安全侧 should:false,
+   * 但调用方按瞬态处理——短冷却重试,不得吃满整段陪伴间隔,否则 Sub 侧
+   * 一坏主动陪伴就整段哑火)。失败/未配置零 LLM 调用或已尽力,不外溢
    */
-  judgeProactive(messages: AgentMessage[], idleMinutes: number): Promise<{ should: boolean; hint?: string }>
+  judgeProactive(
+    messages: AgentMessage[],
+    idleMinutes: number,
+  ): Promise<{ should: boolean; hint?: string; reason?: 'decided' | 'error' }>
   /**
    * 用户风格分析:从对话中提炼可模仿的说话风格(口头禅/句式/称呼/emoji),
    * 供主动回复的 hint 内部指令注入。无明显风格/语境不适合返回 ''
@@ -417,10 +260,10 @@ export function createProactiveAgent(deps: {
   return {
     async judgeProactive(messages, idleMinutes) {
       const { config, ready } = prepareSubCall(deps.getConfig)
-      if (!ready || messages.length === 0) return { should: false }
+      if (!ready || messages.length === 0) return { should: false, reason: 'error' }
       try {
         const { memoryBlock, evolutionStatus, bgStatus, groupStatus } = await loadSubContext(deps)
-        return runSubJson({
+        return await runSubJson<{ should: boolean; hint?: string; reason?: 'decided' | 'error' }>({
           config,
           stream,
           system: buildJudgeSystem(
@@ -429,11 +272,17 @@ export function createProactiveAgent(deps: {
           ),
           history: recentMessages(messages),
           timeoutMs: 60000,
-          parse: parseJudgeJson,
-          fallback: { should: false },
+          // 解析出合法结论 = 'decided'(含 should:false 的"现在别开口");
+          // 垃圾输出/调用失败走 fallback = 'error'(2026-10-22 三态化:
+          // 与"判断说不"可区分,调用方按瞬态短冷却重试而非吃满间隔)
+          parse: (raw) => {
+            const verdict = parseJudgeJson(raw)
+            return verdict ? { ...verdict, reason: 'decided' as const } : null
+          },
+          fallback: { should: false, reason: 'error' as const },
         })
       } catch {
-        return { should: false }
+        return { should: false, reason: 'error' }
       }
     },
     async analyzeUserStyle(messages) {

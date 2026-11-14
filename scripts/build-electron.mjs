@@ -12,6 +12,7 @@
  */
 import { build } from 'esbuild'
 import { spawnSync } from 'node:child_process'
+import fs from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 
@@ -47,16 +48,49 @@ await build({
 console.log('[build-electron] agent.cjs done')
 
 // ---- 2. 生成图标(SVG → PNG) ------------------------------------------------
-// 以 node 运行 electron 的 cli.js(官方推荐方式,无需 shell/.cmd)
-const makeIcon = path.join(root, 'scripts', 'make-icon.cjs')
-const electronCli = path.join(root, 'node_modules', 'electron', 'cli.js')
-const result = spawnSync(process.execPath, [electronCli, makeIcon], {
-  cwd: root,
-  stdio: 'inherit',
-  env: { ...process.env, ELECTRON_DISABLE_SECURITY_WARNINGS: '1' },
-})
-if (result.status !== 0) {
-  console.error('[build-electron] icon generation failed')
-  process.exit(result.status ?? 1)
+// 2026-10-23 修复:图标是**可复用产物**,没必要每次 dev:widget 都起一个离屏
+// Electron 去 capturePage——该步骤依赖 GPU/离屏合成,实测在受限环境或偶发
+// 显卡状态下会以 0x80000003(STATUS_BREAKPOINT)崩掉,而 build-electron 把它
+// 当致命错误 → 整个 pnpm dev:widget 退出码 2147483651,应用根本没机会启动。
+// 现在:icon.png + icon.ico 都在 → 默认跳过(要改图标用 pnpm make:icon 或
+// FORCE_ICON=1);生成失败但已有可用图标 → 告警并继续,不再阻断启动。
+const iconPng = path.join(electronDir, 'icon.png')
+const iconIco = path.join(electronDir, 'icon.ico')
+const hasUsableIcon = () => {
+  try {
+    return fs.statSync(iconPng).size > 0 && fs.statSync(iconIco).size > 0
+  } catch {
+    return false
+  }
 }
-console.log('[build-electron] icon.png done')
+if (process.env.FORCE_ICON !== '1' && hasUsableIcon()) {
+  console.log('[build-electron] icon.png/icon.ico 已存在,跳过离屏渲染(设 FORCE_ICON=1 可强制重建)')
+} else {
+  // 以 node 运行 electron 的 cli.js(官方推荐方式,无需 shell/.cmd)
+  const makeIcon = path.join(root, 'scripts', 'make-icon.cjs')
+  const electronCli = path.join(root, 'node_modules', 'electron', 'cli.js')
+  const result = spawnSync(process.execPath, [electronCli, makeIcon], {
+    cwd: root,
+    stdio: 'inherit',
+    env: {
+      ...process.env,
+      ELECTRON_DISABLE_SECURITY_WARNINGS: '1',
+      // 与 launch-dev-electron.mjs 同一原因:补丁 exe 必须从
+      // C:\electron-hevc-dist 拉起,否则离屏渲染同样 0x80000003。
+      ...(fs.existsSync('C:\\electron-hevc-dist\\electron.exe')
+        ? { ELECTRON_OVERRIDE_DIST_PATH: 'C:\\electron-hevc-dist' }
+        : {}),
+    },
+  })
+  if (result.status !== 0) {
+    const code = result.status ?? result.signal ?? 'unknown'
+    if (hasUsableIcon()) {
+      console.warn(`[build-electron] 图标生成失败(退出码 ${code}),沿用现有图标继续`)
+    } else {
+      console.error(`[build-electron] icon generation failed (exit ${code},无现有图标可沿用)`)
+      process.exit(result.status ?? 1)
+    }
+  } else {
+    console.log('[build-electron] icon.png done')
+  }
+}

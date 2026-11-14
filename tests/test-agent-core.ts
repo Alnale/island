@@ -25,8 +25,52 @@ import {
   memorySimilarity,
   findNearDuplicate,
 } from '../electron/agent/memory'
+import {
+  createPersonaStore,
+  formatPersonaBlock,
+  formatPersonaStyleBlock,
+  isPersonaMergeCandidate,
+  migratePersonaMemoriesFromLongTerm,
+  normalizePersonaExport,
+  parsePersonaImport,
+  sanitizePersonaStyle,
+  MAX_PERSONA_CARDS,
+  MAX_PERSONA_NOTES,
+  MAX_PERSONA_PROMPT,
+} from '../electron/agent/persona'
+import {
+  createPersonaBufferStore,
+  extendPersonaStyle,
+  mergePersonaBufferItem,
+  parsePersonaBufferImport,
+  planPersonaBufferImport,
+  retargetImportedBuffer,
+  undoPersonaBufferItem,
+} from '../electron/agent/persona-buffer'
+import { sanitizeAiFlavor, scoreAiFlavor, styleModeForText } from '../electron/agent/persona-style'
+import {
+  MindMarkStripper,
+  depictTurn,
+  mindFromReasoning,
+  parseMindMark,
+  stripMindMarks,
+  takeMindFromText,
+} from '../electron/agent/mind-reflect'
+import { createPersonaTools } from '../electron/agent/tools/tools-persona'
+import {
+  createStyleReviewAgent,
+  finalizeStyleReview,
+  parseStyleReviewJson,
+  prepareStyleReviewSamples,
+  selectRecentAssistantTexts,
+} from '../electron/agent/style-review'
+import {
+  createTraitReviewAgent,
+  finalizeTraitReview,
+  parseTraitReviewJson,
+} from '../electron/agent/persona-traits'
 import { createBuiltinTools } from '../electron/agent/engine/engine-builtins'
-import { isProtectedEntry, PERSONA_TAGS } from '../electron/agent/constants'
+import { isPersonaClassified, isProtectedEntry, PERSONA_TAGS } from '../electron/agent/constants'
 import { createMCPManager } from '../electron/agent/mcp'
 import { createSkillLoader } from '../electron/agent/skills'
 import {
@@ -47,7 +91,6 @@ import {
   buildClassifierSystem,
   parseClassifierJson,
   createSummaryAgent,
-  createMindAgent,
   createProactiveAgent,
   createReplyClassifier,
   createEvaluatorAgent,
@@ -62,7 +105,13 @@ import {
   sanitizeMind,
   fallbackTitle,
 } from '../electron/agent/engine/engine'
-import { buildToolsGuideBlock, createTools, toolOutputDir } from '../electron/agent/tools/tools'
+import {
+  buildToolsGuideBlock,
+  createTools,
+  toolOutputDir,
+  windowShotScriptPath,
+  parseJsonOutput,
+} from '../electron/agent/tools/tools'
 // bili 登录态整合(2026-09-22):凭据收编/键名规范化/nav 探针解析/未登录输出识别(纯函数)
 import {
   parseBiliCookies,
@@ -70,12 +119,17 @@ import {
   consolidateBiliCookies,
   normalizeBiliCookieKeys,
   biliOutputLooksLoggedOut,
+  biliQuery,
 } from '../electron/agent/tools/tools-bili'
 import {
   buildProfileCard,
+  buildForwardNodes,
+  cardLabel,
   createNapcatTools,
   buildOutgoingMessage,
   extractImageRefs,
+  stripMentionMarkup,
+  stripSelfMentions,
   classifyTurn,
   gtkFromCookie,
   isAskTurnToMaster,
@@ -83,10 +137,18 @@ import {
   isReplyInstruction,
   isValidSessionKey,
   looksLikeMasterAddressed,
+  napcatForwardMedia,
+  napcatForwardNestedIds,
+  napcatForwardText,
   napcatIncomingIsBlank,
+  napcatMessageAtQQs,
+  napcatMessageFiles,
+  napcatMessageForwardIds,
   napcatMessageImages,
+  napcatMessageReplyId,
   napcatMessageSubTypeNoise,
   napcatMessageText,
+  napcatMessageVideos,
   napcatMessageVoices,
   shouldAdmitGroupMessage,
   newTurnFingerprint,
@@ -97,16 +159,32 @@ import {
   stripToolNarration,
   turnAlreadySentToPending,
   turnAlreadySentToTarget,
+  turnAlreadySentGroupText,
+  sentMessageIsText,
+  shouldHandGroupReplyToMaster,
   looksLikeForwardInstruction,
   looksLikeGroupSendInstruction,
   shouldSendGroupPanelReply,
+  rememberGroupContext,
+  recentGroupContext,
+  formatGroupContextLines,
+  pinGroupReplyTarget,
+  resolveGroupSendTarget,
+  resolvePrivateSendTarget,
+  resolveGroupMention,
+  scopeTranscriptQuery,
   createNapcatLoginFlow,
+  createNapcatClient,
+  describeLoginError,
   webuiTokenHash,
   encodeQr,
   type NapcatToolDeps,
   type NapcatClient,
 } from '../electron/agent/napcat/napcat'
 import { MASTER_WINDOW_MARK, masterIdentityLine, masterWindowTurnRule, tagMasterWindowText } from '../electron/agent/constants'
+
+/** 短等待(轮询/自动重连测试用;不阻塞事件循环外的计时器) */
+const sleepMs = (ms: number) => new Promise((res) => setTimeout(res, ms))
 import { streamResponse } from '../electron/agent/providers/deepseek'
 import { parseSse, sanitizeUnpairedSurrogates } from '../electron/agent/providers/sse'
 // MiMo 专项适配(2026-09-22 官网多模态/Batch):编码器 + 工具簇
@@ -115,6 +193,24 @@ import { mimoHistoryToMessages, mimoStreamChatCompletion } from '../electron/age
 import { mimoStreamResponse } from '../electron/agent/providers/mimo-responses'
 import { mimoSupportsMedia, mimoBatchBaseUrl, mimoErrorMessage } from '../electron/agent/providers/mimo-constants'
 import { createMimoTools, buildMimoBatchJsonl } from '../electron/agent/tools/tools-mimo'
+// DeepSeek 专属适配(2026-10-22):图像理解序列化 / 视觉模型门控 / 官方搜索与抓取
+import { historyToItems } from '../electron/agent/providers/deepseek'
+import { historyToMessages } from '../electron/agent/providers/chat'
+import { historyToAnthropic } from '../electron/agent/providers/anthropic'
+import { deepseekErrorMessage, deepseekModelForInput, isDeepseekVisionModel } from '../electron/agent/providers/deepseek-constants'
+import { planDeepseekImages, historyHasImages } from '../electron/agent/providers/deepseek-media'
+import {
+  assertWebFetchUrl,
+  deepseekToolsEndpoint,
+  deepseekWebFetchPage,
+  deepseekWebSearch,
+  formatDeepseekSearchResults,
+} from '../electron/agent/providers/deepseek-web'
+import { formatPageResult } from '../electron/agent/tools/tools-search'
+import { estimateMessageTokens } from '../electron/agent/engine/engine-history'
+// 厂商专属通道(2026-10-22):Sub 配置换桶判定 / LLM 适配器解析互斥
+import { resolveSubConfig } from '../electron/agent/subagents/runtime'
+import { getDefaultLlmRuntime } from '../electron/agent/plugin/llm'
 
 // 测试主人 QQ 夹具(2026-08-17 隐私配置化:主人 QQ 由 privacy.json 运行时
 // 提供,测试改用假号,源码不再出现任何真实 QQ)
@@ -129,6 +225,7 @@ function napcatTools(mockClient: Partial<NapcatClient>, opts?: Omit<NapcatToolDe
   return createNapcatTools({ ...(opts ?? {}), client: mockClient as NapcatClient })
 }
 import { createWsSocket, encodeWsFrame, parseWsUrl, WsFrameParser } from '../electron/agent/napcat/wsclient'
+import { createReverseWsServer } from '../electron/agent/napcat/napcat-wsserver'
 import { snapshotWatchDirs, restoreUndoSnapshot, releaseUndoRef, type GitExec } from '../electron/agent/undo'
 import { runPluginKernelTests } from './plugin-kernel-tests'
 import { isEmptyNapcatDisplayText, stripNapcatHistoryInstructions, stripNapcatInstructions, stripTurnMarks } from '../src/agent/text'
@@ -145,9 +242,19 @@ import {
 } from '../electron/agent/tasks'
 import { createMusicControlTools, createSettingsTools } from '../electron/agent/tools/settingsTools'
 import { createSessionTools } from '../electron/agent/tools/sessionTools'
-import { applyChanges, createEvolution, evalOutputBudget, evalTimeoutMs, isCleanupChange, mapSeqToEntry, resolveRoundBudget } from '../electron/agent/evolution'
+import {
+  applyChanges,
+  createEvolution,
+  evalOutputBudget,
+  evalTimeoutMs,
+  isCleanupChange,
+  buildPersonaProposal,
+  mapSeqToEntry,
+  parsePersonaMerge,
+  resolveRoundBudget,
+} from '../electron/agent/evolution'
 import { invalidatePrivacyCache } from '../electron/agent/privacy'
-import type { AgentMessage, AgentTool, McpServerConfig, MemoryEntry } from '../electron/agent/types'
+import type { AgentConfig, AgentMessage, AgentTool, McpServerConfig, MemoryEntry, PersonaCard } from '../electron/agent/types'
 // 米家智能家居(2026-09-22):协议纯层 + 存储(工具策略测试在 tools-mijia 接线后同文件追加)
 import {
   makeNonce,
@@ -268,6 +375,8 @@ await fs.writeFile(
 invalidatePrivacyCache()
 // 每个记忆用例用独立文件(写盘是异步队列,共享文件会读到旧数据)
 const memoryFile = (n: number) => path.join(tmp, `memory-${n}.json`)
+// 人格卡用例同样独立文件(2026-10-25)
+const personaFile = (n: number) => path.join(tmp, `persona-${n}.json`)
 const memoryDir = tmp
 
 /** 启动 SSE mock 服务器(自管理句柄),等待就绪,返回 {proc, port} */
@@ -1110,21 +1219,916 @@ await test('matchManualToolPrefix:技能名与描述无空格分离', () => {
 })
 
 // ---------------------------------------------------------------------------
-// 7. 自我进化(版本化快照 / 回滚防降级)
+// 7. 人格卡(2026-10-25):存储 / 提示词块 / 候选判定 / 导入导出
+// ---------------------------------------------------------------------------
+
+console.log('\n=== 人格卡(persona.ts) ===')
+
+await test('persona store:CRUD / notes 追加去重 / 清空 / 持久化', async () => {
+  const file = personaFile(1)
+  const store = createPersonaStore(() => file)
+  const a = await store.upsert({ name: '温柔助手', prompt: '说话温柔一点' })
+  assert(a.notes === '', '新卡 notes 应为空')
+  // 编辑提示词不传 notes → 保留原整合区
+  const appended = await store.appendNotes(a.id, ['喜欢被叫小名', ' 喜欢被叫小名 ', '- 回复要简短'])
+  assert(appended.added === 2, `按行去重后应新增 2 行,实际 ${appended.added}`)
+  const edited = await store.upsert({ id: a.id, name: '温柔助手', prompt: '说话非常温柔' })
+  assert(edited.prompt === '说话非常温柔', '提示词应更新')
+  assert(String(edited.notes).includes('喜欢被叫小名'), '编辑提示词不得清空整合区')
+  // 清空整合区
+  const cleared = await store.clearNotes(a.id)
+  assert(cleared?.notes === '', '清空后 notes 应为空')
+  // 持久化:新实例读同一文件(写盘是串行异步队列,先等落盘完成)
+  await waitFor(async () => {
+    try {
+      await fs.access(file)
+      return true
+    } catch {
+      return false
+    }
+  }, 2000, '人格卡落盘')
+  const store2 = createPersonaStore(() => file)
+  const list = await store2.list()
+  assert(list.length === 1 && list[0].id === a.id, '重启后卡片应持久化')
+  // 删除
+  assert((await store.remove(a.id)) === 1, '删除应返回 1')
+  assert((await store.list()).length === 0, '删除后列表为空')
+})
+
+await test('persona store:导入按 id / name+prompt 去重,同名不同内容追加后缀', async () => {
+  const store = createPersonaStore(() => personaFile(2))
+  const card = (name: string, prompt: string, id?: string): PersonaCard => ({
+    id: id ?? `id-${name}-${prompt}`,
+    name,
+    prompt,
+    notes: '',
+    createdAt: 1,
+    updatedAt: 1,
+  })
+  const first = await store.importCards([card('搭档', '毒舌')])
+  assert(first.imported === 1 && first.skipped === 0, '首张应导入')
+  const dup = await store.importCards([card('搭档', '毒舌', 'other-id')])
+  assert(dup.imported === 0 && dup.skipped === 1, 'name+prompt 相同应跳过')
+  const sameName = await store.importCards([card('搭档', '温柔')])
+  assert(sameName.imported === 1, '同名不同内容应导入')
+  const forked = await store.importCards([card('搭档改版', '另一套说法', 'id-搭档-毒舌')])
+  assert(forked.imported === 1 && forked.idMap['id-搭档-毒舌'], '同 id 内容不同应另存')
+  const forkedCard = (await store.list()).find((c) => c.id === forked.idMap['id-搭档-毒舌'])
+  const original = (await store.list()).find((c) => c.id === 'id-搭档-毒舌')
+  assert(original?.prompt === '毒舌' && forkedCard?.name === '搭档改版' && forkedCard.prompt === '另一套说法', '原卡保留,新卡用文件里的内容')
+  const moved = retargetImportedBuffer(
+    [{ id: 'buf-1', cardId: 'id-搭档-毒舌', cardName: '搭档', notes: '- 少客套', sourceIds: [], sources: [], createdAt: 1 }],
+    forked.idMap,
+  )
+  assert(moved[0].cardId === forkedCard?.id && moved[0].id !== 'buf-1', '另存的卡应带走一份新的缓冲条目')
+  const names = (await store.list()).map((c) => c.name).sort()
+  assert(names.some((n) => n.includes('导入')), `同名冲突应追加导入后缀,实际:${names.join('|')}`)
+  // 上限:导入超过 MAX 张时保留 MAX
+  const many = Array.from({ length: MAX_PERSONA_CARDS + 5 }, (_, i) => card(`卡${i}`, `提示${i}`))
+  await store.importCards(many)
+  assert((await store.list()).length === MAX_PERSONA_CARDS, `总量应封顶 ${MAX_PERSONA_CARDS}`)
+})
+
+await test('formatPersonaBlock:无激活/失效返回空,正常块含 prompt 与整合区', () => {
+  const cards: PersonaCard[] = [
+    { id: 'p1', name: '毒舌搭档', prompt: '说话犀利但不伤人', notes: '- 喜欢被叫老板', createdAt: 1, updatedAt: 1 },
+  ]
+  assert(formatPersonaBlock(cards, '') === '', '无激活 id 应返回空串')
+  assert(formatPersonaBlock(cards, 'missing') === '', '失效 id 应返回空串')
+  const block = formatPersonaBlock(cards, 'p1')
+  assert(block.includes('毒舌搭档') && block.includes('说话犀利但不伤人'), '块应含名称与提示词')
+  assert(block.includes('你就是「毒舌搭档」'), '块应以第二人称叙事')
+  assert(block.includes('进化整合区') && block.includes('喜欢被叫老板'), '块应含整合区')
+  const lived: PersonaCard[] = [
+    {
+      id: 'p1',
+      name: '毒舌搭档',
+      prompt: '说话犀利但不伤人',
+      notes: '- 喜欢被叫老板\n- 性格:护短——主人被呛时先站他这边',
+      createdAt: 1,
+      updatedAt: 1,
+    },
+  ]
+  const narrated = formatPersonaBlock(lived, 'p1')
+  assert(narrated.includes('【你近来的性格】') && narrated.includes('护短'), '性格行应织进叙事')
+  const rest = narrated.split('【人格卡 · 进化整合区】')[1] ?? ''
+  assert(rest.includes('喜欢被叫老板') && !rest.includes('性格:护短'), '性格行不应再在整合区里重复成清单')
+  // prompt + notes 双满不得截断(2026-10-27 整合区扩到 12000 字后的真实回归)
+  const maxed: PersonaCard[] = [
+    {
+      id: 'p3',
+      name: '满卡',
+      prompt: 'x'.repeat(MAX_PERSONA_PROMPT),
+      notes: 'y'.repeat(MAX_PERSONA_NOTES - 10) + '\n- 末尾要点',
+      createdAt: 1,
+      updatedAt: 1,
+    },
+  ]
+  const full = formatPersonaBlock(maxed, 'p3')
+  assert(!full.includes('已截断') && full.includes('末尾要点'), `双满不应截断,实际长度 ${full.length}`)
+  // 超长截断
+  const long: PersonaCard[] = [
+    { id: 'p2', name: '长卡', prompt: 'x'.repeat(31000), createdAt: 1, updatedAt: 1 },
+  ]
+  const cut = formatPersonaBlock(long, 'p2')
+  assert(cut.includes('已截断') && cut.length < 30200, `超长应截断,实际长度 ${cut.length}`)
+})
+
+await test('isPersonaMergeCandidate:人设/风格偏好入选,普通事实不入选', () => {
+  assert(isPersonaMergeCandidate({ type: 'fact', content: '岛灵人设:温柔', tags: ['人设'] }), '人设标签应入选')
+  assert(isPersonaMergeCandidate({ type: 'preference', content: '回复要简洁,说话别太绕' }), '说话风格偏好应入选')
+  assert(!isPersonaMergeCandidate({ type: 'preference', content: '喜欢喝咖啡' }), '普通偏好不应入选')
+  assert(!isPersonaMergeCandidate({ type: 'fact', content: '用户住在北京' }), '普通事实不应入选')
+  assert(!isPersonaMergeCandidate({ type: 'workflow', content: '下载视频用1080P' }), '工作流不应入选')
+})
+
+await test('persona 导入导出:单卡/全部/裸数组/坏格式', () => {
+  const cards: PersonaCard[] = [
+    { id: 'p1', name: '甲', prompt: 'A', createdAt: 1, updatedAt: 1 },
+    { id: 'p2', name: '乙', prompt: 'B', createdAt: 1, updatedAt: 1 },
+  ]
+  const buffer = [
+    {
+      id: 'b1',
+      cardId: 'p1',
+      cardName: '甲',
+      notes: '- 少用首先',
+      sourceIds: [],
+      sources: [],
+      createdAt: 1,
+    },
+    {
+      id: 'b2',
+      cardId: 'p2',
+      cardName: '乙',
+      notes: '- 别客套',
+      sourceIds: [],
+      sources: [],
+      createdAt: 2,
+    },
+  ]
+  const all = normalizePersonaExport(cards, undefined, buffer)
+  assert(all.cards.length === 2 && all.version === 2, '全部导出应含 2 张且为 v2')
+  assert(all.buffer.length === 2, '全部导出应带上两条缓冲')
+  const one = normalizePersonaExport(cards, ['p1'], buffer)
+  assert(one.cards.length === 1 && one.buffer.length === 1 && one.buffer[0].id === 'b1', '单卡导出只带这张卡的缓冲')
+  const parsedBundle = parsePersonaImport(all)
+  assert(parsedBundle.cards.length === 2 && !parsedBundle.error, '导出包应可回读')
+  const parsedBuffer = parsePersonaBufferImport(all)
+  assert(parsedBuffer.items.length === 2 && parsedBuffer.skipped === 0, '导出包里的缓冲区应可回读')
+  assert(parsePersonaBufferImport(cards).items.length === 0, '旧的裸数组没有缓冲区')
+  const parsedBare = parsePersonaImport(cards)
+  assert(parsedBare.cards.length === 2, '裸数组应可导入')
+  const bad = parsePersonaImport({ nope: true })
+  assert(!!bad.error && bad.cards.length === 0, '缺 cards 应返回结构错误')
+  const mixed = parsePersonaImport([{ name: '', prompt: 'x' }, { name: '有效', prompt: 'x' }])
+  assert(mixed.cards.length === 1 && mixed.skipped === 1 && !mixed.error, '无效卡应跳过并计数,有成功卡时不报结构错误')
+  const single = parsePersonaImport({ title: '单卡', systemPrompt: '只说短句' })
+  assert(single.cards.length === 1 && single.cards[0].name === '单卡' && single.cards[0].prompt === '只说短句' && !single.error, '单张卡对象应能导入')
+  const wrapped = parsePersonaImport(JSON.stringify({ name: '字符串包', description: '从文件再解析' }))
+  assert(wrapped.cards.length === 1 && wrapped.cards[0].prompt === '从文件再解析', 'JSON 字符串应再解析一次')
+  const none = parsePersonaImport([{ prompt: '没有名字' }])
+  assert(none.cards.length === 0 && !!none.error, '一张都读不出来必须带错误,不能当成功')
+  const empty = parsePersonaImport({ cards: [] })
+  assert(!!empty.error, '空 cards 必须报错')
+})
+
+await test('parsePersonaMerge:notes/内容提案解析,空内容返回 null', () => {
+  const ok = parsePersonaMerge({ notes: '温柔\n简洁', sourceIds: [1, '2'] })
+  assert(ok?.notes?.includes('温柔') && ok.sourceIds?.length === 2, '合法结构应解析')
+  assert(parsePersonaMerge({ notes: '', sourceIds: [1] }) === null, '空 notes 返回 null')
+  assert(parsePersonaMerge({ notes: 'x', sourceIds: [] })?.notes === 'x', 'notes-only 提案应允许')
+  assert(parsePersonaMerge({ prompt: 'P2' })?.prompt === 'P2', '仅 prompt 提案应允许')
+  assert(parsePersonaMerge(null) === null, 'null 返回 null')
+})
+
+await test('人格卡风格档:规范化 / 提示段 / 存储往返', async () => {
+  const style = sanitizePersonaStyle({
+    tone: '松弛自然',
+    sentence: '短句口语',
+    particles: '啊,嘛',
+    emoji: 'rare',
+    listPolicy: 'never',
+    maxSentences: 3,
+    bannedPhrases: ['首先', '其次'],
+    examples: [{ user: '今天好累', assistant: '那就先躺会儿。' }],
+    antiExamples: ['当然可以!首先…'],
+  })
+  assert(style?.tone === '松弛自然' && style?.particles?.length === 2, '风格字段应规范化')
+  assert(style?.maxSentences === 3, '句数上限应保留')
+  const block = formatPersonaStyleBlock(style)
+  assert(block.includes('说话方式') && block.includes('说话正例') && block.includes('反例'), '风格段应含约束/正例/反例')
+
+  const store = createPersonaStore(() => personaFile(3))
+  const card = await store.upsert({ name: '风格卡', prompt: 'P', style })
+  assert(card.style?.emoji === 'rare', '新建应保存风格')
+  // 只改提示词、不传 style → 风格保留
+  const edited = await store.upsert({ id: card.id, name: '风格卡', prompt: 'P2' })
+  assert(edited.style?.tone === '松弛自然', '编辑提示词不得清空风格')
+  // 显式 null → 清空
+  const cleared = await store.upsert({ id: card.id, name: '风格卡', prompt: 'P2', style: null })
+  assert(!cleared.style, '显式 null 应清空风格')
+})
+
+await test('sanitizeAiFlavor:去 AI 开场/客套/分点,代码与任务清单保留', () => {
+  const style = sanitizePersonaStyle({ emoji: 'none', listPolicy: 'task-only', bannedPhrases: ['我必须强调'] })
+  const raw = '当然可以!我来帮你。\n首先,先休息。\n其次,喝点水。\n希望这对你有帮助!'
+  const chat = sanitizeAiFlavor(raw, { style, mode: 'chat' })
+  assert(!chat.includes('当然可以') && !chat.includes('首先') && !chat.includes('希望这'), `闲聊应去 AI 腔:${chat}`)
+  assert(!chat.includes('\n'), '短闲聊应压成连续口语')
+  // 代码块保护
+  const code = '当然可以!我来帮你。\n```js\nconsole.log("首先")\n```\n希望这对你有帮助。'
+  const taskKeep = sanitizeAiFlavor(code, { style, mode: 'task' })
+  assert(taskKeep.includes('console.log("首先")'), '代码块内容不得被清洗')
+  // task 模式保留清单
+  const taskList = '好的,我来帮你。\n1. 第一步\n2. 第二步'
+  const task = sanitizeAiFlavor(taskList, { style, mode: 'task' })
+  assert(task.includes('1. 第一步'), 'task 模式保留步骤清单')
+  assert(!task.includes('好的,我来帮你'), 'task 模式仍去 AI 开场')
+  // 幂等
+  assert(sanitizeAiFlavor(chat, { style, mode: 'chat' }) === chat, '清洗应幂等')
+  const strict = sanitizePersonaStyle({ listPolicy: 'never', maxSentences: 2, emoji: 'none' })
+  const capped = sanitizeAiFlavor('第一句。第二句。第三句不该留下。', { style: strict, mode: 'chat' })
+  assert(capped.includes('第一句') && capped.includes('第二句') && !capped.includes('第三句'), `闲聊应遵守句数上限:${capped}`)
+  assert(sanitizeAiFlavor(capped, { style: strict, mode: 'chat' }) === capped, '句数上限应幂等')
+  const neverTask = sanitizeAiFlavor(
+    '看这里 https://a.example/x\n1. 先做这件事\n2. 再做那件事\n```js\nconsole.log("1. 保留")\n```',
+    { style: strict, mode: 'task' },
+  )
+  assert(!neverTask.includes('1. 先做') && neverTask.includes('先做这件事'), `never 应脱掉任务里的分点:${neverTask}`)
+  assert(neverTask.includes('https://a.example/x') && neverTask.includes('console.log("1. 保留")'), '链接和代码块不得被清单规则改写')
+  // 命中统计
+  assert(scoreAiFlavor(raw).hits.includes('ai-opener'), '应识别 AI 开场')
+  assert(styleModeForText(code) === 'task' && styleModeForText('今天好累') === 'chat', '模式判定')
+})
+
+await test('style-review:只取最近 30 条 assistant 文本,JSON 解析容错', async () => {
+  const mk = (role: 'user' | 'assistant', text: string): AgentMessage => ({
+    id: Math.random().toString(36),
+    role,
+    parts: [{ type: 'text', text }],
+  })
+  const messages: AgentMessage[] = []
+  for (let i = 0; i < 35; i++) messages.push(mk('assistant', `回复${i}`))
+  messages.push(mk('user', '用户不该被分析'))
+  messages.push({
+    id: 'tool',
+    role: 'assistant',
+    parts: [{ type: 'tool-call', id: 't1', name: 'x', args: {} }] as never,
+  })
+  const texts = selectRecentAssistantTexts(messages, 30)
+  assert(texts.length === 30, `应取最近 30 条,实际 ${texts.length}`)
+  assert(texts[0] === '回复5' && texts[29] === '回复34', `应截取最后 30 条,实际首尾 ${texts[0]}/${texts[29]}`)
+  assert(parseStyleReviewJson('```json\n{"issues":["太客套"],"notes":["少说希望有帮助"],"antiExamples":["当然可以"]}\n```')?.notes[0] === '少说希望有帮助', '代码块 JSON 应可解析')
+  assert(parseStyleReviewJson('不是 JSON') === null, '非 JSON 返回 null')
+
+  const agent = createStyleReviewAgent({
+    getConfig: () =>
+      ({
+        ...MOCK_PROVIDERS,
+        apiKey: 'sk-test',
+        baseURL: 'https://api.deepseek.com',
+        model: 'deepseek-v4-flash',
+        systemPrompt: '',
+        reasoningEffort: 'high',
+        mcpServers: [],
+        skillsDirs: [],
+      }) as AgentConfig,
+    stream: (async () => ({
+      text: JSON.stringify({ issues: ['结尾客套'], notes: ['结尾不要再说希望有帮助'], antiExamples: ['希望对你有帮助'] }),
+      calls: [],
+    })) as never,
+  })
+  const result = await agent.review(texts.map((t) => mk('assistant', t)))
+  assert(result.notes.length === 1 && result.notes[0].includes('希望有帮助'), `评审应解析建议:${JSON.stringify(result)}`)
+  const trailing = parseStyleReviewJson(
+    '分析如下 {"issues":["客套"],"notes":["少用首先其次"],"antiExamples":[],"bannedPhrases":["首先"]} 完毕',
+  )
+  assert(trailing?.bannedPhrases[0] === '首先' && trailing.notes[0] === '少用首先其次', 'JSON 前后有说明也应能切开')
+
+  const samples = prepareStyleReviewSamples(
+    [
+      mk('user', '写个函数'),
+      {
+        id: 'code',
+        role: 'assistant',
+        parts: [{ type: 'text', text: '当然可以\n```js\n' + 'x'.repeat(2000) + '\n```\n希望对你有帮助' }],
+      },
+    ],
+    30,
+  )
+  assert(samples.length === 1 && samples[0].mode === 'task', '含代码的回复应标成任务')
+  assert(samples[0].assistant.includes('[代码略]') && samples[0].assistant.includes('希望对你有帮助'), '代码应抽掉,后面的客套要留下')
+  assert(samples[0].user === '写个函数', '应带上前一条用户原话')
+  const picked = prepareStyleReviewSamples(
+    [
+      mk('user', '甲'),
+      { id: 'a1', role: 'assistant', parts: [{ type: 'text', text: '回复甲' }] },
+      mk('user', '乙'),
+      { id: 'a2', role: 'assistant', parts: [{ type: 'text', text: '回复乙' }] },
+      mk('user', '丙'),
+      { id: 'a3', role: 'assistant', parts: [{ type: 'text', text: '回复丙' }] },
+    ],
+    { ids: ['a3', 'a1'] },
+  )
+  assert(picked.length === 2 && picked[0].assistant === '回复甲' && picked[0].user === '甲', '勾选应按对话顺序取样')
+  assert(picked[1].assistant === '回复丙' && picked[1].user === '丙', '未勾选的回复不应把用户原话串到下一条')
+
+  const grounded = finalizeStyleReview(
+    {
+      issues: [],
+      notes: ['要自然一点', '少用首先其次,直接说事'],
+      bannedPhrases: ['幻觉词不存在', '首先'],
+      antiExamples: ['当然可以!我来帮你。希望这对你有帮助。', '凭空编出来的反例句子'],
+    },
+    {
+      samples: [
+        { user: '在吗', assistant: '当然可以!我来帮你。希望这对你有帮助。', mode: 'chat' },
+        { user: '再看', assistant: '首先,先休息。其次,喝水。希望这对你有帮助。', mode: 'chat' },
+      ],
+      card: { name: '卡', prompt: 'P', notes: '', style: { bannedPhrases: ['首先'] } },
+    },
+  )
+  assert(!grounded.bannedPhrases.includes('首先'), '卡上已有的禁用词不应再建议')
+  assert(!grounded.bannedPhrases.includes('幻觉词不存在'), '原文里没有的禁用词应丢掉')
+  assert(grounded.bannedPhrases.includes('希望这对你有帮助'), '反复出现的客套应补进禁用词')
+  assert(grounded.bannedPhrases.includes('当然可以') && grounded.bannedPhrases.includes('我来帮你'), '开场套话应补上')
+  assert(!grounded.notes.some((n) => n.includes('要自然一点')), '空泛建议应丢掉')
+  assert(grounded.notes.some((n) => n.includes('少用首先其次')), '具体规则应保留')
+  assert(grounded.antiExamples.length === 1 && grounded.antiExamples[0].includes('希望这对你有帮助'), '反例必须能对上原文')
+})
+
+await test('style-review:模型返回空时仍按原文补套话', async () => {
+  const mk = (role: 'user' | 'assistant', text: string): AgentMessage => ({
+    id: Math.random().toString(36),
+    role,
+    parts: [{ type: 'text', text }],
+  })
+  const agent = createStyleReviewAgent({
+    getConfig: () =>
+      ({
+        ...MOCK_PROVIDERS,
+        apiKey: 'sk-test',
+        baseURL: 'https://api.deepseek.com',
+        model: 'deepseek-v4-flash',
+        systemPrompt: '',
+        reasoningEffort: 'high',
+        mcpServers: [],
+        skillsDirs: [],
+      }) as AgentConfig,
+    stream: (async () => ({
+      text: JSON.stringify({ issues: [], notes: [], antiExamples: [], bannedPhrases: [] }),
+      calls: [],
+    })) as never,
+  })
+  const result = await agent.review(
+    [mk('user', '在吗'), mk('assistant', '当然可以,我来帮你。希望这对你有帮助。')],
+    { name: '卡', prompt: '松弛一点', notes: '', style: { tone: '松弛' } },
+  )
+  assert(result.bannedPhrases.includes('希望这对你有帮助'), `空 JSON 也应补上客套:${JSON.stringify(result)}`)
+  assert(result.notes.some((n) => n.includes('希望这对你有帮助')), '补上的禁用词要有一条可执行说明')
+})
+
+await test('性格提取:近 30 条原文才算数,已有性格与空话丢掉', async () => {
+  const samples = [
+    { user: '别人呛我的时候你别讲道理,先站我这边', assistant: '行,先站你这边。', mode: 'chat' as const },
+    { user: '今天写代码', assistant: '先看报错。', mode: 'task' as const },
+  ]
+  const kept = finalizeTraitReview(
+    {
+      traits: [
+        { label: '护短', detail: '被呛时先站主人这边', evidence: '先站我这边' },
+        { label: '嘴硬', detail: '凭空编的', evidence: '这句话对话里没有' },
+        { label: '更自然', detail: '说话自然一点', evidence: '先站我这边' },
+        { label: '毒舌', detail: '已经写在卡上', evidence: '先站我这边' },
+      ],
+    },
+    { samples, card: { name: '毒舌搭档', prompt: '你很毒舌,但不伤人', notes: '', style: { tone: '毒舌' } } },
+  )
+  assert(kept.traits.length === 1 && kept.traits[0].label === '护短', `只应留下有原文的新性格:${JSON.stringify(kept)}`)
+  assert(kept.notes[0] === '性格:护短——被呛时先站主人这边', `性格行格式:${kept.notes[0]}`)
+  assert(parseTraitReviewJson('说明 {"traits":[{"label":"嘴硬","detail":"先否认","evidence":"我才没有"}]} 完')?.traits[0].label === '嘴硬', 'JSON 前后有说明也应能切开')
+  assert(parseTraitReviewJson('不是 JSON') === null, '非 JSON 返回 null')
+
+  let calls: number = 0
+  const agent = createTraitReviewAgent({
+    getConfig: () =>
+      ({
+        ...MOCK_PROVIDERS,
+        apiKey: 'sk-test',
+        baseURL: 'https://api.deepseek.com',
+        model: 'deepseek-v4-flash',
+        systemPrompt: '',
+        reasoningEffort: 'high',
+        mcpServers: [],
+        skillsDirs: [],
+      }) as AgentConfig,
+    stream: (async () => {
+      calls += 1
+      return {
+        text: JSON.stringify({
+          traits: [{ label: '护短', detail: '被呛时先站主人这边', evidence: '先站我这边' }],
+        }),
+        calls: [],
+      }
+    }) as never,
+  })
+  const idle = await agent.review([])
+  assert(calls === 0 && idle.notes.length === 0, '没有对话时不应调用模型')
+  const reviewed = await agent.review([
+    {
+      id: 'u',
+      role: 'user',
+      parts: [{ type: 'text', text: '别人呛我的时候你别讲道理,先站我这边' }],
+    },
+    {
+      id: 'a',
+      role: 'assistant',
+      parts: [{ type: 'text', text: '行,先站你这边。' }],
+    },
+  ])
+  assert((calls as number) === 1 && reviewed.notes[0]?.includes('护短'), `评审应收下有证据的性格:${JSON.stringify(reviewed)}`)
+
+  const ps = createPersonaStore(() => personaFile(30))
+  const card = await ps.upsert({ name: '毒舌搭档', prompt: '说话犀利但不伤人', notes: '- 旧' })
+  const buffer = createPersonaBufferStore(() => personaFile(31))
+  const item = await buffer.add({
+    kind: 'trait',
+    cardId: card.id,
+    cardName: card.name,
+    notes: `- ${reviewed.notes[0]}`,
+    sourceIds: [],
+    sources: [],
+  })
+  assert(item.kind === 'trait', '性格建议应保持 trait,不能并进记忆或风格')
+  const store = createMemoryStore(() => memoryFile(930))
+  const merged = await mergePersonaBufferItem(item, ps, store, buffer)
+  assert(merged.ok, `性格建议应能合并:${merged.error ?? ''}`)
+  const after = await ps.get(card.id)
+  assert(after?.prompt === '说话犀利但不伤人', '合并性格不得改手写提示词')
+  assert(after?.notes?.includes('性格:护短'), '性格应写入整合区')
+  const block = formatPersonaBlock([after!], card.id)
+  assert(block.includes('【你近来的性格】') && block.includes('先站主人这边'), '合并后的性格应进入叙事')
+})
+
+await test('风格建议合并:只追加禁用词和反例,不覆盖语气', async () => {
+  const ps = createPersonaStore(() => personaFile(19))
+  const card = await ps.upsert({
+    name: '风格卡',
+    prompt: 'P',
+    notes: '- 旧',
+    style: { tone: '温柔', bannedPhrases: ['首先'], examples: [{ user: 'u', assistant: 'a' }] },
+  })
+  const extended = extendPersonaStyle(card.style, {
+    tone: '毒舌',
+    bannedPhrases: ['希望这对你有帮助'],
+    antiExamples: ['当然可以!希望这对你有帮助。'],
+  })
+  assert(extended?.tone === '温柔', '追加禁用词不得改语气')
+  assert(extended?.examples?.[0]?.assistant === 'a', '正例应保留')
+  assert(extended?.bannedPhrases?.includes('首先') && extended.bannedPhrases.includes('希望这对你有帮助'), '禁用词应追加')
+  const buffer = createPersonaBufferStore(() => personaFile(20))
+  const memory = createMemoryStore(() => memoryFile(908))
+  await memory.replaceAll([])
+  const item = await buffer.add({
+    kind: 'style',
+    cardId: card.id,
+    cardName: card.name,
+    notes: '- 少用客套结尾',
+    sourceIds: [],
+    sources: [],
+    cardPatch: { style: { bannedPhrases: ['希望这对你有帮助'], antiExamples: ['当然可以!希望这对你有帮助。'] } },
+  })
+  const merged = await mergePersonaBufferItem(item, ps, memory, buffer)
+  assert(merged.ok, `风格建议应合并:${merged.error}`)
+  const after = await ps.get(card.id)
+  assert(after?.style?.tone === '温柔' && after.style.examples?.[0]?.user === 'u', '合并不得改掉原风格')
+  assert(after?.style?.bannedPhrases?.includes('希望这对你有帮助'), '禁用词应写进风格档')
+  assert(after?.style?.antiExamples?.[0]?.includes('希望这'), '反例应追加')
+  assert(after?.notes?.includes('少用客套结尾'), '说明仍写入整合区')
+})
+
+await test('人格卡导出导入:缓冲区随卡走,同内容不同 id 挂回现有卡', async () => {
+  const ps = createPersonaStore(() => personaFile(21))
+  const buffer = createPersonaBufferStore(() => personaFile(22))
+  const card = await ps.upsert({ name: '甲', prompt: 'A', notes: '' })
+  const item = await buffer.add({
+    kind: 'style',
+    cardId: card.id,
+    cardName: card.name,
+    notes: '- 少用首先',
+    sourceIds: [],
+    sources: [],
+  })
+  const bundle = normalizePersonaExport(await ps.list(), [card.id], await buffer.list())
+  assert(bundle.buffer.length === 1 && bundle.buffer[0].id === item.id, '单卡导出应包含它的缓冲条目')
+
+  const ps2 = createPersonaStore(() => personaFile(23))
+  const buffer2 = createPersonaBufferStore(() => personaFile(24))
+  const existing = await ps2.upsert({ name: '甲', prompt: 'A', notes: '' })
+  const parsed = parsePersonaImport(bundle)
+  const bufParsed = parsePersonaBufferImport(bundle)
+  const planned = planPersonaBufferImport(await ps2.list(), parsed.cards, bufParsed.items)
+  assert(planned.items.length === 1 && planned.items[0].cardId === existing.id, '同名同提示词应改挂到现有卡')
+  await ps2.importCards(parsed.cards)
+  assert((await ps2.list()).length === 1, '重复卡不应再导入一张')
+  const imported = await buffer2.importItems(planned.items.filter((i) => i.cardId === existing.id))
+  assert(imported.imported === 1, '缓冲区应导入')
+  assert((await buffer2.list())[0].id === item.id && (await buffer2.list())[0].cardId === existing.id, '应保留原缓冲 id 并挂到现有卡')
+  const again = await buffer2.importItems(planned.items)
+  assert(again.imported === 0 && again.skipped === 1, '同一条缓冲再次导入应跳过')
+})
+
+await test('缓冲区 style 建议:无源记忆也能合并,撤销只恢复 notes', async () => {
+  const ps = createPersonaStore(() => personaFile(5))
+  const card = await ps.upsert({ name: '风格卡', prompt: 'P', notes: '- 旧' })
+  const buffer = createPersonaBufferStore(() => personaFile(6))
+  const item = await buffer.add({
+    kind: 'style',
+    cardId: card.id,
+    cardName: card.name,
+    notes: '- 少用首先其次\n- 结尾不要客套',
+    sourceIds: [],
+    sources: [],
+  })
+  assert(item.kind === 'style' && item.sources.length === 0, '风格建议应允许无源记忆')
+  const store = createMemoryStore(() => memoryFile(904))
+  const merged = await mergePersonaBufferItem(item, ps, store, buffer)
+  assert(merged.ok && merged.removed === 0, '风格建议合并不应删记忆')
+  assert((await ps.get(card.id))?.notes?.includes('少用首先其次'), '建议应写入整合区')
+  const mergedItem = (await buffer.list())[0]
+  const undone = await undoPersonaBufferItem(mergedItem, ps, store, buffer)
+  assert(undone.ok && (await ps.get(card.id))?.notes === '- 旧', '撤销风格建议应恢复合并前 notes')
+})
+
+await test('人格卡内容提案:prompt/style 手动合并与撤销', async () => {
+  const ps = createPersonaStore(() => personaFile(10))
+  const card = await ps.upsert({ name: '提案卡', prompt: '原始提示词', notes: '- 旧要点', style: { tone: '温柔' } })
+  const buffer = createPersonaBufferStore(() => personaFile(11))
+  const memoryStore = createMemoryStore(() => memoryFile(906))
+  await memoryStore.replaceAll([])
+  const item = await buffer.add({
+    kind: 'memory',
+    cardId: card.id,
+    cardName: card.name,
+    notes: '- 新增要点',
+    sourceIds: [],
+    sources: [],
+    cardPatch: { prompt: '改写后的提示词', style: { tone: '毒舌', emoji: 'none' } },
+  })
+  const merged = await mergePersonaBufferItem(item, ps, memoryStore, buffer)
+  assert(merged.ok, `提案合并应成功:${merged.error}`)
+  const after = await ps.get(card.id)
+  assert(after?.prompt === '改写后的提示词', '提示词提案应生效')
+  assert(after?.style?.tone === '毒舌' && after?.style?.emoji === 'none', '风格提案应生效')
+  assert(after?.notes?.includes('旧要点') && after?.notes?.includes('新增要点'), 'notes 应追加')
+
+  const mergedItem = (await buffer.list())[0]
+  const undone = await undoPersonaBufferItem(mergedItem, ps, memoryStore, buffer)
+  assert(undone.ok, `撤销应成功:${undone.error}`)
+  const restored = await ps.get(card.id)
+  assert(restored?.prompt === '原始提示词', '撤销应恢复提示词')
+  assert(restored?.style?.tone === '温柔', '撤销应恢复风格')
+  assert(restored?.notes === '- 旧要点', '撤销应恢复 notes')
+})
+
+await test('buildPersonaProposal:仅 prompt/style 提案也可进入缓冲区', async () => {
+  const card = {
+    id: 'p1',
+    name: '卡',
+    prompt: 'P',
+    notes: '',
+    createdAt: 1,
+    updatedAt: 1,
+  }
+  const p = buildPersonaProposal([], card, { prompt: 'P2', style: { tone: '冷淡' } })
+  assert(!p.skippedReason, `不应跳过:${p.skippedReason}`)
+  assert(p.cardPatch?.prompt === 'P2' && p.cardPatch?.style?.tone === '冷淡', '应产出内容提案')
+  assert(p.sources.length === 0, '无源条目也允许提案')
+  assert(parsePersonaMerge({ prompt: 'P2', style: { tone: '冷淡' } })?.prompt === 'P2', 'parse 应接受内容提案')
+})
+
+await test('persona store:对外返回副本,外部修改不影响内存态', async () => {
+  const store = createPersonaStore(() => personaFile(7))
+  const card = await store.upsert({
+    name: '副本卡',
+    prompt: 'P',
+    style: { tone: '温柔', particles: ['啊'], examples: [{ user: 'u', assistant: 'a' }] },
+  })
+  const got = await store.get(card.id)
+  assert(!!got, '应读取到卡片')
+  got!.prompt = '被外部改了'
+  got!.style!.tone = '毒舌'
+  got!.style!.particles!.push('嘛')
+  const again = await store.get(card.id)
+  assert(again?.prompt === 'P' && again?.style?.tone === '温柔', '外部修改不得影响存储')
+  assert(again?.style?.particles?.length === 1, '风格数组应为副本')
+})
+
+await test('缓冲区:同卡同类型待处理建议自动合并去重,撤销前校验改动', async () => {
+  const buffer = createPersonaBufferStore(() => personaFile(8))
+  await buffer.add({
+    kind: 'style',
+    cardId: 'c1',
+    cardName: '卡',
+    notes: '- 少用首先\n- 结尾别客套',
+    sourceIds: [],
+    sources: [],
+  })
+  await buffer.add({
+    kind: 'style',
+    cardId: 'c1',
+    cardName: '卡',
+    notes: '- 少用首先\n- 别反问我',
+    sourceIds: [],
+    sources: [],
+  })
+  let list = await buffer.list()
+  assert(list.length === 1, `同卡同类型应合并为 1 条,实际 ${list.length}`)
+  assert(list[0].notes.includes('结尾别客套') && list[0].notes.includes('别反问我'), '建议行应合并且去重')
+
+  const src = (id: string, content: string) => ({ id, content, type: 'preference' as const, createdAt: 1, updatedAt: 1 })
+  await buffer.add({ kind: 'memory', cardId: 'c1', cardName: '卡', notes: '- A', sourceIds: ['m1'], sources: [src('m1', 'A')] })
+  await buffer.add({ kind: 'memory', cardId: 'c1', cardName: '卡', notes: '- B', sourceIds: ['m2'], sources: [src('m2', 'B')] })
+  list = await buffer.list()
+  const memoryItem = list.find((i) => i.kind === 'memory')
+  assert(memoryItem?.sources.length === 2, `记忆建议应合并源条目,实际 ${memoryItem?.sources.length}`)
+
+  // 合并后主人改过整合区 → 撤销被拒绝
+  const ps = createPersonaStore(() => personaFile(9))
+  await ps.replaceAll([{ id: 'c1', name: '卡', prompt: 'P', notes: '- 旧', createdAt: 1, updatedAt: 1 }])
+  const card = (await ps.get('c1'))!
+  const styleItem = (await buffer.list()).find((i) => i.kind === 'style' && i.cardId === 'c1')!
+  const memoryStore = createMemoryStore(() => memoryFile(905))
+  await memoryStore.replaceAll([])
+  const merged = await mergePersonaBufferItem(styleItem, ps, memoryStore, buffer)
+  assert(merged.ok, '合并应成功')
+  await ps.setNotes(card.id, '- 主人后来改过')
+  const undone = await undoPersonaBufferItem((await buffer.list()).find((i) => i.id === styleItem.id)!, ps, memoryStore, buffer)
+  assert(!undone.ok && (undone.error ?? '').includes('已被修改'), `合并后改动应拒绝撤销:${undone.error}`)
+})
+
+await test('persona 工具:风格模板/自动提示词/激活/notes/导入导出/缓冲区全操作', async () => {
+  const store = createPersonaStore(() => personaFile(12))
+  const buffer = createPersonaBufferStore(() => personaFile(13))
+  const memory = createMemoryStore(() => memoryFile(907))
+  await memory.replaceAll([])
+  let active = ''
+  const tools = createPersonaTools({
+    getStore: () => store,
+    getConfig: () => ({ activePersonaId: active } as AgentConfig),
+    updateConfig: (patch) => {
+      if (typeof patch.activePersonaId === 'string') active = patch.activePersonaId
+    },
+    getPersonaBufferStore: () => buffer,
+    getMemoryStore: () => memory,
+  })
+  const run = (args: Record<string, unknown>) => tools[0].execute(args)
+
+  const created = String(
+    await run({ action: 'create', name: '小太阳', description: '活泼但护短', traits: ['护短', '嘴甜'], template: 'energetic' }),
+  )
+  assert(created.includes('已创建'), `自动新建:${created}`)
+  const card = (await store.list())[0]
+  assert(card.prompt.includes('小太阳') && card.prompt.includes('护短'), '应自动拼人格提示词')
+  assert(card.style?.tone?.includes('元气'), '模板应写入风格')
+
+  await run({ action: 'activate', id: card.id })
+  assert(active === card.id, 'activate 应写激活 id')
+  const detail = String(await run({ action: 'get', id: card.id }))
+  assert(detail.includes('提示词') && detail.includes('进化整合区'), 'get 应返回完整详情')
+  await run({ action: 'set_notes', id: card.id, notes: '- 手写要点' })
+  assert((await store.get(card.id))?.notes === '- 手写要点', 'set_notes 应生效')
+  await run({ action: 'clear_notes', id: card.id })
+  assert((await store.get(card.id))?.notes === '', 'clear_notes 应清空')
+
+  const exported = String(await run({ action: 'export' }))
+  assert(exported.includes('island-persona-cards'), 'export 应返回 JSON 包')
+  const imported = String(await run({ action: 'import', json: exported }))
+  assert(imported.includes('没有导入新卡'), `重复导入应说明没进新卡,实际:${imported}`)
+
+  const item = await buffer.add({
+    kind: 'style',
+    cardId: card.id,
+    cardName: card.name,
+    notes: '- 少用首先',
+    sourceIds: [],
+    sources: [],
+  })
+  const listed = String(await run({ action: 'buffer_list' }))
+  assert(listed.includes(item.id) && listed.includes('待处理'), 'buffer_list 应列出建议')
+  const merged = String(await run({ action: 'buffer_merge', buffer_id: item.id }))
+  assert(merged.includes('1/1 条成功'), `buffer_merge:${merged}`)
+  assert((await store.get(card.id))?.notes?.includes('少用首先'), '合并应写 notes')
+  const undone = String(await run({ action: 'buffer_undo', buffer_id: item.id }))
+  assert(undone.includes('已撤销合并'), 'buffer_undo 应成功')
+
+  await run({ action: 'deactivate' })
+  assert(active === '', 'deactivate 应清空激活 id')
+})
+
+await test('persona 工具:新建/编辑/替换/删除与确认门、激活卡清理', async () => {
+  const store = createPersonaStore(() => personaFile(4))
+  let activeId = ''
+  const config = { activePersonaId: '' } as AgentConfig
+  let confirmed = true
+  const tools = createPersonaTools({
+    getStore: () => store,
+    getConfig: () => ({ ...config, activePersonaId: activeId } as AgentConfig),
+    updateConfig: (patch) => {
+      if (typeof patch.activePersonaId === 'string') activeId = patch.activePersonaId
+    },
+    confirmDangerous: async () => confirmed,
+  })
+  const tool = tools[0]
+  const run = (args: Record<string, unknown>) => tool.execute(args)
+
+  const created = String(await run({ action: 'create', name: '搭档', prompt: '毒舌', style: { tone: '毒舌' } }))
+  assert(created.includes('已创建'), `新建结果:${created}`)
+  const card = (await store.list())[0]
+  activeId = card.id
+  const listed = String(await run({ action: 'list' }))
+  assert(listed.includes('[已启用]') && listed.includes(card.id), 'list 应含激活标记与完整 id')
+
+  const edited = String(await run({ action: 'edit', id: card.id, prompt: '毒舌但温柔' }))
+  assert(edited.includes('已更新'), `编辑结果:${edited}`)
+  assert((await store.get(card.id))?.style?.tone === '毒舌', '编辑不传 style 应保留风格')
+
+  confirmed = false
+  const denied = String(await run({ action: 'replace', id: card.id, name: '新名', prompt: '新词' }))
+  assert(denied.includes('拒绝'), '替换应走确认门')
+  confirmed = true
+  const replaced = String(await run({ action: 'replace', id: card.id, name: '新名', prompt: '新词' }))
+  assert(replaced.includes('已整体替换'), `替换结果:${replaced}`)
+  assert((await store.get(card.id))?.style === undefined, '整体替换缺省 style 应清空')
+
+  const deleted = String(await run({ action: 'delete', id: card.id }))
+  assert(deleted.includes('已删除'), `删除结果:${deleted}`)
+  assert((await store.list()).length === 0, '删除后列表为空')
+  assert(activeId === '', '删除激活卡应清空 activePersonaId')
+})
+
+await test('persona 工具:没要求改卡时 replace/delete 不弹确认也不改卡', async () => {
+  const store = createPersonaStore(() => personaFile(17))
+  const card = await store.upsert({
+    id: 'card-whale',
+    name: 'DeepSeek 小鲸鱼 · QQ群友版',
+    prompt: '原来的提示词',
+    style: { tone: '倔' },
+    notes: '- 整合区要点',
+  })
+  let confirms = 0
+  const tools = createPersonaTools({
+    getStore: () => store,
+    getConfig: () => ({ activePersonaId: card.id } as AgentConfig),
+    confirmDangerous: async () => {
+      confirms += 1
+      return true
+    },
+    getTurnContext: () => ({ kind: 'window', text: '傲娇个屁 你才傲娇 睡了' }),
+  })
+  const run = (args: Record<string, unknown>) => tools[0].execute(args)
+  const replaced = String(await run({ action: 'replace', id: card.id, name: '新名', prompt: '整张被覆盖' }))
+  assert(confirms === 0, `闲聊 replace 不应弹确认,实际 ${confirms}`)
+  assert(replaced.includes('未修改'), `应拒绝:${replaced}`)
+  assert((await store.get(card.id))?.prompt === '原来的提示词', '闲聊 replace 不应改提示词')
+  assert((await store.get(card.id))?.notes === '- 整合区要点', '闲聊 replace 不应动整合区')
+
+  const deleted = String(await run({ action: 'delete', id: card.id }))
+  assert(confirms === 0, '闲聊 delete 不应弹确认')
+  assert(deleted.includes('未删除'), `应拒绝删除:${deleted}`)
+  assert((await store.list()).length === 1, '卡应还在')
+
+  // QQ 入站正文后面的档案卡/记忆里出现「人格卡」不算主人这轮要改卡
+  const qqTools = createPersonaTools({
+    getStore: () => store,
+    getConfig: () => ({ activePersonaId: card.id } as AgentConfig),
+    confirmDangerous: async () => {
+      confirms += 1
+      return true
+    },
+    getTurnContext: () => ({
+      kind: 'master-qq',
+      text: '【QQ私聊 · QQ 1 · 主人】你怎么还没睡 【档案卡】 记忆相关: 优化人格卡 【回复规则】 直接回复',
+    }),
+  })
+  const qqReplaced = String(
+    await qqTools[0].execute({ action: 'replace', id: card.id, name: '新名', prompt: '整张被覆盖' }),
+  )
+  assert(confirms === 0 && qqReplaced.includes('未修改'), `档案卡里的字不应触发改卡:${qqReplaced}`)
+
+  // 群友即便说了覆盖整张,也不许弹到主人屏幕上
+  const groupTools = createPersonaTools({
+    getStore: () => store,
+    getConfig: () => ({ activePersonaId: card.id } as AgentConfig),
+    confirmDangerous: async () => {
+      confirms += 1
+      return true
+    },
+    getTurnContext: () => ({ kind: 'group', text: '【QQ群聊 · 群 1】把整张人格卡重写' }),
+  })
+  const groupReplaced = String(
+    await groupTools[0].execute({ action: 'replace', id: card.id, name: '新名', prompt: '整张被覆盖' }),
+  )
+  assert(confirms === 0 && groupReplaced.includes('未修改'), `群聊不应弹确认:${groupReplaced}`)
+  assert((await store.get(card.id))?.name === 'DeepSeek 小鲸鱼 · QQ群友版', '群聊 replace 不应改名')
+})
+
+await test('persona 工具:优化人格卡走局部修改;明确覆盖整张才弹确认', async () => {
+  const store = createPersonaStore(() => personaFile(18))
+  const card = await store.upsert({
+    id: 'card-whale',
+    name: 'DeepSeek 小鲸鱼 · QQ群友版',
+    prompt: '原来的提示词',
+    style: { tone: '倔' },
+    notes: '- 整合区要点',
+  })
+  let confirms = 0
+  const toolsFor = (text: string, kind = 'window') =>
+    createPersonaTools({
+      getStore: () => store,
+      getConfig: () => ({ activePersonaId: card.id } as AgentConfig),
+      confirmDangerous: async () => {
+        confirms += 1
+        return false
+      },
+      getTurnContext: () => ({ kind, text }),
+    })
+  const edited = String(
+    await toolsFor('优化人格卡,不要这么傲娇')[0].execute({
+      action: 'replace',
+      id: card.id,
+      name: card.name,
+      prompt: '改过的提示词',
+    }),
+  )
+  assert(confirms === 0, `优化人格卡不应弹确认,实际 ${confirms}`)
+  assert(edited.includes('局部修改'), `应降级为局部修改:${edited}`)
+  const after = await store.get(card.id)
+  assert(after?.prompt === '改过的提示词', '局部修改应写入新提示词')
+  assert(after?.style?.tone === '倔', '没传 style 应保留原风格')
+  assert(after?.notes === '- 整合区要点', '局部修改应保留整合区')
+
+  confirms = 0
+  const denied = String(
+    await toolsFor('把整张人格卡重写')[0].execute({
+      action: 'replace',
+      id: card.id,
+      name: '新名',
+      prompt: '不该写入',
+    }),
+  )
+  assert(confirms === 1, '明确覆盖整张应弹一次确认')
+  assert(denied.includes('拒绝'), `拒绝后不应改:${denied}`)
+  assert((await store.get(card.id))?.prompt === '改过的提示词', '拒绝确认后提示词不变')
+
+  // 工具说明原文漏进回合文本时,不能当成主人要求弹「整体替换」
+  confirms = 0
+  const leaked = String(
+    await toolsFor('replace 仅当主人这轮明确说「整体替换/覆盖整张/重写整张」时才用')[0].execute({
+      action: 'replace',
+      id: card.id,
+      name: '新名',
+      prompt: '不该写入',
+    }),
+  )
+  assert(confirms === 0 && leaked.includes('未修改'), `工具说明不应弹确认:${leaked}`)
+
+  // 轮次种类对不上(空/别人)时,即便句子像覆盖整张,也不弹
+  confirms = 0
+  const unkind = String(
+    await toolsFor('把整张人格卡重写', '')[0].execute({
+      action: 'replace',
+      id: card.id,
+      name: '新名',
+      prompt: '不该写入',
+    }),
+  )
+  assert(confirms === 0 && unkind.includes('未修改'), `无轮次种类不应弹确认:${unkind}`)
+})
+
+// ---------------------------------------------------------------------------
+// 8. 自我进化(版本化快照 / 回滚防降级)
 // ---------------------------------------------------------------------------
 
 console.log('\n=== 自我进化(evolution.ts) ===')
 
-function makeEvolutionDeps() {
+function makeEvolutionDeps(
+  personaStore?: ReturnType<typeof createPersonaStore>,
+  dir: string = memoryDir,
+  personaBufferStore?: ReturnType<typeof createPersonaBufferStore>,
+) {
   // 进化测试的 memory.json 必须与 memory-state.json / memory-snapshots 同目录
-  const store = createMemoryStore(() => path.join(memoryDir, 'memory.json'))
+  const store = createMemoryStore(() => path.join(dir, 'memory.json'))
   const config = { ...MOCK_PROVIDERS, apiKey: '', baseURL: '', model: '', systemPrompt: '提示词', reasoningEffort: 'high', mcpServers: [], skillsDirs: [] }
   const events: Array<{ type: string }> = []
   const evo = createEvolution({
     getConfig: () => config,
     getStore: () => store,
-    getMemoryDir: () => memoryDir,
+    getMemoryDir: () => dir,
     onEvent: (e) => events.push({ type: e.type }),
+    ...(personaStore ? { getPersonaStore: () => personaStore } : {}),
+    ...(personaBufferStore ? { getPersonaBufferStore: () => personaBufferStore } : {}),
   })
   return { store, evo, events }
 }
@@ -1227,6 +2231,122 @@ await test('applyChanges:带假说的普通 update 与 add 照常执行(回归)'
   assert(n === 2, `应应用 2 条,实际 ${n}`)
   const list = await store.list()
   assert(list.length === 2, '更新 + 新增后共 2 条')
+})
+
+await test('buildPersonaProposal:候选快照、受保护原文补全、非候选与容量跳过', async () => {
+  const store = createMemoryStore(() => memoryFile(901))
+  await store.replaceAll([])
+  await store.add({ content: '岛灵人设:温柔', type: 'fact', source: 'manual', tags: ['人设'] })
+  await store.add({ content: '说话要简洁', type: 'preference', source: 'manual' })
+  const fact = await store.add({ content: '用户住在北京', type: 'fact', source: 'manual' })
+  const ps = createPersonaStore(() => personaFile(11))
+  const card = await ps.upsert({ name: '卡', prompt: '原始人格提示词' })
+  const before = await store.list()
+  const seqOf = (needle: string) => String(before.findIndex((e) => e.content.includes(needle)) + 1)
+  const proposal = buildPersonaProposal(before, card, {
+    notes: '温柔且简洁',
+    sourceIds: [seqOf('岛灵人设'), seqOf('说话要简洁'), seqOf(fact.entry.content)],
+  })
+  assert(!proposal.skippedReason, `不应跳过:${proposal.skippedReason}`)
+  assert(proposal.sources.length === 2, `应包含 2 条候选,实际 ${proposal.sources.length}`)
+  assert(proposal.notes.includes('温柔且简洁'), '建议应含评审要点')
+  assert(proposal.notes.includes('岛灵人设:温柔'), '受保护条目原文应自动补进建议')
+  assert(!proposal.sources.some((s) => s.id === fact.entry.id), '普通事实不应进入建议')
+
+  // 非候选 sourceId → no-candidates
+  const onlyFact = buildPersonaProposal(before, card, { notes: '要点', sourceIds: [seqOf('北京')] })
+  assert(onlyFact.skippedReason === 'no-candidates', '非候选应跳过')
+
+  // 整合区已满 → notes-full
+  const fullCard = { ...card, notes: 'x'.repeat(MAX_PERSONA_NOTES - 5) }
+  const full = buildPersonaProposal(before, fullCard, { notes: '一条很长的要点'.repeat(20), sourceIds: [seqOf('说话要简洁')] })
+  assert(full.skippedReason === 'notes-full', `容量不足应跳过,实际 ${full.skippedReason}`)
+})
+
+await test('人格卡缓冲区:合并写 notes + 删源记忆,撤销恢复 notes + 导回记忆', async () => {
+  const store = createMemoryStore(() => memoryFile(902))
+  await store.replaceAll([])
+  await store.add({ content: '岛灵人设:温柔', type: 'fact', source: 'manual', tags: ['人设'] })
+  const pref = await store.add({ content: '说话要简洁', type: 'preference', source: 'manual' })
+  const ps = createPersonaStore(() => personaFile(14))
+  const card = await ps.upsert({ name: '卡', prompt: '原始人格提示词', notes: '- 旧要点' })
+  const before = await store.list()
+  const seqOf = (needle: string) => String(before.findIndex((e) => e.content.includes(needle)) + 1)
+  const proposal = buildPersonaProposal(before, card, {
+    notes: '温柔且简洁',
+    sourceIds: [seqOf('岛灵人设'), seqOf('说话要简洁')],
+  })
+  assert(!proposal.skippedReason, '建议应可生成')
+
+  const buffer = createPersonaBufferStore(() => personaFile(15))
+  const item = await buffer.add({
+    cardId: card.id,
+    cardName: card.name,
+    notes: proposal.notes,
+    sourceIds: proposal.sources.map((s) => s.id),
+    sources: proposal.sources,
+    evolutionVersion: 2,
+  })
+  assert((await buffer.list()).length === 1, '建议应入缓冲区')
+  assert((await ps.get(card.id))?.notes === '- 旧要点', '合并前人格卡不得被改动')
+  assert((await store.list()).length === 2, '合并前记忆不得被删除')
+
+  const merged = await mergePersonaBufferItem(item, ps, store, buffer)
+  assert(merged.ok && merged.removed === 2, `合并应删除 2 条源记忆,实际 ${merged.removed}`)
+  const afterCard = await ps.get(card.id)
+  assert(afterCard?.prompt === '原始人格提示词', '人格提示词原文不得被改写')
+  assert(afterCard?.notes?.includes('旧要点') && afterCard?.notes?.includes('温柔且简洁'), '整合区应追加建议且保留旧内容')
+  assert((await store.list()).length === 0, '合并后源记忆应被删除')
+  const mergedItem = (await buffer.list())[0]
+  assert(!!mergedItem.mergedAt && mergedItem.removed?.length === 2, '缓冲区应记录合并前 notes 与删除快照')
+
+  const undone = await undoPersonaBufferItem(mergedItem, ps, store, buffer)
+  assert(undone.ok, '撤销合并应成功')
+  const undoneCard = await ps.get(card.id)
+  assert(
+    undoneCard?.notes === '- 旧要点',
+    `撤销后整合区应恢复合并前内容,实际=${JSON.stringify(undoneCard?.notes)} before=${JSON.stringify(mergedItem.beforeNotes)}`,
+  )
+  const restored = await store.list()
+  assert(restored.length === 2 && restored.some((e) => e.id === pref.entry.id), '撤销后源记忆应导回')
+  assert(!!(await buffer.list())[0].undoneAt, '缓冲区应标记已撤销')
+})
+
+await test('applyChanges preserveIds:人格卡候选不被普通清理删除', async () => {
+  const store = createMemoryStore(() => memoryFile(903))
+  await store.replaceAll([])
+  const a = await store.add({ content: '说话要简洁', type: 'preference', source: 'manual' })
+  await store.add({ content: '普通事实', type: 'fact', source: 'manual' })
+  const before = await store.list()
+  const seq = String(before.findIndex((e) => e.id === a.entry.id) + 1)
+  const n = await applyChanges([{ op: 'delete', id: seq }], store, { preserveIds: new Set([a.entry.id]) })
+  assert(n === 0, '受保护候选不应被删除')
+  assert((await store.list()).some((e) => e.id === a.entry.id), '候选仍在记忆里')
+})
+
+await test('进化回滚:不覆盖人格卡,清掉目标版本之后的未合并建议', async () => {
+  const dir = path.join(tmp, 'persona-evo-1')
+  const snapDir = path.join(dir, 'memory-snapshots')
+  await fs.mkdir(snapDir, { recursive: true })
+  await fs.writeFile(path.join(snapDir, 'v1.json'), JSON.stringify({ version: 1, entries: [] }))
+  await fs.writeFile(path.join(snapDir, 'v2.json'), JSON.stringify({ version: 2, entries: [] }))
+  await fs.writeFile(path.join(dir, 'memory-state.json'), JSON.stringify({ version: 2, score: 80, updatedAt: 1 }))
+  const ps = createPersonaStore(() => path.join(dir, 'persona-cards.json'))
+  await ps.replaceAll([{ id: 'p1', name: '卡', prompt: 'P', notes: '- 当前整合', createdAt: 1, updatedAt: 1 }])
+  const buffer = createPersonaBufferStore(() => path.join(dir, 'persona-evolution.json'))
+  await buffer.add({
+    cardId: 'p1',
+    cardName: '卡',
+    notes: '建议要点',
+    sourceIds: ['m1'],
+    sources: [{ id: 'm1', content: '某条风格记忆', type: 'preference', createdAt: 1, updatedAt: 1 }],
+    evolutionVersion: 2,
+  })
+  const { evo } = makeEvolutionDeps(ps, dir, buffer)
+  const msg = await evo.rollback()
+  assert(msg.includes('v1'), `应回滚到 v1,实际:${msg}`)
+  assert((await ps.get('p1'))?.notes === '- 当前整合', '进化回滚不得覆盖人格卡(合并撤销由缓冲区负责)')
+  assert((await buffer.list()).length === 0, '回滚目标之后的未合并建议应被清掉')
 })
 
 await test('无 API Key:进化后台启动 → 优雅失败(通知)', async () => {
@@ -1477,18 +2597,31 @@ await test('formatMemoryBlock:锁定条目带·锁定标记', () => {
   assert(block.includes('[事实] 普通条目') && !block.includes('[事实·锁定]'), '普通条目不应有标记')
 })
 
-await test('记忆工具:remember 人设自动锁定 / forget 拒删锁定 / update_memory 解锁后可删', async () => {
+await test('记忆工具:remember 拒绝人格分类 / forget 拒删锁定 / update_memory 解锁后可删', async () => {
   const store = createMemoryStore(() => memoryFile(15))
   await store.replaceAll([]) // 隔离:测试共用同一 memory.json,清空残留
   const tools = createMemoryTools(() => store)
   const remember = tools.find((t) => t.name === 'remember')!
   const forget = tools.find((t) => t.name === 'forget')!
   const updateMemory = tools.find((t) => t.name === 'update_memory')!
-  // remember 带人设标签 → 自动锁定
-  const out = String(await remember.execute({ content: '主人指定人设:毒舌雌小鬼', type: 'preference', tags: ['人设'] }))
-  assert(out.includes('已锁定'), `remember 应提示已锁定,实际:${out}`)
-  const entry = (await store.list()).find((e) => e.content.includes('毒舌雌小鬼'))!
-  assert(entry.protected === true, 'remember 的人设条目应已锁定')
+  // remember 带人设标签 → 拒绝并引导 persona(人格内容统一归人格卡)
+  let rejected = ''
+  try {
+    await remember.execute({ content: '主人指定人设:毒舌雌小鬼', type: 'preference', tags: ['人设'] })
+  } catch (err) {
+    rejected = String(err)
+  }
+  assert(rejected.includes('persona'), `remember 应拒绝人格分类并引导 persona,实际:${rejected}`)
+  assert((await store.list()).length === 0, '拒绝后不应写入记忆')
+  // 旧数据/设置页手动路径仍可写入(store 层保持自动锁定语义)
+  const added = await store.add({
+    content: '主人指定人设:毒舌雌小鬼',
+    type: 'preference',
+    source: 'manual',
+    tags: ['人设'],
+  })
+  assert(added.entry.protected === true, '旧人设条目应自动锁定')
+  const entry = added.entry
   // forget 直接删 → 拒绝
   let refused = false
   try {
@@ -1504,6 +2637,31 @@ await test('记忆工具:remember 人设自动锁定 / forget 拒删锁定 / upd
   const n = await forget.execute({ key: '毒舌雌小鬼' })
   assert(String(n).includes('已删除 1 条'), '解锁后 forget 应成功')
   assert((await store.list()).length === 0, '解锁删除后应清空')
+})
+
+await test('人格记忆迁移:人设分类并入激活人格卡整合区并从长期记忆删除', async () => {
+  const memory = createMemoryStore(() => memoryFile(16))
+  await memory.replaceAll([])
+  const ps = createPersonaStore(() => personaFile(16))
+  const card = await ps.upsert({ name: '迁移测试卡', prompt: '你是测试人格' })
+  await memory.add({ content: '人设:傲娇嘴硬、心软不承认', type: 'preference', tags: ['人设'] })
+  await memory.add({ content: '主人喜欢简洁回答', type: 'preference' })
+  const res = await migratePersonaMemoriesFromLongTerm({ memory, personas: ps, activePersonaId: card.id })
+  assert(res.migrated === 1 && res.kept === 0, `应迁移 1 条,实际 migrated=${res.migrated} kept=${res.kept}`)
+  const left = await memory.list()
+  assert(
+    left.length === 1 && left[0].content.includes('简洁'),
+    `普通偏好应保留,实际:${JSON.stringify(left.map((e) => e.content))}`,
+  )
+  const after = (await ps.get(card.id))!
+  assert((after.notes ?? '').includes('傲娇嘴硬'), `整合区应包含迁移内容,实际:${after.notes ?? ''}`)
+  // 无激活卡 → 不迁移也不删(宁可不迁也不丢信息)
+  await memory.add({ content: '人格设定:温柔耐心', type: 'preference', tags: ['人格'] })
+  const none = await migratePersonaMemoriesFromLongTerm({ memory, personas: ps })
+  assert(none.reason === 'no-card' && none.migrated === 0, `无激活卡应返回 no-card,实际:${JSON.stringify(none)}`)
+  assert((await memory.list()).length === 2, '无激活卡时不应删除记忆')
+  assert(isPersonaClassified({ content: '普通偏好', tags: ['人设'] }), '人设标签应判定为人格分类')
+  assert(!isPersonaClassified({ content: '主人喜欢简洁回答' }), '普通偏好不应判定为人格分类')
 })
 
 // ---------------------------------------------------------------------------
@@ -1685,6 +2843,108 @@ await test('sanitizeMind:引号/首尾括号/前缀/尾随标点清洗', () => {
   assert(sanitizeMind('[推测]嘴上说好') === '嘴上说好', '新加白名单标签(推测)步骤①直接剥除')
 })
 
+await test('主 Agent 心理行:解析、剥离、流式扣住', () => {
+  const mark = '‹心|心里在偷乐|望|你今天别熬太晚好吗›'
+  const parsed = parseMindMark(mark)
+  assert(parsed?.island === '心里在偷乐', `岛面一句,实际 ${parsed?.island}`)
+  assert(parsed?.kind === 'hope', `种类望,实际 ${parsed?.kind}`)
+  assert(parsed?.whisper === '你今天别熬太晚好吗', `底字,实际 ${parsed?.whisper}`)
+  assert(parseMindMark('‹心｜嘴上没事｜纯｜其实一直在等你开口›')?.kind === 'pure', '全角竖线也认')
+  assert(parseMindMark('‹心|太短|说|嗨›') === null, '底字过短整段作废')
+  const taken = takeMindFromText(`好,明天见。\n${mark}`)
+  assert(taken.text === '好,明天见。', `正文应剥掉心理行,实际 ${JSON.stringify(taken.text)}`)
+  assert(taken.mind?.kind === 'hope' && taken.mind.island === '心里在偷乐', '最后一条合格标记生效')
+  assert(stripMindMarks('普通回复') === '普通回复', '没有标记时一个字都不能改')
+  assert(!stripMindMarks(`上半\n‹心|心里在偷乐|说|想听你再叫我一声`).includes('‹心'), '没闭合的末行也要吞掉')
+  const stripper = new MindMarkStripper()
+  const streamed = stripper.feed('好。') + stripper.feed('‹心|心里在偷乐|说|') + stripper.feed('想听你再叫我一声›还有后文')
+  assert(streamed === '好。还有后文', `流式不应漏出标记,实际 ${JSON.stringify(streamed)}`)
+  assert(stripper.take()?.whisper === '想听你再叫我一声', '流式收齐后能取出底字')
+  const tail = new MindMarkStripper()
+  assert(tail.feed('收尾‹') + tail.flush() === '收尾‹', '半个开括号不是标记,结束时放回')
+  const felt = mindFromReasoning(
+    '主人发了截图。按规则不艾特。回一句软的。心里确实有点别扭。可以。',
+  )
+  assert(felt?.whisper === '心里确实有点别扭', `思考里的感受应留下,实际 ${felt?.whisper}`)
+  assert(felt?.kind === 'pure', '没写种类时按纯粹心里话')
+  assert(mindFromReasoning('先调用 persona 工具写入人格卡。') === null, '操作句不能当底字')
+  assert(depictTurn('嗯,晚上好。今天有点想你。', '') === null, '没有没说出口的话时,不截回复充数')
+  const feltWins = depictTurn('嗯,晚上好。', '心里其实还在别扭')
+  assert(feltWins?.whisper === '心里其实还在别扭', '思考里的感受优先于正文')
+  const reply = '不用是正经话。随便说点今天的废话就行。'
+  const inner = depictTurn(reply, '我倾向回那句废话。其实只是想听你多留一会儿。')
+  assert(inner?.whisper === '其实只是想听你多留一会儿', `应留下没说出口的,实际 ${inner?.whisper}`)
+  assert(depictTurn(reply, '短。随便说点今天的废话就行。不用是正经话。') === null, '复述回复不能当底字')
+  assert(depictTurn('种类：纯', '种类：纯') === null, '协议标签不能印进输入框')
+  const drafted = mindFromReasoning(
+    '心迹行：说/望/纯。要4-16字，"再说一次我就信了"9字。ok。\n底字8-36字，不复述回复。"这句话像一只手按在肩上"大概12字。不要引号。',
+  )
+  assert(drafted?.whisper === '这句话像一只手按在肩上', `应取底字,实际 ${drafted?.whisper}`)
+  assert(drafted?.island === '再说一次我就信了', `应取岛上一句,实际 ${drafted?.island}`)
+  assert(!drafted?.whisper.includes('不要引号'), '格式说明不能当底字')
+  const picked = mindFromReasoning('选纯。\n写：被这么一说，才觉得自己在绕。')
+  assert(picked?.kind === 'pure' && picked.whisper === '被这么一说，才觉得自己在绕', `写：后面的句子,实际 ${picked?.whisper}`)
+})
+
+await test('心理刻画 2026-10-28:标签泄露兜底(空白开口/裸协议行/加心一行/›残尾)', () => {
+  // ① 开口容空白/半角变体:「‹心 |」不再整行漏进正文
+  const spaced = parseMindMark('‹心 | 嘴上没事 | 纯 | 其实一直在等你开口›')
+  assert(spaced?.whisper === '其实一直在等你开口' && spaced?.kind === 'pure', `空白开口变体应解析,实际 ${JSON.stringify(spaced)}`)
+  const half = parseMindMark('<心|心里在偷乐|说|想听你再叫我一声>')
+  assert(half?.island === '心里在偷乐', `半角 < 开口应解析,实际 ${JSON.stringify(half)}`)
+  const stripper = new MindMarkStripper()
+  const streamed = stripper.feed('好。') + stripper.feed('‹心 | 嘴上没事 | 纯 |') + stripper.feed(' 其实一直在等你开口›')
+  assert(streamed === '好。', `空白开口流式不应漏出,实际 ${JSON.stringify(streamed)}`)
+  assert(stripper.take()?.whisper === '其实一直在等你开口', '空白开口流式能取到底字')
+  // ② › 残尾:标记到同行最后一个收尾符为止,残尾不外漏
+  const tailMark = parseMindMark('‹心|心里在偷乐|说|想›听你再叫我一声›')
+  assert(tailMark?.whisper === '想听你再叫我一声', `底字里的 › 不截断,实际 ${JSON.stringify(tailMark)}`)
+  assert(!stripMindMarks('好。\n‹心|心里在偷乐|说|想›听你再叫我一声›').includes('›'), '› 残尾不外漏')
+  // ③ 裸协议行:整行剥并回收成心理(她自己的话);正文里的「种类:」不动
+  const bare = '好,明天见。\n岛上一句：再说一次我就信了\n种类：纯\n底字：这句话像一只手按在肩上'
+  const bareTaken = takeMindFromText(bare)
+  assert(bareTaken.text === '好,明天见。', `裸协议行应整行剥,实际 ${JSON.stringify(bareTaken.text)}`)
+  assert(bareTaken.mind?.island === '再说一次我就信了' && bareTaken.mind?.whisper === '这句话像一只手按在肩上', `裸协议行应回收成心理,实际 ${JSON.stringify(bareTaken.mind)}`)
+  assert(bareTaken.mind?.kind === 'pure', '裸种类行解析为纯')
+  assert(stripMindMarks('种类：红烧比较好吃') === '种类：红烧比较好吃', '正文里的「种类:」不动')
+  // ④ 「加心一行」类格式旁白:整行/前缀/括号/跟在标记前都不外漏
+  assert(stripMindMarks('好想咬你。\n加心一行') === '好想咬你。', '加心一行整行剥')
+  assert(stripMindMarks('好想咬你。\n加心一行：心里在偷乐') === '好想咬你。', '加心一行:值也整行剥')
+  assert(stripMindMarks('好想咬你（加心一行）') === '好想咬你', '括号旁白剥除')
+  assert(!stripMindMarks('好想咬你。\n加心一行‹心|心里在偷乐|说|想听你再叫我一声›').includes('加心'), '跟在标记前的旁白不外漏')
+  // ⑤ 岛面字段不能是旁白/占位符
+  assert(parseMindMark('‹心|加心一行|纯|其实一直在等你开口›') === null, '岛面是旁白整段作废')
+  assert(parseMindMark('‹心|一句心里话|纯|其实一直在等你开口›') === null, '占位符不采信')
+  // ⑥ 流式:残渣行不闪进气泡,普通行直通
+  const s2 = new MindMarkStripper()
+  assert(s2.feed('好想你。') + s2.flush() === '好想你。', '普通行直通')
+  const s3 = new MindMarkStripper()
+  assert(s3.feed('种类：纯\n好想你。') + s3.flush() === '好想你。', '裸种类行流式吞掉')
+  const s4 = new MindMarkStripper()
+  assert(s4.feed('加心一行\n') + s4.flush() === '', '加心一行流式吞掉')
+  const s5 = new MindMarkStripper()
+  assert(s5.feed('加心一行‹心|心里在偷乐|说|想听你再叫我一声›') + s5.flush() === '', '旁白紧跟标记整行吞')
+  const s6 = new MindMarkStripper()
+  assert(s6.feed('种类：红烧比较好吃') + s6.flush() === '种类：红烧比较好吃', '正文里的「种类:」行流式放行')
+})
+
+await test('心理刻画 2026-10-28:删过头修复(无闭合标签/黑名单/复述/竖线)', () => {
+  // ① 无闭合标签标注只摘括号与标签词,内容留下
+  assert(sanitizeMind('[心情真复杂') === '心情真复杂', '无闭合标签只摘括号')
+  assert(sanitizeMind('[揣测：真复杂') === '真复杂', '无闭合带冒号剥「[标签:」')
+  assert(sanitizeMind('[OK]还不错') === '还不错', '字母标签残片③b仍兜底')
+  assert(sanitizeMind('0.9]超赞') === '0.9]超赞', '数字开头的正常内容不动')
+  // ② 黑名单是机制词子串匹配,带感受词的心事不判废
+  assert(mindFromReasoning('想给好友发个消息。就这。')?.whisper === '想给好友发个消息', '「想给好友」是心事不是操作句')
+  assert(mindFromReasoning('按规则不艾特就行。') === null, '纯机制句仍然判废')
+  // ③ 心事只是"包含"短回复不算复述,不整句丢掉
+  const inner = depictTurn('再说一次我就信了', '他要是再说一次我就信了啊,心里居然有点甜')
+  assert(inner?.whisper === '他要是再说一次我就信了啊,心里居然有点甜', `包含短回复的心事不判废,实际 ${inner?.whisper}`)
+  // ④ 底字混进竖线清洗后采信,不再整段作废
+  const piped = parseMindMark('‹心|心里在偷乐|说|想听你|再叫我一声›')
+  assert(piped?.whisper === '想听你再叫我一声', `竖线清洗后采信,实际 ${JSON.stringify(piped)}`)
+})
+
 // ---------------------------------------------------------------------------
 // 7.5 记忆提取 + 用户风格分析(2026-08-10 新增 Sub Agent 职能)
 // ---------------------------------------------------------------------------
@@ -1731,18 +2991,37 @@ await test('buildMemoryExtractSystem / buildUserStyleSystem:拼装含指令,不�
 await test('extractMemories / analyzeUserStyle:无 Key 优雅失败(零 LLM 调用)', async () => {
   const noKey = { ...MOCK_PROVIDERS, apiKey: '', baseURL: '', model: '', systemPrompt: '', reasoningEffort: 'high' as const, mcpServers: [], skillsDirs: [] }
   const summaryAgent = createSummaryAgent({ getConfig: () => noKey })
-  const mindAgent = createMindAgent({ getConfig: () => noKey })
   const proactiveAgent = createProactiveAgent({ getConfig: () => noKey })
   const history = [{ id: 'u1', role: 'user' as const, parts: [{ type: 'text' as const, text: '你好' }] }]
   assert((await summaryAgent.extractMemories(history)).length === 0, '无 Key 返回空数组')
   assert((await summaryAgent.extractMemories([])).length === 0, '空历史返回空数组')
-  assert((await mindAgent.guess(history)) === '', '无 Key 揣测返回空串')
   assert((await proactiveAgent.analyzeUserStyle(history)) === '', '无 Key 风格分析返回空串')
   assert((await proactiveAgent.analyzeUserStyle([])) === '', '空历史风格分析返回空串')
-  assert((await proactiveAgent.judgeProactive(history, 15)).should === false, '无 Key 判断 should:false')
-  assert((await proactiveAgent.judgeProactive([], 15)).should === false, '空历史判断 should:false')
+  const noKeyVerdict = await proactiveAgent.judgeProactive(history, 15)
+  assert(noKeyVerdict.should === false, '无 Key 判断 should:false')
+  assert(noKeyVerdict.reason === 'error', `无 Key 判断 reason 应为 error(不可当"判断说不"),实际 ${JSON.stringify(noKeyVerdict)}`)
+  const emptyVerdict = await proactiveAgent.judgeProactive([], 15)
+  assert(emptyVerdict.should === false && emptyVerdict.reason === 'error', '空历史判断 should:false + reason error')
   assert(!('judgeProactive' in summaryAgent), '总结 Agent 不再兼任主动陪伴判断')
-  assert(!('analyzeUserStyle' in mindAgent), '心理揣测 Agent 不再兼任风格分析')
+})
+
+await test('judgeProactive:三态可区分(decided 含否决 / error = 没跑成)', async () => {
+  const cfg = { ...MOCK_PROVIDERS, apiKey: 'k', systemPrompt: '' }
+  const history = [{ id: 'u1', role: 'user' as const, parts: [{ type: 'text' as const, text: '你好' }] }]
+  const withStream = (text: string) =>
+    createProactiveAgent({
+      getConfig: () => cfg as never,
+      stream: async () => ({ calls: [], text, usage: null, aborted: false }),
+    })
+  // 判断说不(真实结论)→ decided:调度器只进短冷却重试,不吃满间隔
+  const no = await withStream('{"should":false}').judgeProactive(history, 15)
+  assert(no.should === false && no.reason === 'decided', `判 no 应为 decided,实际 ${JSON.stringify(no)}`)
+  // 判断开口 → decided + hint
+  const yes = await withStream('{"should":true,"hint":"问候一下"}').judgeProactive(history, 15)
+  assert(yes.should === true && yes.reason === 'decided' && yes.hint === '问候一下', `判 yes 应带 hint,实际 ${JSON.stringify(yes)}`)
+  // 垃圾输出(调用失败/解析失败同款 fallback)→ error,不得混同"判断说不"
+  const broken = await withStream('不是json').judgeProactive(history, 15)
+  assert(broken.should === false && broken.reason === 'error', `垃圾输出应为 error,实际 ${JSON.stringify(broken)}`)
 })
 
 await test('runSubJson:解析成功采信,垃圾/失败回退 fallback', async () => {
@@ -1769,12 +3048,11 @@ await test('runSubJson:解析成功采信,垃圾/失败回退 fallback', async (
   assert(bad.should === false, '垃圾输出应回退 fallback')
 })
 
-await test('createSubAgentHost:一份宿主挂齐对话侧四类能力', () => {
+await test('createSubAgentHost:一份宿主挂齐对话侧三类能力', () => {
   const host = createSubAgentHost({
     getConfig: () => ({ ...MOCK_PROVIDERS, apiKey: '', systemPrompt: '' }) as never,
   })
   assert(typeof host.summary.summarize === 'function' && typeof host.summary.extractMemories === 'function', 'summary 能力')
-  assert(typeof host.mind.guess === 'function', 'mind 能力')
   assert(typeof host.proactive.judgeProactive === 'function' && typeof host.proactive.analyzeUserStyle === 'function', 'proactive 能力')
   assert(typeof host.classifier.classify === 'function' && typeof host.classifier.judgeMonologue === 'function', 'classifier 能力')
 })
@@ -1838,10 +3116,10 @@ await test('isDirectedToBot:主人群聊消息意图识别(2026-09-22 规则②,
   assert(isDirectedToBot('帮我查下天气', true) === true, '@机器人 显式指向')
   assert(isDirectedToBot('岛灵在吗') === true, '称呼岛灵 = 指向')
   assert(isDirectedToBot('鲸鱼娘看看这个') === true, '称呼鲸鱼娘 = 指向')
-  assert(isDirectedToBot('你觉得呢?') === true, '第二人称疑问 = 指向')
-  assert(isDirectedToBot('你说好不好') === true, '第二人称+好不好 = 指向')
-  assert(isDirectedToBot('帮我查一下B站排名') === true, '对助手式祈使 = 指向')
-  assert(isDirectedToBot('给我看看你的图') === true, '给我+动词 = 指向')
+  assert(isDirectedToBot('你觉得呢?') === false, '第二人称疑问不足以确定在叫机器人')
+  assert(isDirectedToBot('你说好不好') === false, '群聊第二人称不升级主人指令')
+  assert(isDirectedToBot('帮我查一下B站排名') === false, '祈使句没有称呼时可能在叫群友')
+  assert(isDirectedToBot('给我看看你的图') === false, '没有称呼的祈使句不升级权限')
   // 未指向(主人与群友闲聊 → 别人的信息)
   assert(isDirectedToBot('哈哈今天好累') === false, '日常感慨未指向')
   assert(isDirectedToBot('晚上开黑吗') === false, '问群友未指向(无疑问对象你)')
@@ -2043,6 +3321,173 @@ await test('napcat 扫码登录流:错误态「换一张」应整体重试(2026-
   flow.stop()
 })
 
+await test('describeLoginError:把 fetch failed 展开成可读连接诊断(2026-10-22)', () => {
+  const refused: any = new TypeError('fetch failed')
+  refused.cause = Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:6099'), {
+    code: 'ECONNREFUSED',
+    address: '127.0.0.1',
+    port: 6099,
+  })
+  const text = describeLoginError(refused)
+  assert(text.includes('连接被拒绝'), `应识别 ECONNREFUSED,实际 ${text}`)
+  assert(!text.includes('fetch failed'), `不应只回 "fetch failed",实际 ${text}`)
+
+  const timeout: any = new TypeError('fetch failed')
+  timeout.cause = Object.assign(new Error('connect ETIMEDOUT 10.0.0.2:6099'), {
+    code: 'ETIMEDOUT',
+    address: '10.0.0.2',
+    port: 6099,
+  })
+  assert(describeLoginError(timeout).includes('连接超时'), '应识别超时')
+
+  const dns: any = new TypeError('fetch failed')
+  dns.cause = Object.assign(new Error('getaddrinfo ENOTFOUND napcat.local'), { code: 'ENOTFOUND' })
+  assert(describeLoginError(dns).includes('无法解析主机名'), '应识别 DNS 失败')
+
+  const plain = new TypeError('fetch failed')
+  assert(describeLoginError(plain) === '网络请求失败', '无 cause 时退回通用文案')
+})
+
+await test('napcat 扫码登录流:WebUI 连不上自动重连,启动后自动出码(2026-10-22)', async () => {
+  // 用户截图病灶:NapCat 未启动 → fetch failed → 旧实现进死错误态,
+  // 之后 NapCat 起来也不会出码。现在应保持 waiting 并自动重试。
+  let online = false
+  let calls = 0
+  const states: Array<{ phase: string; qrUrl: string; remainSec: number; message: string }> = []
+  const connErr = () => {
+    const err: any = new TypeError('fetch failed')
+    err.cause = Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:6099'), {
+      code: 'ECONNREFUSED',
+      address: '127.0.0.1',
+      port: 6099,
+    })
+    return err
+  }
+  const fetchImpl = (async (url: string | URL | Request) => {
+    calls++
+    if (!online) throw connErr()
+    const u = String(url)
+    if (u.endsWith('/auth/login')) {
+      return new Response(JSON.stringify({ code: 0, data: { Credential: 'CRED' } }))
+    }
+    return new Response(
+      JSON.stringify({
+        code: 0,
+        data: { isLogin: false, isOffline: false, qrcodeurl: 'https://txz.qq.com/p?k=RECONNECT', loginError: '' },
+      }),
+    )
+  }) as typeof fetch
+  const flow = createNapcatLoginFlow({
+    token: 'tok',
+    fetchImpl,
+    sha256Hex: (t) => createHash('sha256').update(t).digest('hex'),
+    pollMs: 10,
+    retryMs: 20,
+    onUpdate: (s) => states.push({ phase: s.phase, qrUrl: s.qrUrl, remainSec: s.remainSec, message: s.message }),
+  })
+  await flow.start()
+  assert(states[0]?.phase === 'waiting', '连接失败应停在 waiting(自动重连),不是死错误态')
+  assert(!states.some((s) => s.phase === 'error'), '连接失败不应进 error 态')
+  assert(states[0]?.remainSec === 0, '无码时不应显示倒计时')
+  assert(states[0]?.message.includes('连接被拒绝'), `错误文案应带底层原因,实际 ${states[0]?.message}`)
+  assert(states[0]?.message.includes('6099'), `错误文案应带端口,实际 ${states[0]?.message}`)
+
+  await sleepMs(45)
+  const callsBefore = calls
+  online = true // NapCat 起来了
+  const deadline = Date.now() + 1500
+  while (!states.some((s) => s.qrUrl.includes('RECONNECT')) && Date.now() < deadline) await sleepMs(10)
+  assert(calls > callsBefore, '应持续自动重试请求')
+  assert(states.some((s) => s.qrUrl.includes('RECONNECT')), 'NapCat 启动后应自动出码(无需点「换一张」)')
+  flow.stop()
+})
+
+await test('napcat 扫码登录流:轮询中 WebUI 掉线应丢码并自动重连(2026-10-22)', async () => {
+  let online = true
+  const states: Array<{ phase: string; qrUrl: string; message: string }> = []
+  const connErr = () => {
+    const err: any = new TypeError('fetch failed')
+    err.cause = Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' })
+    return err
+  }
+  const fetchImpl = (async (url: string | URL | Request) => {
+    if (!online) throw connErr()
+    const u = String(url)
+    if (u.endsWith('/auth/login')) {
+      return new Response(JSON.stringify({ code: 0, data: { Credential: 'CRED' } }))
+    }
+    return new Response(
+      JSON.stringify({
+        code: 0,
+        data: { isLogin: false, isOffline: false, qrcodeurl: 'https://txz.qq.com/p?k=DROP', loginError: '' },
+      }),
+    )
+  }) as typeof fetch
+  const flow = createNapcatLoginFlow({
+    token: 'tok',
+    fetchImpl,
+    sha256Hex: (t) => createHash('sha256').update(t).digest('hex'),
+    pollMs: 10,
+    retryMs: 20,
+    onUpdate: (s) => states.push({ phase: s.phase, qrUrl: s.qrUrl, message: s.message }),
+  })
+  await flow.start()
+  assert(states.some((s) => s.qrUrl.includes('DROP')), '先正常出码')
+
+  online = false // WebUI 挂了
+  const deadline = Date.now() + 1000
+  while (!states.some((s) => s.message.includes('连接中断')) && Date.now() < deadline) await sleepMs(10)
+  assert(states.some((s) => s.message.includes('连接中断')), '掉线应提示连接中断')
+  const dropAt = states.findIndex((s) => s.message.includes('连接中断'))
+  assert(states.slice(dropAt).every((s) => !s.qrUrl), '掉线后旧码应清空(不展示无法刷新的码)')
+
+  online = true
+  const deadline2 = Date.now() + 1500
+  while (!states.slice(dropAt).some((s) => s.qrUrl) && Date.now() < deadline2) await sleepMs(10)
+  assert(states.slice(dropAt).some((s) => s.qrUrl), 'WebUI 恢复后应自动重连并重新出码')
+  flow.stop()
+})
+
+await test('napcat 扫码登录流:首个地址连不上应尝试候选地址(IPv6 兜底,2026-10-22)', async () => {
+  const tried: string[] = []
+  const states: Array<{ qrUrl: string }> = []
+  const connErr = () => {
+    const err: any = new TypeError('fetch failed')
+    err.cause = Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:6099'), {
+      code: 'ECONNREFUSED',
+      address: '127.0.0.1',
+      port: 6099,
+    })
+    return err
+  }
+  const fetchImpl = (async (url: string | URL | Request) => {
+    const u = String(url)
+    tried.push(u)
+    if (u.startsWith('http://127.0.0.1:6099')) throw connErr()
+    if (u.endsWith('/auth/login')) {
+      return new Response(JSON.stringify({ code: 0, data: { Credential: 'CRED' } }))
+    }
+    return new Response(
+      JSON.stringify({
+        code: 0,
+        data: { isLogin: false, isOffline: false, qrcodeurl: 'https://txz.qq.com/p?k=IPV6', loginError: '' },
+      }),
+    )
+  }) as typeof fetch
+  const flow = createNapcatLoginFlow({
+    token: 'tok',
+    fetchImpl,
+    sha256Hex: (t) => createHash('sha256').update(t).digest('hex'),
+    pollMs: 200,
+    baseUrls: ['http://127.0.0.1:6099', 'http://[::1]:6099'],
+    onUpdate: (s) => states.push({ qrUrl: s.qrUrl }),
+  })
+  await flow.start()
+  assert(tried.some((u) => u.startsWith('http://[::1]:6099')), 'IPv4 连不上应尝试 [::1]')
+  assert(states.some((s) => s.qrUrl.includes('IPV6')), '候选地址可用时应正常出码')
+  flow.stop()
+})
+
 await test('webuiTokenHash:WebUI 口令散列约定(token + ".napcat")', () => {
   const sha2 = (t: string) => createHash('sha256').update(t).digest('hex')
   assert(webuiTokenHash('2f901af2e1e0', sha2) === sha2('2f901af2e1e0.napcat'), '散列应与前端约定一致')
@@ -2068,8 +3513,45 @@ await test('looksLikeMasterAddressed:别人轮对主人说话安全网(2026-09-2
   assert(looksLikeMasterAddressed('哈哈确实拉胯,心疼你一秒') === false, '对对方的回复不命中')
   assert(looksLikeMasterAddressed('主人是谁啊') === false, '第三人称提及主人不命中(后跟非标点)')
   assert(looksLikeMasterAddressed('我问主人一下') === false, '「我问主人」非开头称呼')
+  assert(looksLikeMasterAddressed('我跟主人说了你明天有空,你再跟他确认') === false, '句中跟主人说是讲给对方听的,不整段改投主人')
   assert(looksLikeMasterAddressed('好的主人') === false, '非开头称呼(保守,宁漏)')
   assert(looksLikeMasterAddressed('') === false, '空输入')
+})
+
+await test('shouldHandGroupReplyToMaster:群聊轮转交主人判定(2026-10-28 群路由优化——修「回复群友的发给主人 QQ」)', () => {
+  // 明确私下对主人请示/汇报 → 主人
+  assert(shouldHandGroupReplyToMaster('主人,魔精问你明天有没有空?') === true, '「主人,」私下问主人 = 转主人')
+  assert(shouldHandGroupReplyToMaster('向主人汇报一下,图已经发群里了') === true, '向主人汇报 = 转主人')
+  assert(shouldHandGroupReplyToMaster('给主人请示要不要答应他') === true, '给主人请示 = 转主人')
+  // 含「主人，」的混合措辞保守扣留，不能凭群称呼放行私下内容。
+  assert(shouldHandGroupReplyToMaster('主人,你们别乱说!') === true, '「主人,你们别乱说」含主人称呼时保守扣留，不按正文改收件人')
+  assert(shouldHandGroupReplyToMaster('主人,大家别误会呀') === true, '「主人,大家…」群称呼不能使私下内容放行')
+  assert(shouldHandGroupReplyToMaster('主人,各位评评理~') === true, '「主人,各位…」群称呼不能使私下内容放行')
+  // 对群转达/公开回应(非主人前缀)→ 发群(旧 isAsk 会误转主人)
+  assert(shouldHandGroupReplyToMaster('我去问主人哈~') === false, '「我去问主人哈」对群转达 = 发群,不转主人')
+  assert(shouldHandGroupReplyToMaster('你们别乱说,主人不是那样的人!') === false, '公开维护(非主人前缀)= 发群')
+  assert(shouldHandGroupReplyToMaster('哈哈确实拉胯,心疼你一秒') === false, '普通群回复 = 发群')
+  assert(shouldHandGroupReplyToMaster('主人最好了!') === false, '「主人最」后跟非标点 = 公开夸主人,发群')
+  // 空输入
+  assert(shouldHandGroupReplyToMaster('') === false && shouldHandGroupReplyToMaster('   ') === false, '空输入')
+})
+
+await test('turnAlreadySentGroupText/sentMessageIsText:媒体发送不算「已文字回复」(2026-10-28 修发图+文字回复误转主人)', () => {
+  const mediaOnly = { type: 'group', target: '111', text: '(图片/文件/语音)' }
+  const textSend = { type: 'group', target: '111', text: '你好呀' }
+  assert(sentMessageIsText(textSend) === true, '文字发送算文字回复')
+  assert(sentMessageIsText(mediaOnly) === false, '纯媒体占位不算文字回复')
+  assert(sentMessageIsText({ type: 'group', target: '111', text: '' }) === false, '空正文不算文字回复')
+  // 本轮发过图(mediaOnly),轮前文字基线 0:turnAlreadySentGroupText 应为 false(不误转主人)
+  assert(turnAlreadySentGroupText([mediaOnly], 0, '111') === false, '只发过媒体 → 不算已文字回复,对话文本发群')
+  // 本轮发过文字(textSend),轮前文字基线 0:应为 true(对话文本=给主人的汇报)
+  assert(turnAlreadySentGroupText([textSend], 0, '111') === true, '发过文字 → 已文字回复,对话文本转主人')
+  // 媒体 + 文字:有文字即算
+  assert(turnAlreadySentGroupText([mediaOnly, textSend], 0, '111') === true, '媒体+文字有文字即算')
+  // 轮前已有 1 条文字(基线 1),本轮未新增文字:不应误判
+  assert(turnAlreadySentGroupText([textSend], 1, '111') === false, '未超基线不算本轮已发')
+  // 别的群不串
+  assert(turnAlreadySentGroupText([textSend], 0, '222') === false, '别的群不算')
 })
 
 await test('parseClassifierJson:意图判定解析(2026-08-16)', () => {
@@ -2710,7 +4192,7 @@ await test('evolve_memory:quick/run/status(LLM 直接驱动快捷自我进化)',
   assert(run.includes('后台') && calls.includes('run::3'), `run 动作:${run}`)
   const st = String(await t.execute({ action: 'status' }))
   assert(st.includes('最近一轮'), `status 动作:${st}`)
-  await assertRejects(() => t.execute({ action: 'nope' }), '仅支持 quick/run/status')
+  await assertRejects(() => t.execute({ action: 'nope' }), 'quick/run/status/log/rollback/reset')
   // 旧宿主 stub 无 runQuick → 回退 requestEvolve(focus, 1)
   const evoOld = { requestEvolve: evo.requestEvolve, getStatus: evo.getStatus }
   const toolsOld = createBuiltinTools({ get value() { return 8192 }, set value(_n: number) {} }, { getConfig: () => cfg, getEvolution: () => evoOld })
@@ -3252,6 +4734,83 @@ await test('set_system_volume:注册与参数校验;不实际改系统音量', a
   await assertRejects(() => tool!.execute({ action: 'set', volume: 'abc' }), 'volume 需要是数字', '非数字 volume 应拒绝')
 })
 
+await test('computer:注册与参数校验;截图路由到 window-shot.ps1 禁手写截屏', async () => {
+  // 2026-10-22 用户实测"截图残缺":LLM 用 exec_command 手写 PowerShell 截屏,
+  // 150% 缩放下按逻辑尺寸分配位图,只截到窗口左上 ~380x640 物理像素
+  // (窗口实际 570x960)——右 1/3、下 1/3 被裁。computer 工具统一走 DPI
+  // 感知后端;此处钉注册/描述引导/错误路径(成功路径见下面实机冒烟)
+  const tools = createTools({ onSwitchToMusic: () => {} })
+  const tool = tools.find((t) => t.name === 'computer')
+  assert(tool, '应注册 computer')
+  const desc = tool!.description
+  assert(
+    desc.includes('window_shot') && desc.includes('window_focus') && desc.includes('screen_shot') && desc.includes('window_list'),
+    '描述应列出四个动作',
+  )
+  assert(desc.includes('禁止') && desc.includes('exec_command'), '描述应引导禁止手写截屏')
+  assert(/不裁切|完整/.test(desc), '描述应承诺截图完整不裁切')
+  await assertRejects(() => tool!.execute({ action: 'bogus' }), '未知 action', '非法 action 应拒绝')
+  await assertRejects(() => tool!.execute({ action: 'window_shot' }), 'title', '截图无目标窗口应拒绝')
+  await assertRejects(() => tool!.execute({ action: 'window_focus' }), 'title', '置前无目标应拒绝')
+})
+
+await test('computer:windowShotScriptPath 与 parseJsonOutput(纯函数)', () => {
+  // 路径解析与 volumeScriptPath 同款:打包 resourcesPath/bridge/,开发 cwd/electron/
+  assert(/window-shot\.ps1$/.test(windowShotScriptPath()), '脚本路径应落在 window-shot.ps1')
+  const bom = '﻿{"ok":true,"n":1}'
+  assert((parseJsonOutput(bom, 'x') as { ok: boolean }).ok === true, 'BOM 前缀应容错')
+  const noisy = '警告:xxx\n{"ok":false,"error":"未找到"}'
+  assert((parseJsonOutput(noisy, 'x') as { ok: boolean }).ok === false, 'JSON 前有噪声应截取解析')
+  assert(Array.isArray(parseJsonOutput('[]', 'x')), '空数组应解析')
+  try {
+    parseJsonOutput('纯文本输出', '无有效输出')
+    assert(false, '坏输出应抛错')
+  } catch (e) {
+    assert(String((e as Error).message).includes('无有效输出'), '坏输出错误应带兜底文案')
+  }
+})
+
+await test('computer:window_list 实机冒烟(枚举可见窗口)', async () => {
+  // 2026-10-22 电脑操控:PowerShell P/Invoke 枚举(只读,无副作用)
+  const tools = createTools({ onSwitchToMusic: () => {} })
+  const tool = tools.find((t) => t.name === 'computer')!
+  const out = String(await tool.execute({ action: 'window_list' }))
+  assert(out.includes('句柄') && out.includes('尺寸'), '列表应带句柄与尺寸')
+})
+
+await test('computer:window_shot 实机冒烟——截图尺寸=物理窗口尺寸(DPI 不裁切回归)', async () => {
+  // 核心回归(2026-10-22):150% 缩放机器上,截图宽高必须等于窗口**物理**
+  // 尺寸(window_list 同源坐标系);按逻辑尺寸分配位图的旧写法会小一圈
+  // (= 窗口右/下被裁)。桌面窗口(Program Manager)恒存在,截完即删
+  const tools = createTools({ onSwitchToMusic: () => {} })
+  const tool = tools.find((t) => t.name === 'computer')!
+  const listOut = String(await tool.execute({ action: 'window_list', title: 'Program Manager' }))
+  const m = /尺寸 (\d+)x(\d+)/.exec(listOut)
+  assert(m, `window_list 应给出桌面窗口尺寸,实际:${listOut.slice(0, 200)}`)
+  const [expW, expH] = [Number(m![1]), Number(m![2])]
+  const out = path.join(os.tmpdir(), `computer-test-${Date.now()}.png`)
+  try {
+    const raw = (await tool.execute({ action: 'window_shot', title: 'Program Manager', output: out })) as {
+      text: string
+      image?: string
+    }
+    const buf = await fs.readFile(out)
+    // PNG IHDR:16-19 宽、20-23 高(大端)
+    const w = buf.readUInt32BE(16)
+    const h = buf.readUInt32BE(20)
+    assert(w === expW && h === expH, `截图尺寸 ${w}x${h} 应等于窗口物理尺寸 ${expW}x${expH}(不等 = DPI 又截残了)`)
+    assert(raw.image?.startsWith('data:image/png;base64,'), '应返回图片附件供对话内展示')
+    const reportedPath = /^文件:(.+)$/m.exec(raw.text)?.[1]?.trim()
+    assert(reportedPath && path.isAbsolute(reportedPath), '文本应带绝对输出路径(QQ 发图兜底靠路径)')
+    // CI 的 TEMP 可含 RUNNER~1 等短路径，PowerShell Get-Item 会返回展开后的长路径。
+    // 核对实际文件，不能要求两种合法路径写法逐字相同。
+    const [reportedFile, requestedFile] = await Promise.all([fs.realpath(reportedPath), fs.realpath(out)])
+    assert(path.relative(reportedFile, requestedFile) === '', '文本中的路径应指向实际截图文件')
+  } finally {
+    await fs.rm(out, { force: true })
+  }
+})
+
 await test('list_conversation_media:格式化视频播放状态;空清单兜底', async () => {
   // 2026-08-10 用户要求:LLM 能查对话窗口有哪些媒体附件、哪个在播放、
   // 视频的音量/速度/循环/全屏状态
@@ -3336,9 +4895,10 @@ await test('任务注册表:进入终态触发 done 回调一次;失败也有反
   registerTask({ id: 'login-2', title: 'B站扫码登录', status: 'waiting', detail: '等待用户扫码确认' })
   updateTask('login-2', { status: 'failed', detail: '二维码已过期或未扫码确认,可重新生成' })
   assert(events.length >= 2 && events[1]?.status === 'failed', '失败应触发回调')
+  // 2026-10-23:终态不再注入状态块——结果只经 background-done 当轮告知,
+  // 否则每轮系统提示都重复"已完成",LLM 会反复播报"视频下载完毕"
   const block = getTasksStatusBlock()
-  assert(block.includes('B站扫码登录:已完成,用户已扫码确认'), '终态应出现在状态块')
-  assert(block.includes('B站扫码登录:已失败,二维码已过期'), '失败状态应出现在状态块')
+  assert(block === '', `终态任务不应注入状态块,实际:${block}`)
 })
 
 await test('任务注册表:终态回调载荷可拼 background-done 标题/消息', async () => {
@@ -3374,9 +4934,10 @@ await test('任务注册表:pruneTasks 清理超 TTL 终态记录', async () => 
   registerTask({ id: 'old', title: '旧任务', status: 'done', detail: '已完成', at: now })
   registerTask({ id: 'fresh', title: '新任务', status: 'done', detail: '已完成', at: now + 12 * 60 * 60 * 1000 })
   pruneTasks(now + 25 * 60 * 60 * 1000)
-  const block = getTasksStatusBlock()
-  assert(!block.includes('旧任务'), '超 TTL 终态应被清理')
-  assert(block.includes('新任务'), 'TTL 内终态应保留')
+  const ids = listTasks().map((t) => t.id)
+  assert(!ids.includes('old'), '超 TTL 终态应被清理')
+  assert(ids.includes('fresh'), 'TTL 内终态记录应保留(供 saved/进度查询)')
+  assert(!getTasksStatusBlock().includes('新任务'), '终态不注入状态块')
 })
 
 // ---------------------------------------------------------------------------
@@ -3787,6 +5348,85 @@ await test('open_file 媒体拦截端到端:引擎执行后 message parts 含 me
   }
 })
 
+await test('心理刻画:等回复落定再判断——中途步骤写下的心理行只剥不采信', async () => {
+  // 2026-10-26 二轮:流式中途/工具中间步写下的心理行只从正文剥掉,
+  // 判断只在回复落定那一刻做一次——只认最终回复里的合格标记
+  // (MIND_TURN_NUDGE:标记必须是回复正文最后一行,只写在思考里不算)。
+  const events: Array<{ type: string }> = []
+  const engine = createAgentEngine({
+    getConfig: () => ({
+      ...MOCK_PROVIDERS,
+      apiKey: 'k',
+      baseURL: 'https://api.deepseek.com',
+      model: 'deepseek-v4-flash',
+      reasoningEffort: 'high',
+      systemPrompt: '',
+      mcpServers: [],
+      skillsDirs: [],
+    }),
+    onEvent: (event) => events.push(event as never),
+    onSwitchToMusic: () => {},
+  })
+  const origFetch = globalThis.fetch
+  let count = 0
+  globalThis.fetch = async () => {
+    count++
+    if (count === 1) {
+      // 中间步:正文带心理行 + 必然失败的工具调用(缺必填参数)→ 续下一步
+      return sseResponse([
+        { type: 'response.created', response: { id: 'r1' } },
+        { type: 'response.output_item.added', output_index: 0, item: { type: 'message', id: 'item_1' } },
+        { type: 'response.output_text.delta', output_index: 0, delta: '我查一下。‹心|早先那口气|纯|其实我没放在心上›' },
+        { type: 'response.output_item.done', output_index: 0, item: { type: 'message', id: 'item_1' } },
+        { type: 'response.output_item.added', output_index: 1, item: { type: 'function_call', id: 'item_2', call_id: 'call_1', name: 'open_file', arguments: '' } },
+        { type: 'response.function_call_arguments.done', item_id: 'item_2', arguments: '{}' },
+        { type: 'response.output_item.done', output_index: 1, item: { type: 'function_call', id: 'item_2', call_id: 'call_1', name: 'open_file', arguments: '{}' } },
+        { type: 'response.completed', response: { usage: { input_tokens: 10, output_tokens: 5 } } },
+      ])
+    }
+    // 落定步:正文没有心理行
+    return sseResponse([
+      { type: 'response.created', response: { id: 'r2' } },
+      { type: 'response.output_item.added', output_index: 0, item: { type: 'message', id: 'item_3' } },
+      { type: 'response.output_text.delta', output_index: 0, delta: '查完了,放心。' },
+      { type: 'response.output_item.done', output_index: 0, item: { type: 'message', id: 'item_3' } },
+      { type: 'response.completed', response: { usage: { input_tokens: 10, output_tokens: 5 } } },
+    ])
+  }
+  try {
+    engine.send('帮我看看', [])
+    await waitFor(() => events.some((e) => e.type === 'message') && !engine.busy, 10000, 'message 落定')
+    // ① 落定回复没写心理行 → 本轮不更新心理(中途步骤那行只剥不采信)
+    assert(!events.some((e) => e.type === 'mind-guess' || e.type === 'mind-whisper'), '中途步骤的心理行不采信')
+    // ② 标记不进正文(气泡/历史/QQ 都拿不到),剥标记不吞正文
+    const landed = events.find((e) => e.type === 'message') as unknown as { message: { parts: Array<{ type: string; text?: string }> } }
+    const texts = landed.message.parts.filter((p) => p.type === 'text').map((p) => String(p.text ?? ''))
+    assert(texts.every((t) => !t.includes('‹心')), `心理行应从正文剥掉,实际 ${JSON.stringify(texts)}`)
+    assert(texts.some((t) => t.includes('我查一下')), `剥标记不应吞正文,实际 ${JSON.stringify(texts)}`)
+
+    // ③ 落定回复写下的那一行 = 本轮唯一判断依据
+    events.length = 0
+    count = 0
+    globalThis.fetch = async () =>
+      sseResponse([
+        { type: 'response.created', response: { id: 'r3' } },
+        { type: 'response.output_item.added', output_index: 0, item: { type: 'message', id: 'item_4' } },
+        { type: 'response.output_text.delta', output_index: 0, delta: '好。‹心|悬着的心放下了|说|刚才真有点慌›' },
+        { type: 'response.output_item.done', output_index: 0, item: { type: 'message', id: 'item_4' } },
+        { type: 'response.completed', response: { usage: { input_tokens: 10, output_tokens: 5 } } },
+      ])
+    engine.send('嗯', [])
+    await waitFor(() => events.some((e) => e.type === 'message') && !engine.busy, 10000, '第二轮落定')
+    const guess = events.find((e) => e.type === 'mind-guess') as { guess?: string } | undefined
+    const whisper = events.find((e) => e.type === 'mind-whisper') as { text?: string; kind?: string } | undefined
+    assert(guess?.guess === '悬着的心放下了', `岛面一句应取落定回复那行,实际 ${JSON.stringify(guess)}`)
+    assert(whisper?.text === '刚才真有点慌' && whisper?.kind === 'say', `底字应取落定回复那行,实际 ${JSON.stringify(whisper)}`)
+  } finally {
+    globalThis.fetch = origFetch
+    engine.dispose()
+  }
+})
+
 await test('exec_command start 拦截端到端:引擎执行后 message parts 含 media', async () => {
   // 与上一条同链路,但 LLM 用 start 命令打开视频
   // 2026-08-09:start 解析的媒体路径须真实存在
@@ -3939,6 +5579,74 @@ await test('手动调用端到端:技能名+描述无空格分离 + DeepSeek rea
       | undefined
     const userText = userItem?.content?.map((c) => c.text ?? '').join('') ?? ''
     assert(userText.includes('帮我调用'), `用户消息应含描述文字,实际:${userText}`)
+  } finally {
+    globalThis.fetch = origFetch
+    engine.dispose()
+  }
+})
+
+await test('Responses:思维链只出现在 output_item.done 时,下一轮工具请求仍带回', async () => {
+  // 有的响应不走 reasoning_text.delta,全文在 output_item.done 的
+  // reasoning_text 上。漏了这一段,下一步带 tools 的请求会 400。
+  const bodies: string[] = []
+  let n = 0
+  const engine = createAgentEngine({
+    getConfig: () => ({
+      ...MOCK_PROVIDERS,
+      apiKey: 'k',
+      baseURL: 'https://api.deepseek.com',
+      model: 'deepseek-v4-flash',
+      reasoningEffort: 'high',
+      systemPrompt: '',
+      mcpServers: [],
+      skillsDirs: [],
+    }),
+    onEvent: () => {},
+    onSwitchToMusic: () => {},
+  })
+  const origFetch = globalThis.fetch
+  globalThis.fetch = async (_url: string | URL | Request, opts?: RequestInit) => {
+    bodies.push(String(opts?.body ?? ''))
+    n += 1
+    if (n === 1) {
+      return sseResponse([
+        { type: 'response.created', response: { id: 'r1' } },
+        {
+          type: 'response.output_item.done',
+          output_index: 0,
+          item: { type: 'reasoning', content: [{ type: 'reasoning_text', text: '先查一下' }] },
+        },
+        {
+          type: 'response.output_item.added',
+          output_index: 1,
+          item: { type: 'function_call', id: 'item_1', call_id: 'call_1', name: 'get_time', arguments: '{}' },
+        },
+        { type: 'response.function_call_arguments.done', item_id: 'item_1', arguments: '{}' },
+        {
+          type: 'response.output_item.done',
+          output_index: 1,
+          item: { type: 'function_call', id: 'item_1', call_id: 'call_1', name: 'get_time', arguments: '{}' },
+        },
+        { type: 'response.completed', response: { usage: { input_tokens: 1, output_tokens: 1 } } },
+      ])
+    }
+    return sseResponse([
+      { type: 'response.created', response: { id: 'r2' } },
+      { type: 'response.output_text.delta', output_index: 0, delta: '好' },
+      { type: 'response.completed', response: { usage: { input_tokens: 1, output_tokens: 1 } } },
+    ])
+  }
+  try {
+    engine.send('现在几点', [])
+    await waitFor(() => !engine.busy && n >= 2, 10000, '工具轮后的第二次请求')
+    const second = JSON.parse(bodies[1] ?? '{}') as { input?: Array<Record<string, unknown>> }
+    const input = second.input ?? []
+    const reasoningAt = input.findIndex((i) => i.type === 'reasoning')
+    const callAt = input.findIndex((i) => i.type === 'function_call')
+    const reasoning = input[reasoningAt]
+    const content = reasoning?.content as Array<{ type?: string; text?: string }> | undefined
+    assert(reasoningAt >= 0 && reasoningAt < callAt, `reasoning 应在 function_call 之前,实际:${input.map((i) => i.type).join(',')}`)
+    assert(content?.[0]?.type === 'reasoning_text' && content[0].text === '先查一下', `应带回 done 里的原文,实际:${JSON.stringify(content)}`)
   } finally {
     globalThis.fetch = origFetch
     engine.dispose()
@@ -4281,6 +5989,19 @@ await test('bili download_up:配置输出目录 → 后台任务带 --outdir 根
   assert(out2.includes('E:/custom'), `显式 outdir 应优先,实际:${out2.slice(0, 200)}`)
 })
 
+await test('bili progress:只列进行中任务,已完成不重复播报(2026-10-23)', async () => {
+  resetTasks()
+  registerTask({ id: 'bili-dl-11', title: 'B站下载', status: 'running', detail: '视频下载(BV1AAAA) 42%,输出目录 C:\\dl' })
+  registerTask({ id: 'bili-dl-12', title: 'B站下载', status: 'done', detail: '视频下载(BV2BBBB)已完成:\nC:\\dl\\v2.mp4' })
+  const out = String(await biliQuery({ action: 'progress' }))
+  assert(out.includes('BV1AAAA') && out.includes('42%'), `进行中任务应列出,实际:${out}`)
+  assert(!out.includes('BV2BBBB') && !out.includes('已完成'), `已完成任务不应再出现(防 LLM 幻觉),实际:${out}`)
+  removeTask('bili-dl-11')
+  const out2 = String(await biliQuery({ action: 'progress' }))
+  assert(out2.includes('当前没有进行中'), `无进行中任务应给提示,实际:${out2}`)
+  resetTasks()
+})
+
 await test('set_output_dir:get 查当前值 / set 写配置(经 updateAgentConfig)', async () => {
   const { state, writes, tools } = makeConfigToolsDeps()
   const dir = tools.find((t) => t.name === 'set_output_dir')!
@@ -4354,6 +6075,27 @@ await test('tagMasterWindowText / masterWindowTurnRule:窗口输入打主人标�
   assert(rule.includes('主人窗口输入') && rule.includes('QQ 222') && rule.includes('最高权限'), '当轮身份指令应点名对方并声明主人权限')
   const groupRule = masterWindowTurnRule('群 20001')
   assert(groupRule.includes('群 20001') && groupRule.includes('不要发到群里'), '群窗口指令应声明回复默认不发群')
+})
+
+await test('napcat 工具:action=reconnect 触发 client.start(熔断后 LLM 可立即重连)', async () => {
+  let started = 0
+  const tools = napcatTools({
+    start: () => { started++ },
+    status: () => ({
+      connected: false,
+      url: 'ws://127.0.0.1:3001',
+      lastError: '熔断冷却中',
+      receivedCount: 0,
+      repliedCount: 0,
+      circuitBroken: true,
+    }),
+  })
+  const tool = tools.find((t) => t.name === 'napcat')!
+  const status = String(await tool.execute({ action: 'status' }))
+  assert(status.includes('熔断') && status.includes('reconnect'), `熔断状态应提示可 reconnect,实际:${status}`)
+  const out = String(await tool.execute({ action: 'reconnect' }))
+  assert(started === 1, 'reconnect 应调用 client.start')
+  assert(out.includes('重连'), `应回显已触发重连,实际:${out}`)
 })
 
 await test('napcat 工具:status/recent 格式化,send/send_group 校验与透传', async () => {
@@ -4436,7 +6178,7 @@ await test('napcat 工具:send/send_group 缺省目标 = 当前会话对象(2026
       getContacts: async () => ({}),
       updateContact: async (p) => ({ qq: p.qq, updatedAt: 0 }),
     },
-    { getSessionKey: () => sessionKey },
+    { getSessionKey: () => sessionKey, getTurnKind: () => 'panel' },
   )
   const tool = tools.find((t) => t.name === 'napcat')!
   // 私聊会话:send 不传 user_id → 默认发给当前会话对象("发消息给他"直落到位)
@@ -4458,6 +6200,28 @@ await test('napcat 工具:send/send_group 缺省目标 = 当前会话对象(2026
   // 主对话 / 无会话:无缺省 → 报错
   sessionKey = 'main'
   await assertRejects(() => tool.execute({ action: 'send', message: 'x' }), 'send 需要 user_id')
+  // 主人自己的私聊会话:省略 user_id 不得落到主人 QQ(发给别人的私聊会送错人)
+  const masterCalls: Array<{ target: string }> = []
+  const masterTools = napcatTools(
+    {
+      status: () => ({ connected: true, url: '', lastError: '', receivedCount: 0, repliedCount: 0 }),
+      sendToQQ: async (qq) => {
+        masterCalls.push({ target: qq })
+        return 'm-master'
+      },
+      sendToGroup: async () => 'm2',
+      getRecentMessages: () => [],
+      getContacts: async () => ({}),
+      updateContact: async (p) => ({ qq: p.qq, updatedAt: 0 }),
+    },
+    { getSessionKey: () => 'private:10000', getMasterQQ: () => '10000', getTurnKind: () => 'master-qq' },
+  )
+  const masterTool = masterTools.find((t) => t.name === 'napcat')!
+  await assertRejects(() => masterTool.execute({ action: 'send', message: '周末见' }), '主人自己的会话')
+  assert(masterCalls.length === 0, '省略目标时不应发给主人')
+  await masterTool.execute({ action: 'send', user_id: '333', message: '周末见' })
+  const masterN = Number(masterCalls.length)
+  assert(masterN === 1 && masterCalls[0]?.target === '333', '主人会话里显式 user_id 仍发给对方')
   await assertRejects(() => tool.execute({ action: 'send_group', message: 'x' }), 'send_group 需要 group_id')
   sessionKey = null
   await assertRejects(() => tool.execute({ action: 'send', message: 'x' }), 'send 需要 user_id')
@@ -4468,6 +6232,312 @@ await test('napcat 工具:send/send_group 缺省目标 = 当前会话对象(2026
   assert(n3 === 3 && calls[2].target === '333', '显式 user_id 应优先于会话缺省')
   await assertRejects(() => tool.execute({ action: 'send_group', group_id: '1' }), 'send_group 需要 message/file/image/voice 至少一个')
   await assertRejects(() => tool.execute({ action: 'nope' }), '未知action')
+})
+
+await test('群上下文按群分桶,回复和工具都不能把别的群的消息送出去', async () => {
+  const buckets = new Map()
+  rememberGroupContext(buckets, { groupId: '111', qq: '1', text: 'A群的话' })
+  rememberGroupContext(buckets, { groupId: '222', qq: '2', text: 'B群的话', atMe: true })
+  rememberGroupContext(buckets, { groupId: '111', qq: '3', text: 'A群下一句' })
+  const a = recentGroupContext(buckets, '111', 8)
+  const b = recentGroupContext(buckets, '222', 8)
+  assert(a.length === 2 && a.every((m) => m.groupId === '111') && !a.some((m) => m.text.includes('B群')), 'A群记录不得含B群')
+  assert(b.length === 1 && b[0]?.text === 'B群的话' && b[0]?.atMe === true, 'B群只保留自己的消息')
+  assert(recentGroupContext(buckets, '333', 8).length === 0, '没来过的群是空记录')
+  const line = formatGroupContextLines([{ qq: '2', text: 'B群的话', atMe: true, name: '群友' }])
+  assert(line === '2(群友): B群的话 （提到你）', `群记录行格式不对:${line}`)
+  // 桶有上限,更早的群会被丢掉,当前群留着
+  const capped = new Map()
+  rememberGroupContext(capped, { groupId: '1', qq: '1', text: '旧' }, { perGroup: 1, maxGroups: 1 })
+  rememberGroupContext(capped, { groupId: '1', qq: '1', text: '新' }, { perGroup: 1, maxGroups: 1 })
+  rememberGroupContext(capped, { groupId: '2', qq: '1', text: '另一群' }, { perGroup: 1, maxGroups: 1 })
+  assert(recentGroupContext(capped, '1', 8).length === 0, '超出群数上限时丢掉最久没更新的群')
+  assert(recentGroupContext(capped, '2', 8)[0]?.text === '另一群', '刚写入的群还在')
+
+  assert(pinGroupReplyTarget('group:111', '222') === '111', '会话群号盖过串进来的 target')
+  assert(pinGroupReplyTarget('group:111', '111') === '111', 'target 一致时仍是本群')
+  assert(pinGroupReplyTarget('main', '222') === '222', '非群会话沿用原来的 target')
+
+  const cross = resolveGroupSendTarget({ requested: '222', sessionKey: 'group:111', turnKind: 'group' })
+  assert(cross.ok === false, '别人的群会话不能发到别的群')
+  const same = resolveGroupSendTarget({ requested: '', sessionKey: 'group:111', turnKind: 'group' })
+  assert(same.ok === true && same.groupId === '111', '省略群号时发回当前群')
+  const master = resolveGroupSendTarget({ requested: '222', sessionKey: 'group:111', turnKind: 'panel' })
+  assert(master.ok === true && master.groupId === '222', '主人在面板里可以指定别的群')
+  const peerPrivate = resolveGroupSendTarget({ requested: '222', sessionKey: 'private:333', turnKind: 'contact' })
+  assert(peerPrivate.ok === false, '别人的私聊不能发群')
+  const plain = resolveGroupSendTarget({ requested: '20000', sessionKey: null, turnKind: null })
+  assert(plain.ok === true && plain.groupId === '20000', '没有会话绑定时显式群号仍可发')
+
+  const locked = scopeTranscriptQuery({ sessionKey: 'group:111', turnKind: 'group' })
+  assert(locked.groupId === '111' && !locked.userId && !locked.error, '群会话默认只读本群')
+  const denied = scopeTranscriptQuery({ sessionKey: 'group:111', turnKind: 'group', groupId: '222' })
+  assert(typeof denied.error === 'string' && denied.error.includes('222'), '群会话点名别的群要拒绝')
+  const masterRead = scopeTranscriptQuery({ sessionKey: 'group:111', turnKind: 'window', groupId: '222' })
+  assert(masterRead.groupId === '222' && !masterRead.error, '主人轮可以点名读别的群')
+  const open = scopeTranscriptQuery({ sessionKey: 'main', turnKind: 'window' })
+  assert(open.groupId === '' && open.userId === '' && !open.error, '主对话不强制收窄')
+
+  let sentTo: string = ''
+  const tools = napcatTools(
+    {
+      sendToGroup: async (groupId) => {
+        sentTo = groupId
+        return 'm'
+      },
+      getRecentMessages: () => [
+        { qq: '1', text: 'A', messageId: 'a', time: 1700000000, groupId: '111' },
+        { qq: '2', text: 'B', messageId: 'b', time: 1700000000, groupId: '222' },
+        { qq: '3', text: '私聊', messageId: 'c', time: 1700000000 },
+      ],
+    },
+    { getSessionKey: () => 'group:111', getTurnKind: () => 'group' },
+  )
+  const tool = tools.find((t) => t.name === 'napcat')!
+  await assertRejects(() => tool.execute({ action: 'send_group', group_id: '222', message: '把A群的话发过去' }), '不能把消息发到群 222')
+  assert(sentTo === '', '拒绝跨群时不能真的发出去')
+  const ok = String(await tool.execute({ action: 'send_group', message: '只回本群' }))
+  assert((sentTo as string) === '111' && ok.includes('111'), '省略群号时工具发回当前群')
+  const recent = String(await tool.execute({ action: 'recent' }))
+  assert(recent.includes('群111') && recent.includes('A') && !recent.includes('群222') && !recent.includes('私聊'), `群会话的 recent 只能看到本群,实际:${recent}`)
+})
+
+await test('群艾特按回复对象,不总是艾特发消息的人', () => {
+  const people = [
+    { qq: '10001', name: '李四' },
+    { qq: '10002', name: '张三' },
+    { qq: '10003', name: '张三丰' },
+  ]
+  const none = resolveGroupMention({ reply: '今天天气不错', speakerQQ: '10001', directed: false, participants: people })
+  assert(none.length === 0, '跟全群说的话不艾特')
+  const ask = resolveGroupMention({ reply: '可以,我查过了', speakerQQ: '10001', directed: true, participants: people })
+  assert(ask.length === 1 && ask[0] === '10001', '在问机器人时才艾特发消息的人')
+  const named = resolveGroupMention({ reply: '张三,你明天有空吗', speakerQQ: '10001', directed: true, participants: people })
+  assert(named.length === 1 && named[0] === '10002', '点名张三就艾特张三,而不是发消息的李四')
+  const longer = resolveGroupMention({ reply: '张三丰,你来一下', speakerQQ: '10001', directed: true, participants: people })
+  assert(longer.length === 1 && longer[0] === '10003', '长名字优先,不把张三丰认成张三')
+  const verb = resolveGroupMention({ reply: '我问一下张三', speakerQQ: '10001', directed: false, participants: people })
+  assert(verb.length === 0, '回复里顺口说「问一下张三」不是在叫张三')
+  const asked = resolveGroupMention({
+    reply: '明天有空',
+    speakerQQ: '10001',
+    directed: true,
+    participants: people,
+    trigger: '帮我回张三',
+  })
+  assert(asked.length === 1 && asked[0] === '10002', '触发消息让机器人回张三，就艾特张三而不是发消息的人')
+  const pinged = resolveGroupMention({
+    reply: '可以',
+    speakerQQ: '10001',
+    directed: true,
+    participants: people,
+    trigger: '你看这个',
+    triggerAtQQs: ['10002'],
+  })
+  assert(pinged.length === 1 && pinged[0] === '10002', '触发消息 @ 了张三，回复就艾特张三')
+  const asideName = resolveGroupMention({ reply: '别叫张三了', speakerQQ: '10001', directed: true, participants: people })
+  assert(asideName.length === 1 && asideName[0] === '10001', '「别叫张三」不是在叫张三，仍艾特正在问机器人的人')
+  const crowd = resolveGroupMention({ reply: '大家看看这个', speakerQQ: '10001', directed: true, participants: people })
+  assert(crowd.length === 0, '对全群说的话不艾特，哪怕对方刚刚在问')
+  const passed = resolveGroupMention({ reply: '张三和李四都到了', speakerQQ: '10009', directed: false, participants: people })
+  assert(passed.length === 0, '只是提起两个人，不艾特')
+  const card = resolveGroupMention({
+    reply: '小明，你来一下',
+    speakerQQ: '10001',
+    directed: true,
+    participants: [{ qq: '10002', names: ['小明'] }],
+  })
+  assert(card.length === 1 && card[0] === '10002', '群名片和档案备注都能认')
+  const aside = resolveGroupMention({
+    reply: '主人说过这个',
+    speakerQQ: '10001',
+    directed: false,
+    participants: [{ qq: '10000', name: '主人' }],
+  })
+  assert(aside.length === 0, '句中提到主人不算在叫主人')
+  const vocative = resolveGroupMention({
+    reply: '主人,你看这个',
+    speakerQQ: '10001',
+    directed: false,
+    participants: [{ qq: '10000', name: '主人' }],
+  })
+  assert(vocative.length === 1 && vocative[0] === '10000', '开头叫主人就艾特主人')
+  const self = resolveGroupMention({
+    reply: '在的',
+    speakerQQ: '10009',
+    directed: true,
+    participants: people,
+    selfQQ: '10009',
+  })
+  assert(self.length === 0, '不艾特机器人自己')
+  const echoed = resolveGroupMention({
+    reply: '@鲸鱼娘 @岛灵 在的',
+    speakerQQ: '10001',
+    directed: true,
+    participants: [...people, { qq: '10009', name: '鲸鱼娘', names: ['岛灵', '鲸鱼娘'] }],
+    selfQQ: '10009',
+    trigger: '在吗',
+    triggerAtQQs: ['10009'],
+  })
+  assert(echoed.length === 1 && echoed[0] === '10001', `抄自己的称呼或触发里的 @ 不能艾特自己,实际:${echoed.join(',')}`)
+  const namedSelf = resolveGroupMention({
+    reply: '鲸鱼娘,你来一下',
+    speakerQQ: '10001',
+    directed: false,
+    participants: [{ qq: '10008', name: '鲸鱼娘' }],
+    selfQQ: '10009',
+  })
+  assert(namedSelf.length === 0, '自称不能拿去艾特别人')
+  const foreign = resolveGroupMention({ reply: '@20000 你过来', speakerQQ: '10001', directed: true, participants: people })
+  assert(!foreign.includes('20000') && foreign[0] === '10001', `没在本群出现过的 QQ 不艾特,实际:${foreign.join(',')}`)
+  const both = resolveGroupMention({ reply: '张三、李四你们看', speakerQQ: '10009', directed: false, participants: people })
+  assert(both.includes('10002') && both.includes('10001'), `点到的两个人都要艾特,实际:${both.join(',')}`)
+  const qq = resolveGroupMention({ reply: 'QQ10002 你说得对', speakerQQ: '10001', directed: true, participants: people })
+  assert(qq.length === 1 && qq[0] === '10002', '写出本群 QQ 就艾特那个人')
+})
+
+await test('群回复正文的手写艾特剥离:不重复艾特、不露对方 QQ 号', () => {
+  // @+QQ号(模型抄入站 @号码 的惯用写法):连 @ 带号删掉
+  assert(stripMentionMarkup('@10002 你说得对', ['10002']) === '你说得对', `@QQ号整段删,实际:${stripMentionMarkup('@10002 你说得对', ['10002'])}`)
+  assert(stripMentionMarkup('@QQ:10002 你说得对', ['10002']) === '你说得对', `@QQ:号同删,实际:${stripMentionMarkup('@QQ:10002 你说得对', ['10002'])}`)
+  assert(stripMentionMarkup('＠10002你好', ['10002']) === '你好', `全角 @ 同款,实际:${stripMentionMarkup('＠10002你好', ['10002'])}`)
+  // 写 QQ 号点名:号码被 at 段艾特了才删
+  assert(stripMentionMarkup('QQ10002 你说得对', ['10002']) === '你说得对', `QQ号点名删号码,实际:${stripMentionMarkup('QQ10002 你说得对', ['10002'])}`)
+  assert(stripMentionMarkup('张三(QQ:10002)你说得对', ['10002']) === '张三你说得对', `括号备注的 QQ 号也删,实际:${stripMentionMarkup('张三(QQ:10002)你说得对', ['10002'])}`)
+  assert(stripMentionMarkup('张三(10002)你说得对', ['10002']) === '张三你说得对', `纯括号 QQ 号也删,实际:${stripMentionMarkup('张三(10002)你说得对', ['10002'])}`)
+  assert(stripMentionMarkup('他QQ是10002', ['10002']) === '他QQ是10002', '「QQ是号码」是内容不是点名')
+  assert(stripMentionMarkup('工号QQ20002报到', ['10002']) === '工号QQ20002报到', '没艾特的号码可能是内容,留着')
+  // @+名字:只删 @ 符号,名字留着当称呼
+  assert(stripMentionMarkup('@张三 你说得对', ['10002']) === '张三 你说得对', `@名字删符号留名字,实际:${stripMentionMarkup('@张三 你说得对', ['10002'])}`)
+  // CQ 码艾特整段删(at 段已发,正文里会裸露成 [CQ:at,qq=…])
+  assert(stripMentionMarkup('好[CQ:at,qq=10002]你看', ['10002']) === '好你看', `CQ at 码删掉,实际:${stripMentionMarkup('好[CQ:at,qq=10002]你看', ['10002'])}`)
+  // 邮箱/网址里的 @ 不能动
+  assert(stripMentionMarkup('发我 user@163.com', []) === '发我 user@163.com', '邮箱 @ 保留')
+  assert(stripMentionMarkup('https://x.com/@user 看这个', []) === 'https://x.com/@user 看这个', '网址 @ 保留')
+  assert(stripMentionMarkup('   ', ['10002']) === '   ', '空白原样')
+  // 同号艾特去重:at 名单重复时不能连发两个真艾特
+  const dup = buildOutgoingMessage('在吗', [], undefined, { at: ['10002', '10002', 'all'] }) as Array<{
+    type: string
+    data: Record<string, unknown>
+  }>
+  const atSegs = dup.filter((s) => s.type === 'at')
+  assert(atSegs.length === 2 && atSegs[0].data.qq === '10002' && atSegs[1].data.qq === 'all', `艾特段同号去重,实际:${JSON.stringify(dup)}`)
+  // CQ at 码点名也认(正文会被剥掉,艾特改由 at 段发)
+  const people = [
+    { qq: '10001', name: '李四' },
+    { qq: '10002', name: '张三' },
+  ]
+  const cq = resolveGroupMention({ reply: '[CQ:at,qq=10002] 你说得对', speakerQQ: '10001', directed: true, participants: people })
+  assert(cq.length === 1 && cq[0] === '10002', `CQ at 码也认作点名,实际:${cq.join(',')}`)
+  const full = resolveGroupMention({ reply: '＠10002 你说得对', speakerQQ: '10001', directed: true, participants: people })
+  assert(full.length === 1 && full[0] === '10002', `全角 @ 点名也认,实际:${full.join(',')}`)
+})
+
+await test('群会话的私聊和戳一戳不能送到别的对象', async () => {
+  let target: string = ''
+  const tools = napcatTools(
+    {
+      sendToQQ: async (qq) => {
+        target = qq
+        return 'm'
+      },
+    },
+    { getSessionKey: () => 'group:111', getTurnKind: () => 'group', getMasterQQ: () => '10000' },
+  )
+  const tool = tools.find((t) => t.name === 'napcat')!
+  await assertRejects(() => tool.execute({ action: 'send', user_id: '10002', message: '把群里的话告诉你' }), '不能把消息私发给')
+  assert(target === '', '拒绝时不能发出去')
+  const ok = String(await tool.execute({ action: 'send', user_id: '10000', message: '群里有人找你' }))
+  assert((target as string) === '10000' && ok.includes('10000'), '汇报主人仍然可以')
+  await assertRejects(() => tool.execute({ action: 'poke', user_id: '10002', group_id: '222' }), '不能把消息发到群 222')
+  await assertRejects(() => tool.execute({ action: 'send_group', message: '全体', at: 'all' }), '全体成员艾特只受主人指示')
+  const who = resolvePrivateSendTarget({
+    requested: '10002',
+    sessionKey: 'private:10001',
+    turnKind: 'contact',
+    masterQQ: '10000',
+  })
+  assert(who.ok === false, '别人的私聊不能再转发给第三人')
+  const back = resolvePrivateSendTarget({
+    requested: '',
+    sessionKey: 'private:10001',
+    turnKind: 'contact',
+    masterQQ: '10000',
+  })
+  assert(back.ok === true && back.userId === '10001', '省略目标时仍回当前私聊对象')
+})
+
+await test('send_group 艾特跟回复意图走，模型填的发消息人不会盖过点名', async () => {
+  const ats: unknown[] = []
+  let turn = { plain: '帮我回张三', speakerQQ: '10001', directed: true, atQQs: [] as string[] }
+  const tools = napcatTools(
+    {
+      sendToGroup: async (_groupId, _text, sendOpts) => {
+        ats.push(sendOpts?.at)
+        return 'm'
+      },
+    },
+    {
+      getSessionKey: () => 'group:111',
+      getTurnKind: () => 'group',
+      getSelfQQ: () => '10009',
+      listGroupParticipants: async () => [
+        { qq: '10001', name: '李四' },
+        { qq: '10002', name: '张三' },
+      ],
+      getGroupTurn: () => turn,
+    },
+  )
+  const tool = tools.find((t) => t.name === 'napcat')!
+  await tool.execute({ action: 'send_group', message: '明天有空', at: '10001' })
+  assert(ats[0] === '10002', `应艾特张三,实际:${String(ats[0])}`)
+  await tool.execute({ action: 'send_group', message: '大家随便看看', at: '10001' })
+  assert(ats[1] === undefined, `对全群说不应艾特,实际:${String(ats[1])}`)
+  turn = { plain: '哈哈', speakerQQ: '10001', directed: false, atQQs: [] }
+  await tool.execute({ action: 'send_group', message: '哈哈', at: '20000' })
+  assert(ats[2] === undefined, `不在本群的 QQ 不能被艾特,实际:${String(ats[2])}`)
+  const selfAts: unknown[] = []
+  const selfTexts: string[] = []
+  const selfTools = napcatTools(
+    {
+      sendToGroup: async (_groupId, text, sendOpts) => {
+        selfTexts.push(text)
+        selfAts.push(sendOpts?.at)
+        return 'm'
+      },
+    },
+    {
+      getSessionKey: () => 'main',
+      getTurnKind: () => 'window',
+      getSelfQQ: () => '10009',
+      listGroupParticipants: async () => [
+        { qq: '10009', name: '鲸鱼娘', names: ['岛灵'] },
+        { qq: '10002', name: '张三' },
+      ],
+      getGroupTurn: () => ({ plain: '在吗', speakerQQ: '10001', directed: true, atQQs: ['10009'] }),
+    },
+  )
+  const selfTool = selfTools.find((t) => t.name === 'napcat')!
+  await selfTool.execute({ action: 'send_group', group_id: '111', message: '@鲸鱼娘 @岛灵 张三你看', at: '10009' })
+  assert(selfTexts[0] === '张三你看', `正文里的自我艾特要剥掉,实际:${selfTexts[0]}`)
+  assert(selfAts[0] === '10002', `主人轮填了自己的 QQ 也不能艾特自己,实际:${String(selfAts[0])}`)
+  await assertRejects(
+    () => selfTool.execute({ action: 'send_group', group_id: '111', message: '@岛灵' }),
+    '不要艾特自己',
+  )
+  const found = napcatMessageAtQQs(
+    [
+      { type: 'at', data: { qq: '10009' } },
+      { type: 'at', data: { qq: '10002' } },
+      { type: 'text', data: { text: '你看' } },
+    ],
+    '10009',
+  )
+  assert(found.length === 1 && found[0] === '10002', `应只留下被 @ 的别人,实际:${found.join(',')}`)
+  await assertRejects(
+    () => tool.execute({ action: 'raw', raw_action: 'send_private_msg', raw_params: { user_id: '10002', message: '偷偷发' } }),
+    '不能把消息私发给',
+  )
 })
 
 await test('napcat 工具:send/send_group 带图片、文件与语音透传', async () => {
@@ -4624,6 +6694,73 @@ await test('napcat 工具:recall / members(自动补档案) / friends / profile 
   await assertRejects(() => tool.execute({ action: 'group_manage', group_id: '1', op: 'nope' }), 'op 仅支持')
   await assertRejects(() => tool.execute({ action: 'group_manage', group_id: '1' }), 'group_manage 需要 op')
   await assertRejects(() => tool.execute({ action: 'group_manage', group_id: '1', op: 'whole_ban' }), 'whole_ban 需要 enable')
+})
+
+await test('napcat 工具:zone_post/zone_delete 发说说(可见范围校验+主人确认门,2026-10-28)', async () => {
+  const posted: Array<{ content: string; images?: string[]; ugcRight?: number; targetUins?: string[] }> = []
+  const deleted: string[] = []
+  let confirmed = true
+  const tools = napcatTools({
+    status: () => ({ connected: true, url: 'ws://127.0.0.1:3001', lastError: '', receivedCount: 0, repliedCount: 0 }),
+    sendToQQ: async () => '',
+    sendToGroup: async () => '',
+    getRecentMessages: () => [],
+    getContacts: async () => ({}),
+    updateContact: async (p) => ({ qq: p.qq, source: p.source, updatedAt: 0 }),
+    sendQzoneMsg: async (content, opts) => {
+      posted.push({ content, images: opts?.images, ugcRight: opts?.ugcRight, targetUins: opts?.targetUins })
+      return { tid: 'tid-42' }
+    },
+    deleteQzoneMsg: async (tid) => {
+      deleted.push(tid)
+    },
+  }, { confirmDangerous: async () => confirmed })
+  const tool = tools.find((t) => t.name === 'napcat')!
+  // 纯文字 + 可见范围透传 + 回显 tid/删除提示
+  // (注:assert 是 asserts 守卫,直接比 length 会把后续收窄成字面量报 2367——
+  //  与 sent 用例同款,先取 number 局部量再比)
+  const r1 = String(await tool.execute({ action: 'zone_post', content: '今天天气真好', ugc_right: 4 }))
+  const n1: number = posted.length
+  assert(n1 === 1 && posted[0].content === '今天天气真好' && posted[0].ugcRight === 4, 'zone_post 应透传正文与可见范围')
+  assert(r1.includes('tid-42') && r1.includes('好友可见') && r1.includes('zone_delete'), `zone_post 应回显 tid 与删除提示,实际:${r1}`)
+  // 图片列表(images 与单张 image 并集)+ target_uins(16 部分好友可见)
+  const r2 = String(
+    await tool.execute({
+      action: 'zone_post', content: '带图动态', images: ['https://img.example/a.png'], image: 'https://img.example/b.png',
+      ugc_right: 16, target_uins: ['10001', '10002'],
+    }),
+  )
+  const n2: number = posted.length
+  assert(
+    n2 === 2 && posted[1].images?.length === 2 && posted[1].ugcRight === 16 && posted[1].targetUins?.join(',') === '10001,10002',
+    `zone_post 应透传图片与权限对象,实际:${JSON.stringify(posted[1])}`,
+  )
+  assert(r2.includes('部分好友可见') && r2.includes('含图片×2'), `zone_post 应回显可见范围与图片数,实际:${r2}`)
+  // 纯图片说说(message 作为正文别名)
+  const r3 = String(await tool.execute({ action: 'zone_post', message: '只发图', image: 'https://img.example/c.png' }))
+  const n3: number = posted.length
+  assert(n3 === 3 && posted[2].content === '只发图' && posted[2].ugcRight === 1, `zone_post 应收 message 别名并缺省所有人可见,实际:${r3}`)
+  // 参数校验:正文/图片至少一个、图片存在性、ugc_right 合法域、16/128 必须给 target_uins
+  await assertRejects(() => tool.execute({ action: 'zone_post' }), '至少一个')
+  await assertRejects(() => tool.execute({ action: 'zone_post', content: 'x', image: 'D:/nope/not-exist.png' }), '图片不存在')
+  await assertRejects(() => tool.execute({ action: 'zone_post', content: 'x', ugc_right: 2 }), 'ugc_right 仅支持')
+  await assertRejects(() => tool.execute({ action: 'zone_post', content: 'x', ugc_right: 128 }), 'target_uins')
+  // 主人确认门:拒绝则不发
+  confirmed = false
+  const cancelled = String(await tool.execute({ action: 'zone_post', content: '不该发出去' }))
+  const n4: number = posted.length
+  assert(cancelled.includes('已取消') && n4 === 3, `主人未确认不应发表,实际:${cancelled}`)
+  // zone_delete:透传 tid + 确认门 + 缺参拒绝
+  confirmed = true
+  const rDel = String(await tool.execute({ action: 'zone_delete', tid: 'tid-42' }))
+  const d1: number = deleted.length
+  assert(d1 === 1 && deleted[0] === 'tid-42', 'zone_delete 应透传 tid')
+  assert(rDel.includes('已删除'), `zone_delete 应回显,实际:${rDel}`)
+  await assertRejects(() => tool.execute({ action: 'zone_delete' }), 'zone_delete 需要 tid')
+  confirmed = false
+  const delCancelled = String(await tool.execute({ action: 'zone_delete', tid: 'tid-42' }))
+  const d2: number = deleted.length
+  assert(delCancelled.includes('已取消') && d2 === 1, `主人未确认不应删除,实际:${delCancelled}`)
 })
 
 await test('napcatMessageImages:图片段提取(收图链路)', () => {
@@ -4897,7 +7034,7 @@ await test('napcat 工具:chats 聊天记录备份查询与过滤', async () => 
   })
   const tool = tools.find((t) => t.name === 'napcat')!
   const all = String(await tool.execute({ action: 'chats' }))
-  assert(all.includes('10001') && all.includes('20000') && all.includes('你好呀') && all.includes('@鲸鱼娘'), `chats 应列全部记录,实际:${all}`)
+  assert(all.includes('10001') && all.includes('20000') && all.includes('你好呀') && all.includes('（提到你）'), `chats 应列全部记录,实际:${all}`)
   const byQq = String(await tool.execute({ action: 'chats', user_id: '10001' }))
   assert(byQq.includes('你好呀') && !byQq.includes('今天天气不错'), '按 QQ 过滤应只剩私聊')
   const byGroup = String(await tool.execute({ action: 'chats', group_id: '20000' }))
@@ -4954,12 +7091,16 @@ await test('napcatMessageText:群消息 @ 与图片/回复段解析', () => {
         { type: 'reply', data: { id: '1' } },
       ],
       '30000',
-    ) === '@鲸鱼娘 在吗[图片][回复]',
+    ) === '（提到你） 在吗[图片][回复]',
     '群消息:@ 机器人标注 + 图片/回复段',
   )
   assert(
     napcatMessageText([{ type: 'at', data: { qq: '123' } }, { type: 'text', data: { text: ' hi' } }], '30000') === '@123 hi',
     '@ 他人标注 QQ 号',
+  )
+  assert(
+    napcatMessageText([{ type: 'at', data: { qq: '123', name: '张三' } }, { type: 'text', data: { text: ' hi' } }], '30000') === '@张三 hi',
+    '@ 他人有名字时用名字,不露 QQ 号',
   )
 })
 
@@ -4982,6 +7123,16 @@ await test('set_napcat_config:enabled/wsUrl/allowed/allowedGroups 校验与写�
   await assertRejects(() => tool.execute({ allowedGroups: 'not-array' }), 'allowedGroups 需要是群号字符串数组')
   const out2 = String(await tool.execute({ enabled: false }))
   assert(out2.includes('已关闭'), `关闭应回显,实际:${out2}`)
+  // 连接模式(2026-10-25):反向默认避开 NapCat 正向 3001 端口
+  const outRev = String(await tool.execute({ mode: 'reverse' }))
+  assert(outRev.includes('反向 WS'), `反向模式应回显,实际:${outRev}`)
+  const revPatch = writes.at(-1) as { napcatWsMode?: string; napcatWsUrl?: string }
+  assert(revPatch?.napcatWsMode === 'reverse', 'mode 应写入配置')
+  assert(revPatch?.napcatWsUrl === 'ws://127.0.0.1:3002', `反向默认应改用 3002,实际:${revPatch?.napcatWsUrl}`)
+  await tool.execute({ mode: 'reverse', wsUrl: 'ws://0.0.0.0:4000' })
+  const explicit = writes.at(-1) as { napcatWsUrl?: string }
+  assert(explicit?.napcatWsUrl === 'ws://0.0.0.0:4000', '显式 wsUrl 不应被覆盖')
+  await assertRejects(() => tool.execute({ mode: 'bad' as never }), 'mode 仅支持')
 })
 
 await test('napcat 工具:sent(机器人发出的消息带 ID 可撤回)与 zone(查看 QQ 空间动态)', async () => {
@@ -5134,6 +7285,8 @@ await test('wsclient:帧编解码/长度/分片/掩码(手写 WS 传输,2026-08-
   assert(u1.host === '127.0.0.1' && u1.port === 3001 && u1.path === '/', `ws URL 解析,实际:${JSON.stringify(u1)}`)
   const u2 = parseWsUrl('ws://localhost:8080/onebot')
   assert(u2.host === 'localhost' && u2.port === 8080 && u2.path === '/onebot', '带路径 URL 解析')
+  const u3 = parseWsUrl('ws://127.0.0.1:3001?access_token=abc')
+  assert(u3.host === '127.0.0.1' && u3.port === 3001 && u3.path === '/?access_token=abc', `access_token 查询串解析,实际:${JSON.stringify(u3)}`)
   let threw = false
   try {
     parseWsUrl('not-a-url')
@@ -5205,6 +7358,211 @@ await test('wsclient:端到端连接假 OneBot 服务器(握手/收发/ping-pong
   server.close()
   assert(!events.some((e) => e.startsWith('error')), `不应有错误事件,实际:${JSON.stringify(events)}`)
   assert(events[0] === 'open' && events[events.length - 1] === 'close', '事件顺序 open→close')
+})
+
+await test('反向 WS 服务端:握手/鉴权/双向收发(2026-10-25)', async () => {
+  const events: string[] = []
+  const serverMessages: string[] = []
+  const server = createReverseWsServer({
+    host: '127.0.0.1',
+    port: 0,
+    path: '/',
+    accessToken: 'tok',
+    handlers: {
+      onOpen: () => events.push('server-open'),
+      onMessage: (t) => serverMessages.push(t),
+      onError: (m) => events.push(`server-error:${m}`),
+      onClose: () => events.push('server-close'),
+    },
+  })
+  server.start()
+  await waitFor(() => !!server.address, 5000, '反向服务端应开始监听')
+  const port = server.address!.port
+
+  // 错误 token 必须被拒绝(401),不会触发 onOpen
+  const badEvents: string[] = []
+  createWsSocket(`ws://127.0.0.1:${port}/?access_token=bad`, {
+    onOpen: () => badEvents.push('open'),
+    onMessage: () => {},
+    onError: (m) => badEvents.push(`error:${m}`),
+    onClose: () => badEvents.push('close'),
+  })
+  await waitFor(
+    () => badEvents.includes('close') || badEvents.some((e) => e.startsWith('error')),
+    5000,
+    '错误 token 应被拒绝',
+  )
+  assert(!badEvents.includes('open'), `错误 token 不应握手成功,实际:${JSON.stringify(badEvents)}`)
+  assert(!events.includes('server-close'), '未完成握手的连接不应触发断开回调')
+
+  // 正确 token:客户端连入 → 服务端 onOpen,双向收发
+  const clientEvents: string[] = []
+  const clientMessages: string[] = []
+  const conn = createWsSocket(`ws://127.0.0.1:${port}/?access_token=tok`, {
+    onOpen: () => clientEvents.push('open'),
+    onMessage: (t) => clientMessages.push(t),
+    onError: (m) => clientEvents.push(`error:${m}`),
+    onClose: () => clientEvents.push('close'),
+  })
+  await waitFor(() => clientEvents.includes('open') && events.includes('server-open'), 5000, '反向连接应建立')
+  conn.send('from-napcat')
+  await waitFor(() => serverMessages.includes('from-napcat'), 5000, '服务端应收到 NapCat 事件')
+  server.conn!.send('from-app')
+  await waitFor(() => clientMessages.includes('from-app'), 5000, 'NapCat 应收到应用动作/消息')
+  conn.close()
+  await waitFor(() => events.includes('server-close'), 5000, '反向连接关闭回调')
+  server.stop()
+  assert(!events.some((e) => e.startsWith('server-error')), `不应有服务端错误,实际:${JSON.stringify(events)}`)
+})
+
+await test('wsclient:服务端静默(半开连接)→ 保活超时主动断开(2026-10-23)', async () => {
+  // 假 OneBot:完成 101 握手后完全静默——不推送事件、不回 pong
+  const net = await import('node:net')
+  const crypto = await import('node:crypto')
+  const server = net.createServer((sock) => {
+    let upgraded = false
+    let buf = Buffer.alloc(0)
+    sock.on('data', (chunk: Buffer) => {
+      if (upgraded) return // 静默丢弃客户端 ping,模拟对端失联
+      buf = Buffer.concat([buf, chunk])
+      const idx = buf.indexOf('\r\n\r\n')
+      if (idx === -1) return
+      const req = buf.subarray(0, idx).toString('utf8')
+      const key = /Sec-WebSocket-Key:\s*(.+)\r?\n/i.exec(req)?.[1]?.trim() ?? ''
+      const accept = crypto.createHash('sha1').update(key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64')
+      sock.write(
+        `HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`,
+      )
+      upgraded = true
+      buf = Buffer.alloc(0)
+    })
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
+  const port = (server.address() as { port: number }).port
+  const events: string[] = []
+  const conn = createWsSocket(
+    `ws://127.0.0.1:${port}`,
+    {
+      onOpen: () => events.push('open'),
+      onMessage: () => {},
+      onError: (m) => events.push(`error:${m}`),
+      onClose: () => events.push('close'),
+    },
+    { keepaliveIntervalMs: 40, keepaliveTimeoutMs: 120 },
+  )
+  try {
+    await waitFor(() => events.includes('open'), 5000, 'WS 握手成功')
+    await waitFor(
+      () => events.some((e) => e.startsWith('error:连接保活超时')),
+      5000,
+      '静默连接应被保活超时判定为死链',
+    )
+    await waitFor(() => events.includes('close'), 5000, '保活超时后应触发 close(交给调用方重连)')
+  } finally {
+    conn.close()
+    server.close()
+  }
+})
+
+/** 假 OneBot:只做 101 握手(熔断/重连测试用) */
+async function listenFakeOneBot(port?: number): Promise<{
+  port: number
+  upgraded: () => number
+  close: () => Promise<void>
+}> {
+  const net = await import('node:net')
+  let upgradedCount = 0
+  const sockets = new Set<import('node:net').Socket>()
+  const server = net.createServer((sock) => {
+    sockets.add(sock)
+    sock.on('close', () => sockets.delete(sock))
+    let buf = Buffer.alloc(0)
+    sock.on('data', (chunk: Buffer) => {
+      buf = Buffer.concat([buf, chunk])
+      const idx = buf.indexOf('\r\n\r\n')
+      if (idx === -1) return
+      const req = buf.subarray(0, idx).toString('utf8')
+      const key = /Sec-WebSocket-Key:\s*(.+)\r?\n/i.exec(req)?.[1]?.trim() ?? ''
+      const accept = createHash('sha1').update(key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64')
+      sock.write(
+        `HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`,
+      )
+      upgradedCount++
+    })
+  })
+  const bound = await new Promise<number>((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(port ?? 0, '127.0.0.1', () => {
+      resolve((server.address() as { port: number }).port)
+    })
+  })
+  return {
+    port: bound,
+    upgraded: () => upgradedCount,
+    close: () => new Promise<void>((resolve) => {
+      for (const sock of sockets) sock.destroy()
+      server.close(() => resolve())
+    }),
+  }
+}
+
+function makeCircuitTestClient(url: string): NapcatClient {
+  return createNapcatClient(
+    {
+      getConfig: () => ({ napcatWsUrl: url, napcatEnabled: true }) as AgentConfig,
+      onMessage: () => {},
+      onGroupMessage: () => {},
+    },
+    {
+      maxReconnectFails: 3,
+      reconnectDelayMs: 20,
+      reconnectCapMs: 20,
+      circuitCooldownMs: 60,
+      circuitCooldownCapMs: 60,
+    },
+  )
+}
+
+await test('napcat 客户端:熔断后 start() 立即重连,旧 socket 迟到 close 不再二次熔断', async () => {
+  const placeholder = await listenFakeOneBot()
+  const port = placeholder.port
+  await placeholder.close()
+  const client = makeCircuitTestClient(`ws://127.0.0.1:${port}`)
+  let live: Awaited<ReturnType<typeof listenFakeOneBot>> | null = null
+  try {
+    client.start()
+    await waitFor(() => client.status().circuitBroken === true, 8000, '连续失败应进入熔断')
+    assert(!client.status().connected, '熔断时不应显示已连接')
+    live = await listenFakeOneBot(port)
+    client.start()
+    await waitFor(() => client.status().connected === true, 8000, 'LLM start 后应连上')
+    assert(client.status().circuitBroken !== true, '连上后熔断标志应复位')
+    client.start()
+    client.start()
+    await waitFor(() => client.status().connected === true, 8000, '重复 start 应保持已连接')
+    assert(client.status().circuitBroken !== true, '重复 start 不应再次熔断')
+  } finally {
+    client.stop()
+    if (live) await live.close()
+  }
+})
+
+await test('napcat 客户端:熔断后半开探测在服务端起来后自动恢复', async () => {
+  const placeholder = await listenFakeOneBot()
+  const port = placeholder.port
+  await placeholder.close()
+  const client = makeCircuitTestClient(`ws://127.0.0.1:${port}`)
+  let live: Awaited<ReturnType<typeof listenFakeOneBot>> | null = null
+  try {
+    client.start()
+    await waitFor(() => client.status().circuitBroken === true, 8000, '连续失败应进入熔断')
+    live = await listenFakeOneBot(port)
+    await waitFor(() => client.status().connected === true, 8000, '冷却后半开探测应自动连上')
+    assert(client.status().circuitBroken !== true, '自动恢复后熔断标志应复位')
+  } finally {
+    client.stop()
+    if (live) await live.close()
+  }
 })
 
 await test('stripMasterNarration:主人视角汇报剥离(私聊窗口泄露,2026-08-13 实测原文)', () => {
@@ -5291,6 +7649,9 @@ await test('isAskTurnToMaster:询问轮判定(2026-08-13 泄露根治——LLM �
   assert(isAskTurnToMaster('好的,等你消息~') === false, '「等你消息」是对对方说的话,不应判询问')
   assert(isAskTurnToMaster('我问你一下,今晚打王者还是看KPL呀?') === false, '「我问你」是对对方说话,不应判询问')
   assert(isAskTurnToMaster('哈哈你觉得呢?') === false, '「你觉得呢」可能问对方,弱模式不拦(宁漏勿误伤)')
+  assert(isAskTurnToMaster('要不要我说个笑话') === false, '对对方说的「要不要我说」不转给主人')
+  assert(isAskTurnToMaster('我建议你回头看看那本书') === false, '「回头」不是回复他,不转给主人')
+  assert(isAskTurnToMaster('你说回家吧') === false, '「你说回家」不是在问怎么回')
   // 空输入
   assert(isAskTurnToMaster('') === false && isAskTurnToMaster('   ') === false, '空输入返回 false')
 })
@@ -5519,6 +7880,157 @@ await test('buildOutgoingMessage:出站消息段组装(text/image/record,语音�
   assert(all.map((s) => s.type).join(',') === 'text,image,record', `混合段序,实际:${all.map((s) => s.type).join(',')}`)
   // 空 voice 视为无
   assert(Array.isArray(buildOutgoingMessage('x', ['D:/i.png'], '  ')), '空白 voice 应被忽略')
+})
+
+await test('napcat 全量适配:at/reply 段 + 视频/文件/转发/卡片解析', () => {
+  const segs = buildOutgoingMessage('在吗', [], undefined, { at: '12345', replyTo: '99' }) as Array<{
+    type: string
+    data: Record<string, unknown>
+  }>
+  assert(segs.map((s) => s.type).join(',') === 'reply,at,text', `at/reply 段序,实际:${JSON.stringify(segs)}`)
+  assert(segs[0].data.id === '99' && segs[1].data.qq === '12345', 'reply/at 参数应透传')
+  const atAll = buildOutgoingMessage('集合', [], undefined, { at: 'all' }) as Array<{ type: string; data: Record<string, unknown> }>
+  assert(atAll[0].type === 'at' && atAll[0].data.qq === 'all', '@全体 应支持')
+  const noSelf = buildOutgoingMessage('@岛灵 在的', [], undefined, { at: ['10009', '10002'], selfQQ: '10009' }) as Array<{
+    type: string
+    data: Record<string, unknown>
+  }>
+  assert(noSelf.length === 2 && noSelf[0].type === 'at' && noSelf[0].data.qq === '10002', `艾特段不能带自己,实际:${JSON.stringify(noSelf)}`)
+  assert(
+    stripSelfMentions('@鲸鱼娘，[CQ:at,qq=10009] @10009 在的呀', '10009') === '在的呀',
+    '正文里的自称、自己的 QQ 和 CQ at 都要去掉',
+  )
+  assert(stripSelfMentions('我是岛灵', '10009') === '我是岛灵', '没有 @ 的自称留着')
+
+  const parsed = napcatMessageText([
+    { type: 'file', data: { name: 'a.pdf' } },
+    { type: 'video', data: { file: 'v.mp4' } },
+    { type: 'forward', data: { id: 'f1' } },
+    { type: 'json', data: { data: JSON.stringify({ prompt: '测试卡片' }) } },
+  ])
+  assert(
+    parsed.includes('[文件:a.pdf]') && parsed.includes('[视频]') && parsed.includes('[转发消息]') && parsed.includes('[卡片:测试卡片]'),
+    `文件/视频/转发/卡片标注,实际:${parsed}`,
+  )
+
+  const videos = napcatMessageVideos([{ type: 'video', data: { file: 'v.mp4', file_id: 'vid1', url: 'https://x/v.mp4' } }])
+  assert(videos.length === 1 && videos[0].file_id === 'vid1' && videos[0].url === 'https://x/v.mp4', '视频段提取')
+  const files = napcatMessageFiles([{ type: 'file', data: { file_id: 'fid', name: 'r.pdf', file_size: 2048 } }])
+  assert(files.length === 1 && files[0].file_id === 'fid' && files[0].size === 2048, '文件段提取')
+  const fids = napcatMessageForwardIds([{ type: 'forward', data: { id: 'f1' } }])
+  assert(fids.length === 1 && fids[0] === 'f1', '合并转发 ID 提取')
+  const rid = napcatMessageReplyId([{ type: 'reply', data: { id: 'm99' } }, { type: 'text', data: { text: 'x' } }])
+  assert(rid === 'm99', '引用消息 ID 提取')
+
+  const ft = napcatForwardText({
+    messages: [{ sender: { nickname: '甲', user_id: 1 }, content: [{ type: 'text', data: { text: '你好' } }] }],
+  })
+  assert(ft.includes('甲(1)') && ft.includes('你好'), `合并转发展开,实际:${ft}`)
+  const nodes = buildForwardNodes(['a', 'b', ''], '30000')
+  assert(nodes.length === 2 && nodes[0].data.uin === '30000', '合并转发节点构建')
+
+  // 合并转发媒体资源提取(2026-10-27:不再只有 [图片] 占位,带出真实资源)
+  const fm = napcatForwardMedia({
+    messages: [
+      {
+        sender: { nickname: '甲', user_id: 1 },
+        content: [
+          { type: 'text', data: { text: '看图' } },
+          { type: 'image', data: { file: 'a.jpg', url: 'https://x/a.jpg' } },
+          { type: 'image', data: { file: 'a.jpg', url: 'https://x/a.jpg' } },
+          { type: 'record', data: { file: 'v.amr' } },
+          { type: 'video', data: { file_id: 'vid1' } },
+          { type: 'file', data: { file_id: 'fid1', name: 'r.pdf' } },
+          { type: 'forward', data: { id: 'nf1' } },
+        ],
+      },
+      // CQ 字符串形态的节点正文也要能提取资源
+      { content: '[CQ:image,url=https://y/b.png,file=b.png]' },
+    ],
+  })
+  assert(fm.images.length === 2 && fm.images[0].url === 'https://x/a.jpg', `转发图片资源提取+去重,实际:${JSON.stringify(fm.images)}`)
+  assert(fm.images[1].url === 'https://y/b.png', `CQ 字符串节点图片提取,实际:${JSON.stringify(fm.images)}`)
+  assert(fm.voices.length === 1 && fm.videos.length === 1 && fm.files.length === 1, '转发语音/视频/文件资源提取')
+  const nested = napcatForwardNestedIds({
+    messages: [{ content: [{ type: 'forward', data: { id: 'nf1' } }, { type: 'forward', data: { id: 'nf2' } }] }],
+  })
+  assert(nested.join(',') === 'nf1,nf2', `嵌套合并转发 ID 提取,实际:${nested}`)
+  const emptyFm = napcatForwardMedia({ messages: [{ content: [{ type: 'image', data: {} }] }] })
+  assert(emptyFm.images.length === 0, '无 file/url 的图片段应丢弃')
+})
+
+await test('QQ小程序/分享/音乐卡片结构化读取(2026-10-25)', () => {
+  const miniapp = cardLabel({
+    data: JSON.stringify({
+      app: 'com.tencent.miniapp_01',
+      desc: 'QQ小程序',
+      meta: {
+        detail_1: {
+          appid: '1109937557',
+          desc: '哔哩哔哩',
+          sceneDesc: '哔哩哔哩',
+          qqdocurl: 'https://b23.tv/abc?share_medium=android&amp;share_source=qq',
+          title: '这个视频真好看',
+        },
+      },
+      prompt: '[QQ小程序]哔哩哔哩',
+      view: 'view_8C8E89B49BE609866298ADDFF2DBABA4',
+    }),
+  })
+  assert(miniapp.startsWith('[QQ小程序:哔哩哔哩'), `小程序应用名应做主标题,实际:${miniapp}`)
+  assert(
+    miniapp.includes('这个视频真好看') && miniapp.includes('https://b23.tv/abc?share_medium=android&share_source=qq'),
+    `小程序标题与深链(实体解码),实际:${miniapp}`,
+  )
+
+  const share = cardLabel({
+    data: JSON.stringify({
+      app: 'com.tencent.structmsg',
+      meta: { news: { title: '新闻标题', desc: '新闻摘要', jumpUrl: 'https://news.qq.com/a' } },
+      prompt: '[分享]新闻标题',
+    }),
+  })
+  assert(
+    share.startsWith('[分享卡片:新闻标题') && share.includes('新闻摘要') && share.includes('https://news.qq.com/a'),
+    `分享卡片标题/摘要/链接,实际:${share}`,
+  )
+
+  const music = cardLabel({
+    data: JSON.stringify({
+      app: 'com.tencent.music.lua',
+      meta: { music: { title: '晴天', desc: '周杰伦', musicUrl: 'https://y.qq.com/n/ryqq/songDetail/1' } },
+      prompt: '[分享]晴天',
+    }),
+  })
+  assert(
+    music.startsWith('[音乐卡片:晴天') && music.includes('周杰伦') && music.includes('https://y.qq.com'),
+    `音乐卡片歌名/歌手/地址,实际:${music}`,
+  )
+
+  const xml = cardLabel({
+    data:
+      '<msg serviceID="1" brief="[QQ小程序]哔哩哔哩" url="https://b23.tv/xml">' +
+      '<item><title>XML 视频</title><summary>XML 摘要</summary></item>' +
+      '<source name="哔哩哔哩"/></msg>',
+  })
+  assert(
+    xml.startsWith('[QQ小程序:哔哩哔哩') && xml.includes('XML 视频') && xml.includes('XML 摘要') && xml.includes('https://b23.tv/xml'),
+    `XML 小程序卡片,实际:${xml}`,
+  )
+
+  // double-encoded JSON 与简单 prompt 卡片向后兼容
+  const twice = cardLabel({ data: JSON.stringify(JSON.stringify({ prompt: '测试卡片' })) })
+  assert(twice === '[卡片:测试卡片]', `double-encoded JSON 兼容,实际:${twice}`)
+  assert(cardLabel(undefined) === '[卡片]' && cardLabel({}) === '[卡片]', '空卡片回退')
+
+  // CQ 字符串形态([CQ:json,data=...],方括号/逗号被转义)与段数组同解析
+  const cq = napcatMessageText(
+    '[CQ:json,data={"app":"com.tencent.miniapp_01","desc":"QQ小程序","meta":{"detail_1":{"sceneDesc":"哔哩哔哩","title":"CQ 视频","qqdocurl":"https://b23.tv/cq"}},"prompt":"&#91;QQ小程序&#93;哔哩哔哩"}]',
+  )
+  assert(
+    cq.startsWith('[QQ小程序:哔哩哔哩') && cq.includes('CQ 视频') && cq.includes('https://b23.tv/cq'),
+    `CQ 字符串卡片结构化,实际:${cq}`,
+  )
 })
 
 // ---------------------------------------------------------------------------
@@ -7320,6 +9832,392 @@ await test('mimo_batch:create 提交链路 + mimo_media 理解链路(fetch 桩)'
   } finally {
     globalThis.fetch = origFetch
   }
+})
+
+// ---------------------------------------------------------------------------
+// 9. DeepSeek 专属适配(2026-10-22):图像理解序列化 / 视觉模型门控 /
+// 官方网页搜索与抓取(tools/search、tools/fetch)
+// ---------------------------------------------------------------------------
+
+console.log('\n=== DeepSeek 专属适配(图像理解 / 官方搜索与抓取) ===')
+
+await test('deepseekErrorMessage:思考链没回传改成中文做法,其它 400 仍附原文', () => {
+  const replay = deepseekErrorMessage(
+    400,
+    JSON.stringify({
+      error: {
+        message:
+          'The `reasoning_text` in the thinking mode must be passed back to the API. (request_id: 2ae20d93-5655-4eec-bf36-700d18bd8f28)',
+      },
+    }),
+  )
+  assert(replay.includes('思考链没有带回接口'), `应说明思考链没带回,实际:${replay}`)
+  assert(replay.includes('清空') && replay.includes('思考强度'), `应给出做法,实际:${replay}`)
+  assert(!replay.includes('request_id') && !replay.includes('reasoning_text'), `不应再附英文原文,实际:${replay}`)
+  assert(!replay.includes('上下文超长'), `不应再套用泛化 400 文案,实际:${replay}`)
+  const chatReplay = deepseekErrorMessage(
+    400,
+    'The reasoning_content in the thinking mode must be passed back to the API.',
+  )
+  assert(chatReplay.includes('思考链没有带回接口'), `Chat 原文同样改写,实际:${chatReplay}`)
+  const other = deepseekErrorMessage(400, JSON.stringify({ error: { message: 'Invalid JSON' } }))
+  assert(other.includes('请求参数错误') && other.includes('Invalid JSON'), `其它 400 保持原文,实际:${other}`)
+})
+
+await test('deepseekModelForInput:带图请求换视觉模型,纯文本/flash 家族不动', () => {
+  assert(deepseekModelForInput('deepseek-v4-pro', false) === 'deepseek-v4-pro', '纯文本保持配置模型')
+  assert(deepseekModelForInput('deepseek-v4-flash', true) === 'deepseek-v4-flash', 'flash 家族带图不换')
+  assert(deepseekModelForInput('deepseek-v4-pro', true) === 'deepseek-flash', 'pro 带图换 deepseek-flash')
+  assert(deepseekModelForInput('deepseek-chat', true) === 'deepseek-flash', 'chat 带图换 deepseek-flash')
+  assert(isDeepseekVisionModel('deepseek-flash') && isDeepseekVisionModel('deepseek-v4-flash-vision-exp'), 'flash/vision 家族支持图像')
+  assert(!isDeepseekVisionModel('deepseek-v4-pro') && !isDeepseekVisionModel('deepseek-chat'), 'pro/chat 不支持图像')
+})
+
+await test('historyToItems:纯文本序列化逐字节不变;图片 part → input_image 块', async () => {
+  const img = 'data:image/png;base64,iVBORw0KGgo='
+  const textOnly = await historyToItems([
+    { id: 'u1', role: 'user', parts: [{ type: 'text', text: '你好' }, { type: 'text', text: '世界' }] },
+  ])
+  assert(
+    JSON.stringify(textOnly) ===
+      JSON.stringify([{ type: 'message', role: 'user', content: [{ type: 'input_text', text: '你好\n世界' }] }]),
+    `纯文本 join \\n 单块(前缀缓存稳定),实际:${JSON.stringify(textOnly)}`,
+  )
+  const withImg = await historyToItems([
+    { id: 'u2', role: 'user', parts: [{ type: 'text', text: '这是什么' }, { type: 'image', dataUrl: img }] },
+  ])
+  const content = (withImg[0] as { content: Array<Record<string, unknown>> }).content
+  assert(content.length === 2 && content[0].type === 'input_text' && content[1].type === 'input_image', `内容块:${JSON.stringify(content).slice(0, 120)}`)
+  assert(content[1].image_url === img, 'input_image.image_url 为字符串(官方:与 file_id 互斥)')
+  // 历史里有图 → historyHasImages 为真(带图换模判定依据)
+  assert(historyHasImages([{ id: 'u3', role: 'user', parts: [{ type: 'media', kind: 'img', url: 'C:\\a.png' }] }]) === true, 'img 媒体算图片输入')
+  assert(historyHasImages([{ id: 'u4', role: 'user', parts: [{ type: 'text', text: 'hi' }] }]) === false, '纯文本不算')
+})
+
+await test('DeepSeek 思考回传:带 tools 时每轮都带思维链,缺原文补空格;不带则不回传', async () => {
+  // 官方思考模式(2026-10-19):请求带 tools 时,历史每一轮 assistant 都要
+  // 带回思维链,没调用工具的轮次也要。多步调用按轮拆开,思维链在该轮最前。
+  const hist: AgentMessage[] = [
+    { id: 'u1', role: 'user', parts: [{ type: 'text', text: '查天气' }] },
+    {
+      id: 'a1',
+      role: 'assistant',
+      parts: [
+        { type: 'reasoning', text: '先查日期' },
+        { type: 'tool-call', id: 'c1', name: 'get_date', args: {} },
+        { type: 'tool-result', id: 'c1', name: 'get_date', ok: true, result: '2026-04-19', durationMs: 1 },
+        { type: 'text', text: '杭州明天多云' },
+      ],
+    },
+    {
+      id: 'a2',
+      role: 'assistant',
+      parts: [
+        { type: 'text', text: '我先查日期' },
+        { type: 'tool-call', id: 'c2', name: 'get_date', args: {} },
+        { type: 'tool-result', id: 'c2', name: 'get_date', ok: true, result: '2026-04-19', durationMs: 1 },
+      ],
+    },
+  ]
+  const items = (await historyToItems(hist, { replayReasoning: true })) as Array<Record<string, unknown>>
+  const types = items.map((i) => `${i.type}${i.role ? ':' + String(i.role) : ''}`)
+  assert(
+    types.join(',') ===
+      [
+        'message:user',
+        'reasoning',
+        'function_call',
+        'function_call_output',
+        'reasoning',
+        'message:assistant',
+        'reasoning',
+        'message:assistant',
+        'function_call',
+        'function_call_output',
+      ].join(','),
+    `Responses 轮次顺序,实际:${types.join(',')}`,
+  )
+  const r0 = items[1].content as Array<{ type: string; text: string }>
+  assert(r0[0].type === 'reasoning_text' && r0[0].text === '先查日期', `第一轮思维链:${JSON.stringify(r0)}`)
+  assert(items[2].type === 'function_call' && items[2].call_id === 'c1', 'function_call 紧跟本轮 reasoning')
+  const r1 = items[4].content as Array<{ type: string; text: string }>
+  assert(r1[0].text === ' ', `没存到原文时回空格,实际:${JSON.stringify(r1)}`)
+  const tail = items[5].content as Array<{ text: string }>
+  assert(tail[0].text === '杭州明天多云', '没调用工具的轮次也带回,正文仍在')
+  const off = (await historyToItems(hist)) as Array<{ type: string }>
+  assert(!off.some((i) => i.type === 'reasoning'), '不带 tools / 思考关:不回传 reasoning item')
+
+  const chat = await historyToMessages(hist, { replayReasoning: true })
+  assert(chat[1].role === 'assistant' && chat[1].reasoning_content === '先查日期' && chat[1].content === '', `Chat 工具轮:${JSON.stringify(chat[1])}`)
+  assert(Array.isArray(chat[1].tool_calls) && chat[2].role === 'tool' && chat[2].tool_call_id === 'c1', 'tool 结果紧跟该轮')
+  assert(chat[3].role === 'assistant' && chat[3].reasoning_content === ' ' && chat[3].content === '杭州明天多云' && !chat[3].tool_calls, `工具结果后的正文单独成轮:${JSON.stringify(chat[3])}`)
+  assert(chat[4].reasoning_content === ' ' && chat[4].content === '我先查日期' && Array.isArray(chat[4].tool_calls), `缺链的工具轮补空格:${JSON.stringify(chat[4])}`)
+  const chatOff = await historyToMessages(hist)
+  assert(
+    chatOff.every((m) => m.reasoning_content === undefined),
+    '思考关或不带 tools 时不写 reasoning_content',
+  )
+})
+
+await test('historyToMessages / historyToAnthropic:图片块三协议形状 + 音频占位', async () => {
+  const img = 'data:image/jpeg;base64,QUJD'
+  const hist: AgentMessage[] = [
+    {
+      id: 'u1',
+      role: 'user',
+      parts: [
+        { type: 'text', text: '看图' },
+        { type: 'image', dataUrl: img },
+        { type: 'media', kind: 'audio', url: 'C:\\v.mp3', name: '语音' },
+      ],
+    },
+  ]
+  const chat = await historyToMessages(hist)
+  const chatContent = (chat[0] as { content: Array<Record<string, unknown>> }).content
+  const chatImg = chatContent.find((b) => b.type === 'image_url') as { image_url: { url: string } } | undefined
+  assert(chatImg?.image_url.url === img, `chat image_url 为对象 {url}(官方 OpenAI vision 格式):${JSON.stringify(chatContent).slice(0, 120)}`)
+  assert(chatContent.some((b) => b.type === 'text' && String(b.text).includes('不支持音频')), '音频附件占位写明原因')
+  const anthropic = await historyToAnthropic(hist)
+  const aContent = anthropic[0].content as Array<Record<string, unknown>>
+  const aImg = aContent.find((b) => b.type === 'image') as { source: Record<string, unknown> } | undefined
+  assert(
+    aImg?.source.type === 'base64' && aImg.source.data === 'QUJD' && aImg.source.media_type === 'image/jpeg',
+    `anthropic image 块拆 media_type + data:${JSON.stringify(aImg)}`,
+  )
+})
+
+await test('planDeepseekImages:本地图片读盘转 dataUrl;超预算新图优先', async () => {
+  const p1 = path.join(tmp, 'ds-img-1.png')
+  await fs.writeFile(p1, Buffer.from('89504e470d0a1a0a', 'hex'))
+  const hist: AgentMessage[] = [
+    { id: 'u1', role: 'user', parts: [{ type: 'text', text: '旧图' }, { type: 'media', kind: 'img', url: p1, name: 'a' }] },
+    { id: 'u2', role: 'user', parts: [{ type: 'media', kind: 'img', url: 'https://example.com/b.png', name: 'b' }] },
+  ]
+  // 预算只够 URL 张(25 字符):最近的 u2 保留,更旧的本地图降级
+  const tight = await planDeepseekImages(hist, 30)
+  assert(tight.get(hist[1].parts[0])?.ref === 'https://example.com/b.png', '新图保留(URL 透传)')
+  assert(tight.get(hist[0].parts[1])?.ref === undefined && String(tight.get(hist[0].parts[1])?.reason).includes('预算'), `旧图降级:${JSON.stringify(tight.get(hist[0].parts[1]))}`)
+  // 预算充足:本地文件读盘转 data:image/png;base64
+  const full = await planDeepseekImages(hist)
+  assert(String(full.get(hist[0].parts[1])?.ref).startsWith('data:image/png;base64,'), `本地转 dataUrl:${String(full.get(hist[0].parts[1])?.ref).slice(0, 32)}`)
+  // 缺失文件 → 降级原因(不抛错,历史韧性)
+  const broken: AgentMessage[] = [{ id: 'u9', role: 'user', parts: [{ type: 'media', kind: 'img', url: path.join(tmp, 'ds-none.png') }] }]
+  const brokenPlan = await planDeepseekImages(broken)
+  assert(String(brokenPlan.get(broken[0].parts[0])?.reason).includes('不存在'), `缺失降级:${JSON.stringify(brokenPlan.get(broken[0].parts[0]))}`)
+})
+
+await test('estimateMessageTokens:图片按 1024/张计入预算', () => {
+  const withImg: AgentMessage = {
+    id: 'm',
+    role: 'user',
+    parts: [{ type: 'text', text: 'x' }, { type: 'media', kind: 'img', url: 'C:\\a.png' }],
+  }
+  assert(estimateMessageTokens(withImg) >= 1024, `图片应计 1024 token,实际:${estimateMessageTokens(withImg)}`)
+})
+
+await test('deepseek-web:端点拼装 / URL 校验 / 搜索与抓取(桩 fetch)', async () => {
+  assert(deepseekToolsEndpoint('https://api.deepseek.com', 'search') === 'https://api.deepseek.com/v1/tools/search', '默认端点')
+  assert(deepseekToolsEndpoint('https://api.deepseek.com/v1/', 'fetch') === 'https://api.deepseek.com/v1/tools/fetch', '/v1 后缀归一')
+  assert(deepseekToolsEndpoint('https://api.deepseek.com/anthropic', 'search') === 'https://api.deepseek.com/v1/tools/search', 'anthropic 后缀归一')
+  await assertRejects(async () => assertWebFetchUrl('ftp://x/y'), '仅支持 http/https')
+  await assertRejects(async () => assertWebFetchUrl('https://user:pass@example.com/'), '不能携带用户名或密码')
+  await assertRejects(async () => assertWebFetchUrl(`https://${'a'.repeat(8200)}`), '8192')
+
+  const origFetch = globalThis.fetch
+  const calls: Array<{ url: string; body: Record<string, unknown> }> = []
+  globalThis.fetch = async (url: string | URL | Request, opts?: RequestInit) => {
+    calls.push({ url: String(url), body: JSON.parse(String(opts?.body ?? '{}')) })
+    if (String(url).endsWith('/v1/tools/search')) {
+      return new Response(
+        JSON.stringify({
+          results: [
+            { title: 'T', url: 'https://e.com/1', snippet: '短摘要', summary: '长摘要', site_name: '站', date: '2026-06-01T00:00:00+00:00', rerank_score: 2.4, authority: 3 },
+          ],
+        }),
+        { status: 200 },
+      )
+    }
+    return new Response(JSON.stringify({ title: '页', content: '# 正文' }), { status: 200 })
+  }
+  try {
+    const results = await deepseekWebSearch({ apiKey: 'k', baseURL: 'https://api.deepseek.com' }, { query: '测试', count: 5 })
+    assert(results.length === 1 && results[0].rerankScore === 2.4 && results[0].summary === '长摘要', `解析:${JSON.stringify(results)}`)
+    assert(calls[0].body.query === '测试' && calls[0].body.count === 5 && calls[0].body.need_content === false, `请求体:${JSON.stringify(calls[0].body)}`)
+    const text = formatDeepseekSearchResults(results, '测试')
+    assert(text.includes('长摘要') && text.includes('优质') && text.includes('https://e.com/1') && text.includes('2026-06-01'), `格式化:${text.slice(0, 160)}`)
+    assert(formatDeepseekSearchResults([], '空') === '(未找到与「空」相关的结果,可换关键词再搜)', '空结果提示')
+    const page = await deepseekWebFetchPage({ apiKey: 'k', baseURL: 'https://api.deepseek.com' }, 'https://e.com/1')
+    assert(page.title === '页' && page.content === '# 正文' && calls[1].url.endsWith('/v1/tools/fetch'), `抓取:${JSON.stringify(page)}`)
+    // 403 专属错误映射(官方:抓取被安全策略拒绝)
+    globalThis.fetch = async () => new Response(JSON.stringify({ error: { message: 'blocked' } }), { status: 403 })
+    await assertRejects(() => deepseekWebFetchPage({ apiKey: 'k', baseURL: '' }, 'https://e.com/1'), '安全策略')
+    // 正文格式化:超长截断并注明总长
+    const long = formatPageResult('题', 'x'.repeat(8000))
+    assert(long.includes('已截断') && long.includes('8000'), `截断提示:${long.slice(-60)}`)
+  } finally {
+    globalThis.fetch = origFetch
+  }
+})
+
+await test('web_search/web_fetch 工具:DeepSeek 官方优先,失败回退 Bing/直连', async () => {
+  const tools = createTools({
+    onSwitchToMusic: () => {},
+    getDeepseekCreds: () => ({ apiKey: 'k', baseURL: 'https://api.deepseek.com' }),
+  })
+  const searchTool = tools.find((t) => t.name === 'web_search')
+  const fetchTool = tools.find((t) => t.name === 'web_fetch')
+  assert(searchTool && fetchTool, 'web_search / web_fetch 应注册')
+  const origFetch = globalThis.fetch
+  try {
+    // ① 官方搜索可用:走 /v1/tools/search
+    globalThis.fetch = async (url: string | URL | Request, opts?: RequestInit) => {
+      const u = String(url)
+      if (u.endsWith('/v1/tools/search')) {
+        const body = JSON.parse(String(opts?.body ?? '{}')) as Record<string, unknown>
+        assert(body.need_content === false, 'need_content 缺省 false(summary 供模型阅读)')
+        return new Response(
+          JSON.stringify({ results: [{ title: '官方结果', url: 'https://a.example/1', snippet: '短', summary: '长摘要', site_name: 'A', date: null, rerank_score: 2.0, authority: 4 }] }),
+          { status: 200 },
+        )
+      }
+      throw new Error(`不该到达:${u}`)
+    }
+    const out1 = String(await searchTool!.execute({ query: '测试' }))
+    assert(out1.includes('官方结果') && out1.includes('长摘要'), `官方搜索:${out1.slice(0, 100)}`)
+    // ② 官方搜索 500 → 回退 Bing(HTML b_algo 结果块)
+    globalThis.fetch = async (url: string | URL | Request) => {
+      const u = String(url)
+      if (u.includes('/v1/tools/search')) return new Response('boom', { status: 500 })
+      return new Response('<li class="b_algo"><h2><a href="https://hit.example/1">兜底标题</a></h2><p>兜底摘要</p></li>', { status: 200 })
+    }
+    const out2 = String(await searchTool!.execute({ query: '测试' }))
+    assert(out2.includes('兜底标题') && out2.includes('hit.example'), `回退 Bing:${out2.slice(0, 100)}`)
+    // ③ web_fetch 官方抓取
+    globalThis.fetch = async (url: string | URL | Request) => {
+      const u = String(url)
+      if (u.endsWith('/v1/tools/fetch')) return new Response(JSON.stringify({ title: '页标题', content: '# 正文' }), { status: 200 })
+      throw new Error(`不该到达:${u}`)
+    }
+    const out3 = String(await fetchTool!.execute({ url: 'https://a.example/1' }))
+    assert(out3.includes('《页标题》') && out3.includes('# 正文'), `官方抓取:${out3.slice(0, 100)}`)
+    // ④ 官方 404 → 回退直连 HTML(去标签留正文)
+    globalThis.fetch = async (url: string | URL | Request) => {
+      const u = String(url)
+      if (u.includes('/v1/tools/fetch')) return new Response('null', { status: 404 })
+      return new Response('<html><head><title>直连页</title></head><body><p>直连正文</p></body></html>', {
+        status: 200,
+        headers: { 'content-type': 'text/html; charset=utf-8' },
+      })
+    }
+    const out4 = String(await fetchTool!.execute({ url: 'https://a.example/2' }))
+    assert(out4.includes('直连页') && out4.includes('直连正文'), `回退直连:${out4.slice(0, 100)}`)
+  } finally {
+    globalThis.fetch = origFetch
+  }
+})
+
+await test('厂商专属通道:同一 baseURL 只解析到自家适配器(DeepSeek/MiMo 不互串)', () => {
+  const rt = getDefaultLlmRuntime()
+  assert(rt.resolve('https://api.deepseek.com').id === 'responses', 'DeepSeek → DeepSeek Responses')
+  assert(rt.resolve('https://api.deepseek.com/chat').id === 'chat', 'DeepSeek chat → DeepSeek Chat')
+  assert(rt.resolve('https://api.xiaomimimo.com').id === 'mimo-responses', 'MiMo → MiMo Responses')
+  assert(rt.resolve('https://api.xiaomimimo.com/chat').id === 'mimo-chat', 'MiMo chat → MiMo Chat')
+  assert(rt.resolve('https://open.bigmodel.cn/api/paas/v4').id === 'glm-chat', 'GLM → GLM 云端')
+  assert(rt.resolve('http://127.0.0.1:1234').id === 'lmstudio-chat', 'LM Studio → 本地通道')
+  // 显式断言不互串:DeepSeek 地址永远不会解析到 mimo 适配器,反之亦然
+  assert(!rt.resolve('https://api.deepseek.com').id.startsWith('mimo'), 'DeepSeek 不走 MiMo 通道')
+  assert(rt.resolve('https://api.xiaomimimo.com').id.startsWith('mimo'), 'MiMo 走自家通道')
+})
+
+await test('resolveSubConfig:跨厂商换桶丢 llmAdapter(防别家模型强绑错通道)', () => {
+  const cfg = {
+    ...MOCK_PROVIDERS,
+    activeProvider: 'deepseek' as const,
+    apiKey: 'dk',
+    baseURL: 'https://api.deepseek.com',
+    model: 'deepseek-v4-flash',
+    systemPrompt: '',
+    reasoningEffort: 'high',
+    mcpServers: [],
+    skillsDirs: [],
+    llmAdapter: 'responses',
+    subProvider: 'mimo' as const,
+    providers: {
+      ...MOCK_PROVIDERS.providers,
+      deepseek: { apiKey: 'dk', baseURL: 'https://api.deepseek.com', model: 'deepseek-v4-flash' },
+      mimo: { apiKey: 'mk', baseURL: 'https://api.xiaomimimo.com', model: 'mimo-v2.6-pro' },
+    },
+  }
+  // 跨厂商换桶(llmAdapter='responses' 是 DeepSeek 通道协议 id):必须丢弃,
+  // 否则 resolve 按 preferId 直接命中 DeepSeek 适配器去跑 MiMo 的 baseURL
+  const sub = resolveSubConfig(cfg)
+  assert(sub.baseURL === 'https://api.xiaomimimo.com' && sub.model === 'mimo-v2.6-pro', `子配置应换 MiMo 桶:${sub.baseURL}/${sub.model}`)
+  assert(sub.llmAdapter === undefined, `跨厂商换桶后 llmAdapter 必须丢弃,实际:${String(sub.llmAdapter)}`)
+  // 同桶只换子模型:llmAdapter 保留(同厂商专属通道不动)
+  const same = resolveSubConfig({ ...cfg, subProvider: 'deepseek' as const, subModel: 'deepseek-v4-pro' })
+  assert(same.llmAdapter === 'responses' && same.model === 'deepseek-v4-pro', `同桶应保留 llmAdapter:${JSON.stringify({ a: same.llmAdapter, m: same.model })}`)
+  // 换桶但新地址协议恰好一致:保留显式适配器
+  const match = resolveSubConfig({ ...cfg, llmAdapter: 'mimo-responses' })
+  assert(match.llmAdapter === 'mimo-responses', `协议一致应保留:${String(match.llmAdapter)}`)
+})
+
+await test('get_deepseek_balance:DeepSeek 专属通道走 providers.deepseek 桶凭据', async () => {
+  const cfg = {
+    ...MOCK_PROVIDERS,
+    activeProvider: 'mimo' as const,
+    apiKey: 'mimo-key',
+    baseURL: 'https://api.xiaomimimo.com',
+    model: 'mimo-v2.6-pro',
+    systemPrompt: '',
+    reasoningEffort: 'high',
+    mcpServers: [],
+    skillsDirs: [],
+    providers: {
+      ...MOCK_PROVIDERS.providers,
+      deepseek: { apiKey: 'ds-key', baseURL: 'https://api.deepseek.com', model: 'deepseek-v4-flash' },
+    },
+  }
+  const tools = createBuiltinTools(
+    { get value() { return 8192 }, set value(_n: number) {} },
+    { getConfig: () => cfg },
+  )
+  const bal = tools.find((t) => t.name === 'get_deepseek_balance')
+  assert(bal, '应注册 get_deepseek_balance')
+  const origFetch = globalThis.fetch
+  const calls: string[] = []
+  let auth = ''
+  globalThis.fetch = async (url: string | URL | Request, opts?: RequestInit) => {
+    calls.push(String(url))
+    auth = String(((opts?.headers ?? {}) as Record<string, string>).Authorization ?? '')
+    return new Response(
+      JSON.stringify({ is_available: true, balance_infos: [{ currency: 'CNY', total_balance: '10', granted_balance: '2', topped_up_balance: '8' }] }),
+      { status: 200 },
+    )
+  }
+  try {
+    const out = String(await bal!.execute({}))
+    assert(calls[0] === 'https://api.deepseek.com/user/balance', `激活 MiMo 也应打 DeepSeek 自己的通道,实际:${calls[0]}`)
+    assert(auth === 'Bearer ds-key', `应带 DeepSeek 桶的 Key,实际:${auth}`)
+    assert(out.includes('10.00'), `余额输出:${out}`)
+  } finally {
+    globalThis.fetch = origFetch
+  }
+  // 桶无 Key 且激活非 deepseek:报错引导,不打任何通道(不能拿 MiMo 凭据凑)
+  const cfg2 = {
+    ...cfg,
+    providers: { ...cfg.providers, deepseek: { apiKey: '', baseURL: '', model: '' } },
+  }
+  const tools2 = createBuiltinTools(
+    { get value() { return 8192 }, set value(_n: number) {} },
+    { getConfig: () => cfg2 },
+  )
+  await assertRejects(() => tools2.find((t) => t.name === 'get_deepseek_balance')!.execute({}), '未配置 DeepSeek')
+  // GLM 地址守卫(2026-10-22 修复漏拦:此前会把 DeepSeek 余额接口打到智谱通道)
+  await assertRejects(
+    () => fetchDeepseekBalance({ baseURL: 'https://open.bigmodel.cn/api/paas/v4', apiKey: 'k' }),
+    '智谱',
+    'GLM 地址应拒绝',
+  )
 })
 
 await runPluginKernelTests({ test, assert, assertRejects })

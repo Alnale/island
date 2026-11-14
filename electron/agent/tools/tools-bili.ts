@@ -6,7 +6,7 @@
  */
 
 import { spawn } from 'node:child_process'
-import { mkdirSync, promises as fs, readFileSync, writeFileSync } from 'node:fs'
+import { closeSync, existsSync, mkdirSync, openSync, promises as fs, readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { shell } from 'electron'
 import { showNotify } from '../notify'
@@ -35,12 +35,17 @@ export const BILI_ENV = {
 // "二进制缺失")——download/saved/trending 等分支都直接 spawn,从不创建
 // 目录,首次使用必然失败(2026-08-08 工具逐一验证实测);login 分支虽有
 // mkdir 但只管二维码路径。模块加载时同步创建(开销可忽略,userData/bili
-// 本就是约定落点)。注意 mkdirSync 来自 node:fs 顶层,不是 promises
-try {
-  mkdirSync(BILI_CWD, { recursive: true })
-} catch {
-  // 目录创建失败不致命:后续 spawn 会给出真实错误
+// 本就是约定落点)。注意 mkdirSync 来自 node:fs 顶层,不是 promises。
+// 2026-10-23:清空工具数据/外部删除后目录可能已不存在,每次 spawn 前再
+// 确保一次(否则被误报为"bili 工具被删/二进制缺失")。
+export function ensureBiliCwd(): void {
+  try {
+    mkdirSync(BILI_CWD, { recursive: true })
+  } catch {
+    // 目录创建失败不致命:后续 spawn 会给出真实错误
+  }
 }
+ensureBiliCwd()
 
 // ---------------------------------------------------------------------------
 // 登录态整合(2026-09-22 用户反馈"明明登录了,查询收藏夹又说没有登录信息")
@@ -383,6 +388,10 @@ async function resolveBiliOutputs(job: BiliJob): Promise<string[]> {
  * 返回文本明确"无需等待",防止 Agent 自行反复轮询造成等待感 */
 function runBiliBackground(args: string[]): string {
   try {
+    ensureBiliCwd()
+    if (!existsSync(BILI_BIN)) {
+      throw new Error(`bili-tool.exe 不存在:${BILI_BIN}(安装包未安装 bili 工具,请重新安装并勾选「哔哩哔哩下载工具」)`)
+    }
     // 实时进度(2026-08-11,用户要求"下载到哪了可查"):单视频下载(get)
     // 追加 --progress-file,bili-tool 每 1.5s 原子写进度 JSON;下方轮询器
     // 每 2s 读取,把百分比注入任务状态块(detail)——LLM 对话里直接能
@@ -396,13 +405,35 @@ function runBiliBackground(args: string[]): string {
       mkdirSync(path.dirname(progressPath), { recursive: true })
       args = [...args, '--progress-file', progressPath]
     }
+    // 输出落盘(2026-10-23 修复):bili-tool 下载失败时**退出码仍然是 0**
+    // (cmd_get 捕获错误后照样返回 Ok,只在 stdout 打 ✗ 行),旧实现 stdio='ignore'
+    // 把失败吞掉 —— 引擎于是把失败当成功,通知"B站下载完成"、用户却找不到文件
+    // (实测根因还有 bili-tool.exe 被打上 Low Mandatory Level,写 AppData 一律
+    // os error 5 拒绝访问)。统一重定向到 .logs,close 时读回判定。
+    const logDir = path.join(BILI_CWD, '.logs')
+    mkdirSync(logDir, { recursive: true })
+    const logPath = path.join(logDir, `bili-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.log`)
+    let logFd = -1
+    try {
+      logFd = openSync(logPath, 'w')
+    } catch {
+      logFd = -1
+    }
+    const childStdio: 'ignore' | Array<'ignore' | number> = logFd >= 0 ? ['ignore', logFd, logFd] : 'ignore'
     const child = spawn(BILI_BIN, args, {
       windowsHide: true,
-      stdio: 'ignore',
+      stdio: childStdio,
       detached: true,
       cwd: BILI_CWD,
       env: BILI_ENV,
     })
+    if (logFd >= 0) {
+      try {
+        closeSync(logFd)
+      } catch {
+        // 父进程句柄关闭失败不致命:子进程持有自己的副本继续写
+      }
+    }
     child.unref()
     const pid = child.pid ?? -1
     biliJobs.set(pid, { pid, startedAt: Date.now(), args, finished: false, exitCode: null, finishedAt: 0, outputPaths: [] })
@@ -433,9 +464,11 @@ function runBiliBackground(args: string[]): string {
             if (p.stage === 'download' && typeof p.percent === 'number' && p.percent >= 0) {
               detail = `${biliJobLabel(args)} ${p.percent}%(${p.label ?? ''} ${fmtMb(p.done ?? 0)}/${fmtMb(p.total ?? 0)}),输出目录 ${outdir}`
             } else if (p.stage === 'transcode') {
-              detail = `${biliJobLabel(args)} 下载完成,正在转码为 H.264(约需几分钟),输出目录 ${outdir}`
+              // 措辞避免"下载完成"——进行中任务仍在转码,LLM 看到"完成"
+              // 会提前向用户播报下载结束(2026-10-23 幻觉反馈)
+              detail = `${biliJobLabel(args)} 转码中(约需几分钟),输出目录 ${outdir}`
             } else if (p.stage === 'mux') {
-              detail = `${biliJobLabel(args)} 下载完成,正在合并音视频,输出目录 ${outdir}`
+              detail = `${biliJobLabel(args)} 合并音视频中,输出目录 ${outdir}`
             } else {
               return
             }
@@ -459,17 +492,32 @@ function runBiliBackground(args: string[]): string {
       job.finishedAt = Date.now()
       biliJobs.delete(pid)
       const label = biliJobLabel(job.args)
-      if (code !== 0) {
-        showNotify('B站下载结束', `${label}异常退出(退出码 ${code}),请用 bili saved 查看记录或重试`)
+      let logText = ''
+      try {
+        logText = readFileSync(logPath, 'utf8')
+      } catch {
+        logText = ''
+      }
+      // bili-tool 的错误行统一以 ✗ 开头(cmd_get: println!("✗ {bv}: {e}"))
+      const errLines = logText
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter((line) => line.startsWith('✗'))
+        .slice(0, 3)
+        .join(' / ')
+      if (code !== 0 || errLines) {
+        const reason = errLines || (code !== 0 ? `异常退出(退出码 ${code})` : '未知错误')
+        showNotify('B站下载失败', `${label}: ${reason}`)
         // 失败也进入终态 → background-done → 自动对话告知用户(失败
         // 不再"只弹通知",LLM 与用户都在对话里知道结果)
         updateTask(taskId, {
           status: 'failed',
-          detail: `${label}异常退出(退出码 ${code}),可用 bili saved 查看记录或重试`,
+          detail: `${label}失败: ${reason}(日志: ${logPath})`,
         })
         return
       }
       // 成功:后台查 saved 记录解析输出文件绝对路径 → 终态 + 通知
+      void fs.rm(logPath, { force: true }).catch(() => {})
       void resolveBiliOutputs(job).then((files) => {
         job.outputPaths = files
         const message =
@@ -513,6 +561,7 @@ function startBiliLoginPoll(key: string): void {
     // 发起会话键(2026-08-16):登录结果通知回到发起登录的会话
     sessionKey: currentBiliSessionKey(),
   })
+  ensureBiliCwd()
   const child = spawn(
     BILI_BIN,
     ['login', '--resume', key, '--timeout', '120'],
@@ -534,6 +583,7 @@ function startBiliLoginPoll(key: string): void {
  * cwd 固定 BILI_CWD,saved 记录等相对路径才能按同一基准解析) */
 export function runBili(args: string[], timeoutMs: number): Promise<string> {
   return new Promise((resolve, reject) => {
+    ensureBiliCwd()
     const child = spawn(BILI_BIN, args, {
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -550,7 +600,11 @@ export function runBili(args: string[], timeoutMs: number): Promise<string> {
     }, timeoutMs)
     child.on('error', (e: Error) => {
       clearTimeout(timer)
-      reject(new Error(`无法启动 bili-tool:${e.message}(二进制缺失:${BILI_BIN})`))
+      // 区分"工具本体缺失"与"工作目录/权限问题",不再一律误报二进制缺失
+      const hint = !existsSync(BILI_BIN)
+        ? `(工具缺失:${BILI_BIN};请重新安装并勾选「哔哩哔哩下载工具」)`
+        : `(工作目录:${BILI_CWD})`
+      reject(new Error(`无法启动 bili-tool:${e.message}${hint}`))
     })
     child.on('close', (code) => {
       clearTimeout(timer)
@@ -711,10 +765,13 @@ export async function biliQuery(params: ToolParams): Promise<string | { text: st
         .join('\n')
     }
     case 'progress': {
-      // 实时下载进度(2026-08-11):查询进行中的 bili 后台下载任务——
-      // detail 由引擎轮询 bili-tool 进度文件持续更新(如"68%"),任务
-      // 已完成/失败则不在列表(自动对话告知结果);无进行中任务返回提示
-      const running = listTasks().filter((t) => t.id.startsWith('bili-dl-'))
+      // 实时下载进度(2026-08-11):查询**进行中**的 bili 后台下载任务——
+      // detail 由引擎轮询 bili-tool 进度文件持续更新(如"68%")。
+      // 2026-10-23:必须过滤终态——终态记录保留 24h,旧实现把"已完成"
+      // 也列出来,LLM 每次查询都重新播报"视频下载完毕"(幻觉),用户实测。
+      const running = listTasks().filter(
+        (t) => t.id.startsWith('bili-dl-') && (t.status === 'running' || t.status === 'waiting'),
+      )
       if (running.length === 0) return '当前没有进行中的 bili 下载任务(最近下载完成/失败后已自动告知结果,可用 bili saved 查记录)'
       return running.map((t) => `- ${t.detail}`).join('\n')
     }

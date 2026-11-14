@@ -146,6 +146,7 @@
   }
   .status.err { color: #ff9b9b; }
   .status.ok { color: #6ee7a0; }
+  .status.warn { color: #fbbf24; }
   .actions { margin-top: 6px; display: flex; gap: 10px; }
   .btn {
     border: 1px solid rgba(255,255,255,0.22);
@@ -217,7 +218,7 @@
     <input id="token" placeholder="WebUI Token(可留空自动读取)" spellcheck="false">
     <button class="btn primary" id="btnStart">开始</button>
   </div>
-  <div class="hint">token 自动读取自 NapCat 配置 webui.json;若提示未授权,粘贴 token 后点「开始」。<br>登录成功后本窗口自动关闭,OneBot(3001)随即可用。</div>
+  <div class="hint">token 自动读取自 NapCat 配置 webui.json;若提示未授权,粘贴 token 后点「开始」。<br>NapCat 未启动时窗口会自动重连;登录成功后本窗口自动关闭,OneBot(3001)随即可用。</div>
 <script>
   const $ = (id) => document.getElementById(id)
   const canvas = $('qr')
@@ -269,10 +270,18 @@
     $('timerSec').textContent = r + 's'
   }
 
+  function setIdleTimer() {
+    $('bar').style.width = '0%'
+    $('bar').className = ''
+    $('timerSec').textContent = '--'
+  }
+
   function render(s) {
-    // 二维码(有矩阵就画;错误态清掉旧码避免扫到死码)
-    if (s.qr && s.qr.rows) drawQr(s.qr.rows)
-    setTimer(s.remainSec, s.ttlSec)
+    const hasQr = !!(s.qr && s.qr.rows)
+    // 二维码(有矩阵就画;无码/错误态不画,避免把旧码留在屏上被扫)
+    if (hasQr) drawQr(s.qr.rows)
+    if (hasQr && s.phase === 'waiting') setTimer(s.remainSec, s.ttlSec)
+    else setIdleTimer() // 没码时别显示 105s 倒计时(旧版错误态也显示,像还有码可扫)
 
     if (s.phase === 'done') {
       $('veil').classList.add('show')
@@ -287,7 +296,7 @@
       setChip('err', '出错')
       $('status').textContent = s.message || '出错了'
       $('status').className = 'status err'
-    } else if (s.phase === 'waiting' && s.qr && s.qr.rows) {
+    } else if (s.phase === 'waiting' && hasQr) {
       $('veil').classList.remove('show')
       const remain = Math.max(0, s.remainSec | 0)
       if (s.message) {
@@ -299,11 +308,17 @@
       }
       $('status').className = 'status'
     } else {
-      // waiting 但暂无矩阵(启动中 / 换码间隙)
-      showPlaceholder('load', '正在获取登录二维码…', '连接 NapCat WebUI')
-      setChip('load', '连接中')
-      $('status').textContent = '正在连接…'
-      $('status').className = 'status'
+      // waiting 但暂无码:启动中 / 换码间隙 / WebUI 连不上自动重连(2026-10-22)
+      const msg = String(s.message || '')
+      const reconnect = /无法连接|连接中断|自动重连/.test(msg)
+      showPlaceholder(
+        'load',
+        reconnect ? '等待 NapCat WebUI…' : '正在获取登录二维码…',
+        reconnect ? '启动 NapCat 后会自动出码' : '连接 NapCat WebUI',
+      )
+      setChip(reconnect ? 'busy' : 'load', reconnect ? '重连中' : '连接中')
+      $('status').textContent = msg || '正在连接…'
+      $('status').className = reconnect ? 'status warn' : 'status'
     }
     // token 行:仅错误态且疑似鉴权问题时浮现(恢复 waiting 自动收起)
     const m = s.message || ''

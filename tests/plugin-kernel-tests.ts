@@ -34,7 +34,7 @@ import { createToolRegistry, toolRegistryPlugin } from '../electron/agent/plugin
 import { delegateToolPlugin } from '../electron/agent/plugin/tool-plugins'
 import { TOOL_POST_EXECUTE, TOOL_PRE_EXECUTE, toolExecHooksOf } from '../electron/agent/plugin/tool-events'
 import { ASSISTANT_SETTLED, recordLifecycle, type TurnUsage } from '../electron/agent/plugin/lifecycle-events'
-import { mindGuessPlugin } from '../electron/agent/plugin/subagent-plugins'
+import { subagentOnReplyPlugin } from '../electron/agent/plugin/subagent-plugins'
 import {
   createFileSessionLog,
   createMemorySessionLog,
@@ -560,7 +560,7 @@ export async function runPluginKernelTests({ test, assert, assertRejects }: Harn
     assert(reg.builtin().length === 0, 'dispose 后工具注册应逆序回滚')
   })
 
-  await test('心理揣测插件:助手落定后同步评估并经 events 回推 mind-guess', async () => {
+  await test('落定插件:只回推标题,不再另开模型猜心理', async () => {
     const ctx = createContext('mind-sync-1')
     const events: AgentEvent[] = []
     ctx.register('config', { getConfig: () => ({ apiKey: 'sk-test', systemPrompt: '' }) as never })
@@ -568,7 +568,7 @@ export async function runPluginKernelTests({ test, assert, assertRejects }: Harn
     ctx.register('sessionState', { getSessionId: () => null, getSessionKey: () => 'main' })
     ctx.register('memoryStore', null)
     ctx.register('evolution', null)
-    ctx.plugin(mindGuessPlugin({ stream: async () => mockOutcome('心里偷乐装没事') as never }))
+    ctx.plugin(subagentOnReplyPlugin({ stream: async () => mockOutcome('心里偷乐装没事') as never }))
     const landed = {
       id: 'a-1',
       role: 'assistant' as const,
@@ -583,32 +583,30 @@ export async function runPluginKernelTests({ test, assert, assertRejects }: Harn
       proactive: false,
     })
     const t0 = Date.now()
-    while (!events.some((e) => e.type === 'mind-guess') && Date.now() - t0 < 2000) {
+    while (!events.some((e) => e.type === 'conversation-title') && Date.now() - t0 < 2000) {
       await new Promise((r) => setTimeout(r, 10))
     }
-    const ev = events.find((e) => e.type === 'mind-guess')
-    assert(!!ev && ev.type === 'mind-guess', '应回推 mind-guess 事件')
-    assert(ev && ev.type === 'mind-guess' && ev.messageId === 'a-1', 'messageId 对应当轮落定消息')
-    assert(ev && ev.type === 'mind-guess' && ev.guess === '心里偷乐装没事', `揣测文本回流,实际 ${ev && ev.type === 'mind-guess' ? ev.guess : ''}`)
+    assert(!events.some((e) => e.type === 'mind-guess'), '心理不再由落定插件回推')
     const titleEv = events.find((e) => e.type === 'conversation-title')
     assert(!!titleEv && titleEv.type === 'conversation-title', '同一拍应回推 conversation-title')
+    assert(titleEv && titleEv.type === 'conversation-title' && titleEv.messageId === 'a-1', 'messageId 对应当轮落定消息')
     ctx.dispose()
   })
 
-  await test('心理揣测插件:外部会话不评估(紧凑态文字区只展示主对话)', async () => {
+  await test('落定插件:外部会话不评估标题', async () => {
     const ctx = createContext('mind-sync-2')
     const events: AgentEvent[] = []
     ctx.register('config', { getConfig: () => ({ apiKey: 'sk-test', systemPrompt: '' }) as never })
     ctx.register('events', { emit: (e: AgentEvent) => events.push(e) })
     ctx.register('sessionState', { getSessionId: () => null, getSessionKey: () => 'private:222' })
-    ctx.plugin(mindGuessPlugin({ stream: async () => mockOutcome('不该出现') as never }))
+    ctx.plugin(subagentOnReplyPlugin({ stream: async () => mockOutcome('不该出现') as never }))
     ctx.emit(ASSISTANT_SETTLED, {
       message: { id: 'a-x', role: 'assistant', parts: [{ type: 'text', text: 'hi' }] },
       history: [{ id: 'a-x', role: 'assistant', parts: [{ type: 'text', text: 'hi' }] }],
       proactive: false,
     })
     await new Promise((r) => setTimeout(r, 50))
-    assert(!events.some((e) => e.type === 'mind-guess'), '外部会话不应回推 mind-guess')
+    assert(!events.some((e) => e.type === 'mind-guess' || e.type === 'conversation-title'), '外部会话不评估标题,也不猜心理')
     ctx.dispose()
   })
 

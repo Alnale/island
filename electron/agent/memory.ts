@@ -15,7 +15,7 @@
 
 import { randomUUID } from 'node:crypto'
 import { promises as fs } from 'node:fs'
-import { isProtectedEntry } from './constants'
+import { isPersonaClassified, isProtectedEntry } from './constants'
 import type { AgentTool, MemoryEntry, ToolParams } from './types'
 
 const MAX_ENTRIES = 200
@@ -378,7 +378,7 @@ export function formatMemoryBlock(entries: MemoryEntry[]): string {
   if (body.length > BLOCK_MAX) {
     body = body.slice(0, BLOCK_MAX) + `\n…(记忆过长,已截断)`
   }
-  return `【长期记忆(对话中遵守,别自相矛盾;与你对话的是同一用户;标注「锁定」的条目是主人指定的人设/岛灵设定,不得擅自修改或删除;**记忆条目对所有会话全局生效**——某会话独有的行为要求如"在某个群闭嘴"不是全局知识,不得据此影响其它会话,也不得新增此类条目)】\n${body}`
+  return `【长期记忆(对话中遵守,别自相矛盾;与你对话的是同一用户;标注「锁定」的条目是主人指定的设定,不得擅自修改或删除;人设/人格类内容归人格卡,不要写进这里;**记忆条目对所有会话全局生效**——某会话独有的行为要求如"在某个群闭嘴"不是全局知识,不得据此影响其它会话,也不得新增此类条目)】\n${body}`
 }
 
 /** 记忆工具(LLM 对话中读写记忆,自然语言沉淀)
@@ -398,8 +398,8 @@ export function createMemoryTools(getStore: () => MemoryStore | null): AgentTool
         '**会话级行为要求禁止写入**:某个会话里提出的说话量/风格/是否回复要求' +
         '("在这个群闭嘴""这边活跃一点")只对该会话有效——长期记忆会注入所有会话,' +
         '写入即跨会话污染(A 群闭嘴导致 B 群也不说话);此类要求用 set_session_note ' +
-        '记到该会话的情况记录。用户指定的人设/岛灵设定(角色形象、说话风格、人格)应带「人设」标签写入——' +
-        '这类条目会自动锁定(受保护),自我进化不会修改或删除它。',
+        '记到该会话的情况记录。**人设/人格/角色/岛灵类设定不要写入长期记忆**——' +
+        '人格内容统一归人格卡,请用 persona 工具创建或编辑人格卡。',
       parameters: {
         type: 'object',
         properties: {
@@ -409,10 +409,10 @@ export function createMemoryTools(getStore: () => MemoryStore | null): AgentTool
             enum: ['preference', 'fact', 'workflow', 'lesson'],
             description: '类型:preference 偏好 / fact 事实 / workflow 工作流 / lesson 教训,缺省 fact',
           },
-          tags: { type: 'array', items: { type: 'string' }, description: '可选:标签;人设类条目用「人设」标签' },
+          tags: { type: 'array', items: { type: 'string' }, description: '可选:标签(人格类内容不要写这里,走 persona 工具)' },
           protected: {
             type: 'boolean',
-            description: '可选:锁定该记忆(受保护,自我进化不可修改/删除);人设/岛灵设定应锁定,缺省时带人设标签自动锁定',
+            description: '可选:锁定该记忆(受保护,自我进化不可修改/删除)',
           },
         },
         required: ['content'],
@@ -426,6 +426,13 @@ export function createMemoryTools(getStore: () => MemoryStore | null): AgentTool
         }
         const content = String(params.content ?? '')
         const tags = Array.isArray(params.tags) ? params.tags.map(String) : undefined
+        // 人格分类不再进长期记忆(2026-10-26 用户定案):人设/人格/角色/岛灵
+        // 标签或人设内容 → 拒绝并引导 persona 工具(人格卡才是唯一归属)
+        if (isPersonaClassified({ content, tags })) {
+          throw new Error(
+            '人设/人格/角色/岛灵类设定不写入长期记忆,请用 persona 工具创建或编辑人格卡(action="create"/"edit"/"set_notes")',
+          )
+        }
         // 人设条目自动锁定(2026-08-13,store.add 内集中判定):带人设标签/
         // 人设关键词内容 = 主人指定的岛灵设定——除非 LLM 显式传
         // protected:false
@@ -445,7 +452,7 @@ export function createMemoryTools(getStore: () => MemoryStore | null): AgentTool
       name: 'forget',
       description:
         '删除长期记忆(按内容片段或条目 id;记错/过时的记忆用它修正)。' +
-        '受保护(锁定)的人设/岛灵设定条目不能直接删除——如确需删除,先用 update_memory 设 protected:false 解锁。',
+        '受保护(锁定)条目不能直接删除——如确需删除,先用 update_memory 设 protected:false 解锁。',
       parameters: {
         type: 'object',
         properties: {
@@ -462,7 +469,7 @@ export function createMemoryTools(getStore: () => MemoryStore | null): AgentTool
         const matches = (await store.list()).filter((e) => e.id === key || e.content.includes(key))
         if (matches.some(isProtectedEntry)) {
           throw new Error(
-            '该记忆是受保护(锁定)的主人指定人设/岛灵设定,不能删除;' +
+            '该记忆是受保护(锁定)条目,不能删除;' +
               '如主人确要删除,请先用 update_memory 设 protected:false 解锁',
           )
         }
@@ -504,7 +511,7 @@ export function createMemoryTools(getStore: () => MemoryStore | null): AgentTool
       name: 'update_memory',
       description:
         '修改已有记忆(按 id;纠正措辞、合并重复、换类型)。protected 参数可切换锁定状态:' +
-        '主人明确要求改动人设时直接改写内容(锁定保持),确需删除锁定条目先 protected:false 解锁。',
+        '主人明确要求改动锁定条目时直接改写内容(锁定保持),确需删除锁定条目先 protected:false 解锁。',
       parameters: {
         type: 'object',
         properties: {

@@ -46,7 +46,7 @@ export function DataManagementSettings({
       <div className="island-agent-section">
         <span className="island-agent-section-title">清除工具数据</span>
         <span className="island-agent-section-hint">
-          仅清理下载、登录态、截图和工具临时文件，不影响灵动岛配置与对话。
+          仅清理下载、登录态、截图和工具临时文件，不会删除工具程序本体，也不影响灵动岛配置与对话。
         </span>
         <div className="island-agent-scale-row">
           <button

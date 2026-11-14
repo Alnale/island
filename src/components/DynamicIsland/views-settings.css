@@ -83,6 +83,27 @@
   transform: scale(0.97);
 }
 
+/* 置于桌面最上方开关(2026-10-24):左侧图标 + 文案,右侧复用歌词 API
+   开关的轨道/滑块;.on 由渲染端按主进程持久化状态切换 */
+.island-settings-toggle {
+  justify-content: flex-start;
+  gap: 8px;
+  padding: 10px 14px;
+}
+.island-settings-toggle .island-settings-toggle-label {
+  flex: 1;
+  text-align: left;
+}
+.island-settings-toggle .island-toggle-track {
+  flex: none;
+}
+.island-settings-toggle.on .island-toggle-track {
+  background: color-mix(in srgb, var(--state-color, #4d6bfe) 85%, transparent);
+}
+.island-settings-toggle.on .island-toggle-knob {
+  transform: translateX(16px);
+}
+
 /* ===== 字体设置视图(设置视图"字体"入口,岛内打开) =====
    内容紧凑适配 244px 面板:预览单行 + 上传/移除按钮行 +
    颜色模式分段 + (自定义时)色板单行 + hex 输入行。
@@ -499,6 +520,14 @@
   pointer-events: none;
 }
 
+/* 有自定义背景图:固定深色轻蒙版,不跟随浅色 UI。
+   不透明度拉高后合成亮度越过阈值会切 island-ui-light,
+   --island-agent-veil 变成近白 rgba(248,250,252,0.14),整张图被罩灰
+   (典型照片大约就在 90%)。这里锁死深色,文字仍可按亮度改黑白。 */
+.island-demo.island-has-bg-image .island-panel-mask {
+  background: rgba(8, 10, 14, 0.16);
+}
+
 .island-panel-list-head {
   display: flex;
   align-items: center;
@@ -713,25 +742,33 @@
 }
 
 /* ===== 自定义背景 =====
-   背景图图层覆盖在岛体深色底之上,不透明度可调(0 = 纯深色底);
-   圆角跟随岛体形变,pointer-events 穿透,内容层在其上。
+   背景图和深色蒙层画在同一元素里,元素本身不设 opacity。
+   透明窗口下 opacity<1 会把桌面透进这一层,图被洗灰(约 90% 最明显)。
+   --bg-veil-* 的 alpha = 1 - 用户不透明度;图在下、蒙层在上,实底兜住
+   PNG 透明处,合成像素不透明。
    展开态 / 紧凑态各自独立的图片与裁切参数(组件经 CSS 变量注入,互不影响):
-   - 默认(紧凑态):--bg-img-c / --bg-size-c / --bg-pos-c
-   - 展开态:--bg-img-e / --bg-size-e / --bg-pos-e */
+   - 默认(紧凑态):--bg-img-c / --bg-size-c / --bg-pos-c / --bg-veil-c
+   - 展开态:--bg-img-e / --bg-size-e / --bg-pos-e / --bg-veil-e */
 .island-bg-image {
   position: absolute;
   inset: 0;
   border-radius: inherit;
-  background-image: var(--bg-img-c, none);
-  background-size: var(--bg-size-c, cover);
-  background-position: var(--bg-pos-c, 50% 50%);
+  background-color: rgb(8, 10, 14);
+  background-image:
+    linear-gradient(var(--bg-veil-c, transparent), var(--bg-veil-c, transparent)),
+    var(--bg-img-c, none);
+  background-repeat: no-repeat;
+  background-size: 100% 100%, var(--bg-size-c, cover);
+  background-position: center, var(--bg-pos-c, 50% 50%);
   pointer-events: none;
 }
 
 .island-demo.expanded .island-bg-image {
-  background-image: var(--bg-img-e, none);
-  background-size: var(--bg-size-e, cover);
-  background-position: var(--bg-pos-e, 50% 50%);
+  background-image:
+    linear-gradient(var(--bg-veil-e, transparent), var(--bg-veil-e, transparent)),
+    var(--bg-img-e, none);
+  background-size: 100% 100%, var(--bg-size-e, cover);
+  background-position: center, var(--bg-pos-e, 50% 50%);
 }
 
 /* 背景编辑器视图:岛体加高容纳裁切区(挂件窗口同步加高;

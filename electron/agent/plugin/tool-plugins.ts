@@ -15,6 +15,7 @@ import { createSessionTools } from '../tools/sessionTools'
 import { createNapcatTools } from '../napcat/napcat'
 import { createMemoryTools } from '../memory'
 import { createConfigTools } from '../tools/configTools'
+import { createPersonaTools } from '../tools/tools-persona'
 import { createBuiltinTools } from '../engine/engine-builtins'
 import { createDelegateTool } from '../engine/engine-tool-execution'
 import { getTaskDoneHandler, setTaskDoneHandler } from '../tasks'
@@ -56,6 +57,13 @@ export function coreToolsPlugin(): Plugin {
             return mimo && mimo.apiKey.trim()
               ? { apiKey: mimo.apiKey, baseURL: mimo.baseURL, model: mimo.model }
               : null
+          },
+          // DeepSeek 官方网页工具凭据(2026-10-22:web_search/web_fetch 走
+          // 官方 tools/search|fetch):实时读 providers.deepseek 桶,与激活
+          // 供应商无关;Key 空返回 null(Bing/DDG/直连兜底)
+          getDeepseekCreds: () => {
+            const ds = ctx.get('config').getConfig().providers?.deepseek
+            return ds && ds.apiKey.trim() ? { apiKey: ds.apiKey, baseURL: ds.baseURL } : null
           },
           // 米家写守卫来源(2026-09-22):turnKind 八值优先(window/panel/
           // master-qq/master-group 可写),getTurnSource 三值兜底
@@ -99,12 +107,57 @@ export function napcatToolsPlugin(): Plugin {
     apply(ctx: AgentContext) {
       const client = ctx.get('napcatClient')
       if (!client) return
+      const groupRoute = ctx.has('groupRoute') ? ctx.get('groupRoute') : undefined
       ctx.get('tools').registerTools(
         createNapcatTools({
           client,
           getSessionKey: () => ctx.get('sessionState').getSessionKey(),
+          getTurnKind: () => (ctx.has('ownerConfig') ? ctx.get('ownerConfig')?.getTurnKind?.() ?? null : null),
+          getSelfQQ: () => {
+            try {
+              const live = client.getBotQQ?.()
+              if (live && /^\d{5,12}$/.test(live)) return live
+            } catch {
+              // 测试桩可能没有 getBotQQ
+            }
+            return String(ctx.get('config').getConfig().napcatBotQQ ?? '')
+          },
+          listGroupParticipants: groupRoute?.listParticipants,
+          getGroupTurn: groupRoute?.getTurn,
           confirmDangerous: ctx.get('confirm').confirmAction,
           openLogin: () => ctx.get('napcatLogin')?.(),
+        }),
+      )
+    },
+  }
+}
+
+/** 人格卡工具(2026-10-26;未注入 personaStore 则不激活) */
+export function personaToolsPlugin(): Plugin {
+  return {
+    name: 'tools-persona',
+    inject: ['tools', 'personaStore', 'personaBufferStore', 'memoryStore', 'config', 'updateConfig', 'confirm'],
+    apply(ctx: AgentContext) {
+      const store = ctx.get('personaStore')
+      if (!store) return
+      ctx.get('tools').registerTools(
+        createPersonaTools({
+          getStore: () => ctx.get('personaStore'),
+          getConfig: () => ctx.get('config').getConfig(),
+          updateConfig: ctx.get('updateConfig'),
+          confirmDangerous: ctx.get('confirm').confirmAction,
+          getPersonaBufferStore: () => ctx.get('personaBufferStore'),
+          getMemoryStore: () => ctx.get('memoryStore'),
+          // 闲聊/群聊/系统通知里模型擅自 replace 会弹出「整体替换人格卡」。
+          // 始终注入本轮上下文:缺轮次按静默轮拒绝,不回退到「一律弹确认」。
+          getTurnContext: () => {
+            const owner = ctx.has('ownerConfig') ? ctx.get('ownerConfig') : null
+            if (!owner) return { kind: 'silent', text: '' }
+            return {
+              kind: owner.getTurnKind?.() ?? 'silent',
+              text: owner.getTurnText?.() ?? '',
+            }
+          },
         }),
       )
     },

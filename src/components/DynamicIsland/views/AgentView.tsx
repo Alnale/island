@@ -36,6 +36,7 @@ import { Markdown, type AgentMediaReport } from './Markdown'
 import { AssistantBlock, ToolSummary, UserBubble } from './AgentMessages'
 import type { AgentMessage } from '../../../agent/types'
 import { stripTurnMarks, textFromParts } from '../../../agent/text'
+import { MIND_INK, MindWhisperField } from './MindWhisperField'
 import {
   AGENT_PANEL_FIXED_H,
   AGENT_PANEL_HEIGHT_SLACK,
@@ -429,6 +430,8 @@ export function AgentView({
   onMediaSnapshot,
   mediaAutoPlayIds,
   onMediaAutoPlayed,
+  mindWhisper,
+  whisperRevealAt,
 }: AgentViewProps) {
   // 稳定引用(2026-08-11,性能):消费自动播放标记回调按 id 传参,每条
   // 消息复用同一引用——内联箭头会让 AssistantBlock 的 memo 全部失效,
@@ -739,6 +742,13 @@ export function AgentView({
   useEffect(() => () => window.clearTimeout(suggestCloseTimerRef.current), [])
   // 输入框引用:LLM 回复完成后自动聚焦,直接可输入
   const inputRef = useRef<HTMLTextAreaElement>(null)
+  const confirmRef = useRef<HTMLDivElement>(null)
+  // 确认卡挂上后把窗口拉到前台。透明置顶窗没焦点时,系统会吃掉第一下
+  // 点击,允许/拒绝看起来点了没反应。
+  useEffect(() => {
+    if (!pendingConfirm) return
+    window.desktop?.focusWindow?.()
+  }, [pendingConfirm])
   const scrollRef = useRef<HTMLDivElement>(null)
   // 跳底锚点(2026-08-17 收敛):消息列表末尾 0 高哨兵,统一跳底用它对齐
   const bottomAnchorRef = useRef<HTMLDivElement>(null)
@@ -779,6 +789,27 @@ export function AgentView({
     if (!el) return
     el.scrollTop = el.scrollHeight
   })
+  // 会话切换强制贴底(2026-10-25):切换到另一个 QQ 会话 = 打开另一段聊天,
+  // 无论上一个会话是否向上翻过历史,都重置贴底标志并同帧滚到最新消息。
+  // 同时覆盖从历史/工具视图切回 chat 的情况;消息增量仍走上方贴底守卫。
+  // **注意**:仅有这里的 scrollTop 赋值不够——消息列表整体替换会触发
+  // Chromium scroll anchoring 在布局阶段回写 scrollTop(实测落底后被拽回
+  // 中部),已由 .island-agent-messages 的 overflow-anchor: none 关闭锚定。
+  useLayoutEffect(() => {
+    atBottomRef.current = true
+    if (view !== 'chat' || phase !== 'content') return
+    const el = scrollRef.current
+    if (!el) return
+    el.scrollTop = el.scrollHeight
+    // 同帧滚动时面板高度动画/新会话消息可能尚未落定,再补一次延后贴底;
+    // 后续高度增长由消息区 RO(已观察容器自身)持续跟随。
+    const t = window.setTimeout(() => {
+      if (!atBottomRef.current) return
+      const el2 = scrollRef.current
+      if (el2) el2.scrollTop = el2.scrollHeight
+    }, 80)
+    return () => window.clearTimeout(t)
+  }, [currentSessionKey, view, phase])
   // 卸载时清理测量节流计时器
   useEffect(() => () => window.clearTimeout(measureTimerRef.current), [])
   const busy = status === 'thinking' || status === 'running'
@@ -859,12 +890,16 @@ export function AgentView({
       // 兜住,收起后暴露。横幅高度计入预算,消息区恢复完整高度
       let bannerH = 0
       if (bannerRef.current) bannerH = bannerRef.current.offsetHeight + 10
+      // 确认卡长在输入区上方,FIXED_H 只预算了单行输入框。不把这截高度
+      // 加进岛体,卡片会被 overflow:hidden 裁掉下半,按钮看得见但点不着。
+      let confirmExtra = 0
+      if (confirmRef.current) confirmExtra = confirmRef.current.offsetHeight + 8
       const next = Math.min(
         AGENT_PANEL_MAX_H,
         // + AGENT_PANEL_HEIGHT_SLACK(2026-08-13 修复"切会话收起面板后
         // 单条消息底部被截断"):零余量预算在 offsetHeight 取整/行高小数
         // 下消息区比内容矮 1-2px,底缘被裁;加余量后消息区留出呼吸空间
-        Math.max(AGENT_PANEL_MIN_H, AGENT_PANEL_FIXED_H + contentH + dockH + bannerH + AGENT_PANEL_HEIGHT_SLACK),
+        Math.max(AGENT_PANEL_MIN_H, AGENT_PANEL_FIXED_H + contentH + dockH + bannerH + confirmExtra + AGENT_PANEL_HEIGHT_SLACK),
       )
       onHeightChange?.(next)
     }
@@ -1058,7 +1093,7 @@ export function AgentView({
   useLayoutEffect(() => {
     const raf = requestAnimationFrame(measureHeight)
     return () => cancelAnimationFrame(raf)
-  }, [measureHeight, view, messages, streaming, status, lastError, phase])
+  }, [measureHeight, view, messages, streaming, status, lastError, phase, pendingConfirm])
 
   // 消息内容高度变化 → 重测岛体 + 贴底跟随(2026-08-17 弃虚拟滚动后恢复
   // 容器级 RO):工具卡片展开/媒体加载/文本重排使单条消息高度变化,消息
@@ -1080,6 +1115,12 @@ export function AgentView({
       if (atBottomRef.current && viewRef.current === 'chat') scrollToBottom()
     })
     for (let i = 0; i < el.children.length; i++) ro.observe(el.children[i])
+    // 滚动容器自身(2026-10-25):--agent-h 由高度动画逐帧写 DOM,消息区
+    // max-height/clientHeight 随之变化,但子元素高度不变——只观察 children
+    // 不会在容器伸缩时重贴底。**真正的"切群聊停在中间"根因是浏览器滚动
+    // 锚定,已在 .island-agent-messages 上 overflow-anchor: none 关闭**;
+    // 观察容器本身只负责面板高度变化期间的贴底跟随
+    ro.observe(el)
     return () => ro.disconnect()
     // view 入 deps(2026-08-19):三视图共用滚动容器,切换时 children 被整批
     // 替换——原 deps 不含 view,切回 chat 后 RO 观察的还是挂载时的旧节点
@@ -1100,8 +1141,8 @@ export function AgentView({
     }
   }, [messages, streaming, status, lastError, view, phase, scrollToBottom])
 
-  // 会话切换强制贴底已合并进上方统一滚底 effect(2026-08-17 收敛,
-  // 见 scrollRef 处注释——避免两处独立 effect 触发路径不一致)
+  // 会话切换强制贴底见上方 currentSessionKey useLayoutEffect(2026-10-25):
+  // 与消息增量滚底解耦——切会话无条件贴底,消息增量仍受 atBottom 守卫。
 
   // 聊天/历史/工具视图共用滚动处理(2026-08-17 弃虚拟滚动后,chat 视图
   // 滚动容器也挂 onScroll):按距底 48px 更新贴底标志(供新消息跳底判定)。
@@ -1801,7 +1842,7 @@ export function AgentView({
           }}
         >
           {pendingConfirm && (
-            <div className="island-agent-confirm">
+            <div ref={confirmRef} className="island-agent-confirm">
               {/* 确认卡通用化(2026-08-10):exec_command 确认带 command 显示
                   "允许执行命令?";bili 批量下载等动作确认带 title/detail
                   显示动作标题 + 详情 */}
@@ -1817,7 +1858,9 @@ export function AgentView({
                 <button
                   type="button"
                   className="island-agent-confirm-allow"
-                  onClick={(event) => {
+                  onPointerDown={(event) => {
+                    if (event.button !== 0) return
+                    event.preventDefault()
                     event.stopPropagation()
                     onConfirmTool(true)
                   }}
@@ -1827,7 +1870,9 @@ export function AgentView({
                 <button
                   type="button"
                   className="island-agent-confirm-deny"
-                  onClick={(event) => {
+                  onPointerDown={(event) => {
+                    if (event.button !== 0) return
+                    event.preventDefault()
                     event.stopPropagation()
                     onConfirmTool(false)
                   }}
@@ -1900,17 +1945,31 @@ export function AgentView({
               </div>
             </div>
           )}
-          <textarea
+          <div
+            className="island-agent-compose"
+            data-mind={mindWhisper ? mindWhisper.kind : undefined}
+            style={mindWhisper ? { ['--mind-ink' as string]: MIND_INK[mindWhisper.kind] } : undefined}
+          >
+            {/* 恒挂载:新对话无底字时也保留主题色粒子(打字无字面可盖,
+                粒子全走主题色),避免第一次打字不触发 */}
+            <MindWhisperField
+              whisper={mindWhisper}
+              typed={input}
+              revealAt={whisperRevealAt}
+              textareaRef={inputRef}
+            />
+            <textarea
             ref={inputRef}
             value={input}
-            placeholder="输入指令,Enter 发送…"
+            placeholder={mindWhisper ? '' : '输入指令,Enter 发送…'}
             rows={1}
             onChange={(event) => setInput(event.target.value)}
             onKeyDown={handleInputKeyDown}
             // 仅主实例自动聚焦(离场副本不抢焦点——挂载时 autoFocus
             // 会把输入焦点从用户处抢走,造成切换时的焦点跳动)
             autoFocus={listRef !== undefined}
-          />
+            />
+          </div>
           {busy ? (
             <button
               type="button"

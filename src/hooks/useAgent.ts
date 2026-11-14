@@ -15,11 +15,13 @@
  * (git 快照)回滚到该轮之前的状态快照。
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { MASTER_WINDOW_MARK, tagMasterWindowText } from '../../electron/agent/constants'
 import { isEmptyNapcatDisplayText, stripNapcatHistoryInstructions, stripTurnMarks } from '../agent/text'
+import { depictTurn, isMindLabel } from '../../electron/agent/mind-mark'
 import type {
   AgentConfig,
+  NapcatGroupTurn,
   AgentEvent,
   AgentMessage,
   AgentPart,
@@ -27,6 +29,8 @@ import type {
   AgentStatus,
   AgentToolCallState,
   AgentToolInfo,
+  MindWhisper,
+  MindWhisperKind,
 } from '../agent/types'
 
 /** 按码元截断(后台标签结果清洗:引擎已截,这里兜底;跨 emoji 安全) */
@@ -49,8 +53,59 @@ const HISTORY_KEY = 'widget-agent-messages'
 const SESSIONS_KEY = 'widget-agent-sessions'
 /** 当前对话实时总结标题存储键 */
 const TITLE_KEY = 'widget-agent-title'
-/** 心理揣测存储键(最近一次回复的心理;重启保留,文字区不落空) */
+/** 她的岛面心理(最近一次;重启保留,文字区不落空)。主对话沿用旧键 */
 const MIND_KEY = 'widget-agent-mind'
+/** 输入框底字。按会话分键,外部会话不覆盖主对话 */
+function mindStorageKey(sessionKey: string): string {
+  return sessionKey === 'main' ? MIND_KEY : `${MIND_KEY}:${sessionKey}`
+}
+function whisperStorageKey(sessionKey: string): string {
+  return sessionKey === 'main' ? 'widget-agent-mind-whisper' : `widget-agent-mind-whisper:${sessionKey}`
+}
+
+function loadStoredWhisper(sessionKey: string): MindWhisper | null {
+  try {
+    const raw = localStorage.getItem(whisperStorageKey(sessionKey))
+    if (!raw) return null
+    const obj = JSON.parse(raw) as { kind?: unknown; text?: unknown }
+    return normalizeWhisper(obj.kind, obj.text)
+  } catch {
+    return null
+  }
+}
+
+function textOf(message: AgentMessage, type: 'text' | 'reasoning'): string {
+  return message.parts
+    .filter((p): p is Extract<AgentPart, { type: 'text' | 'reasoning' }> => p.type === type)
+    .map((p) => p.text)
+    .join('\n')
+}
+
+/** 等回复落定再判断:一轮已落定的回复 → 输入框该印的心理。主动陪伴和普通回复同一条。 */
+function whisperFromMessage(message: AgentMessage): MindWhisper | null {
+  if (message.role !== 'assistant' || !Array.isArray(message.parts)) return null
+  const felt = depictTurn(textOf(message, 'text'), textOf(message, 'reasoning'))
+  if (!felt) return null
+  return { kind: felt.kind, text: felt.whisper }
+}
+
+/** 已有对话里她没写下心理行时,用最近一轮能刻画的回复补输入框。 */
+function whisperFromHistory(messages: AgentMessage[]): MindWhisper | null {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i]
+    if (!message) continue
+    const felt = whisperFromMessage(message)
+    if (felt) return felt
+  }
+  return null
+}
+
+function normalizeWhisper(kind: unknown, text: unknown): MindWhisper | null {
+  if (kind !== 'say' && kind !== 'hope' && kind !== 'pure') return null
+  const value = Array.from(String(text ?? '').trim()).slice(0, 40).join('')
+  if (Array.from(value).length < 4 || isMindLabel(value)) return null
+  return { kind: kind as MindWhisperKind, text: value }
+}
 /** 历史会话数量上限(超出丢弃最旧) */
 const MAX_SESSIONS = 20
 
@@ -224,8 +279,12 @@ export interface AgentController {
   tools: AgentToolInfo[]
   /** 当前对话实时总结标题(每轮回复后静默更新;null = 尚无总结) */
   currentTitle: string | null
-  /** 心理揣测(助手回复落定同步评估;紧凑态文字区优先展示) */
+  /** 她自己的心理(主 Agent 写下的岛面一句;紧凑态文字区优先展示) */
   mindGuess: string | null
+  /** 输入框底字 */
+  mindWhisper: MindWhisper | null
+  /** 底字是刚刚写下的(>0)还是从存档恢复的(0) */
+  whisperRevealAt: number
   /** 发送一轮对话。opts.silent = 系统提示静默模式(不进渲染端历史,
    * 仅作引擎本轮输入——background-done 等系统通知用);
    * opts.media / opts.paths(2026-08-17 拖拽上传):media = 媒体附件路径
@@ -302,27 +361,32 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
       return null
     }
   })
-  // 当前回复的心理揣测(助手回复落定同步评估;紧凑态文字区优先展示)
+  // 她写在岛上的那一句(主 Agent 回复末行剥离;紧凑态文字区优先展示)
   const [mindGuess, setMindGuess] = useState<string | null>(() => {
     try {
-      const v = localStorage.getItem(MIND_KEY)
-      // 揣测上限 16 码元(2026-08-16):任何来源进文字区都不超过 16 字
+      const v = localStorage.getItem(mindStorageKey(myKey))
+      // 上限 16 码元:任何来源进文字区都不超过 16 字
       return v ? truncateCodepoints(v, 16) : null
     } catch {
       return null
     }
   })
-  // 会话版本号:仅在 clear/loadSession(会话真正切换)时递增;
-  // 后台标签(总结标题/心理揣测)完成时校验,旧会话的结果不覆盖新会话。
-  // 注意:send 不递增——连续对话时每轮总结基于最新消息,旧总结结果
-  // 主题一致仍有效,递增会把总结全部作废(文字区永远等不到标题)
-  const sessionVersionRef = useRef(0)
+  const [mindWhisper, setMindWhisper] = useState<MindWhisper | null>(() => {
+    const stored = loadStoredWhisper(myKey)
+    if (stored) return stored
+    const history = myKey === 'main' ? loadHistory() : loadExternalHistory(myKey)
+    return whisperFromHistory(history)
+  })
+  const [whisperRevealAt, setWhisperRevealAt] = useState(() => {
+    if (loadStoredWhisper(myKey)) return 0
+    const history = myKey === 'main' ? loadHistory() : loadExternalHistory(myKey)
+    return whisperFromHistory(history) ? Date.now() : 0
+  })
   // 2026-08-10 自动播放标记:本会话**流式落定**且尚未自动播放过的助手
   // 消息 id——LLM 播放视频/音频只在"当次对话"(本轮落定)自动播放一次;
   // 历史会话加载/重挂载(收起再展开)读到已消费 → 不再自动播放
   const mediaAutoPlayRef = useRef(new Set<string>())
-  // 加载历史后跳过下一次后台标签生成(历史已有标题/心理,无需重新生成)
-  const skipNextLabelRef = useRef(false)
+
   // 主动陪伴(2026-08-07):上次"有操作"时刻(用户发送/清空/切换会话/
   // 主动回复落定都会重置)——调度器据此判断"无操作满 N 分钟"
   const lastUserSendRef = useRef(Date.now())
@@ -334,6 +398,15 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
   // 主动陪伴 tick in-flight 守卫(覆盖 judge 全程:IPC 在 judge 完成后
   // 才 resolve,期间不重发;judge 阶段用户 send 天然优先)
   const proactiveInFlightRef = useRef(false)
+  // 主动陪伴判定冷却截止时刻(2026-10-22:judge-no/judge-error 只进短冷却
+  // 重试,不再重置无操作时钟——旧策略判一次"不"就等满整段间隔,主动陪伴
+  // 因此"基本不触发";冷却 = 间隔/3 钳 2-5 分钟,闲置时判定调用有界)
+  const proactiveNextJudgeAtRef = useRef(0)
+  // 本个"沉默窗口"内连续未开口次数(judge-no/judge-error 计数;≥2 →
+  // force 兜底强制开口)。沉默窗口 = 两次"有操作"之间——用 lastUserSendRef
+  // 的取值做窗口指纹:任何"有操作"重置时钟即换窗口,计数自动归零
+  const proactiveSkipsRef = useRef(0)
+  const proactiveCycleRef = useRef(lastUserSendRef.current)
 
   // 订阅/发送需要引用最新的 messages(事件回调里不要依赖闭包里的 state)
   const messagesRef = useRef(messages)
@@ -342,6 +415,10 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
   sessionsRef.current = sessions
   const currentTitleRef = useRef(currentTitle)
   currentTitleRef.current = currentTitle
+  const mindGuessRef = useRef(mindGuess)
+  mindGuessRef.current = mindGuess
+  const mindWhisperRef = useRef(mindWhisper)
+  mindWhisperRef.current = mindWhisper
   const statusRef = useRef(status)
   statusRef.current = status
   // 流式状态镜像 + rAF 合批:高频增量事件(text/reasoning/tool)直写镜像,
@@ -362,10 +439,12 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
   // message 落定到达——先缓存,消息落定时应用,保证任何时序下"已发送"
   // 指纹 UI 都能补上(messageId → 'peer' | 'group' | 'master')
   const pendingRoutedRef = useRef<Map<string, string>>(new Map())
-  // 心理揣测时序兜底:回复落定同步评估可能与 message 事件同拍到达,
-  // messagesRef 要等下一帧渲染才更新——先到的猜缓存,消息落定再应用;
-  // lastLandedId 覆盖"消息已 setState 但 ref 未刷新"的中间态
+  // 心理刻画时序兜底:回复落定后判断的岛面一句/底字可能与 message
+  // 事件同拍到达,messagesRef 要等下一帧渲染才更新——先到的缓存,
+  // 消息落定再应用;lastLandedId 覆盖"消息已 setState 但 ref 未刷新"
+  // 的中间态
   const pendingMindRef = useRef<{ messageId: string; guess: string } | null>(null)
+  const pendingWhisperRef = useRef<{ messageId: string; whisper: MindWhisper } | null>(null)
   const pendingTitleRef = useRef<{ messageId: string; title: string } | null>(null)
   const lastLandedIdRef = useRef<string | null>(null)
   const resetStreaming = useCallback(() => {
@@ -424,7 +503,7 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
     return desktop.onAgentEvent((raw: unknown) => {
       const event = raw as AgentEvent
       // 会话过滤(2026-08-13):事件带 sessionKey 时只处理自己的会话;
-      // 无键事件(总结标题/心理揣测等后台标签)仅 main 实例处理
+      // 无键事件(总结标题/心理刻画等后台标签)仅 main 实例处理
       if (event.sessionKey && event.sessionKey !== myKey) return
       switch (event.type) {
         case 'status':
@@ -520,6 +599,20 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
             pendingMindRef.current = null
             setMindGuess(truncateCodepoints(pendingMind.guess, 16))
           }
+          const pendingWhisper = pendingWhisperRef.current
+          const fromEngine =
+            pendingWhisper && pendingWhisper.messageId === landed.id ? pendingWhisper.whisper : null
+          if (pendingWhisper) pendingWhisperRef.current = null
+          // 每一轮回复落定都改输入框,含主动陪伴。引擎没推心理行时,用这一轮自己的话补。
+          const nextWhisper = fromEngine ?? whisperFromMessage(landed)
+          const prevWhisper = mindWhisperRef.current
+          if (
+            nextWhisper &&
+            (prevWhisper?.text !== nextWhisper.text || prevWhisper?.kind !== nextWhisper.kind)
+          ) {
+            setMindWhisper(nextWhisper)
+            setWhisperRevealAt(Date.now())
+          }
           const pendingTitle = pendingTitleRef.current
           if (pendingTitle && pendingTitle.messageId === landed.id) {
             pendingTitleRef.current = null
@@ -546,10 +639,16 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
           sessionIdRef.current = newSessionId()
           setLastError(null)
           pendingMindRef.current = null
+          pendingWhisperRef.current = null
           pendingTitleRef.current = null
           lastLandedIdRef.current = null
+          setMindGuess(null)
+          setMindWhisper(null)
+          setWhisperRevealAt(0)
           break
         case 'tool-confirm-request':
+          // 无会话键的旧事件只给主对话,避免每个外部会话各画一张点不掉的卡
+          if (!event.sessionKey && myKey !== 'main') break
           setPendingConfirm({ command: event.command, title: event.title, detail: event.detail })
           break
         case 'background-done': {
@@ -618,11 +717,9 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
           setCurrentTitle(truncateCodepoints(title, 20))
           break
         }
-        case 'mind-guess':
-        case 'mind-proactive': {
-          // 心理揣测:回复落定同步评估(mind-guess)或巡检直调
-          // (mind-proactive)——更新紧凑态文字区。messageId 校验:
-          // 尚未落定则缓存,clear/loadSession 后迟到的旧揣测丢弃
+        case 'mind-guess': {
+          // 她自己的岛面一句(心理刻画,回复落定后判断)。
+          // 尚未落定则缓存,clear/loadSession 后迟到的旧句丢弃
           const { messageId, guess } = event
           if (!guess) break
           const known =
@@ -633,6 +730,20 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
             break
           }
           setMindGuess(truncateCodepoints(guess, 16))
+          break
+        }
+        case 'mind-whisper': {
+          const whisper = normalizeWhisper(event.kind, event.text)
+          if (!whisper) break
+          const known =
+            lastLandedIdRef.current === event.messageId ||
+            messagesRef.current.some((m) => m.id === event.messageId)
+          if (!known) {
+            pendingWhisperRef.current = { messageId: event.messageId, whisper }
+            break
+          }
+          setMindWhisper(whisper)
+          setWhisperRevealAt(Date.now())
           break
         }
         default:
@@ -719,15 +830,25 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
       // 存储失败忽略
     }
   }, [currentTitle])
-  // 心理揣测持久化(重启保留最近一次回复的心理,文字区不落空)
+  // 岛面心理与输入框底字按会话持久化(重启保留,文字区不落空)
   useEffect(() => {
     try {
-      if (mindGuess) localStorage.setItem(MIND_KEY, mindGuess)
-      else localStorage.removeItem(MIND_KEY)
+      const key = mindStorageKey(myKey)
+      if (mindGuess) localStorage.setItem(key, mindGuess)
+      else localStorage.removeItem(key)
     } catch {
       // 存储失败忽略
     }
-  }, [mindGuess])
+  }, [mindGuess, myKey])
+  useEffect(() => {
+    try {
+      const key = whisperStorageKey(myKey)
+      if (mindWhisper) localStorage.setItem(key, JSON.stringify(mindWhisper))
+      else localStorage.removeItem(key)
+    } catch {
+      // 存储失败忽略
+    }
+  }, [mindWhisper, myKey])
   // 卸载时取消未提交的流式合批帧(避免卸载后 setState)
   useEffect(
     () => () => {
@@ -736,124 +857,6 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
     },
     [],
   )
-  // 后台标签 Sub Agent 调用器(总结标题 / 心理揣测共用),行为语义:
-  // - 入口守卫:进行中不并发,新一轮回复落定(进行中)只标记 pending,
-  //   完成后补跑最新一轮(追平连续对话——跳过会让标签永远等不到,
-  //   是"文字区一直显示回复开头"的常见原因);
-  // - 结果带会话版本校验(clear/loadSession 作废),旧快照结果主题一致
-  //   直接生效(总比空好,新结果后覆盖);
-  // - 失败重试:1.5s 后重试同一快照(retryLeft 预算递减);
-  //   预算耗尽 → 10s 后补跑一次**最新**消息(仅此一次,不连锁重试)—
-  //   会话静止时标签也能补上,文字区不会一直停留在回复开头预览。
-  // 每个标签独立 in-flight/排队状态(互不阻塞)
-  const createLabelRunner = useCallback(
-    (
-      task: (snapshot: AgentMessage[]) => Promise<string>,
-      apply: (value: string) => void,
-      maxLen: number,
-    ): ((snapshot: AgentMessage[]) => void) => {
-      const st = { inflight: false, pending: false }
-      const run = (snapshot: AgentMessage[], retryLeft = 1) => {
-        if (st.inflight) return
-        st.inflight = true
-        const version = sessionVersionRef.current
-        // 标签落定后追平:期间新一轮回复落定(pending)→ 补跑最新一轮
-        const catchUp = () => {
-          if (!st.pending) return
-          st.pending = false
-          if (statusRef.current === 'idle' && messagesRef.current.length > 0) {
-            run(messagesRef.current, 0)
-          }
-        }
-        task(snapshot)
-          .then((value) => {
-            st.inflight = false
-            // 双保险:引擎已清洗并截断到岛体文字区容量,这里再按码元
-            // 兜底(标签过长在紧凑态会被截成"开头几字",观感等同失败)
-            // 上限按标签类型:标题 20(2026-08-07 放宽:推荐 10 字左右
-            // 严格不超过 20)/ 心理揣测 16(15 字左右最多 16)
-            const v = truncateCodepoints(value, maxLen)
-            if (v && sessionVersionRef.current === version) apply(v)
-            catchUp()
-          })
-          .catch(() => {
-            st.inflight = false
-            if (retryLeft > 0) {
-              // 网络抖动:1.5s 后重试同一快照;期间新消息落定(排队中)
-              // 则改补跑最新一轮,不再重试陈旧快照
-              window.setTimeout(() => {
-                if (st.pending) {
-                  st.pending = false
-                  if (statusRef.current === 'idle' && messagesRef.current.length > 0) {
-                    run(messagesRef.current, 0)
-                  }
-                } else {
-                  run(snapshot, retryLeft - 1)
-                }
-              }, 1500)
-            } else {
-              // 全部重试都失败:延迟补跑一次最新消息(仅此一次,
-              // 不再走重试链——避免对同一对话无限循环请求)
-              window.setTimeout(() => {
-                if (st.inflight) return
-                if (statusRef.current !== 'idle' || messagesRef.current.length === 0) return
-                if (st.pending) st.pending = false
-                st.inflight = true
-                const latest = messagesRef.current
-                const v = sessionVersionRef.current
-                task(latest)
-                  .then((value) => {
-                    st.inflight = false
-                    // 兜底同主路径(maxLen 按标签类型:标题 20 / 揣测 16)
-                    const t = truncateCodepoints(value, maxLen)
-                    if (t && sessionVersionRef.current === v) apply(t)
-                  })
-                  .catch(() => {
-                    st.inflight = false
-                    // 补跑失败不再重试
-                  })
-              }, 10000)
-            }
-          })
-      }
-      // 触发入口:进行中 → 标记排队(完成时由 catchUp 追平),否则立即执行
-      return (snapshot) => {
-        if (st.inflight) {
-          st.pending = true
-          return
-        }
-        run(snapshot)
-      }
-    },
-    [],
-  )
-  // 心理揣测 runner:仅 loadSession 补跑(生产路径已改为回复落定同步
-  // 评估,经 mind-guess 事件回推;标题走 conversation-title 事件)
-  const mindRunner = useMemo(
-    () =>
-      createLabelRunner(
-        (snapshot) => window.desktop?.agentMindGuess?.(snapshot) ?? Promise.resolve(''),
-        (g) => setMindGuess(g),
-        16,
-      ),
-    [createLabelRunner],
-  )
-
-  useEffect(() => {
-    if (status !== 'idle' || messages.length === 0) return
-    // 会话隔离:标题/揣测仅主对话实例运行(外部会话无文字区展示)
-    if (myKey !== 'main') return
-    if (skipNextLabelRef.current) {
-      skipNextLabelRef.current = false
-      // 只跳过总结标题(加载的历史会话已有标题语义);
-      // **心理揣测照跑**(loadSession 清了 mindGuess,历史消息不会再走
-      // 回复落定插件,需补猜一次,否则文字区回退回复预览)
-      mindRunner(messages)
-      return
-    }
-    // 标题与心理揣测均由引擎插件在回复落定时同步评估
-    // (conversation-title / mind-guess);此处不再 IPC,避免重复调用
-  }, [messages, status, mindRunner, myKey])
 
   /**
    * 拉取配置与工具清单(主进程),挂载与"打开设置视图前刷新"共用。
@@ -900,15 +903,19 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
     // eslint-disable-next-line react-hooks/exhaustive-deps -- 挂载时一次性
   }, [loadConfigAndTools])
 
-  // 主动陪伴调度器(2026-08-07):每 60s 检查触发条件——① Agent 模式
-  // (WidgetApp 经 allowProactive 传入)② 配置开启 ③ status idle ④ 有
-  // 对话历史 ⑤ 距上次"有操作"(发送/清空/切换会话/主动回复落定)≥ N
-  // 分钟 ⑥ 非 in-flight。满足则发 tick(带完整历史与空闲分钟数)→
-  // 主进程:总结 Sub Agent 判断语境 → should 则主 Agent 完整回合主动
-  // 回复(思考/流式/工具照常,消息正常落定)。judge-no 回退 idle 时钟
-  // (下次判断在 N 分钟后——不静默变每分钟一次 LLM 判断调用,1440 次/
-  // 天);busy/mode/disabled 各自自愈(用户操作已重置时钟 / 模式切换
-  // 停 effect / 配置变更重装 effect),不回退
+  // 主动陪伴调度器(2026-08-07;2026-10-22 触发策略重构):每 60s 检查
+  // 触发条件——① Agent 模式(WidgetApp 经 allowProactive 传入)② 配置
+  // 开启 ③ status idle ④ 有对话历史 ⑤ 距上次"有操作"(发送/清空/切换
+  // 会话/主动回复落定)≥ N 分钟 ⑥ 非 in-flight ⑦ 判定冷却结束。满足则
+  // 发 tick(带完整历史与空闲分钟数)→ 主进程:主动陪伴 Sub Agent 判断
+  // 语境 → should 则主 Agent 完整回合主动回复(思考/流式/工具照常,消息
+  // 正常落定)。**judge-no/judge-error 不再重置 idle 时钟**(2026-10-22
+  // 根因修复:旧策略判一次"不"就等满整段间隔,判断保守 + Sub 故障都被
+  // 当"不",主动陪伴因此基本不触发)——只记一次未开口 + 短冷却(间隔/3
+  // 钳 2-5 分钟)重试;**连续 2 次未开口 → force 兜底强制开口一次**
+  // (最坏沉默 = 间隔 + 2×冷却,功能不再整段死在判断上;间隔仍是主动
+  // 联系的最小间隔——开口落定重置 idle 时钟)。busy/mode/disabled 自愈
+  // (用户操作已重置时钟 / 模式切换停 effect / 配置变更重装 effect),不计数
   useEffect(() => {
     if (!window.desktop?.agentProactiveTick || !opts?.allowProactive || myKey !== 'main') return
     if (!config?.proactiveEnabled) return
@@ -916,29 +923,51 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
     const unitSecs =
       config.proactiveIntervalUnit === 's' ? 1 : config.proactiveIntervalUnit === 'h' ? 3600 : 60
     const intervalMs = Math.max(1, config.proactiveInterval ?? 15) * unitSecs * 1000
+    // 判定冷却:间隔/3,钳 2-5 分钟(秒级间隔也别把 judge 打成每分钟调用)
+    const judgeCooldownMs = Math.min(5 * 60_000, Math.max(2 * 60_000, Math.round(intervalMs / 3)))
+    // 轮询周期随间隔收短(秒级间隔 60s 轮询等于失信),仍钳 5s-60s
+    const pollMs = Math.min(60_000, Math.max(5_000, intervalMs))
     const timer = window.setInterval(() => {
       if (proactiveInFlightRef.current) return
       if (statusRef.current !== 'idle') return
       if (messagesRef.current.length === 0) return
-      const idleMs = Date.now() - lastUserSendRef.current
+      const now = Date.now()
+      const idleMs = now - lastUserSendRef.current
       if (idleMs < intervalMs) return
+      // 沉默窗口指纹:上次"有操作"重置了时钟 → 新窗口,未开口计数归零
+      if (proactiveCycleRef.current !== lastUserSendRef.current) {
+        proactiveCycleRef.current = lastUserSendRef.current
+        proactiveSkipsRef.current = 0
+        proactiveNextJudgeAtRef.current = 0
+      }
+      if (now < proactiveNextJudgeAtRef.current) return
+      // 连续 2 次未开口 → 兜底强制开口(跳过 judge,主进程直接开回合)
+      const force = proactiveSkipsRef.current >= 2
       proactiveInFlightRef.current = true
       const snapshot = messagesRef.current
       window.desktop
-        ?.agentProactiveTick?.(snapshot, Math.floor(idleMs / 60_000), sessionIdRef.current)
+        ?.agentProactiveTick?.(snapshot, Math.floor(idleMs / 60_000), sessionIdRef.current, { force })
         .then((r) => {
-          if (r?.reason === 'judge-no') lastUserSendRef.current = Date.now()
+          if (r?.started) {
+            // 回合已开始:计数归零;下次判定等满一段间隔(开口落定会经
+            // message.proactive 重置 idle 时钟,这里兜底回合中途失败的情形)
+            proactiveSkipsRef.current = 0
+            proactiveNextJudgeAtRef.current = Date.now() + intervalMs
+          } else if (r?.reason === 'judge-no' || r?.reason === 'judge-error') {
+            proactiveSkipsRef.current += 1
+            proactiveNextJudgeAtRef.current = Date.now() + judgeCooldownMs
+          }
         })
         .catch(() => {})
         .finally(() => {
           proactiveInFlightRef.current = false
         })
-    }, 60_000)
+    }, pollMs)
     return () => window.clearInterval(timer)
   }, [config?.proactiveEnabled, config?.proactiveInterval, config?.proactiveIntervalUnit, opts?.allowProactive, myKey])
 
   const send = useCallback(
-    async (text: string, opts?: { silent?: boolean; source?: 'qq' | 'group' | 'ask'; target?: string; media?: string[]; paths?: string[]; profileCard?: string; owner?: 'master' | 'peer' }) => {
+    async (text: string, opts?: { silent?: boolean; source?: 'qq' | 'group' | 'ask'; target?: string; media?: string[]; paths?: string[]; profileCard?: string; owner?: 'master' | 'peer'; groupTurn?: NapcatGroupTurn }) => {
     const trimmed = text.trim()
     // 2026-08-17 拖拽上传:无文字也可发送(纯附件上传——附件路径标注
     // 就是本轮输入;空文本 + 无附件才拦截)
@@ -1000,9 +1029,10 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
     // 仍有效;递增会把每轮总结都作废,标题永远等不到)
     // **图片附件(2026-08-12 收图链路)**:opts.media = 本地图片路径列表
     // (main.cjs 下载的 QQ/群消息图片)→ 用户消息 parts 追加 media part,
-    // 对话窗口展示图片(引擎 historyToItems 只序列化 text part,LLM 侧
-    // 经文本标注【图片已下载】知晓路径)。2026-08-17 拖拽上传复用:
-    // 拖入的媒体文件(图片/音视频)同样作 media part 展示
+    // 对话窗口展示图片(文本标注【媒体已下载】带路径;**2026-10-22 起
+    // 视觉模型还直接看到图片**——DeepSeek/lmstudio/mimo 的 provider 把图片
+    // part 序列化进请求供图像理解,文本标注仍是兜底)。2026-08-17 拖拽上传
+    // 复用:拖入的媒体文件(图片/音视频)同样作 media part 展示
     const mediaParts = (opts?.media ?? [])
       .filter((p) => typeof p === 'string' && p.trim())
       .map((p, i) => ({ type: 'media' as const, kind: inferMediaKind(p), url: p, name: `附件${i + 1}` }))
@@ -1080,6 +1110,7 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
       // 消息归属(2026-09-22 归属指纹,规则①②③):窗口输入 = master;
       // QQ 来源按 payload 的 owner(入口判定);缺省让主进程按来源推
       opts?.owner ?? (!routed ? 'master' : undefined),
+      opts?.groupTurn,
     )
   },
     [myKey],
@@ -1095,7 +1126,7 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
   //   先问主人】"前缀,本侧**不带 source**——LLM 先询问主人,主人
   //   指示后的回复由主进程 pendingQQReply 链路发回;
   // - 群接话 = 带 source='group'(回复发回群)
-  const napcatQueueRef = useRef<Array<{ text: string; source?: 'qq' | 'group' | 'ask'; target?: string; media?: string[]; profileCard?: string; owner?: 'master' | 'peer' }>>([])
+  const napcatQueueRef = useRef<Array<{ text: string; source?: 'qq' | 'group' | 'ask'; target?: string; media?: string[]; profileCard?: string; owner?: 'master' | 'peer'; groupTurn?: NapcatGroupTurn }>>([])
   const MAX_NAPCAT_QUEUE = 50 // 队列最大长度(防LLM长时间busy时消息无限堆积)
   // 系统通知队列(2026-08-13:background-done busy 时入队,idle 后逐条
   // 补发——防"下载太快通知被吞")
@@ -1143,7 +1174,7 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
   // 私聊消息处理(订阅与父级补投共用,2026-08-13 三轮:首条消息到达时
   // 外部会话实例可能尚未挂载,父级暂存后经 ingestNapcatMessage 补投)
   const processNapcatMessage = useCallback(
-    (msg: { text?: string; qq?: string; trusted?: boolean; media?: string[]; profileCard?: string; muted?: boolean; sessionKey?: string; messageId?: string; owner?: 'master' | 'peer' }) => {
+    (msg: { text?: string; qq?: string; trusted?: boolean; media?: string[]; profileCard?: string; muted?: boolean; sessionKey?: string; messageId?: string; owner?: 'master' | 'peer'; groupTurn?: NapcatGroupTurn }) => {
       if (!msg || typeof msg.text !== 'string') return
       if ((!msg.media || msg.media.length === 0) && isEmptyNapcatDisplayText(msg.text)) return
       // 双通道去重(2026-08-13):实例订阅 + 父级 ingest 会各送一次;
@@ -1172,17 +1203,17 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
       }
       if (statusRef.current === 'thinking' || statusRef.current === 'running') {
         const queue = napcatQueueRef.current
-        queue.push({ text: msg.text, source: msg.trusted === false ? 'ask' : 'qq', target: msg.qq, media: msg.media, profileCard: msg.profileCard, owner: msg.owner })
+        queue.push({ text: msg.text, source: msg.trusted === false ? 'ask' : 'qq', target: msg.qq, media: msg.media, profileCard: msg.profileCard, owner: msg.owner, groupTurn: msg.groupTurn })
         // 队列溢出保护:超过最大长度时丢弃最旧的消息
         if (queue.length > MAX_NAPCAT_QUEUE) queue.shift()
         return
       }
-      send(msg.text, { source: msg.trusted === false ? 'ask' : 'qq', target: msg.qq, media: msg.media, profileCard: msg.profileCard, owner: msg.owner })
+      send(msg.text, { source: msg.trusted === false ? 'ask' : 'qq', target: msg.qq, media: msg.media, profileCard: msg.profileCard, owner: msg.owner, groupTurn: msg.groupTurn })
     },
     [send, myKey, dedupNapcatMsg],
   )
   const processNapcatGroupMessage = useCallback(
-    (msg: { text?: string; qq?: string; groupId?: string; media?: string[]; profileCard?: string; muted?: boolean; sessionKey?: string; messageId?: string; owner?: 'master' | 'peer' }) => {
+    (msg: { text?: string; qq?: string; groupId?: string; media?: string[]; profileCard?: string; muted?: boolean; sessionKey?: string; messageId?: string; owner?: 'master' | 'peer'; groupTurn?: NapcatGroupTurn }) => {
       if (!msg || typeof msg.text !== 'string') return
       if ((!msg.media || msg.media.length === 0) && isEmptyNapcatDisplayText(msg.text)) return
       // 双通道去重(2026-08-13):实例订阅 + 父级 ingest 会各送一次;
@@ -1200,12 +1231,12 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
       }
       if (statusRef.current === 'thinking' || statusRef.current === 'running') {
         const queue = napcatQueueRef.current
-        queue.push({ text: msg.text, source: 'group', target: msg.groupId, media: msg.media, profileCard: msg.profileCard, owner: msg.owner })
+        queue.push({ text: msg.text, source: 'group', target: msg.groupId, media: msg.media, profileCard: msg.profileCard, owner: msg.owner, groupTurn: msg.groupTurn })
         // 队列溢出保护:超过最大长度时丢弃最旧的消息
         if (queue.length > MAX_NAPCAT_QUEUE) queue.shift()
         return
       }
-      send(msg.text, { source: 'group', target: msg.groupId, media: msg.media, profileCard: msg.profileCard, owner: msg.owner })
+      send(msg.text, { source: 'group', target: msg.groupId, media: msg.media, profileCard: msg.profileCard, owner: msg.owner, groupTurn: msg.groupTurn })
     },
     [send, myKey, dedupNapcatMsg],
   )
@@ -1288,7 +1319,7 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
     if (status !== 'idle') return
     const napcat = napcatQueueRef.current.shift()
     if (napcat) {
-      send(napcat.text, napcat.source && napcat.target ? { source: napcat.source, target: napcat.target, media: napcat.media, profileCard: napcat.profileCard, owner: napcat.owner } : { media: napcat.media, profileCard: napcat.profileCard })
+      send(napcat.text, napcat.source && napcat.target ? { source: napcat.source, target: napcat.target, media: napcat.media, profileCard: napcat.profileCard, owner: napcat.owner, groupTurn: napcat.groupTurn } : { media: napcat.media, profileCard: napcat.profileCard })
       return
     }
     const silent = silentQueueRef.current.shift()
@@ -1397,7 +1428,6 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
     setStatus('idle')
     // 新对话:当前对话(非空)存档到历史,再清空。
     // 标题用实时总结(每轮回复后已静默更新,无需再次调用 LLM)
-    sessionVersionRef.current += 1
     // 新对话 = 新会话 ID(此后工具输出落到新对话文件夹)
     sessionIdRef.current = newSessionId()
     // 自动播放标记随会话清空(历史/新会话不自动播)
@@ -1414,6 +1444,8 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
         title: title.slice(0, 24),
         updatedAt: Date.now(),
         messages: current,
+        mindGuess: mindGuessRef.current,
+        mindWhisper: mindWhisperRef.current,
       }
       setSessions((prev) => [session, ...prev].slice(0, MAX_SESSIONS))
     }
@@ -1422,7 +1454,10 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
     setLastError(null)
     setCurrentTitle(null)
     setMindGuess(null)
+    setMindWhisper(null)
+    setWhisperRevealAt(0)
     pendingMindRef.current = null
+    pendingWhisperRef.current = null
     pendingTitleRef.current = null
     lastLandedIdRef.current = null
     // 主动陪伴:切换会话 = 有操作(新会话从零计时)
@@ -1432,22 +1467,25 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
   const loadSession = useCallback((id: string) => {
     const target = sessionsRef.current.find((s) => s.id === id)
     if (!target) return
-    // 加载 = 替换当前对话;从历史移除(当前会话继续由 HISTORY_KEY 持久化);
-    // 标题/心理重置并跳过下一次自动生成(历史消息不该被重新总结)
-    sessionVersionRef.current += 1
+    // 加载 = 替换当前对话;从历史移除(当前会话继续由 HISTORY_KEY 持久化)。
+    // 标题不重总结。岛面一句和底字用存档时她写下的;旧档没有就空着,等她再开口。
     // 加载历史会话 = 沿用其原 id(对话还是那个对话,工具输出归入
     // 原对话文件夹;2026-08-12)
     sessionIdRef.current = target.id
     // 自动播放标记随会话切换清空(加载的历史消息不自动播放)
     mediaAutoPlayRef.current.clear()
-    skipNextLabelRef.current = true
     setMessages(target.messages)
     setSessions((prev) => prev.filter((s) => s.id !== id))
     setStreaming(null)
     setLastError(null)
     setCurrentTitle(null)
-    setMindGuess(null)
+    setMindGuess(target.mindGuess ? truncateCodepoints(target.mindGuess, 16) : null)
+    const archived = normalizeWhisper(target.mindWhisper?.kind, target.mindWhisper?.text)
+    const recovered = archived ?? whisperFromHistory(target.messages)
+    setMindWhisper(recovered)
+    setWhisperRevealAt(archived ? 0 : recovered ? Date.now() : 0)
     pendingMindRef.current = null
+    pendingWhisperRef.current = null
     pendingTitleRef.current = null
     lastLandedIdRef.current = null
     // 主动陪伴:加载历史会话 = 有操作(从零计时)
@@ -1483,6 +1521,8 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
     tools,
     currentTitle,
     mindGuess,
+    mindWhisper,
+    whisperRevealAt,
     /** 本会话流式落定且未自动播放过的消息 id(引用稳定,渲染时读 has) */
     mediaAutoPlayIds: mediaAutoPlayRef.current,
     /** 消费自动播放标记(媒体已自动播放过) */

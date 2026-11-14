@@ -23,10 +23,19 @@
 
 import { parseSse, sanitizeJsonStrings, truncateResult } from './sse'
 import { deepseekErrorMessage } from './deepseek-constants'
+import { deepseekUserContent, planDeepseekImages } from './deepseek-media'
 import type { AgentConfig, AgentEvent, AgentMessage, AgentPart, AgentTool, ProviderOutcome } from '../types'
 
-/** 历史 → Anthropic messages(工具结果重排 + 相邻同角色合并) */
-export function historyToAnthropic(history: AgentMessage[]): Array<{ role: 'user' | 'assistant'; content: unknown[] }> {
+/**
+ * 历史 → Anthropic messages(工具结果重排 + 相邻同角色合并)。
+ * 图像理解(2026-10-22):user 消息带图片 part 时追加 image 块(source
+ * base64/url,vision 指南"Anthropic 兼容端点"节;claude 系与 DeepSeek
+ * 兼容端点均接受,不换模型)。async(本地图片需读盘编码)。
+ */
+export async function historyToAnthropic(
+  history: AgentMessage[],
+): Promise<Array<{ role: 'user' | 'assistant'; content: unknown[] }>> {
+  const plan = await planDeepseekImages(history)
   const msgs: Array<{ role: 'user' | 'assistant'; content: unknown[] }> = []
 
   const pushBlock = (role: 'user' | 'assistant', block: unknown) => {
@@ -37,11 +46,12 @@ export function historyToAnthropic(history: AgentMessage[]): Array<{ role: 'user
 
   for (const msg of history) {
     if (msg.role === 'user') {
-      const text = msg.parts
-        .filter((p): p is Extract<AgentPart, { type: 'text' }> => p.type === 'text')
-        .map((p) => p.text)
-        .join('\n')
-      if (text) pushBlock('user', { type: 'text', text })
+      const content = deepseekUserContent(msg.parts, 'anthropic', plan)
+      if (typeof content === 'string') {
+        if (content) pushBlock('user', { type: 'text', text: content })
+      } else {
+        for (const block of content) pushBlock('user', block)
+      }
       continue
     }
     // system 角色(主动陪伴回合的内部指令等):Anthropic messages 无
@@ -124,7 +134,7 @@ export async function streamAnthropic(params: {
     model: config.model.trim() || 'deepseek-v4-flash',
     max_tokens: maxOutputTokens ?? 4096,
     system: system || undefined,
-    messages: historyToAnthropic(history),
+    messages: await historyToAnthropic(history),
     // 有工具才带 tools(静默总结等无工具请求不带,请求体最小化)
     ...(tools.length > 0 ? { tools: anthropicTools(tools) } : {}),
     stream: true,

@@ -132,6 +132,46 @@ pub fn write_progress(path: Option<&str>, stage: &str, label: &str, done: u64, t
     }
 }
 
+/// 带 CDN 兜底的下载(2026-10-23 修复):B站 playurl 的 baseUrl 经常是 PCDN
+/// 节点(*.mcdn.bilivideo.cn:8082),本机网络连不通就整条失败("网络错误:
+/// error sending request"),而 backupUrl 里的 upos 节点是通的。策略:
+/// 非 mcdn 地址优先,失败后逐个换下一个,全部失败才算失败。
+async fn download_stream_with_fallback(
+    api: &BiliApi,
+    stream: &video::Stream,
+    dest: &Path,
+    tmpdir: &Path,
+    parallel: usize,
+    rate_limit: Option<u64>,
+    label: &str,
+    progress_path: Option<&Path>,
+) -> Result<u64, ApiError> {
+    let mut urls: Vec<String> = Vec::new();
+    for u in std::iter::once(&stream.base_url).chain(stream.backup_urls.iter()) {
+        if !u.is_empty() && !urls.iter().any(|x| x == u) {
+            urls.push(u.clone());
+        }
+    }
+    if urls.is_empty() {
+        return Err(ApiError(format!("{label}: 没有可用的下载地址")));
+    }
+    // 非 PCDN(mcdn)地址优先:实测本机对 mcdn:8082 一律 error sending request
+    urls.sort_by_key(|u| usize::from(u.contains("mcdn")));
+    let mut last_err: Option<ApiError> = None;
+    for (i, url) in urls.iter().enumerate() {
+        match download_url(api.clone(), url, dest, tmpdir, parallel, rate_limit, label, progress_path).await {
+            Ok(n) => return Ok(n),
+            Err(e) => {
+                if i + 1 < urls.len() {
+                    println!("  {label}: 节点 {} 失败({e}),换备用节点重试 ...", i + 1);
+                }
+                last_err = Some(e);
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| ApiError(format!("{label}: 下载失败"))))
+}
+
 /// 下载一个 URL 到文件（Range 分片并发 + 断点续传 + 进度）
 pub async fn download_url(
     api: BiliApi,
@@ -512,7 +552,7 @@ async fn download_page_body(
         };
         log(format!("下载音频 ({} kbps) ...", a_stream.bandwidth / 1000));
         let src_audio = tmpdir.join("audio.m4a");
-        if let Err(e) = download_url(api.clone(), &a_stream.base_url, &src_audio, &tmpdir, opts.parallel, rate, "audio", opts.progress_file.as_deref().map(std::path::Path::new)).await {
+        if let Err(e) = download_stream_with_fallback(api, a_stream, &src_audio, &tmpdir, opts.parallel, rate, "audio", opts.progress_file.as_deref().map(std::path::Path::new)).await {
             let _ = std::fs::remove_dir_all(&tmpdir);
             return Err(format!("音频下载失败: {e}"));
         }
@@ -540,7 +580,7 @@ async fn download_page_body(
             // 非 dash 单文件（少见，未登录低清兜底）
             final_path = outdir.join(format!("{name}.mp4"));
             log("下载视频（单文件模式）...".into());
-            if let Err(e) = download_url(api.clone(), &playurl.durl[0].base_url, &final_path, &tmpdir, opts.parallel, rate, "video", opts.progress_file.as_deref().map(std::path::Path::new)).await {
+            if let Err(e) = download_stream_with_fallback(api, &playurl.durl[0], &final_path, &tmpdir, opts.parallel, rate, "video", opts.progress_file.as_deref().map(std::path::Path::new)).await {
                 let _ = std::fs::remove_dir_all(&tmpdir);
                 return Err(format!("视频下载失败: {e}"));
             }
@@ -555,8 +595,8 @@ async fn download_page_body(
             let src_v = tmpdir.join("video.m4v");
             let src_a = tmpdir.join("audio.m4a");
             let (rv, ra) = tokio::join!(
-                download_url(api.clone(), &v_stream.base_url, &src_v, &tmpdir, opts.parallel, rate, "video", opts.progress_file.as_deref().map(std::path::Path::new)),
-                download_url(api.clone(), &a_stream.base_url, &src_a, &tmpdir, opts.parallel, rate, "audio", opts.progress_file.as_deref().map(std::path::Path::new)),
+                download_stream_with_fallback(api, v_stream, &src_v, &tmpdir, opts.parallel, rate, "video", opts.progress_file.as_deref().map(std::path::Path::new)),
+                download_stream_with_fallback(api, a_stream, &src_a, &tmpdir, opts.parallel, rate, "audio", opts.progress_file.as_deref().map(std::path::Path::new)),
             );
             match (rv, ra) {
                 (Ok(_), Ok(_)) => {}

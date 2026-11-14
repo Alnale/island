@@ -30,10 +30,28 @@
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { isProtectedEntry } from './constants'
+import {
+  formatPersonaStyleBlock,
+  isPersonaMergeCandidate,
+  MAX_PERSONA_NOTES,
+  sanitizePersonaStyle,
+  splitNoteLines,
+} from './persona'
 import { showNotify } from './notify'
 import { getDefaultLlmRuntime, type LlmStreamParams } from './plugin/llm'
 import { createEvaluatorAgent } from './subagents/subagents'
-import type { AgentConfig, AgentEvent, MemoryEntry, MemoryStoreLike, ProviderOutcome } from './types'
+import type {
+  AgentConfig,
+  AgentEvent,
+  MemoryEntry,
+  MemoryStoreLike,
+  PersonaBufferSource,
+  PersonaBufferStoreLike,
+  PersonaCard,
+  PersonaCardStoreLike,
+  PersonaStyle,
+  ProviderOutcome,
+} from './types'
 
 /** 评估 Sub Agent 单次调用基础超时(条目多时按 evalTimeoutMs 自适应放大) */
 const EVAL_TIMEOUT_MS = 60_000
@@ -121,6 +139,8 @@ interface EvolutionResult {
   summary: string
   /** 本轮是否应用了清理类改动(delete/merge 整合,2026-08-11) */
   cleanupApplied?: boolean
+  /** 本轮是否产生人格卡建议进缓冲区(2026-10-26;测试/日志用) */
+  personaProposed?: boolean
   error?: string
 }
 
@@ -137,6 +157,104 @@ interface EvolutionChange {
   /** 假说:预测改进后哪些可观察行为会变化(无假说的建议不采纳;
    * delete 与 merge 整合豁免) */
   hypothesis?: string
+}
+
+/**
+ * 人格卡整合建议(2026-10-25):把标【可整合·人设/风格】的零散记忆整理
+ * 进当前激活人格卡的「进化整合区」。**人格卡提示词由主人手写,本流程
+ * 绝不改写**;notes 只追加到整合区,sourceIds 只能取候选条目。
+ */
+export interface EvolutionPersonaMerge {
+  /** 要追加到整合区的要点(多行文本;可选) */
+  notes?: string
+  /** 候选条目在评审输入中的 1 基序号 */
+  sourceIds?: string[]
+  /** 可选:完整改写后的人格提示词(手动合并才生效) */
+  prompt?: string
+  /** 可选:结构化风格提案(手动合并才生效) */
+  style?: PersonaStyle
+}
+
+/** 人格卡整合建议(进入缓冲区前的预览结果) */
+export interface PersonaProposal {
+  /** 建议追加到整合区的要点(已去重、已补受保护原文) */
+  notes: string
+  /** 建议整合的源记忆快照 */
+  sources: PersonaBufferSource[]
+  /** 可选:人格卡提示词/风格提案(手动合并才生效) */
+  cardPatch?: { prompt?: string; style?: PersonaStyle }
+  skippedReason?: string
+}
+
+/** 文本归一化(受保护原文是否已写入 notes 的包含判定) */
+function normText(s: unknown): string {
+  return String(s ?? '').replace(/\s+/g, '').toLowerCase()
+}
+
+/**
+ * 生成人格卡整合建议(不落盘、不删记忆,2026-10-26 改为缓冲区模式):
+ * 1. 无激活卡 / 非候选 sourceId → skippedReason;
+ * 2. 受保护的人设条目原文逐行写入建议(合并后防丢失);
+ * 3. 与现有整合区重复 → duplicate-notes;容量不足 → notes-full;
+ * 4. 返回源记忆快照,供缓冲区合并时删除、撤销时恢复。
+ */
+export function buildPersonaProposal(
+  original: MemoryEntry[],
+  card: PersonaCard,
+  merge: EvolutionPersonaMerge,
+): PersonaProposal {
+  const targets: MemoryEntry[] = []
+  const seen = new Set<string>()
+  for (const seq of merge.sourceIds ?? []) {
+    const e = mapSeqToEntry(original, String(seq))
+    if (!e || seen.has(e.id) || !isPersonaMergeCandidate(e)) continue
+    seen.add(e.id)
+    targets.push(e)
+  }
+  const prompt = String(merge.prompt ?? '').trim().slice(0, 8000)
+  const style = sanitizePersonaStyle(merge.style)
+  const cardPatch =
+    prompt || style
+      ? { ...(prompt ? { prompt } : {}), ...(style ? { style } : {}) }
+      : undefined
+  if (targets.length === 0 && !cardPatch) return { notes: '', sources: [], skippedReason: 'no-candidates' }
+  let block = String(merge.notes ?? '').trim()
+  // 受保护人设条目:原文必须出现在建议里;评审漏写时由代码逐字补上
+  let normBlock = normText(block)
+  for (const e of targets) {
+    if (!isProtectedEntry(e)) continue
+    const n = normText(e.content)
+    if (!n || normBlock.includes(n)) continue
+    block += `\n- ${e.content}`
+    normBlock += n
+  }
+  const existing = splitNoteLines(card.notes)
+  const existingNorm = new Set(existing.map((l) => normText(l)))
+  const freshLines = splitNoteLines(block).filter((l) => {
+    const n = normText(l)
+    return !!n && !existingNorm.has(n)
+  })
+  if (freshLines.length === 0 && !cardPatch) {
+    return { notes: '', sources: [], skippedReason: 'duplicate-notes' }
+  }
+  if (freshLines.length > 0) {
+    const projected = [...existing.map((l) => `- ${l}`), ...freshLines.map((l) => `- ${l}`)].join('\n')
+    if (projected.length > MAX_PERSONA_NOTES) return { notes: '', sources: [], skippedReason: 'notes-full' }
+  }
+  return {
+    notes: freshLines.join('\n'),
+    sources: targets.map((e) => ({
+      id: e.id,
+      content: e.content,
+      type: e.type,
+      tags: e.tags,
+      source: e.source,
+      protected: e.protected,
+      createdAt: e.createdAt,
+      updatedAt: e.updatedAt,
+    })),
+    cardPatch,
+  }
 }
 
 /** 清理类建议判定(2026-08-11,测试用导出):delete 或 merge 整合 = 确定性
@@ -165,10 +283,14 @@ export function isCleanupChange(ch: EvolutionChange): boolean {
  *   constants.isProtectedEntry)对 delete/update/merge 全部免疫——
  *   评审提示词禁止触碰(见 reviewSystemPrompt)+ 本层代码硬跳过,
  *   双保险;清理类轮次免复评直接接受,评审误改人设会直接落盘,
- *   必须在此拦截(实测 v26→v28 把人设重写成"整体切换为鲸鱼娘模式") */
+ *   必须在此拦截(实测 v26→v28 把人设重写成"整体切换为鲸鱼娘模式")
+ * **2026-10-26 人格卡缓冲区**:人格卡建议不再由本函数落盘;runRound
+ *   通过 preserveIds 保护候选条目——建议合并前,普通 delete/update
+ *   不允许删改这些候选项(防止"没沉淀进人格卡就被清理掉")。 */
 export async function applyChanges(
   changes: EvolutionChange[],
   store: MemoryStoreLike | null,
+  opts?: { preserveIds?: Set<string> },
 ): Promise<number> {
   if (!store) return 0
   // **评审的序号针对评审输入时的列表(初始快照)**——一次映射全部目标,
@@ -176,6 +298,7 @@ export async function applyChanges(
   // 删除 #2 后原 #3 前移到 #2,重读映射 '3' 越界落空(实测"应应用 3 条
   // 实际 2"、残留重复);update 改变 updatedAt 重排后同样错位
   const original = await store.list()
+  const preserve = opts?.preserveIds ?? new Set<string>()
   let changeCount = 0
   for (const ch of changes) {
     // 假说驱动:add/普通 update 必须带假说(预测行为变化);
@@ -190,6 +313,9 @@ export async function applyChanges(
         // 受保护条目硬拦截(2026-08-13):delete/update/merge 的目标是
         // 人设/岛灵设定 → 直接跳过(LLM 无视提示词也不生效)
         if (target && isProtectedEntry(target)) continue
+        // 人格卡候选保护(2026-10-26):已进入建议缓冲区的条目只允许经
+        // 合并迁移,不允许被普通清理顺手删掉
+        if (target && preserve.has(target.id)) continue
         if (ch.op === 'delete') {
           if (target) {
             changeCount += await store.remove(target.id)
@@ -199,7 +325,9 @@ export async function applyChanges(
             // 包含该片段的受保护条目一起删掉——改为逐条按 id 删,
             // 受保护条目跳过
             const fragment = ch.content.trim()
-            for (const m of original.filter((e) => e.content.includes(fragment) && !isProtectedEntry(e))) {
+            for (const m of original.filter(
+              (e) => e.content.includes(fragment) && !isProtectedEntry(e) && !preserve.has(e.id),
+            )) {
               changeCount += await store.remove(m.id)
             }
           }
@@ -231,6 +359,26 @@ function parseJsonLoose(raw: string): Record<string, unknown> | null {
   return null
 }
 
+/** 人格卡整合建议解析(容错:notes 非字符串/sourceIds 非法 → null) */
+export function parsePersonaMerge(raw: unknown): EvolutionPersonaMerge | null {
+  if (!raw || typeof raw !== 'object') return null
+  const r = raw as Record<string, unknown>
+  const notes = String(r.notes ?? '').trim().slice(0, 3000)
+  const sourceIds = Array.isArray(r.sourceIds)
+    ? r.sourceIds.map((v) => String(v ?? '').trim()).filter(Boolean).slice(0, 20)
+    : []
+  const prompt = String(r.prompt ?? '').trim().slice(0, 8000)
+  const style = sanitizePersonaStyle(r.style)
+  // 至少要有一个可落地内容(notes / prompt / style);sourceIds 只是迁移源
+  if (!notes && !prompt && !style) return null
+  return {
+    ...(notes ? { notes } : {}),
+    ...(sourceIds.length > 0 ? { sourceIds } : {}),
+    ...(prompt ? { prompt } : {}),
+    ...(style ? { style } : {}),
+  }
+}
+
 function clampScore(v: unknown): number {
   const n = Number(v)
   return Number.isFinite(n) ? Math.min(100, Math.max(0, Math.round(n))) : 0
@@ -252,6 +400,10 @@ export function mapSeqToEntry(fresh: MemoryEntry[], id: string | undefined): Mem
 export function createEvolution(deps: {
   getConfig(): AgentConfig
   getStore(): MemoryStoreLike | null
+  /** 人格卡存储(2026-10-25;未注入 = 不整合人格卡,旧宿主兼容) */
+  getPersonaStore?(): PersonaCardStoreLike | null
+  /** 人格卡建议缓冲区(2026-10-26;未注入 = 不产生建议) */
+  getPersonaBufferStore?(): PersonaBufferStoreLike | null
   /** 记忆文件与日志目录(userData) */
   getMemoryDir(): string
   onEvent(event: AgentEvent): void
@@ -260,7 +412,7 @@ export function createEvolution(deps: {
 }): EvolutionHandle {
   const { getConfig, getStore, getMemoryDir, onEvent } = deps
   const stream = deps.stream ?? ((params: LlmStreamParams) => getDefaultLlmRuntime().stream(params))
-  // 评估 Sub Agent:与总结/揣测同一套内核(Sub 供应商/超时/鉴权)
+  // 评估 Sub Agent:与总结同一套内核(Sub 供应商/超时/鉴权)
   const evaluator = createEvaluatorAgent({
     getConfig,
     stream,
@@ -336,6 +488,8 @@ export function createEvolution(deps: {
     }
     await fs.mkdir(snapshotsDir(), { recursive: true })
     const entries = store ? await store.list() : []
+    // 人格卡不再进进化快照(2026-10-26):建议只进缓冲区,合并是独立
+    // 手动动作;快照回滚不应覆盖主人后来的合并(撤销由缓冲区负责)。
     await fs.writeFile(file, JSON.stringify({ version, entries }, null, 2), 'utf8')
     return file
   }
@@ -344,13 +498,15 @@ export function createEvolution(deps: {
    * **受保护标记(2026-08-13,用户实测"进化总是丢失岛灵设定")**:人设/
    * 岛灵设定条目标注【受保护·主人设定】——评审提示词禁止触碰,且
    * applyChanges 代码层硬拦截,双保险 */
-  function memoryDump(entries: MemoryEntry[]): string {
+  function memoryDump(entries: MemoryEntry[], markCandidates = false): string {
     if (entries.length === 0) return '(暂无记忆)'
     const typeLabel: Record<string, string> = { preference: '偏好', fact: '事实', workflow: '工作流', lesson: '教训' }
     return entries
       .map((e, i) => {
         const lock = isProtectedEntry(e) ? '【受保护·主人设定】' : ''
-        return `${i + 1}. [${typeLabel[e.type] ?? e.type}]${lock} ${e.content}`
+        // 人格卡整合候选(2026-10-25):只有标记者可被 personaMerge 引用
+        const mergeable = markCandidates && isPersonaMergeCandidate(e) ? '【可整合·人设/风格】' : ''
+        return `${i + 1}. [${typeLabel[e.type] ?? e.type}]${lock}${mergeable} ${e.content}`
       })
       .join('\n')
   }
@@ -363,7 +519,29 @@ export function createEvolution(deps: {
       '可操作性(每条具体、不空泛)、价值性(值得长期保留)。总分 0-100。' +
       '输出格式:{"total": 总分, "issues": ["问题1"], "changes": [{"op": "add"|"delete"|"update", ' +
       '"id": "原条目序号(delete/update 必填)", "content": "内容", "type": "preference|fact|workflow|lesson", ' +
-      '"merge": true|false, "hypothesis": "预测的改进效果"}]}。' +
+      '"merge": true|false, "hypothesis": "预测的改进效果"}], ' +
+      '"personaMerge": {"notes": "追加到人格卡整合区的要点(多行)", "sourceIds": [候选条目序号], ' +
+      '"prompt": "可选:完整改写后的人格提示词", "style": {"tone": "…", "sentence": "…", "emoji": "none|rare|normal", "examples": [{"user":"…","assistant":"…"}]}}}。' +
+      '**全量覆盖(2026-10-26,最高优先级之一)**:必须逐条审视清单里的**所有记忆**(事实/工作流/教训/偏好),' +
+      '不要只看带【可整合】标记的候选——每条要么明确保留,要么纳入 changes 去重/合并/删除;' +
+      '遗漏整块重复或过时条目视为本轮不合格。' +
+      '**人格卡提案(可选)**:若确实需要优化主人手写的提示词或结构化风格,可给 personaMerge.prompt/style' +
+      '(必须给**完整值**,不要只给差异);**不得丢失主人原有的身份/称谓/禁忌/偏好**;没有把握就不提。' +
+      '提案会先进缓冲区,主人看到前后差异后手动合并才生效。' +
+      '**人格卡整合(2026-10-25,仅在输入含【当前人格卡】时)**:清单中带【可整合·人设/风格】的' +
+      '条目(人设/人格/岛灵设定、说话风格/偏好)可整理进当前人格卡的「进化整合区」——' +
+      '按主题写成简洁要点(每条一行、保留全部信息点),用 personaMerge.notes 输出,' +
+      'sourceIds 只填这些候选条目的序号;建议先进入"记忆进化缓冲区",主人合并到人格卡后才从长期记忆移除。' +
+      '新的性格特征单独写成「性格:词——这个性格在说话里怎么体现」(词要具体,如护短、嘴硬;不要写「更自然」「有人味」)。' +
+      '提示词或整合区里已经有的性格不要再写。没有新性格就不要为了凑数输出 personaMerge。' +
+      '**人格卡提示词原文由主人手写**:你不能直接改写卡片;只能通过 personaMerge.prompt/style 提交提案,' +
+      '由主人查看差异后手动合并;没有提案时 personaMerge 只追加整合区。' +
+      '受保护候选条目的原文会由程序逐字写入整合区,不要遗漏其信息;' +
+      '**受保护条目可以列入 personaMerge.sourceIds**(这是它们唯一的迁移路径:' +
+      '内容先写入人格卡再移除),但仍不得出现在 changes 的 delete/update/merge 里;' +
+      '整合区容量有限(12000 字),写不下时程序会整体放弃且不删源条目——' +
+      '所以要精炼,宁少勿滥。没有【当前人格卡】或没有候选条目时不要输出 personaMerge;' +
+      'personaMerge 属于清理类改动,不需要 hypothesis。' +
       '**垂直细分整合(最重要,优先于其它 change)**:把内容相似/重复的条目按主题归组——同一主题' +
       '(如"回答风格"、"B站视频下载"、"夜间习惯"、"TTG/小胖偏好"、"工具使用"等)的多条记忆' +
       '必须整合为**一条**垂直细分条目:选该主题内容最完整的一条,输出 ' +
@@ -403,6 +581,9 @@ export function createEvolution(deps: {
       const data = JSON.parse(raw) as { entries?: MemoryEntry[] }
       const entries = Array.isArray(data.entries) ? data.entries : []
       await store.replaceAll(entries)
+      // 人格卡不经进化快照回滚(2026-10-26):建议只在缓冲区,合并撤销由
+      // 缓冲区记录负责;此处只清掉回滚目标之后尚未合并的建议
+      await deps.getPersonaBufferStore?.()?.removeAfterVersion(version)
       return entries.length
     } catch {
       return -1 // 快照缺失/损坏
@@ -416,9 +597,42 @@ export function createEvolution(deps: {
     const entries = await store.list()
     const config = getConfig()
     const focusLine = focus?.trim() ? `\n本次关注点:${focus.trim()}` : ''
+    // 人格卡建议(2026-10-26):仅在设置页开启 personaEvolveEnabled 时
+    // 让评审输出 personaMerge;结果只进缓冲区,不直接改卡/删记忆。
+    const personaStore = deps.getPersonaStore?.() ?? null
+    const personaBufferStore = deps.getPersonaBufferStore?.() ?? null
+    const personaEnabled = config.personaEvolveEnabled === true
+    const activePersonaId = String(config.activePersonaId ?? '').trim()
+    const activePersona = personaStore && activePersonaId ? await personaStore.get(activePersonaId) : null
+    // 待处理建议一并给评审:避免反复提出已经排队等待合并的内容
+    let pendingBlock = ''
+    if (activePersona && personaEnabled && personaBufferStore) {
+      try {
+        const pending = (await personaBufferStore.list()).filter(
+          (i) => i.cardId === activePersona.id && !i.mergedAt && !i.undoneAt,
+        )
+        if (pending.length > 0) {
+          const lines = pending
+            .map((i) => `- [${i.kind === 'style' ? '风格' : i.kind === 'trait' ? '性格' : '记忆'}] ${i.notes.replace(/\s+/g, ' ').slice(0, 500)}`)
+            .join('\n')
+          pendingBlock = `\n【待处理人格卡建议(勿重复提出)】\n${lines.slice(0, 2000)}`
+        }
+      } catch {
+        pendingBlock = ''
+      }
+    }
+    const personaInput = activePersona && personaEnabled
+      ? `【当前人格卡】\n名称:${activePersona.name}\n` +
+        `提示词(主人手写,绝对不可改写):\n${activePersona.prompt.slice(0, 4000) || '(空)'}\n` +
+        `${formatPersonaStyleBlock(activePersona.style) || '(未设置结构化风格)'}\n` +
+        `进化整合区(可追加;当前):\n${(activePersona.notes ?? '').slice(0, 8000) || '(空)'}` +
+        pendingBlock
+      : personaEnabled
+        ? '【当前人格卡】未激活人格卡(禁止输出 personaMerge)'
+        : '【当前人格卡】未开启人格卡优化(本机设置里关闭;禁止输出 personaMerge)'
 
     // 1. 评审(评分 + 问题 + 假说建议)——委托独立评估 Sub Agent
-    const reviewInput = `【系统提示词】${config.systemPrompt.slice(0, 500)}\n\n【当前记忆】\n${memoryDump(entries)}${focusLine}`
+    const reviewInput = `【系统提示词】${config.systemPrompt.slice(0, 500)}\n\n${personaInput}\n\n【当前记忆】\n${memoryDump(entries, true)}${focusLine}`
     // **可扩展性预算(2026-08-14,用户实测"条目超 40 个进化就崩了")**:
     // 输出 token 上限与超时按记忆规模放大——原缺省 4096 token/60s 在
     // 大记忆集下把评审 JSON 截断/掐死,两次降级重试同样失败 → 中止
@@ -455,16 +669,29 @@ export function createEvolution(deps: {
     const changes = Array.isArray(review.changes)
       ? review.changes.filter((c): c is EvolutionChange => !!c && typeof c === 'object')
       : []
+    const personaMerge = personaEnabled ? parsePersonaMerge(review.personaMerge) : null
+    // 先把建议算出来(不落盘):源条目本轮受保护,普通清理不得删改
+    const personaProposal =
+      personaMerge && activePersona
+        ? buildPersonaProposal(entries, activePersona, personaMerge)
+        : null
+    const proposalOk =
+      !!personaProposal &&
+      !personaProposal.skippedReason &&
+      (personaProposal.sources.length > 0 || !!personaProposal.cardPatch)
+    const preserveIds = new Set(proposalOk ? personaProposal!.sources.map((s) => s.id) : [])
 
     // 2. 候选:应用建议前确保 Reference 快照存在(拒绝时恢复点;
     //    同版本不重复打包——第一轮创建,后续轮复用)
     const refVersion = state.version
     await ensureSnapshot(refVersion)
-    const changeCount = await applyChanges(changes, getStore())
-    const hasRealChange = changeCount > 0
+    const changeCount = await applyChanges(changes, getStore(), { preserveIds })
+    // 人格卡建议算真实改动(进入缓冲区;不直接改卡)
+    const hasRealChange = changeCount > 0 || proposalOk
     // 清理类轮次(2026-08-11 二轮):本轮含 delete/merge 整合建议
-    // (评审的确定性清理——内容只减/整合,评审自己设计的改动)
-    const cleanupApplied = hasRealChange && changes.some(isCleanupChange)
+    // (评审的确定性清理——内容只减/整合,评审自己设计的改动);
+    // 人格卡建议同样免复评直接接受(2026-10-26)
+    const cleanupApplied = hasRealChange && (changes.some(isCleanupChange) || proposalOk)
 
     // 3. 复评(独立黑盒打分)——**仅对纯增改轮次(无 delete/merge 清理)
     //    生效(2026-08-11 实测:复评与评审分数不同量级、噪声大——评审
@@ -515,6 +742,24 @@ export function createEvolution(deps: {
     } else {
       await restoreFromSnapshot(refVersion)
     }
+    // 人格卡建议只在轮次被接受后进缓冲区(拒绝即丢弃),不直接改卡
+    let personaBuffered = 0
+    if (applied && proposalOk && personaProposal && activePersona && personaBufferStore) {
+      try {
+        await personaBufferStore.add({
+          cardId: activePersona.id,
+          cardName: activePersona.name,
+          notes: personaProposal.notes,
+          sourceIds: personaProposal.sources.map((s) => s.id),
+          sources: personaProposal.sources,
+          cardPatch: personaProposal.cardPatch,
+          evolutionVersion: state.version,
+        })
+        personaBuffered = Math.max(1, personaProposal.sources.length)
+      } catch {
+        // 缓冲区写失败不影响记忆进化结果
+      }
+    }
     const summary =
       `v${refVersion}→v${applied ? state.version : refVersion} 评分 ${before} → ${after}` +
       (issues.length > 0 ? `;问题:${issues[0].slice(0, 50)}` : '') +
@@ -522,11 +767,23 @@ export function createEvolution(deps: {
         ? cleanupApplied
           ? `;整合/清理 ${changeCount} 条重复(评审确认直接接受)`
           : `;应用 ${changeCount} 条假说改进`
-        : ';无有效改进(无假说的建议已忽略)')
+        : ';无有效改进(无假说的建议已忽略)') +
+      (personaBuffered > 0
+        ? `;人格卡建议 ${personaBuffered} 条已进入缓冲区(设置页按需合并)`
+        : '')
     lastResult = { at: Date.now(), version: state.version, applied, before, after, summary }
     logs = [{ at: Date.now(), version: state.version, before, after, applied, summary, changes: changeCount }, ...logs]
     await saveLog()
-    return { ok: true, applied, before, after, version: state.version, summary, cleanupApplied }
+    return {
+      ok: true,
+      applied,
+      before,
+      after,
+      version: state.version,
+      summary,
+      cleanupApplied,
+      personaProposed: personaBuffered > 0,
+    }
   }
 
   /** 完整进化会话:多轮候选循环,直到轮数预算/达标/拒绝后停止。
@@ -675,6 +932,8 @@ export function createEvolution(deps: {
       lastResult = null
       await saveState()
       await saveLog()
+      // 独立人格卡缓冲区一并清空(版本历史已归零,旧建议无归属)
+      await deps.getPersonaBufferStore?.()?.clear()
       return '已清除全部版本,回到初始状态(v1)'
     },
   }

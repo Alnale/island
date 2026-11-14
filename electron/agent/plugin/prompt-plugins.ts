@@ -7,9 +7,37 @@
  */
 
 import { PRE_STEP_EVENT } from './prompt'
+import { MIND_REFLECT_LINE } from '../mind-reflect'
 import { formatMemoryBlock } from '../memory'
+import { formatPersonaBlock } from '../persona'
 import { getTasksStatusBlock } from '../tasks'
 import type { AgentContext, Plugin } from './kernel'
+
+/**
+ * 人格卡段落(2026-10-25):激活卡存在时注入 prompt 原文 + 进化整合区。
+ * 无激活 / id 失效 / store 未注入 → 空串(静默跳过,不阻断对话)。
+ * 放在记忆段之前:人格(身份/称谓/说话方式)优先于长期记忆的风格要求。
+ */
+export function personaPromptPlugin(): Plugin {
+  return {
+    name: 'prompt-persona',
+    inject: ['personaStore'],
+    apply(ctx: AgentContext) {
+      ctx.waterfall(PRE_STEP_EVENT, async (system, next, info) => {
+        const store = ctx.get('personaStore')
+        const activeId = info?.config?.activePersonaId
+        if (!store || !activeId) return next(system)
+        let block = ''
+        try {
+          block = formatPersonaBlock(await store.list(), activeId)
+        } catch {
+          block = ''
+        }
+        return next(block ? `${system}\n\n${block}` : system)
+      })
+    },
+  }
+}
 
 /** 长期记忆段落 */
 export function memoryPromptPlugin(): Plugin {
@@ -56,6 +84,19 @@ export function bgTasksPromptPlugin(): Plugin {
         const block = getTasksStatusBlock()
         return next(block ? `${system}\n\n${block}` : system)
       })
+    },
+  }
+}
+
+/**
+ * 她自己的心理刻画(2026-10-26):挂在提示瀑布最后,让主 Agent 在回复
+ * 末行写下岛面一句和输入框底字;等回复落定再判断。不另开模型来猜。
+ */
+export function mindPromptPlugin(): Plugin {
+  return {
+    name: 'prompt-mind',
+    apply(ctx: AgentContext) {
+      ctx.waterfall(PRE_STEP_EVENT, async (system, next) => next(`${system}\n\n${MIND_REFLECT_LINE}`))
     },
   }
 }

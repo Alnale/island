@@ -4,6 +4,7 @@
  * 各一份内联「filter text parts → join」逐字重复,统一到此处)
  */
 
+import { stripMindMarks } from '../../electron/agent/mind-mark'
 import type { AgentMessage, AgentPart } from './types'
 
 /**
@@ -69,8 +70,10 @@ export function isEmptyNapcatDisplayText(text: string): boolean {
  * (napcat-client)另有同款剥除——标记物理上到不了任何聊天对象
  */
 export function stripTurnMarks(text: string): string {
-  return String(text ?? '')
-    .replace(/^\s*/, '')
-    .replace(/^【回复对方】\s*/, '')
-    .replace(/^【(?:指纹|主人指纹):[2-9A-HJ-NP-Z]{6}】\s*/, '')
+  return stripMindMarks(
+    String(text ?? '')
+      .replace(/^\s*/, '')
+      .replace(/^【回复对方】\s*/, '')
+      .replace(/^【(?:指纹|主人指纹):[2-9A-HJ-NP-Z]{6}】\s*/, ''),
+  )
 }

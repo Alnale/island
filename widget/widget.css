@@ -51,9 +51,10 @@ body {
   backdrop-filter: none !important;
 }
 
-/* 有自定义背景图:半透明深底(图层按 opacity 叠加,与 Web 一致) */
+/* 有自定义背景图:不透明实底。图的明暗由 .island-bg-image 的蒙层控制,
+   这一层和图片层都不能留 alpha,否则桌面壁纸透进来发灰。 */
 .widget-stage .island-demo.island-has-bg-image .island-bg {
-  background: rgba(0, 0, 0, 0.85);
+  background: rgb(8, 10, 14);
 }
 
 /* ===== 挂件版:展开/收起动画去掉内容模糊 =====

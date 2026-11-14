@@ -90,6 +90,18 @@ export interface AgentMessage {
   proactive?: boolean
 }
 
+/**
+ * 她写给输入框的底字种类(2026-10-26,主 Agent 自己的心):
+ * say = 想对他说却没写进回复;hope = 渴望他接下来对她说的;
+ * pure = 不冲着他说的纯粹心里话
+ */
+export type MindWhisperKind = 'say' | 'hope' | 'pure'
+
+export interface MindWhisper {
+  kind: MindWhisperKind
+  text: string
+}
+
 /** 引擎 → 渲染端的事件流(经主进程转发) */
 /** 会话隔离并发(2026-08-13):事件统一携带 sessionKey('main' = 主人
  * 主对话;'private:<QQ>' / 'group:<群号>' = 外部会话),渲染端按会话路由
@@ -131,21 +143,21 @@ export type AgentEvent = { sessionKey?: string; turnTag?: string } & (
    * command(兼容),bili 批量下载等动作确认带 title+detail 展示 */
   | { type: 'tool-confirm-request'; command: string; title?: string; detail?: string }
   /**
-   * 心理揣测:助手回复落定时由 subagent-on-reply 插件同步评估,
-   * 经宿主事件出口推渲染端更新紧凑态文字区。proactive = 主动陪伴
-   * 回合(主进程据此弹系统通知,与文字区同一句)
+   * 她自己的心理刻画(2026-10-26):主 Agent 在回复末行写下,引擎等
+   * 回复落定再判断后推给紧凑态文字区。没有 Sub Agent 事后猜测。
+   * proactive = 主动陪伴回合(主进程据此弹系统通知,与文字区同一句)
    */
   | { type: 'mind-guess'; messageId: string; guess: string; proactive?: boolean }
   /**
-   * 对话标题:与心理揣测同一拍(回复落定同步评估),渲染端更新
+   * 输入框底字:与 mind-guess 同一拍,从她写下的同一行解析。
+   * kind + text 印在文本框背后,用户每输入一个码元盖住一个字
+   */
+  | { type: 'mind-whisper'; messageId: string; kind: MindWhisperKind; text: string }
+  /**
+   * 对话标题:与心理刻画同一拍(回复落定同步评估),渲染端更新
    * currentTitle;失败不发本事件(文字区回退回复预览)
    */
   | { type: 'conversation-title'; messageId: string; title: string }
-  /**
-   * 主动陪伴揣测(巡检/旧路径兼容):runProactiveGuess 直调仍发此事件;
-   * 渲染端与 mind-guess 同处理
-   */
-  | { type: 'mind-proactive'; messageId: string; guess: string }
   /**
    * 会话上下文已清空(2026-08-13,LLM clear_session_context 工具):主进程
    * 已擦除该会话持久化历史,渲染端据此清消息状态(**不中止当前回合**——
@@ -193,6 +205,106 @@ export interface MemoryEntry {
   protected?: boolean
   createdAt: number
   updatedAt: number
+}
+
+/**
+ * 人格卡(2026-10-25):设置页可管理、可热切换的多套人格。
+ *
+ * **提示词原文由主人手写,自我进化绝不改写**(prompt 只读);自我进化只
+ * 维护卡内独立的「进化整合区」notes(把零散的人设/风格记忆整理进卡),
+ * 该区可一键清空。卡片本体独立存 userData/persona-cards.json,激活状态
+ * 存 AgentConfig.activePersonaId(引擎每轮读取,热切换下一轮生效)。
+ */
+export interface PersonaCard {
+  id: string
+  /** 卡片名称(设置页展示,≤60 字) */
+  name: string
+  /** 主人手写的人格提示词(≤8000 字;进化不可改写) */
+  prompt: string
+  /** 进化整合区(自我进化建议经缓冲区合并后追加,≤12000 字;可清空) */
+  notes?: string
+  /** 结构化说话风格(2026-10-26;范例 + 硬约束 + 出站清洗共用) */
+  style?: PersonaStyle
+  createdAt: number
+  updatedAt: number
+}
+
+/** 说话范例(用户一句 / 岛灵一句;模仿语气,不复制内容) */
+export interface PersonaStyleExample {
+  user: string
+  assistant: string
+}
+
+/**
+ * 人格卡结构化风格档(2026-10-26):持久化在 persona-cards.json,
+ * 每轮确定性注入 + 出站清洗使用;自我进化不可改写,只由主人编辑。
+ */
+export interface PersonaStyle {
+  /** 语气:松弛/毒舌/温柔/冷淡…(≤200 字) */
+  tone?: string
+  /** 句式要求:短句口语/少用书面连接词…(≤200 字) */
+  sentence?: string
+  /** 自称/称呼要求(≤200 字) */
+  address?: string
+  /** 常用语气词(最多 10 个,每个 ≤10 字) */
+  particles?: string[]
+  /** emoji 策略:不出现 / 少量 / 正常 */
+  emoji?: 'none' | 'rare' | 'normal'
+  /** 列表策略:闲聊绝不列清单 / 仅任务清单可用 */
+  listPolicy?: 'never' | 'task-only'
+  /** 闲聊回复句数上限(1-10)。出站按句末标点截断;含代码或链接的任务回复不截 */
+  maxSentences?: number
+  /** 自定义禁用词(最多 30 个,每个 ≤30 字) */
+  bannedPhrases?: string[]
+  /** 说话范例(最多 6 组,user ≤200 / assistant ≤300) */
+  examples?: PersonaStyleExample[]
+  /** 反例:绝不要这样说的句子(最多 6 条,每条 ≤300) */
+  antiExamples?: string[]
+}
+
+/** 人格卡进化缓冲区来源条目快照(合并后可据此撤销并恢复记忆) */
+export interface PersonaBufferSource {
+  id: string
+  content: string
+  type: MemoryEntry['type']
+  tags?: string[]
+  source?: MemoryEntry['source']
+  protected?: boolean
+  createdAt: number
+  updatedAt: number
+}
+
+/** 人格卡进化缓冲区条目(2026-10-26:独立文件,按需合并) */
+export interface PersonaBufferItem {
+  id: string
+  /** 建议类型:memory = 记忆进化整合;style = 去 AI 味;trait = 近 30 条聊天抽出的新性格 */
+  kind?: 'memory' | 'style' | 'trait'
+  cardId: string
+  cardName: string
+  /** 建议追加到进化整合区的要点 */
+  notes: string
+  /** 建议整合的源记忆 id */
+  sourceIds: string[]
+  /** 源记忆快照(合并时删除;撤销时恢复) */
+  sources: PersonaBufferSource[]
+  /** 人格卡内容提案(可选;prompt/style 需主人手动合并) */
+  cardPatch?: { prompt?: string; style?: PersonaStyle }
+  createdAt: number
+  /** 产生该建议的进化版本(回滚到更早版本时清掉之后的建议) */
+  evolutionVersion?: number
+  /** 已合并时间与合并前内容(撤销合并用) */
+  mergedAt?: number
+  beforeNotes?: string
+  beforePrompt?: string
+  beforeStyle?: PersonaStyle
+  /** 合并后的 notes/提示词/风格指纹(撤销前校验中途是否被改过) */
+  afterNotes?: string
+  afterPrompt?: string
+  afterStyle?: PersonaStyle
+  /** 实际删除的源条目(撤销合并时恢复) */
+  removed?: PersonaBufferSource[]
+  /** 已撤销合并时间 */
+  undoneAt?: number
 }
 
 /** 单个 LLM 供应商的连接凭据(API Key / Base URL / 模型) */
@@ -243,6 +355,17 @@ export interface AgentConfig {
   llmAdapter?: string
   /** 系统提示词(默认值在 main.cjs 兜底) */
   systemPrompt: string
+  /**
+   * 当前激活的人格卡 id(2026-10-25):空 = 不注入人格卡;卡片本体存
+   * userData/persona-cards.json。引擎每轮读配置 → 设置页切换后下一轮
+   * 立即生效(热插拔);id 失效时插件静默跳过。
+   */
+  activePersonaId?: string
+  /**
+   * 允许记忆进化优化人格卡(2026-10-26):开启后评审可输出 personaMerge,
+   * 结果先进入独立「记忆进化缓冲区」,由主人按需合并;默认关闭。
+   */
+  personaEvolveEnabled?: boolean
   /** 思考强度(官方文档 reasoning.effort:low/medium/high,默认 high) */
   reasoningEffort: string
   /**
@@ -273,12 +396,15 @@ export interface AgentConfig {
   confirmExec?: boolean
   /**
    * 主动陪伴(2026-08-07):开启后用户无操作满 proactiveInterval × 单位,
-   * 由总结 Sub Agent 判断语境是否需要主动开口,是则主 Agent 完整回合
+   * 由主动陪伴 Sub Agent 判断语境是否需要主动开口,是则主 Agent 完整回合
    * 主动回复(默认开启)。2026-08-07 支持单位选择(秒/分钟/小时,
-   * 数值不变仅换单位——旧 proactiveIntervalMinutes 由主进程迁移)
+   * 数值不变仅换单位——旧 proactiveIntervalMinutes 由主进程迁移)。
+   * **2026-10-22 触发策略**:间隔 = 主动联系的最小间隔;判断"暂不开口"
+   * 或判断失败只进短冷却重试(不再重置无操作时钟),连续 2 次未开口后
+   * 兜底强制开口一次——主动陪伴不再整段死在保守判断/Sub 故障上
    */
   proactiveEnabled?: boolean
-  /** 主动陪伴间隔数值(默认 60,钳制 5–480;配合 proactiveIntervalUnit) */
+  /** 主动陪伴间隔数值(默认 15,钳制 5–480;配合 proactiveIntervalUnit) */
   proactiveInterval?: number
   /** 主动陪伴间隔单位:s=秒 / m=分钟(默认)/ h=小时 */
   proactiveIntervalUnit?: 's' | 'm' | 'h'
@@ -287,9 +413,6 @@ export interface AgentConfig {
    * 或自定义文本 ≤100 字;注入总结系统提示
    */
   summaryStyle?: string
-  /** 心理揣测人格(2026-08-07 Sub Agent 设置):预设 id(MIND_PERSONAS)
-   * 或自定义文本 ≤100 字;注入揣测系统提示 */
-  mindPersona?: string
   /**
    * 工具输出根目录(2026-08-12):所有工具的产出文件统一存放——
    * 目录结构 = <根>/<工具名>/[<会话ID>](每工具文件夹分类、文件按
@@ -304,11 +427,19 @@ export interface AgentConfig {
    * ws://127.0.0.1:3001)。收到私聊消息自动进入对话,LLM 回复发回 QQ
    */
   napcatWsUrl?: string
+  /** 连接模式(2026-10-25):forward = 主动连 NapCat;reverse = 本机监听等 NapCat 连入 */
+  napcatWsMode?: 'forward' | 'reverse'
   /** NapCat 开关(默认 false;开启后挂件启动即连接) */
   napcatEnabled?: boolean
   /** 私聊扩展信任 QQ 号(主人由 privacy.json 配置;空 = 只信任主人) */
   napcatAllowed?: string[]
-  /** 群白名单(由 privacy.json 的 allowedGroups 配置;空 = 不处理群消息) */
+  /**
+   * 私聊自主回复策略(2026-10-23):true(默认)= 所有私聊(含陌生人)由
+   * LLM 自主判断回复/不回复;false = 仅主人与扩展信任自主,陌生人消息
+   * 先询问主人。入口按此字段决定是否走"询问主人"链路
+   */
+  napcatPrivateAutoReply?: boolean
+  /** 群白名单(由 privacy.json 的 allowedGroups 回填;空 = 监听所有群,非空 = 只收名单内) */
   napcatAllowedGroups?: string[]
   /** 机器人自身 QQ(群消息 @ 检测;由 privacy.json 的 botQQ 配置) */
   napcatBotQQ?: string
@@ -409,6 +540,10 @@ export interface EngineDeps {
   onSwitchToMusic(play?: boolean): void
   /** 记忆存储(主进程创建;未注入则记忆工具/记忆块不可用) */
   getMemoryStore?(): MemoryStoreLike | null
+  /** 人格卡存储(主进程创建;未注入则不注入人格卡提示段) */
+  getPersonaStore?(): PersonaCardStoreLike | null
+  /** 人格卡进化缓冲区(未注入则不产生/不消费人格卡建议) */
+  getPersonaBufferStore?(): PersonaBufferStoreLike | null
   /** 自我进化 harness(主进程创建,懒加载;未注入则 evolve 工具不可用) */
   getEvolution?(): EvolutionLike | null
   /**
@@ -479,6 +614,19 @@ export interface EngineDeps {
    */
   getTurnKind?(): string | null
   /**
+   * 本轮触发原文(agent:send 写入 route.lastTriggerText;工具执行期间仍在,
+   * 落定后清零)。人格卡 replace/delete 用它判断主人有没有要求改卡,
+   * 避免闲聊里擅自弹出「整体替换」确认。
+   */
+  getTurnText?(): string | null
+  /** 本群最近发言的人，供 send_group 决定艾特谁。未注入则工具只信显式 at。 */
+  listGroupParticipants?(groupId: string): Promise<Array<{ qq: string; name?: string; names?: string[] }>>
+  /**
+   * 当前群回合的触发原文和被 @ 的人。工具执行时轮次还没清，
+   * 用它判断「这句是在回触发消息里的那个人」，而不是总艾特发消息的人。
+   */
+  getGroupTurn?(): { plain?: string; atQQs?: string[]; speakerQQ?: string; directed?: boolean } | null
+  /**
    * Sub Agent 能力宿主:主进程一份单例,引擎插件经 ctx.subagents
    * 取同一实例。未注入时插件自行建本地工厂(测试环境)
    */
@@ -490,8 +638,12 @@ export interface EngineDeps {
    */
   napcat?: {
     status(): { connected: boolean; url: string; lastError: string; receivedCount: number; repliedCount: number }
-    sendToQQ(qq: string, text: string, opts?: { image?: string; file?: string; voice?: string }): Promise<string>
-    sendToGroup(groupId: string, text: string, opts?: { file?: string; image?: string; voice?: string }): Promise<string>
+    sendToQQ(qq: string, text: string, opts?: { image?: string; file?: string; voice?: string; replyTo?: string }): Promise<string>
+    sendToGroup(
+      groupId: string,
+      text: string,
+      opts?: { file?: string; image?: string; voice?: string; at?: string | string[]; replyTo?: string },
+    ): Promise<string>
     getRecentMessages(): Array<{ qq: string; text: string; messageId: string; time: number; replied?: boolean }>
     /** 联系人档案(2026-08-12:napcat 工具 contacts/contact_update) */
     getContacts(): Promise<
@@ -512,12 +664,11 @@ export interface SubAgentHost {
     summarize(messages: AgentMessage[]): Promise<string>
     extractMemories(messages: AgentMessage[]): Promise<{ content: string; type: MemoryEntry['type'] }[]>
   }
-  mind: { guess(messages: AgentMessage[]): Promise<string> }
   proactive: {
     judgeProactive(
       messages: AgentMessage[],
       idleMinutes: number,
-    ): Promise<{ should: boolean; hint?: string }>
+    ): Promise<{ should: boolean; hint?: string; reason?: 'decided' | 'error' }>
     analyzeUserStyle(messages: AgentMessage[]): Promise<string>
   }
   classifier: {
@@ -551,6 +702,61 @@ export interface MemoryStoreLike {
   importEntries(next: MemoryEntry[]): Promise<{ imported: number; skipped: number }>
 }
 
+/** 人格卡存储的引擎可见子集(避免 types ↔ persona 循环引用) */
+export interface PersonaCardStoreLike {
+  list(): Promise<PersonaCard[]>
+  get(id: string): Promise<PersonaCard | null>
+  upsert(input: {
+    id?: string
+    name: string
+    prompt: string
+    notes?: string
+    style?: PersonaStyle | null
+  }): Promise<PersonaCard>
+  remove(id: string): Promise<number>
+  clearNotes(id: string): Promise<PersonaCard | null>
+  setNotes(id: string, notes: string): Promise<PersonaCard | null>
+  appendNotes(
+    id: string,
+    lines: string[],
+  ): Promise<{ card: PersonaCard | null; added: number; reason?: 'full' | 'duplicate' }>
+  replaceAll(next: PersonaCard[]): Promise<PersonaCard[]>
+  importCards(next: PersonaCard[]): Promise<{ imported: number; skipped: number; idMap: Record<string, string> }>
+}
+
+/** 人格卡进化缓冲区存储的引擎可见子集 */
+export interface PersonaBufferStoreLike {
+  list(): Promise<PersonaBufferItem[]>
+  add(input: {
+    kind?: 'memory' | 'style' | 'trait'
+    cardId: string
+    cardName: string
+    notes: string
+    sourceIds: string[]
+    sources: PersonaBufferSource[]
+    cardPatch?: { prompt?: string; style?: PersonaStyle }
+    evolutionVersion?: number
+  }): Promise<PersonaBufferItem>
+  remove(id: string): Promise<number>
+  markMerged(
+    id: string,
+    patch: {
+      beforeNotes: string
+      afterNotes: string
+      beforePrompt: string
+      beforeStyle?: PersonaStyle
+      afterPrompt: string
+      afterStyle?: PersonaStyle
+      removed: PersonaBufferSource[]
+    },
+  ): Promise<PersonaBufferItem | null>
+  markUndone(id: string): Promise<PersonaBufferItem | null>
+  removeAfterVersion(version: number): Promise<number>
+  clear(): Promise<void>
+  /** 导入导出包里的缓冲区条目(保留原 id 与合并/撤销状态;同 id 跳过) */
+  importItems(next: PersonaBufferItem[]): Promise<{ imported: number; skipped: number }>
+}
+
 /** 自我进化 harness 的引擎可见子集 */
 export interface EvolutionLike {
   requestEvolve(focus?: string, rounds?: number): Promise<{ started: boolean; message: string }>
@@ -562,7 +768,23 @@ export interface EvolutionLike {
    * 工具层回退 requestEvolve
    */
   runQuick?(focus?: string): Promise<{ ok: boolean; message: string }>
+  /** 最近进化日志(设置页/LLM 工具查看;旧宿主可缺省) */
+  getLog?(): Promise<
+    Array<{ at: number; version: number; before: number; after: number; applied: boolean; summary: string; changes: number }>
+  >
+  /** 回滚到最近一个已接受版本(旧宿主可缺省) */
+  rollback?(): Promise<string>
+  /** 清除全部进化版本(记忆条目保留;旧宿主可缺省) */
+  resetAll?(): Promise<string>
 }
 
 /** 工具参数名 → 值的开放对象(工具 execute 收到的参数) */
 export type ToolParams = Record<string, unknown>
+
+/** 一条群消息的路由元数据。与消息一起排队，不能从会话最近活动回填。 */
+export interface NapcatGroupTurn {
+  speakerQQ?: string
+  plain?: string
+  atQQs?: string[]
+  directed?: boolean
+}

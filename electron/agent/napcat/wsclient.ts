@@ -36,13 +36,26 @@ export interface WsHandlers {
   onOpen(): void
   onMessage(text: string): void
   onError(message: string): void
-  onClose(): void
+  /** 连接关闭(恰好一次);info 为服务端 close 帧的 code/reason(无则空) */
+  onClose(info?: WsCloseInfo): void
+}
+
+/** 服务端 close 帧信息(客户端保活超时/网络中断时为空) */
+export interface WsCloseInfo {
+  code?: number
+  reason?: string
 }
 
 /** 帧头部最小长度(2 字节基础头) */
 const MIN_HEADER = 2
 /** 握手超时(连接建立后 10s 内未收到 101 则断开走重连) */
 const HANDSHAKE_TIMEOUT_MS = 10_000
+/** 保活 ping 间隔 */
+const KEEPALIVE_INTERVAL_MS = 20_000
+/** 保活超时:超过该时长未收到任何数据(含 pong/服务端心跳)即判定连接已死
+ * (2026-10-23:睡眠/唤醒或网络切换后 TCP 可能半开——对端已失联但本端收不到
+ * FIN,旧逻辑仍显示"已连接"且永不重连;由主动 ping + 无数据超时兜底) */
+const KEEPALIVE_TIMEOUT_MS = 65_000
 
 /**
  * 编码客户端帧(客户端 → 服务端必须带掩码,4 字节随机掩码)
@@ -67,6 +80,24 @@ export function encodeWsFrame(opcode: number, payload: Buffer): Buffer {
   const mask = randomBytes(4)
   const masked = Buffer.from(payload.map((b, i) => b ^ mask[i % 4]))
   return Buffer.concat([header, mask, masked])
+}
+
+/** 编码服务端帧(服务端 → 客户端,不掩码;2026-10-25 反向 WS) */
+export function encodeServerFrame(opcode: number, payload: Buffer): Buffer {
+  const len = payload.length
+  if (len < 126) return Buffer.concat([Buffer.from([0x80 | opcode, len]), payload])
+  if (len < 65536) {
+    const head = Buffer.alloc(4)
+    head[0] = 0x80 | opcode
+    head[1] = 126
+    head.writeUInt16BE(len, 2)
+    return Buffer.concat([head, payload])
+  }
+  const head = Buffer.alloc(10)
+  head[0] = 0x80 | opcode
+  head[1] = 127
+  head.writeBigUInt64BE(BigInt(len), 2)
+  return Buffer.concat([head, payload])
 }
 
 /** 解析出的单帧(服务端 → 客户端,通常不掩码;掩码帧同样容错解析) */
@@ -118,11 +149,22 @@ export class WsFrameParser {
   }
 }
 
-/** 解析 ws:// URL → {host, port, path}(缺省端口 80;OneBot 恒本机明文) */
+/** 解析 ws:// URL → {host, port, path}(缺省端口 80;OneBot 恒本机明文)。
+ * 支持 `ws://host:port?access_token=xxx`:查询串并入 Upgrade 请求行,
+ * NapCat 侧按 access_token 校验(2026-10-25)。 */
 export function parseWsUrl(url: string): { host: string; port: number; path: string } {
-  const m = /^ws:\/\/([^/:]+)(?::(\d+))?(\/.*)?$/i.exec(String(url).trim())
+  const m = /^ws:\/\/([^/:?]+)(?::(\d+))?([/?].*)?$/i.exec(String(url).trim())
   if (!m) throw new Error(`无效的 ws URL:${url}`)
-  return { host: m[1], port: m[2] ? Number(m[2]) : 80, path: m[3] || '/' }
+  let path = m[3] || '/'
+  if (path.startsWith('?')) path = '/' + path
+  return { host: m[1], port: m[2] ? Number(m[2]) : 80, path }
+}
+
+/** 保活/握手时序(仅测试注入;生产走上面的默认常量) */
+export interface WsTuning {
+  handshakeTimeoutMs?: number
+  keepaliveIntervalMs?: number
+  keepaliveTimeoutMs?: number
 }
 
 /**
@@ -131,7 +173,10 @@ export function parseWsUrl(url: string): { host: string; port: number; path: str
  * Sec-WebSocket-Accept)→ open;期间错误/超时统一走 onError + onClose
  * (onClose 恰好一次,重连由调用方 onClose 里调度)
  */
-export function createWsSocket(url: string, handlers: WsHandlers): WsConn {
+export function createWsSocket(url: string, handlers: WsHandlers, tuning?: WsTuning): WsConn {
+  const handshakeTimeoutMs = tuning?.handshakeTimeoutMs ?? HANDSHAKE_TIMEOUT_MS
+  const keepaliveIntervalMs = tuning?.keepaliveIntervalMs ?? KEEPALIVE_INTERVAL_MS
+  const keepaliveTimeoutMs = tuning?.keepaliveTimeoutMs ?? KEEPALIVE_TIMEOUT_MS
   let socket: net.Socket | null = null
   let state: 'connecting' | 'open' | 'closed' = 'connecting'
   let closedFired = false
@@ -141,24 +186,57 @@ export function createWsSocket(url: string, handlers: WsHandlers): WsConn {
   const parser = new WsFrameParser()
   /** 握手响应累积(纯字符串按行解析,不经 llhttp) */
   let handshakeBuf = ''
+  /** 服务端 close 帧信息(供 onClose 上报) */
+  let closeInfo: WsCloseInfo = {}
+  /** 最近一次收到任何数据的时间(保活判活) */
+  let lastInboundAt = Date.now()
+  let keepaliveTimer: ReturnType<typeof setInterval> | null = null
 
   const { host, port, path } = parseWsUrl(url)
+
+  const stopKeepalive = () => {
+    if (keepaliveTimer) {
+      clearInterval(keepaliveTimer)
+      keepaliveTimer = null
+    }
+  }
+
+  /** 建连后启动保活:每 20s 发 WS ping;65s 收不到任何数据(服务端心跳/
+   * pong/事件)即判定半开连接,主动断开走调用方重连 */
+  const startKeepalive = () => {
+    stopKeepalive()
+    lastInboundAt = Date.now()
+    keepaliveTimer = setInterval(() => {
+      if (state !== 'open') return
+      if (Date.now() - lastInboundAt > keepaliveTimeoutMs) {
+        fail('连接保活超时(NapCat 已无响应)')
+        return
+      }
+      try {
+        socket!.write(encodeWsFrame(0x9, Buffer.alloc(0)))
+      } catch (e) {
+        fail(`连接保活发送失败:${(e as Error).message}`)
+      }
+    }, keepaliveIntervalMs)
+  }
 
   const fireClose = () => {
     if (closedFired) return
     closedFired = true
     state = 'closed'
-    handlers.onClose()
+    stopKeepalive()
+    handlers.onClose(closeInfo)
   }
 
   const fail = (message: string) => {
     if (state === 'closed') return
     handlers.onError(message)
+    stopKeepalive()
     socket?.destroy()
   }
 
   socket = net.connect(port, host)
-  socket.setTimeout(HANDSHAKE_TIMEOUT_MS, () => fail('连接超时(NapCat 未响应握手)'))
+  socket.setTimeout(handshakeTimeoutMs, () => fail('连接超时(NapCat 未响应握手)'))
   socket.on('connect', () => {
     // HTTP Upgrade 请求(客户端密钥随机 16 字节 base64;不协商压缩)
     const key = randomBytes(16).toString('base64')
@@ -173,6 +251,7 @@ export function createWsSocket(url: string, handlers: WsHandlers): WsConn {
     )
     // 握手密钥供 101 校验
     socket!.on('data', (chunk: Buffer) => {
+      lastInboundAt = Date.now()
       if (state === 'open') {
         // 已升级:按帧解析
         for (const f of parser.push(chunk)) handleFrame(f)
@@ -207,6 +286,7 @@ export function createWsSocket(url: string, handlers: WsHandlers): WsConn {
       if (rest.length > 0) {
         for (const f of parser.push(rest)) handleFrame(f)
       }
+      startKeepalive()
       handlers.onOpen()
     })
   })
@@ -232,12 +312,17 @@ export function createWsSocket(url: string, handlers: WsHandlers): WsConn {
           if (f.fin) deliverText()
         }
         break
-      case 0x8: // 关闭帧:回 close 后结束
+      case 0x8: // 关闭帧:记录 code/reason 并回 close 后结束
+        if (f.payload.length >= 2) closeInfo.code = f.payload.readUInt16BE(0)
+        if (f.payload.length > 2) {
+          try { closeInfo.reason = f.payload.subarray(2).toString('utf8') } catch { /* 忽略 */ }
+        }
         try {
           socket!.write(encodeWsFrame(0x8, f.payload.subarray(0, 2)))
         } catch {
           // 忽略
         }
+        stopKeepalive()
         socket!.end()
         break
       case 0x9: // ping → pong(回显负载)
@@ -268,6 +353,7 @@ export function createWsSocket(url: string, handlers: WsHandlers): WsConn {
       socket.write(encodeWsFrame(0x1, Buffer.from(String(text), 'utf8')))
     },
     close() {
+      stopKeepalive()
       if (state === 'open' && socket) {
         try {
           socket.write(encodeWsFrame(0x8, Buffer.alloc(0)))

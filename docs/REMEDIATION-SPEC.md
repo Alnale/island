@@ -406,7 +406,7 @@ protected async handshake(
 - 发布 staging 直接使用已经补丁化的 runtime。
 - 不再在用户机器上执行 apply/restore，也不携带官方 runtime 备份。
 - 发布清单记录 Electron tag、补丁 commit、ffmpeg 配置和所有替换文件哈希。
-- HEVC 许可与分发义务在 release gate 中由维护者确认，结果记录在 `THIRD_PARTY_NOTICES.md`。
+- HEVC 许可与分发义务在 release gate 中由维护者确认，结果记录在 `docs/THIRD_PARTY_NOTICES.md`。
 
 ### 9.3 原生安装/卸载
 
@@ -740,9 +740,9 @@ interface WindowPlacementV1 {
 新增或补齐：
 
 - 根目录 `LICENSE`，内容与 README 的 MIT 声明一致。
-- `PRIVACY.md`：说明云端 provider、QQ、日志、记忆和本地工具分别处理什么数据。
-- `SECURITY.md`：说明高权限 Agent 产品原则、漏洞报告方式和支持版本。
-- `THIRD_PARTY_NOTICES.md`：Electron、FFmpeg/HEVC、工具依赖和字体/媒体资源声明。
+- `docs/PRIVACY.md`：说明云端 provider、QQ、日志、记忆和本地工具分别处理什么数据。
+- `docs/SECURITY.md`：说明高权限 Agent 产品原则、漏洞报告方式和支持版本。
+- `docs/THIRD_PARTY_NOTICES.md`：Electron、FFmpeg/HEVC、工具依赖和字体/媒体资源声明。
 - `docs/DATA-LIFECYCLE.md`：数据清单、路径、保留周期和工厂重置语义。
 - `docs/RELEASE.md`：构建、签名、体积门禁、更新和回滚流程。
 

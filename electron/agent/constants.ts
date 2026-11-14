@@ -26,22 +26,13 @@ export function stripMcpServiceLabel(description: string): string {
 /**
  * 总结标题文风预设(2026-08-07 Sub Agent 设置):id 入库(settings.json),
  * desc 为提示词片段(引擎注入总结系统提示);name 设置界面展示。
- * 8 种预设 = 文风 4 + 人格 4;渲染端可安全 import(零 node 依赖)
+ * 4 种文风预设;渲染端可安全 import(零 node 依赖)
  */
 export const SUMMARY_STYLES = [
   { id: 'concise', name: '简洁明了', desc: '文风:极度简洁,用最少字数概括主题,不加修饰语。' },
   { id: 'lively', name: '活泼俏皮', desc: '文风:活泼俏皮,带拟人语气,让标题有生气。' },
   { id: 'literary', name: '文艺诗意', desc: '文风:文艺诗意,可用四字词或对仗,意境优先。' },
   { id: 'formal', name: '正式稳重', desc: '文风:正式稳重,用词规范,不口语化。' },
-] as const
-
-/** 心理揣测人格预设(2026-08-07 Sub Agent 设置):id 入库,desc 为提示词
- * 片段(引擎注入揣测系统提示);name 设置界面展示 */
-export const MIND_PERSONAS = [
-  { id: 'catgirl', name: '俏皮猫娘', desc: '人格:俏皮猫娘,揣测带喵语与活泼口癖。' },
-  { id: 'tender', name: '温柔贴心', desc: '人格:温柔贴心,揣测用暖心的语气。' },
-  { id: 'aloof', name: '高冷克制', desc: '人格:高冷克制,揣测短促冷淡,惜字如金。' },
-  { id: 'witty', name: '知性风趣', desc: '人格:知性风趣,揣测带点观察者的机敏。' },
 ] as const
 
 /**
@@ -118,6 +109,17 @@ export const PERSONA_TAGS = ['人设', '人格', '角色', '岛灵']
 const PERSONA_CONTENT_RE = /(^人设|主人.{0,6}人设|指定人设|岛灵.{0,4}(人设|设定)|人设[:：,。()]|角色形象|角色设定|人格设定)/
 
 /**
+ * 记忆条目是否属于人格分类(2026-10-26 用户定案:人格内容归人格卡,
+ * 长期记忆不再保留该分类)——人设类标签或人设内容关键词命中即算。
+ * 启动迁移据此把旧条目并入激活人格卡,remember 工具据此拒绝新增。
+ */
+export function isPersonaClassified(e: { content: string; tags?: string[] }): boolean {
+  const tags = e.tags ?? []
+  if (tags.some((t) => PERSONA_TAGS.includes(t))) return true
+  return PERSONA_CONTENT_RE.test(e.content)
+}
+
+/**
  * 记忆条目是否受保护(锁定)——`protected` 显式标记优先(显式解锁 false
  * 覆盖标签/内容启发式),否则看人设类标签/内容(旧数据自动识别)。
  * 受保护条目 = 主人指定的岛灵设定:自我进化与 LLM 的 forget 工具都不得
@@ -126,7 +128,5 @@ const PERSONA_CONTENT_RE = /(^人设|主人.{0,6}人设|指定人设|岛灵.{0,4
 export function isProtectedEntry(e: { protected?: boolean; content: string; tags?: string[] }): boolean {
   if (e.protected === false) return false
   if (e.protected === true) return true
-  const tags = e.tags ?? []
-  if (tags.some((t) => PERSONA_TAGS.includes(t))) return true
-  return PERSONA_CONTENT_RE.test(e.content)
+  return isPersonaClassified(e)
 }
