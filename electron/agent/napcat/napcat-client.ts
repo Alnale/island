@@ -36,6 +36,7 @@ import {
   extractImageRefs,
   gtkFromCookie,
   stripMasterNarration,
+  stripMentionMarkup,
   stripSelfMentions,
   stripThinkingPreamble,
   stripToolNarration,
@@ -262,6 +263,10 @@ export interface NapcatClient extends NapcatExtras {
   setGroupKick(groupId: string, qq: string): Promise<void>
   setGroupWholeBan(groupId: string, enable: boolean): Promise<void>
   getQzoneFeeds(qq: string, num: number): Promise<Array<{ tid: string; content: string; createTime: number; picnum: number; commentnum: number; likenum: number }>>
+  /** 发表 QQ 空间说说(2026-10-28 接入 NapCat send_qzone_msg):文字/带图/可见范围 */
+  sendQzoneMsg(content: string, opts?: { images?: string[]; ugcRight?: number; targetUins?: string[] }): Promise<{ tid: string }>
+  /** 删除 QQ 空间说说(2026-10-28,tid 来自 sendQzoneMsg 返回) */
+  deleteQzoneMsg(tid: string): Promise<void>
   /** 待处理的加好友/加群请求(2026-10-25) */
   listPendingRequests(): NapcatPendingRequest[]
   /** 接受/拒绝请求并移出待处理列表(2026-10-25) */
@@ -275,6 +280,16 @@ export interface NapcatClient extends NapcatExtras {
   bindSession?(key: string): void
   watchSession?(kind: 'private' | 'group', id: string): void
   unwatchSession?(kind: 'private' | 'group', id: string): void
+}
+
+/** QQ 空间动作错误信息(2026-10-28):优先取 wording/message;动作不存在
+ * (retcode 1404 等)提示 NapCat 版本过旧——send_qzone_msg 需 2026-08 之后版本 */
+function qzoneActionError(res: { retcode?: number; message?: string; wording?: string } | undefined | null): string {
+  const msg = String(res?.wording || res?.message || `retcode=${res?.retcode ?? '未知'}`)
+  if (res?.retcode === 1404 || /unknown|not.?found|不支持|没有这个|未实现/i.test(msg)) {
+    return `${msg}(NapCat 版本可能过旧:发/删说说需 2026-08 之后版本)`
+  }
+  return msg
 }
 
 export function createNapcatClient(deps: NapcatDeps, tuning?: NapcatReconnectTuning): NapcatClient {
@@ -1381,7 +1396,15 @@ export function createNapcatClient(deps: NapcatDeps, tuning?: NapcatReconnectTun
       opts?: { file?: string; image?: string; voice?: string; at?: string | string[]; replyTo?: string },
     ): Promise<string> {
       const self = botQQ()
-      const cleaned = stripSelfMentions(await prepareOutgoingText(text, false), self, selfNames())
+      // 手写艾特标记剥离(2026-10-28):at 段统一发艾特,正文里的 @QQ号/@名字/
+      // CQ at 码会渲染成第二个艾特并裸露对方 QQ 号——发出前剥掉
+      const atQQs = (Array.isArray(opts?.at) ? opts.at : opts?.at ? [opts.at] : [])
+        .map((x) => String(x ?? '').trim())
+        .filter(Boolean)
+      const cleaned = stripMentionMarkup(
+        stripSelfMentions(await prepareOutgoingText(text, false), self, selfNames()),
+        atQQs,
+      )
       const paramImage = typeof opts?.image === 'string' && opts.image.trim() ? opts.image.trim() : ''
       const file = typeof opts?.file === 'string' && opts.file.trim() ? opts.file.trim() : ''
       const voice = typeof opts?.voice === 'string' && opts.voice.trim() ? opts.voice.trim() : ''
@@ -1584,6 +1607,55 @@ export function createNapcatClient(deps: NapcatDeps, tuning?: NapcatReconnectTun
         commentnum: typeof m.commentnum === 'number' ? m.commentnum : 0,
         likenum: typeof m.likenum === 'number' ? m.likenum : 0,
       }))
+    },
+    async sendQzoneMsg(
+      content: string,
+      opts?: { images?: string[]; ugcRight?: number; targetUins?: string[] },
+    ): Promise<{ tid: string }> {
+      // 与读动态共用 QQ 空间 1s 限速
+      const now = Date.now()
+      if (now - lastQzoneCall < QZONE_RATE_LIMIT_MS) {
+        await new Promise((r) => setTimeout(r, QZONE_RATE_LIMIT_MS - (now - lastQzoneCall)))
+      }
+      lastQzoneCall = Date.now()
+      // NapCat 扩展动作 send_qzone_msg(2026-08 PR #1965 起):图片支持本地
+      // 路径/URL/base64://,由 NapCat 自动上传 QQ 空间相册;ugc_right 可见
+      // 范围 1所有人/4好友/16部分好友可见/64仅自己/128部分好友不可见
+      const params: Record<string, unknown> = { content }
+      const images = (opts?.images ?? []).map((s) => String(s).trim()).filter(Boolean)
+      if (images.length > 0) params.images = images
+      if (opts?.ugcRight !== undefined) params.ugc_right = opts.ugcRight
+      const targetUins = (opts?.targetUins ?? []).map((s) => String(s).trim()).filter(Boolean)
+      if (targetUins.length > 0) params.target_uins = targetUins
+      const res = await callAction<{
+        status?: string
+        retcode?: number
+        data?: { tid?: string }
+        message?: string
+        wording?: string
+      }>('send_qzone_msg', params)
+      if (res?.status !== 'ok' && res?.retcode !== 0) {
+        throw new Error(`发表 QQ 空间说说失败:${qzoneActionError(res)}`)
+      }
+      const tid = String(res?.data?.tid ?? '')
+      if (!tid) throw new Error('发表 QQ 空间说说失败:未返回 tid')
+      return { tid }
+    },
+    async deleteQzoneMsg(tid: string): Promise<void> {
+      const now = Date.now()
+      if (now - lastQzoneCall < QZONE_RATE_LIMIT_MS) {
+        await new Promise((r) => setTimeout(r, QZONE_RATE_LIMIT_MS - (now - lastQzoneCall)))
+      }
+      lastQzoneCall = Date.now()
+      const res = await callAction<{
+        status?: string
+        retcode?: number
+        message?: string
+        wording?: string
+      }>('delete_qzone_msg', { tid })
+      if (res?.status !== 'ok' && res?.retcode !== 0) {
+        throw new Error(`删除 QQ 空间说说失败:${qzoneActionError(res)}`)
+      }
     },
     async setGroupBan(groupId: string, qq: string, durationSec: number): Promise<void> {
       const res = await callAction<{ status?: string; retcode?: number }>('set_group_ban', {

@@ -199,3 +199,5 @@ export interface AgentConfig extends EngineAgentConfig {
   /** 总结标题文风(Sub Agent 设置:预设 id 或自定义 ≤100 字) */
   summaryStyle: string
 }
+
+export type { NapcatGroupTurn } from '../../electron/agent/types'

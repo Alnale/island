@@ -21,6 +21,7 @@ import { isEmptyNapcatDisplayText, stripNapcatHistoryInstructions, stripTurnMark
 import { depictTurn, isMindLabel } from '../../electron/agent/mind-mark'
 import type {
   AgentConfig,
+  NapcatGroupTurn,
   AgentEvent,
   AgentMessage,
   AgentPart,
@@ -966,7 +967,7 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
   }, [config?.proactiveEnabled, config?.proactiveInterval, config?.proactiveIntervalUnit, opts?.allowProactive, myKey])
 
   const send = useCallback(
-    async (text: string, opts?: { silent?: boolean; source?: 'qq' | 'group' | 'ask'; target?: string; media?: string[]; paths?: string[]; profileCard?: string; owner?: 'master' | 'peer' }) => {
+    async (text: string, opts?: { silent?: boolean; source?: 'qq' | 'group' | 'ask'; target?: string; media?: string[]; paths?: string[]; profileCard?: string; owner?: 'master' | 'peer'; groupTurn?: NapcatGroupTurn }) => {
     const trimmed = text.trim()
     // 2026-08-17 拖拽上传:无文字也可发送(纯附件上传——附件路径标注
     // 就是本轮输入;空文本 + 无附件才拦截)
@@ -1109,6 +1110,7 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
       // 消息归属(2026-09-22 归属指纹,规则①②③):窗口输入 = master;
       // QQ 来源按 payload 的 owner(入口判定);缺省让主进程按来源推
       opts?.owner ?? (!routed ? 'master' : undefined),
+      opts?.groupTurn,
     )
   },
     [myKey],
@@ -1124,7 +1126,7 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
   //   先问主人】"前缀,本侧**不带 source**——LLM 先询问主人,主人
   //   指示后的回复由主进程 pendingQQReply 链路发回;
   // - 群接话 = 带 source='group'(回复发回群)
-  const napcatQueueRef = useRef<Array<{ text: string; source?: 'qq' | 'group' | 'ask'; target?: string; media?: string[]; profileCard?: string; owner?: 'master' | 'peer' }>>([])
+  const napcatQueueRef = useRef<Array<{ text: string; source?: 'qq' | 'group' | 'ask'; target?: string; media?: string[]; profileCard?: string; owner?: 'master' | 'peer'; groupTurn?: NapcatGroupTurn }>>([])
   const MAX_NAPCAT_QUEUE = 50 // 队列最大长度(防LLM长时间busy时消息无限堆积)
   // 系统通知队列(2026-08-13:background-done busy 时入队,idle 后逐条
   // 补发——防"下载太快通知被吞")
@@ -1172,7 +1174,7 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
   // 私聊消息处理(订阅与父级补投共用,2026-08-13 三轮:首条消息到达时
   // 外部会话实例可能尚未挂载,父级暂存后经 ingestNapcatMessage 补投)
   const processNapcatMessage = useCallback(
-    (msg: { text?: string; qq?: string; trusted?: boolean; media?: string[]; profileCard?: string; muted?: boolean; sessionKey?: string; messageId?: string; owner?: 'master' | 'peer' }) => {
+    (msg: { text?: string; qq?: string; trusted?: boolean; media?: string[]; profileCard?: string; muted?: boolean; sessionKey?: string; messageId?: string; owner?: 'master' | 'peer'; groupTurn?: NapcatGroupTurn }) => {
       if (!msg || typeof msg.text !== 'string') return
       if ((!msg.media || msg.media.length === 0) && isEmptyNapcatDisplayText(msg.text)) return
       // 双通道去重(2026-08-13):实例订阅 + 父级 ingest 会各送一次;
@@ -1201,17 +1203,17 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
       }
       if (statusRef.current === 'thinking' || statusRef.current === 'running') {
         const queue = napcatQueueRef.current
-        queue.push({ text: msg.text, source: msg.trusted === false ? 'ask' : 'qq', target: msg.qq, media: msg.media, profileCard: msg.profileCard, owner: msg.owner })
+        queue.push({ text: msg.text, source: msg.trusted === false ? 'ask' : 'qq', target: msg.qq, media: msg.media, profileCard: msg.profileCard, owner: msg.owner, groupTurn: msg.groupTurn })
         // 队列溢出保护:超过最大长度时丢弃最旧的消息
         if (queue.length > MAX_NAPCAT_QUEUE) queue.shift()
         return
       }
-      send(msg.text, { source: msg.trusted === false ? 'ask' : 'qq', target: msg.qq, media: msg.media, profileCard: msg.profileCard, owner: msg.owner })
+      send(msg.text, { source: msg.trusted === false ? 'ask' : 'qq', target: msg.qq, media: msg.media, profileCard: msg.profileCard, owner: msg.owner, groupTurn: msg.groupTurn })
     },
     [send, myKey, dedupNapcatMsg],
   )
   const processNapcatGroupMessage = useCallback(
-    (msg: { text?: string; qq?: string; groupId?: string; media?: string[]; profileCard?: string; muted?: boolean; sessionKey?: string; messageId?: string; owner?: 'master' | 'peer' }) => {
+    (msg: { text?: string; qq?: string; groupId?: string; media?: string[]; profileCard?: string; muted?: boolean; sessionKey?: string; messageId?: string; owner?: 'master' | 'peer'; groupTurn?: NapcatGroupTurn }) => {
       if (!msg || typeof msg.text !== 'string') return
       if ((!msg.media || msg.media.length === 0) && isEmptyNapcatDisplayText(msg.text)) return
       // 双通道去重(2026-08-13):实例订阅 + 父级 ingest 会各送一次;
@@ -1229,12 +1231,12 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
       }
       if (statusRef.current === 'thinking' || statusRef.current === 'running') {
         const queue = napcatQueueRef.current
-        queue.push({ text: msg.text, source: 'group', target: msg.groupId, media: msg.media, profileCard: msg.profileCard, owner: msg.owner })
+        queue.push({ text: msg.text, source: 'group', target: msg.groupId, media: msg.media, profileCard: msg.profileCard, owner: msg.owner, groupTurn: msg.groupTurn })
         // 队列溢出保护:超过最大长度时丢弃最旧的消息
         if (queue.length > MAX_NAPCAT_QUEUE) queue.shift()
         return
       }
-      send(msg.text, { source: 'group', target: msg.groupId, media: msg.media, profileCard: msg.profileCard, owner: msg.owner })
+      send(msg.text, { source: 'group', target: msg.groupId, media: msg.media, profileCard: msg.profileCard, owner: msg.owner, groupTurn: msg.groupTurn })
     },
     [send, myKey, dedupNapcatMsg],
   )
@@ -1317,7 +1319,7 @@ export function useAgent(opts?: { allowProactive?: boolean; sessionKey?: string;
     if (status !== 'idle') return
     const napcat = napcatQueueRef.current.shift()
     if (napcat) {
-      send(napcat.text, napcat.source && napcat.target ? { source: napcat.source, target: napcat.target, media: napcat.media, profileCard: napcat.profileCard, owner: napcat.owner } : { media: napcat.media, profileCard: napcat.profileCard })
+      send(napcat.text, napcat.source && napcat.target ? { source: napcat.source, target: napcat.target, media: napcat.media, profileCard: napcat.profileCard, owner: napcat.owner, groupTurn: napcat.groupTurn } : { media: napcat.media, profileCard: napcat.profileCard })
       return
     }
     const silent = silentQueueRef.current.shift()

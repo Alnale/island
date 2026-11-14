@@ -131,6 +131,44 @@ export function stripSelfMentions(text: string, selfQQ?: string | null, extraNam
     .trim()
 }
 
+/**
+ * 群回复正文的手写艾特标记剥离(2026-10-28,修复"群里重复艾特别人和对方
+ * 的QQ号"):艾特统一由 at 段发,但模型会把点名写进正文(@10002/QQ10002/
+ * @张三/[CQ:at,qq=10002]),resolveGroupMention 认出对象转成 at 段后正文
+ * 里的写法原样发出——群里看到的是"@张三 @10002 你好"这种双艾特,还裸露
+ * 对方 QQ 号。规则(纯函数):
+ * - [CQ:at,qq=…] 整段删(at 段已发;段数组里它会被当普通文本裸露出来);
+ * - @+QQ号(@10002/@QQ:10002/@qq 10002)连 @ 带号删掉,不露对方 QQ 号;
+ * - 写 QQ 号点名(QQ10002/QQ:10002)与括号备注((10002)/(QQ:10002)):号码
+ *   真被 at 段艾特了才删(没艾特的可能是正文内容);「QQ是10002」这类
+ *   「QQ+是+号」写法不算点名,保留;
+ * - @+名字/@+其它词:只删 @ 符号,词留着当称呼;邮箱/网址里的 @ 不动。
+ * atQQs = 本次实际艾特的 QQ(at 段名单),用来判断号码是不是点名写法。
+ */
+export function stripMentionMarkup(text: string, atQQs?: readonly string[]): string {
+  let t = String(text ?? '')
+  if (!t.trim()) return t
+  const atSet = new Set((atQQs ?? []).map((x) => String(x ?? '').trim()))
+  // CQ 码艾特段
+  t = t.replace(/\[CQ:at,[^\]]*\]/gi, '')
+  // @+QQ号:连 @ 带号删掉(重复艾特 + 露 QQ 号的根源)
+  t = t.replace(/(?<![A-Za-z0-9_./])[@＠][ \t]*(?:[Qq][Qq][ \t]*[:：]?[ \t]*)?(\d{5,12})(?!\d)/g, '')
+  // QQ 号点名/括号备注:已艾特的删号码本身
+  if (atSet.size > 0) {
+    t = t
+      .replace(/[（(][ \t]*(?:[Qq][Qq][ \t]*[:：]?[ \t]*)?(\d{5,12})[ \t]*[)）]/g, (m: string, id: string) => (atSet.has(id) ? '' : m))
+      .replace(/[Qq][Qq][ \t]*[:：]?[ \t]*(\d{5,12})(?!\d)/g, (m: string, id: string) => (atSet.has(id) ? '' : m))
+  }
+  // @+名字/@+其它词:只删 @ 符号(词留着当称呼);邮箱/网址的 @ 前是字母数字,不动
+  t = t.replace(/(?<![A-Za-z0-9_./])[@＠][ \t]*(?=\S)/g, '')
+  return t
+    .replace(/[（(][ \t]*[)）]/g, '')
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/^[，,、;；:：\s]+/, '')
+    .replace(/[，,、\s]+$/, '')
+    .trim()
+}
+
 /** 艾特名单里去掉机器人自己。at=all 保留。 */
 export function withoutSelfAt(
   at: string | string[] | undefined,
@@ -162,6 +200,8 @@ export function buildOutgoingMessage(
   const ats = (Array.isArray(rawAt) ? rawAt : rawAt ? [rawAt] : [])
     .map((x) => String(x ?? '').trim())
     .filter((x) => x && (x === 'all' || /^\d+$/.test(x)))
+    // 同号去重(2026-10-28):at 参数/解析结果重复时 QQ 会连发两个真艾特
+    .filter((x, i, arr) => arr.indexOf(x) === i)
     .slice(0, 10)
   if (images.length === 0 && !v && !replyTo && ats.length === 0) return text
   const segs: OutgoingSeg[] = []

@@ -59,7 +59,7 @@ async function ensureWidgetBuild() {
     return
   }
   console.log('[release] 构建渲染端(vite --mode widget)…')
-  const r = spawnSync('npx', ['vite', 'build', '--mode', 'widget', '--config', 'vite.widget.config.ts'], {
+  const r = spawnSync(process.execPath, [path.join(root, 'scripts', 'vite-build.mjs'), '--mode', 'widget', '--config', 'vite.widget.config.ts'], {
     cwd: root,
     stdio: 'inherit',
     env: process.env,

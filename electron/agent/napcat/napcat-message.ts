@@ -48,7 +48,11 @@ export function napcatMessageText(msg: unknown, botQQ?: string): string {
         if (s?.type === 'face' || s?.type === 'emoji') return `[${s.type}]`
         if (s?.type === 'at') {
           const qq = String(s.data?.qq ?? '')
-          return qq === String(botQQ ?? '') ? BOT_MENTION_MARK : `@${qq}`
+          if (qq === String(botQQ ?? '')) return BOT_MENTION_MARK
+          // 名字优先(2026-10-28):照 CQ 字符串分支的写法,别让模型和窗口
+          // 盯着 @QQ号 看——模型会把号码写法抄进群回复,群里就露对方 QQ 号
+          const name = String(s.data?.name ?? '').trim()
+          return `@${name || qq}`
         }
         if (s?.type === 'image') return '[图片]'
         if (s?.type === 'record') return '[语音]'

@@ -1,3 +1,5 @@
+import type { NapcatGroupTurn } from '../electron/agent/types'
+
 /**
  * Electron 桌面预加载脚本暴露的桌面 API。
  * 由 electron/preload.cjs 注入,Web 演示环境(纯浏览器)不存在,访问时可选链。
@@ -157,7 +159,7 @@ interface DesktopApi {
    * source='qq'(target = QQ 号)/'group'(target = 群号)/'ask'(询问轮,
    * target = 陌生人 QQ——回复发到主人 QQ 同步询问)= NapCat 触发轮,
    * 2026-08-12) */
-  agentSend(text: string, history: unknown[], sessionId?: string, source?: 'qq' | 'group' | 'ask' | 'window' | 'system', target?: string, sessionKey?: string, noteText?: string, owner?: 'master' | 'peer'): void
+  agentSend(text: string, history: unknown[], sessionId?: string, source?: 'qq' | 'group' | 'ask' | 'window' | 'system', target?: string, sessionKey?: string, noteText?: string, owner?: 'master' | 'peer', groupTurn?: NapcatGroupTurn): void
   /** NapCat 私聊消息订阅(2026-08-12):payload = {qq, text, messageId,
    * time, trusted};渲染端作为用户消息进入对话(同步上下文)。
    * trusted: true = 白名单 QQ(自主回复,回复发回);false = 陌生人
@@ -165,14 +167,14 @@ interface DesktopApi {
    * media(2026-08-12 收图):消息携带的图片已下载到本地的路径列表,
    * 渲染端注入对话图片附件。返回取消订阅函数 */
   onNapcatMessage(
-    callback: (msg: { qq: string; text: string; messageId: string; time: number; trusted?: boolean; media?: string[]; profileCard?: string; muted?: boolean; sessionKey?: string; owner?: 'master' | 'peer' }) => void,
+    callback: (msg: { qq: string; text: string; messageId: string; time: number; trusted?: boolean; media?: string[]; profileCard?: string; muted?: boolean; sessionKey?: string; owner?: 'master' | 'peer'; groupTurn?: NapcatGroupTurn }) => void,
   ): () => void
   /** NapCat 群消息订阅(2026-08-12):payload = {groupId, qq, text,
    * atMe};群消息经自主判断接话后进入对话(回复发回群)。
    * media(2026-08-12 收图):同上,群消息图片路径列表;
    * profileCard(2026-08-13):发言人档案卡 → 气泡头部分层展示 */
   onNapcatGroupMessage(
-    callback: (msg: { groupId: string; qq: string; text: string; atMe: boolean; media?: string[]; profileCard?: string; muted?: boolean; sessionKey?: string; owner?: 'master' | 'peer' }) => void,
+    callback: (msg: { groupId: string; qq: string; text: string; atMe: boolean; media?: string[]; profileCard?: string; muted?: boolean; sessionKey?: string; owner?: 'master' | 'peer'; groupTurn?: NapcatGroupTurn }) => void,
   ): () => void
   /** 会话绑定(2026-08-13 会话隔离):主进程通知渲染端切换当前显示
    * 会话('main' = 主人主对话;private:<QQ>/group:<群号> = 外部会话) */

@@ -101,7 +101,7 @@ contextBridge.exposeInMainWorld('desktop', {
    * 会话各自引擎实例)——**两参曾漏传(实测:外部会话面板输入的消息
    * LLM 完全不知道**——丢 sessionKey 让请求落到主引擎、回复落主对话;
    * 丢 window 让窗口轮不能消费待回复陌生人) */
-  agentSend(text, history, sessionId, source, target, sessionKey, noteText, owner) {
+  agentSend(text, history, sessionId, source, target, sessionKey, noteText, owner, groupTurn) {
     ipcRenderer.send(
       'agent:send',
       String(text),
@@ -119,6 +119,7 @@ contextBridge.exposeInMainWorld('desktop', {
       // 消息归属(2026-09-22 归属指纹):'master' = 主人信息 / 'peer' = 别人
       // 的信息——入口判定随消息传递,主进程据此推回复默认落点
       owner === 'master' || owner === 'peer' ? owner : undefined,
+      source === 'group' && groupTurn && typeof groupTurn === 'object' ? groupTurn : undefined,
     )
   },
   /** NapCat 私聊消息订阅(2026-08-12):payload = {qq, text, messageId,

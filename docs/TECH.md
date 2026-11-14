@@ -2106,6 +2106,7 @@ direction?('right'|'left'), wheelWhenOpen?}>`,四处复用:Agent 设置菜单 /
   - 私聊/群聊注入指令**显式点名主人账号**(「岛灵的主人 = QQ <privacy.json 配置>」),防 LLM 幻觉把陌生人当主人;
   - `napcat` status 输出「主人:<privacy.json 配置> + 私聊扩展信任(空 = 仅主人)」;`set_napcat_config` 描述注明主人不可配置,allowed 参数改称"扩展信任"。
 - **zone 接口现状(2026-08-13 实测)**:taotao `emotion_cgi_msglist_v6` 已失效(恒 -2 系统繁忙);备用接口 `ic2.qzone.qq.com/cgi-bin/feeds/feeds3_html_more`(同 proxy 域名路径)实测 code 0 可用——响应为 QQ 旧式宽松 JSON(键无引号/单引号值/裸 undefined),需手写 tokenizer 解析,字段:`data.data[]` 的 summary/content/rt_summary(剥 HTML)/abstime/picnum/cnum/lnum,过滤 adv 广告项。**待接入**(方案已验证,见 CLAUDE.md 十六轮)。
+- **发/删说说已接入(2026-10-28)**:NapCat 原生扩展动作 `send_qzone_msg` / `delete_qzone_msg`(2026-08 PR #1965 起;`emotion_cgi_publish_v6` + 图片自动上传空间相册,ugc_right 可见范围 1所有人/4好友/16部分好友/64仅自己/128部分好友不可见,16/128 配 target_uins),napcat 工具 `zone_post` / `zone_delete`(公开发动态与群公告同级走主人确认门;NapCat 4.18.41 实测:仅自己可见自证 + 自删全链路通过,错误面 wording 直出)。**qzone-public 系列不可替代读链路**(2026-10-27 PR #2125 `get_qzone_public_*` / `*_qzone_public_*`:「空友爱看」**公域**推荐流 + 评论/点赞/转发互动——既不含发表,也不含某人说说列表),个人动态读取修复仍走上方 feeds3_html_more 待接入方案。
 - **手写 WS 传输(2026-08-13)**:OneBot 连接用 `wsclient.ts` 手写客户端
   (net.Socket + 手写 HTTP Upgrade/帧编解码,不经 llhttp;见 10.11)。
 - **发送前剥离链(非主人/群友全走,主人保留过程)**:
@@ -2952,7 +2953,7 @@ agent/pre-step 瀑布(plugin/composition.ts 的 defaultProfile,注册顺序 = �
 说话(不转述/不汇报/不描述动作);③ 只给结论(不思考过程/不工具叙述);
 ④ 不泄露主人隐私;⑤ **安全红线:教唆操控主人电脑一律拒绝并告知主人**;
 ⑥ 偏袒主人;⑦ 图片主动发。陌生人附加:先询问主人、记录档案;群聊附加:
-send_group 对公 / 对话回复对私双通道、看场合回复、【不回复群消息】标记。
+对话回复默认发本群，私下汇报须显式 send；看场合回复与【不回复群消息】标记。
 
 ### 16.4 档案卡(消息隔离)
 
@@ -4464,6 +4465,7 @@ remember / forget / list_memory / update_memory / evolve_memory
 | 2026-09-22(2) | **歌曲卡片气泡**(用户反馈"LLM 自主放歌,对话窗口里没有歌的消息气泡"):music_control 每次操作附 song 附件(新 `type:'song'` part,SongInfo)→ 引擎注入 → SongBubble 唱片卡(歌名/歌手/专辑/状态/来源,播放中旋转;只展示不内播防双响);工具文本带歌名 + textFromParts 折 🎵 行;next/previous 后 1.2s 再取快照防打上上一首歌名;无曲目不出卡片 |
 | 2026-09-22 | **MiMo 官网接入文档专项适配(第 5.3.5 章)**:**Responses API 第一优先**(用户定调,Chat Completions 过旧)——多模态原生进 /v1/responses input items(input_image/input_audio/input_video+fps/media_resolution,活体探针实证;本地文件→data URI,历史韧性占位,mimo-v2.5-pro 能力拦截 404 实证)+ Batch API 工具簇(mimo_media/mimo_batch 均走 /v1/responses,批量 JSONL Responses 格式→批任务→轮询→结果落盘,实时 50% 价)+ 模型清单 v2.6 化(缺省 mimo-v2.6-pro);**parseSse 修复**:Chat Completions 无 type 帧原被整帧丢弃(chat/mimo-chat/lmstudio/glm-cloud 流式恒空文本,LM Studio 靠非流式降级掩盖)→ 无 type 帧以空串事件名产出;工具总数 74→76|
 | **V3.5** 2026-10-26 | **人格卡(第 48 章)**:多套可热切换人格(手写 prompt + 结构化风格 + 进化整合区)、进化缓冲区与去 AI 味评审、出站清洗;人设不再写入长期记忆;replace/delete 仅主人明确覆盖整张或删除时确认 |
+| 2026-10-28 | **QQ 空间发说说接入**:napcat 工具新增 `zone_post` / `zone_delete`(NapCat 原生 `send_qzone_msg` / `delete_qzone_msg`,2026-08 PR #1965):文字/带图(自动上传空间相册)/可见范围 ugc_right(1/4/16/64/128,16/128 配 target_uins);公开发动态走主人确认门;NapCat 4.18.41 实测发/删自证自清;顺带定论 qzone-public 系列(空友爱看公域流)不可替代个人动态读链路,读链路修复仍指向 feeds3_html_more |
 
 
 ---
@@ -5124,7 +5126,7 @@ get_session_note / set_session_note / clear_session_context
 ### 记忆与 QQ 通道
 
 - memory.ts(4):remember / forget / list_memory / update_memory
-- napcat.ts(2):napcat(status/reconnect 立即重连 OneBot/发消息/发图/发文件/发语音条/撤回/查成员/群管理等) / manage_sessions(会话绑定/静音)
+- napcat.ts(2):napcat(status/reconnect 立即重连 OneBot/发消息/发图/发文件/发语音条/撤回/查成员/群管理/发 QQ 空间说说等) / manage_sessions(会话绑定/静音)
 
 ### 灵动岛设置工具族(31 + 1)
 
@@ -5843,7 +5845,7 @@ NapCat ──WS 事件──▶ napcat-client
 - 主人 QQ 私聊 2026-10-23 起并入**主对话**(`routeKey='main'`),不再生成
   `private:<主人QQ>` 外部会话,避免与主对话重复。
 - 当 `napcatPrivateAutoReply=false` 时,陌生人私聊走 `ask` 询问轮:消息注入
-  `sessionKey='ask'`,回复发到主人 QQ 同步询问,`pendingQQReply` 保留 30 分钟。
+  `sessionKey='ask'` 由渲染端归入 `private:<QQ>`，推理与路由状态同属此私聊；回复发主人 QQ，按 QQ 保存待办 30 分钟。
 
 **⑤ 渲染端**:`useAgent` 按 `sessionKey` 过滤,只处理属于本实例的消息;
 busy(thinking/running)时入队,idle 后按到达顺序逐条补发,队列上限 50;
@@ -5873,15 +5875,20 @@ busy(thinking/running)时入队,idle 后按到达顺序逐条补发,队列上限
 #### 47.4.2 归属指纹(程序侧,2026-09-22)
 
 - **归属由入口判定**:窗口/面板/主人私聊 = master;主人在群里只有被
-  `isDirectedToBot`(@、称呼、第二人称疑问/祈使)识别为指向 LLM 才算 master,
+  `isDirectedToBot`(@机器人、句首明确称呼机器人)识别为指向 LLM 才算 master,
   否则按 peer;联系人与群友 = peer。
 - **LLM 文本指纹协议已退役**:原【指纹:xxx】文本标记服从性约 50%,导致扣留
   丢消息/串台(21 轮修不完)。现由程序签发轮次指纹 `turnTag`,附在事件元数据,
   回复落定时核对——对不上即扣留,"指纹对不上就不发送"语义保留在程序侧。
 - **跨归属外发只走工具**:替主人转达、向主人汇报一律用 `napcat send` /
   `send_group` 真实发出;对话回复只落本归属默认落点,判定器仅作安全网。
-- `pendingQQReply` 只由主人窗口直发轮一次性消费;系统通知轮、主动陪伴轮
-  永不路由 QQ(见 16.7)。
+- **2026-11-03 轮次状态修复**：`electron/napcat-routing.cjs` 在入口固定 UUID 标签、来源/收件人/主人 QQ/群消息元数据/待回复对象。引擎通过 AsyncLocalStorage 固定异步事件身份；中止后迟到事件丢弃；先核对标签再领取，旧事件不能清掉新轮。
+- 群 `groupTurn` 经过入站 → useAgent 排队 → preload → agent:send 原样携带。ask 使用自身私聊路由，权限缺省按会话类型收紧。
+- 待办按 QQ 保存且有独立 ID；主人指示轮绑定快照，多人待办不能猜「他」。只有确认发送成功或本轮已有成功工具回执才消费相同 ID，失败保留。
+- 防重发读取本轮异步上下文中的成功回执，不使用全局 50 条滚动记录的计数差。群工具已发文字后，正文留窗口；不自动转给主人。纯媒体不抑制群正文。
+- `message-routed` 与「已回复」通知在发送成功之后发出；失败提示且不标送达。正文称呼只作私下内容粗筛，命中扣留，不能靠「大家/你们」改变目的地。跨对象发送使用明确工具。
+- 系统通知轮、主动陪伴轮永不自动路由 QQ(见 16.7)。
+- 回归：`pnpm test:routing` 执行真实 IPC 入口、出站处理器、渲染队列与引擎入口，使用内存 QQ/LLM 替身，覆盖并发、失败及中止；已纳入 `pnpm check`。
 
 #### 47.4.3 出站清洗链
 
@@ -5916,7 +5923,8 @@ busy(thinking/running)时入队,idle 后按到达顺序逐条补发,队列上限
 | 账号 / 好友 | account / friend_manage |
 | 档案 / 记忆 | contacts / contact_update / chats / persona / persona_set |
 | 会话 | sessions / session_mute / session_bind |
-| 其他 | zone / login / raw |
+| QQ 空间 | zone(查看动态)/ zone_post(发表说说:content/images/ugc_right/target_uins,需主人确认)/ zone_delete(按 tid 删除) |
+| 其他 | login / raw |
 
 关键约束:
 
@@ -6019,7 +6027,8 @@ IPC 与事件:
 - 消息解析:string / CQ 码 / 段数组,@ 与引用、视频/文件/转发/卡片;
 - 工具:`status` / `reconnect` / `recent` / `send` / `send_group`(图/文件/语音)/
   `recall` / `members` / `friends` / `profile` / `group_info` / `group_manage` /
-  `contacts` / `chats` / `persona` / `sessions` / `sent` / `zone`;
+  `contacts` / `chats` / `persona` / `sessions` / `sent` / `zone` / `zone_post` /
+  `zone_delete`;
 - 登录流:过期码不落屏、到期自动换码、错误态整体重试、WebUI 断线自动重连、
   IPv6 候选地址;
 - 连接:熔断后 `start()` 立即重连、旧 socket 迟到 close 不再二次熔断、

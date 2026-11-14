@@ -780,3 +780,11 @@ export interface EvolutionLike {
 
 /** 工具参数名 → 值的开放对象(工具 execute 收到的参数) */
 export type ToolParams = Record<string, unknown>
+
+/** 一条群消息的路由元数据。与消息一起排队，不能从会话最近活动回填。 */
+export interface NapcatGroupTurn {
+  speakerQQ?: string
+  plain?: string
+  atQQs?: string[]
+  directed?: boolean
+}

@@ -210,7 +210,7 @@ export function scopeTranscriptQuery(input: {
 
 /**
  * 群会话里的私聊发送。别人的群回合只能私发给主人;
- * 别人的私聊只能回当前对象或主人。没标轮次时保持原缺省(测试与旧调用)。
+ * 别人的私聊只能回当前对象或主人。缺少轮次时按会话类型收紧权限。
  */
 export function resolvePrivateSendTarget(input: {
   requested?: string | null
@@ -222,10 +222,11 @@ export function resolvePrivateSendTarget(input: {
   const sessionPrivate = sessionPrivateId(input.sessionKey)
   const sessionGroup = sessionGroupId(input.sessionKey)
   const masterQQ = String(input.masterQQ ?? '').trim()
-  const kind = String(input.turnKind ?? '')
+  const kind = String(input.turnKind ?? '') || (sessionGroup ? 'group' : sessionPrivate ? 'contact' : 'silent')
   const masterTurn = isMasterTurnKind(kind)
   const needUser = 'send 需要 user_id(目标QQ号)。发给别人必须写对方的 QQ 号;主人自己的会话里不能省略'
-  if (masterTurn || !kind) {
+  if (!requested && sessionPrivate && sessionPrivate === masterQQ) return { ok: false, error: needUser }
+  if (masterTurn) {
     if (requested) return { ok: true, userId: requested }
     if (sessionPrivate && sessionPrivate !== masterQQ) return { ok: true, userId: sessionPrivate }
     return { ok: false, error: needUser }
@@ -300,9 +301,11 @@ function mentionNames(participants: ReadonlyArray<GroupParticipant>, self: strin
 
 function scanMentionQQs(text: string, allow: Set<string>): string[] {
   const hits: string[] = []
-  const re = /(?:QQ|qq|@)\s*(\d{5,12})/g
+  // CQ at 码/全角＠/@QQ:号 也算点名写法(2026-10-28:正文里的写法会被
+  // stripMentionMarkup 剥掉,艾特改由 at 段发,这里要先认出来)
+  const re = /\[CQ:at,qq=(\d{5,12})[^\]]*\]|(?:QQ|qq|[@＠])\s*[:：]?\s*(\d{5,12})/g
   for (const m of text.matchAll(re)) {
-    const id = m[1]
+    const id = m[1] || m[2]
     if (!id || !allow.has(id) || hits.includes(id)) continue
     hits.push(id)
   }
@@ -419,6 +422,28 @@ export function turnAlreadySentToPending(
   return turnAlreadySentToTarget(now, before, 'private', qq)
 }
 
+/** recordSent 在纯媒体(图/文件/语音、无正文)发送时写的占位文本 */
+export const SENT_MEDIA_TEXT = '(图片/文件/语音)'
+
+/** 这条已发消息是**文字**回复(而非纯媒体占位)。send_group 带图/文件/语音
+ * 且无正文时 text 是占位,不算"已文字回复"——带媒体时对话文本仍是发群的
+ * 回复/配文,不能据此判定"工具已发过、对话文本=给主人的汇报"(2026-10-28) */
+export function sentMessageIsText(s: { text?: string; type?: string; target?: string } | null | undefined): boolean {
+  const t = String(s?.text ?? '').trim()
+  return !!t && t !== SENT_MEDIA_TEXT
+}
+
+/** 本轮是否已用 send_group 发过**文字**回复(工具文字=回复,纯媒体不算)。
+ * 只统计目标群的文字发送数是否超过轮前快照 before,与 turnAlreadySentToTarget
+ * 同构但排除媒体误报——修"发图 + 文字回复被误转主人 QQ" */
+export function turnAlreadySentGroupText(
+  now: Array<{ type: string; target: string; text?: string }>,
+  before: number,
+  groupId: string,
+): boolean {
+  return now.filter((s) => s.type === 'group' && s.target === groupId && sentMessageIsText(s)).length > before
+}
+
 // ---- 消息归属与轮次分类(归属指纹,2026-09-22) ----
 
 /** 回复归属:master = 给主人的话 / peer = 给对方(触发者/群)的话 */
@@ -485,21 +510,15 @@ export function classifyTurn(input: {
 
 /**
  * 主人群聊消息是否指向 LLM(规则②意图识别,2026-09-22):显式信号优先——
- * @机器人(atMe)/称呼岛灵名字/第二人称疑问句/对助手式祈使(帮我查…)。
+ * @机器人(atMe)/句首明确称呼机器人。普通第二人称或祈使句不升级权限。
  * 模糊样本按「未指向」处理(安全:按环境闲聊,LLM 看场合决定是否回群;
  * 主人想唤起岛灵 @ 一下或叫名字即可)。纯函数可测
  */
 export function isDirectedToBot(text: string, atMe?: boolean): boolean {
   if (atMe) return true
+  // 只有明确叫机器人才能把群聊提升为主人指令；「你」「帮我」可能在叫群友。
   const t = String(text ?? '').trim()
-  if (!t) return false
-  // 称呼机器人(岛灵人设名 + 常见简称)
-  if (/岛灵|鲸鱼娘|鲸鱼|小鲸|小岛|机器人/i.test(t)) return true
-  // 第二人称疑问(你觉得呢 / 你说好不好 / 你帮我看看)
-  if (/(你|您)[^。!？?\n]{0,14}(吗|呢|么|啥|什么|谁|哪|几|多少|怎么|如何|为什么|好不好|行不行|可以吗)/.test(t)) return true
-  // 对助手式祈使(帮我查/给我看/找一下/下载…)——发起者大概率在使唤机器人
-  if (/(帮我|给我|麻烦你|劳驾|拜托)[^。!？?\n]{0,16}(查|看|发|问|搜|下载|打开|找|做|搞|弄|算|翻译|写)/.test(t)) return true
-  return false
+  return /^(?:(?:嗨|你好|喂|嘿)[,，、!！\s]*)?(?:岛灵|鲸鱼娘|鲸鱼|小鲸|小岛|机器人)/i.test(t)
 }
 
 // ---- 询问轮判定(给主人的话不外发;安全网启发式) ----
@@ -530,7 +549,7 @@ export function isAskTurnToMaster(text: string): boolean {
 /**
  * 回复是否在直接对主人说话(别人触发轮的安全网,2026-09-22):归属指纹
  * 机制下别人轮的回复默认发对方——LLM 偶发把「给主人的汇报/请示」写进
- * 回复(「主人,魔精问你明天有没有空~」),启发式命中的改发主人,防泄露
+ * 回复(「主人,魔精问你明天有没有空~」),启发式命中后扣留,防泄露
  * 给对方。保守:只认开头称呼主人 + 明确汇报/请示动词,普通回复不误伤
  */
 export function looksLikeMasterAddressed(text: string): boolean {
@@ -543,6 +562,13 @@ export function looksLikeMasterAddressed(text: string): boolean {
   // 整段改投主人会把私聊原文送错
   if (/^(给|向|跟)主人(汇报|说|报告|请示|问|讲)/.test(t)) return true
   return false
+}
+
+/** 群回复的私下内容粗筛。仅供扣留使用，不能用自然语言判断更换收件人。 */
+export function shouldHandGroupReplyToMaster(text: string): boolean {
+  // 保留函数名供旧调用兼容。只标记疑似私下内容，调用方扣留，不据此改收件人。
+  // 「大家」等词可能是汇报对象，不能作为公开发送的通行证。
+  return looksLikeMasterAddressed(text)
 }
 
 /**

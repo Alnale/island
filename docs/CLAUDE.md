@@ -106,12 +106,14 @@ pnpm test:markdown    # 消息气泡 Markdown 解析器测试(esbuild 打包纯�
 
 #### 消息归属与回复路由(2026-09-22 现行规则,改路由前必读 TECH.md 17 章)
 
-**四规则**:① 对话窗口发给 LLM 的信息永远是主人信息;② 主人 QQ 私聊/群聊发给 LLM 的信息永远是主人信息(群聊需意图识别 `isDirectedToBot`:atM / 称呼(岛灵·鲸鱼娘·鲸鱼·机器人)/ 第二人称疑问句 / 对助手式祈使 → 指向 LLM;未指向 = 别人的信息=环境闲聊,缺省按别人);③ 其它都是别人的信息;④ **归属由触发来源在程序入口判定,回复默认落点随归属走,LLM 不写不读任何文本标记**;跨归属外发(替主人转达/向主人汇报)只走 napcat send/send_group 工具,意图判定器(createReplyClassifier)降级为错配安全网(失败回退默认,非主路由)。
+**四规则**:① 对话窗口发给 LLM 的信息永远是主人信息;② 主人 QQ 私聊/群聊发给 LLM 的信息永远是主人信息(群聊需意图识别 `isDirectedToBot`:@机器人 / 句首明确称呼(岛灵·鲸鱼娘·鲸鱼·机器人) → 指向 LLM;未指向 = 别人的信息=环境闲聊,缺省按别人);③ 其它都是别人的信息;④ **归属由触发来源在程序入口判定,回复默认落点随归属走,LLM 不写不读任何文本标记**;跨归属外发(替主人转达/向主人汇报)只走 napcat send/send_group 工具,意图判定器(createReplyClassifier)降级为错配安全网(失败回退默认,非主路由)。
 
-- **轮次认证 turnTag**:`agent:send` 签发 6 位安全字母表 nonce(newTurnFingerprint 复用)存 route.turnTag 并传 engine.send → 本轮全部事件附 `turnTag` 元数据 → 落定核对 `event.turnTag === route.turnTag`,**对不上(陈旧/跨轮投递)不发送**(logFpGate('stale-turn'));proactiveTurn 清空。"指纹对不上就不发送"保留在程序侧,LLM 服从性归零。
-- **归属判定与轮次推导**:私聊 payload.owner(isMaster?'master':'peer')/ 群聊按 isDirectedToBot → payload.owner;useAgent 透传 `agent:send` 第 8 参 msgOwner;`classifyTurn`(napcat-session.ts)推轮次种类(window/panel/master-qq/master-group/contact/group/ask/silent)+ 回复归属。
-- **默认路由表**:窗口/面板 → 留窗口(主人 QQ 私聊/群点名 → 私发主人 QQ;扩展信任 → 回对方;陌生人 ask → 私发主人(询问,pending 30 分钟流程保留);群友(含主人未指向闲聊)→ 回群,「【不回复群消息】」开头 = 不回);system → 不路由。
-- **安全网**(启发式优先,判定器只走稀有路径):A 执行内容兜底(主人信息轮 + pending 存活 + `isReplyInstruction` 触发侧 + 工具没发过 → 判定器('exec')other → 发 pending 对象;hold/判定失败扣留,不把草稿落到主人 QQ);B 转达草稿扣留(无 pending 指示轮 + 短回复 ≤60 码元 → master-other-no-target 扣留提示用 send 工具);C 别人轮泄露网(isAskTurnToMaster / `looksLikeMasterAddressed` 开头称呼「主人,」或句首「给/向/跟主人说」→ 转交主人;句中提及主人不整段改投);D 防重发(群:本轮工具已发过则回复当汇报私发主人;对方私聊:工具已发过则回复留在会话窗口,不再转投主人 QQ。send 省略 user_id 只缺省到当前对方,主人自己的会话不缺省);E 群面板外发(looksLikeGroupSendInstruction + shouldSendGroupPanelReply)。
+- **轮次上下文(2026-11-03)**:`electron/napcat-routing.cjs` 为每轮创建 UUID `turnTag`、来源/目标/主人 QQ/群发言人/待回复对象快照。引擎与工具经 AsyncLocalStorage 保留原轮身份；中止后的事件不再送出。落定先验标签再领取，旧事件与重复事件不消费新轮。
+- **询问轮**:`ask` 与推理引擎都在对应 `private:<QQ>` 会话，默认回复仍私发主人，不借用 mainRoute。工具缺少轮次时按会话类型限制私发范围。
+- **群元数据**:`groupTurn` 随入站消息、前端队列、preload 和 `agent:send` 一起传递，不读取「最近发言人」。
+- **默认路由表**:窗口/面板留窗口；主人 QQ 私聊/群点名私发主人；联系人回对方；群聊回本群；ask 请示主人；system 不外发。跨对象外发走明确的 send/send_group。疑似私下汇报扣留，文本措辞不能自动更换收件人。
+- **待回复与发送回执**:待办按 QQ 保存 30 分钟，执行轮绑定唯一对象（多人且不明确则不猜），成功后按待办 ID 消费，不删除后来新增的待办。防重发只看本轮成功回执；群工具已发文字则正文留窗口，不转给主人，纯媒体不抑制群正文。收到发送成功回执后才发 `message-routed` 和「已回复」通知；失败保留待办并提示。
+- **执行兜底**:主人明确转达指令 + 固定待办/会话对象 + 判定器确认 other 才能代发；其余走默认落点或扣留。正则只用于粗筛，不把「你/帮我」自动提升为群里的主人指令。
 - **triggerRaw 踩坑**:QQ/群触发文本是注入模板(含「回复对方/发给」字样)会误命中触发侧指令识别——启发式与判定器一律剥【QQxx】类别行 + 【档案卡】后的正文。
 - **已退役**(勿再参考历史文档实现):【指纹:xxx】/【主人指纹:xxx】/【回复对方】整套文本协议、extractTurnFingerprint/extractMasterFingerprint/hasTurnMark/hasMasterTurnMark/routeForClassifierIntent 等;`stripFingerprintMarks` 降级为**历史残留清洗**(旧 localStorage 标记会被 LLM 抄到输出,发送边界剥除);**UI 标签(发给对方纸飞机/发给主人皇冠)唯一来源 = `message-routed` 事件按实际送达目的地补标**(AgentView 不嗅探文本)。
 - **行为变化(留意)**:① 群触发轮"回复自动私发主人汇报"取消(单归属制,群回复给群即止);② 无标记回复不再扣留(默认落点必达);③ 私聊面板回复留窗口(明确指示 + 判定才发对方)。
@@ -164,7 +166,7 @@ pnpm test:markdown    # 消息气泡 Markdown 解析器测试(esbuild 打包纯�
 - **防重发/限流**:`turnAlreadySentToTarget` 快照(本轮工具发过 → 面板回复不自动发回);`waitSendSlot` 同目标 800ms 限流**等待重试**(25 条/分钟全局硬上限仍抛错防刷屏)。
 - **会话体验**:会话键体系 + SessionHost 多实例(useAgent 代理稳定引用;**onTick 必须 useCallback 稳定引用**——内联箭头 = 无限重渲染卡死渲染进程,实测)+ 会话坞(未读红点/删除/静默 mute/绑定)+ **情况记录**(`widget-agent-session-note:<key>`,横幅「记录」编辑,每轮注入「【本会话情况记录】」+ LLM get/set_session_note;「清空」= clear() 不清记录;外部会话清空**不归档**主对话历史)+ `clear_session_context`(LLM 清上下文,不中止当前回合)。
 - **QQ 扫码登录小窗**(`napcat-login.cjs` + napcat-login.ts/qr.ts):WebUI 实时登录流,QR **一次性 ~2 分钟时效,到期自动换码 + 服务端报「过期」立即换码**(WebUI 挂旧码是"扫码总过期"根因);**三条硬契约(2026-09-22 活体实测)**:① API 前缀必须带 `/api`(axios baseURL,漏则 `/auth/login` 404 = 小窗白板);② 权威码源 = `CheckLoginStatus.qrcodeurl`,RefreshQRcode 是**异步铸码**(~1-2s 落地,竞态窗口各接口回旧码);③ **过期码不落屏**(loginError 报过期的码丢弃、占位"正在换新"直到新码落地——展示死码 = 扫到"已过期"根因);④ **连接层故障不停死(2026-10-22)**:WebUI 连不上/轮询中掉线 = 丢码 + waiting + 自动重连(retryMs 2.5s),错误文案展开 fetch 的 cause(ECONNREFUSED/超时/DNS)并带地址;地址从 webui.json 的 host/port 发现并同时尝试 127.0.0.1/[::1]——旧版把 `fetch failed` 抛成 error 态后停死,NapCat 起来也不出码(用户截图根因)。另:错误态「换一张」= 整体重试(refresh 在 stopped 时转 start,原直接 return 按钮死)。托盘「QQ 扫码登录…」+ LLM `napcat login`;QR 编码器零依赖手写(qr.ts,tests/qr-crosscheck.mjs 与 python qrcode 对拍);小窗预览验证 = `npx electron tests/preview-napcat-login.cjs`(直连真实 WebUI 出码截图)。
-- napcat 工具 action:status/reconnect(熔断后立即重连 OneBot,丢弃旧 socket、迟到 onClose 不计失败)/recent/sent/contacts/contact_update/chats/persona/persona_set/send(send_group 对称,缺省目标 = 当前会话对象)/send_group/recall/zone/members/friends/profile/group_info/group_manage/login/sessions/session_mute/session_bind 等(TECH.md 附录 I 为准);群上下文最近 20 条注入;联系人档案 `napcat-contacts.json` 主进程自动落盘 + LLM 补充。`set_napcat_config` 把 enabled 再设 true 或改 wsUrl 同样强制 `start()`(工具写配置不经 `agent:config-set` IPC,补丁须在 `applyAgentConfigPatch` 里同步生命周期)。
+- napcat 工具 action:status/reconnect(熔断后立即重连 OneBot,丢弃旧 socket、迟到 onClose 不计失败)/recent/sent/contacts/contact_update/chats/persona/persona_set/send(send_group 对称,缺省目标 = 当前会话对象)/send_group/recall/zone/zone_post/zone_delete(发/删 QQ 空间说说,走 NapCat 原生 send_qzone_msg/delete_qzone_msg;公开发动态与群公告同级需主人确认,ugc_right 可见范围 1/4/16/64/128)/members/friends/profile/group_info/group_manage/login/sessions/session_mute/session_bind 等(TECH.md 附录 I 为准);群上下文最近 20 条注入;联系人档案 `napcat-contacts.json` 主进程自动落盘 + LLM 补充。`set_napcat_config` 把 enabled 再设 true 或改 wsUrl 同样强制 `start()`(工具写配置不经 `agent:config-set` IPC,补丁须在 `applyAgentConfigPatch` 里同步生命周期)。
 
 #### 渲染端(src/ + widget/)
 

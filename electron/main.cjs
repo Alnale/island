@@ -31,6 +31,8 @@ const path = require('node:path')
 const fs = require('node:fs')
 const fsPromises = require('node:fs/promises')
 const { Readable } = require('node:stream')
+const { createNapcatRouting } = require('./napcat-routing.cjs')
+const napcatRouting = createNapcatRouting()
 const { clearManagedData, RENDERER_DATABASES } = require('./data-manifest.cjs')
 const { placementFromBounds, restoreWindowBounds } = require('./window-placement.cjs')
 
@@ -1261,7 +1263,9 @@ function buildEngineDeps(route, sessionKey) {
         // async 路由(2026-08-16;2026-09-22 归属指纹):错配安全网可能
         // await 意图判定 Sub Agent;路由状态已在函数开头同步消费,不阻塞
         // 事件流。turnTag = 引擎附的轮次认证标签,落定核对(对不上不发送)
-        void handleEngineMessageForNapcat(event.message, sessionKey, event.turnTag)
+        void handleEngineMessageForNapcat(event.message, sessionKey, event.turnTag).catch((err) => {
+          console.warn('[napcat] reply routing failed:', err?.message || err)
+        })
       }
     },
     onSwitchToMusic: (play) => setWidgetMode('music', 'tool', play),
@@ -1287,7 +1291,7 @@ function buildEngineDeps(route, sessionKey) {
     // 主人 QQ 配置桥(set_owner_qq 工具,2026-08-17):getTurnSource = 当前
     // 轮次来源('window' = 主人对话窗口直发;qq/group = QQ 外部;null = 询问/
     // 系统/主动轮)——仅窗口直发轮允许设置主人身份;setOwnerQQ 写 privacy.json
-    getTurnSource: () => route.lastSendSource,
+    getTurnSource: () => napcatRouting.current(sessionKey)?.lastSendSource ?? null,
     setOwnerQQ,
     getSubAgents,
     // QQ 扫码登录小窗(2026-09-22,napcat login 工具)
@@ -1295,12 +1299,13 @@ function buildEngineDeps(route, sessionKey) {
     // 米家扫码登录小窗(2026-09-22,mijia_login 工具)
     openMijiaLogin: (region) => getMijiaLogin().open(region),
     // 轮次种类(classifyTurn 八值,mijia 写守卫区分主人/别人;getTurnSource 三值仅兜底)
-    getTurnKind: () => route.turnKind,
-    getTurnText: () => (typeof route.lastTriggerText === 'string' ? route.lastTriggerText : null),
+    getTurnKind: () => napcatRouting.current(sessionKey)?.turnKind ?? 'silent',
+    getTurnText: () => napcatRouting.current(sessionKey)?.lastTriggerText ?? null,
     listGroupParticipants: (groupId) => participantsInGroup(groupId),
     getGroupTurn: () => {
       if (!sessionKey || !String(sessionKey).startsWith('group:')) return null
-      const live = routeFor(sessionKey)
+      const live = napcatRouting.current(sessionKey)
+      if (!live) return null
       return {
         plain: String(live.turnGroupPlain ?? ''),
         atQQs: Array.isArray(live.turnGroupAtQQs) ? live.turnGroupAtQQs.slice() : [],
@@ -1402,9 +1407,11 @@ function getAgentEngine() {
 
 async function disposeAllAgents() {
   const engines = []
+  napcatRouting.cancel(mainRoute)
   if (agentEngine) engines.push(agentEngine)
   agentEngine = null
   for (const [, entry] of sessionEngines) {
+    napcatRouting.cancel(entry.route)
     if (entry?.engine) engines.push(entry.engine)
   }
   sessionEngines.clear()
@@ -1466,44 +1473,9 @@ const PENDING_QQ_TIMEOUT_MS = 30 * 60 * 1000
  * 询问轮标记/来源标记/待回复陌生人/防重发快照,并发互不串扰
  */
 function newRoute() {
-  return {
-    /** 询问轮标记已被 turnKind === 'ask' 取代(2026-09-22 归属指纹) */
-    lastSendSource: null,
-    lastSendTarget: null,
-    /** 轮次认证标签 turnTag(2026-09-22 归属指纹):agent:send 签发的随机
-     * nonce,engine.send 带入、附本轮全部事件元数据;落定核对
-     * event.turnTag === turnTag——对不上(陈旧/跨轮投递)不发送
-     * (「指纹对不上就不发送」语义的程序侧实现,LLM 不写不读标记);
-     * 轮次结束即清零 */
-    turnTag: null,
-    /** 轮次种类(2026-09-22 归属指纹,napcat-session.classifyTurn 推出):
-     * window/panel/master-qq/master-group/contact/group/ask/silent——
-     * 决定回复默认落点;与 turnTag 同刻清零 */
-    turnKind: null,
-    /** 回复归属(默认落点方向):'master' = 给主人 / 'peer' = 给对方 /
-     * null = 不路由;与 turnTag 同刻清零 */
-    turnOwner: null,
-    /** 本轮触发消息原文(判定器安全网/触发侧指令判定用);与 turnTag 同刻清零 */
-    lastTriggerText: null,
-    pendingQQReply: null,
-    pendingTurnSentBefore: 0,
-    /** 群面板输入轮防重发快照(2026-08-13):本轮开始前已发给该群的
-     * send_group 消息数——已用工具发过则面板回复不再自动发回群 */
-    pendingGroupSentBefore: 0,
-    confirmSlot: null,
-    /** 最近一条群消息的发言人,以及那句话是不是在叫机器人。
-     * 下一条消息会盖掉这两个字段;本轮在 agent:send 里抄到 turn* ,
-     * 落定 @ 用抄本,避免回复 @ 到后来才说话的人。 */
-    lastGroupSpeakerQQ: null,
-    lastGroupDirected: false,
-    lastGroupPlain: '',
-    lastGroupAtQQs: [],
-    turnGroupSpeakerQQ: null,
-    turnGroupDirected: false,
-    turnGroupPlain: '',
-    turnGroupAtQQs: [],
-  }
+  return { activeTurn: null, confirmSlot: null }
 }
+
 /** 主对话(主人)路由:窗口直发 + 主人 QQ,主人会话不计入外部会话 */
 const mainRoute = newRoute()
 /** 外部会话引擎池(2026-08-13 并发):sessionKey → {engine, route}。
@@ -1653,6 +1625,7 @@ function getNapcatClient() {
     // 主动发送成功 → 登记会话并通知渲染端建条目(2026-08-13 用户实测
     // "让 LLM 给别人发消息没有自动创建会话")
     onSent: (sent) => {
+      napcatRouting.recordSent(sent)
       void (async () => {
         try {
           const key = sent.type === 'group' ? `group:${sent.target}` : `private:${sent.target}`
@@ -1902,10 +1875,8 @@ function getNapcatClient() {
       // **隐私边界(2026-08-12 用户要求"别把和主人的私聊泄露给外人")**:
       // 与陌生人交流时不得暴露主人的私密信息(记忆里的私人话题/对话
       // 窗口的私聊内容/真实信息)
-      // 待回复固定挂 mainRoute(2026-08-13 八轮,用户要求"询问无需会话
-      // 对应"):询问显示在**当前打开的会话窗口**,路由状态锚定主对话
-      // 路由——主人无论在哪指示,标记路由都能找到 pending
-      mainRoute.pendingQQReply = { qq: msg.qq, text: msg.text, at: Date.now() }
+      // 待回复按 QQ 保存；主人开始指示时绑定快照，后来的消息不能改收件人。
+      napcatRouting.rememberPending(msg.qq, msg.text)
       // 统一注入模板(2026-08-13 重构,与 trusted 同款):类别行 + 原文 +
       // 档案卡 + 回复规则(陌生人附加:先询问主人/偏袒主人/记录档案)
       void (async () => {
@@ -1942,7 +1913,7 @@ function getNapcatClient() {
         // 陌生人消息 sessionKey = 'ask' 哨兵(2026-08-13 八轮,用户要求
         // "询问直接发送在已打开的会话窗口,无需会话对应"):渲染端把
         // 询问投给**当前查看的会话实例**显示;QQ 私发主人照旧;路由
-        // 状态锚定 mainRoute(见 agent:send 的 ask 分支)
+        // 渲染端将 ask 投到该 QQ 的私聊会话，轮次状态也属于该会话。
         // owner = 'peer'(2026-09-22 归属指纹,规则③:陌生人信息);询问
         // 策略由轮次分类(classifyTurn ask)决定回复归属
         sendToWidget('napcat:message', { ...msg, text: injected, trusted: false, owner: 'peer', media, profileCard: card, muted: sMuted, sessionKey: 'ask' })
@@ -1977,13 +1948,6 @@ function getNapcatClient() {
       lastGroupMsgAt = Date.now()
       // 群会话登记与屏蔽判定(2026-08-13 会话隔离)
       const gKey = agentEngineModule.sessionKeyFor(msg.qq, msg.groupId)
-      // 最近群发言人。是否在叫机器人用原始正文判断(注入模板里有「岛灵」,
-      // 不能拿模板去跑意图,否则每条都会被当成在问机器人)。
-      const gRoute = routeFor(gKey)
-      gRoute.lastGroupSpeakerQQ = msg.qq
-      gRoute.lastGroupDirected = !!(msg.atMe || agentEngineModule.isDirectedToBot(msg.text, msg.atMe))
-      gRoute.lastGroupPlain = String(msg.text ?? '')
-      gRoute.lastGroupAtQQs = Array.isArray(msg.atQQs) ? msg.atQQs.filter((id) => typeof id === 'string' && id) : []
       knownSessions.set(gKey, { title: `群 ${msg.groupId}`, kind: 'group', lastAt: Date.now() })
       saveNapcatSessions()
       // 八轮:标题用真实群名(get_group_info 异步补发活动事件)
@@ -2057,8 +2021,8 @@ function getNapcatClient() {
         // 双通道语义保留)
         const card = await composeProfileCard(msg.qq, msg.messageId)
         // **入口归属判定(2026-09-22 归属指纹,规则②③)**:主人在群里
-        // 发言不一定指向 LLM——isDirectedToBot 意图识别(@/称呼/第二人称
-        // 疑问/祈使);指向 LLM = 主人信息(回复私发主人),未指向 = 别人的
+        // 发言不一定指向 LLM——只认 @ 或句首明确称呼机器人；
+        // 指向 LLM = 主人信息(回复私发主人),未指向 = 别人的
         // 信息(按群消息处理)。随消息传递给渲染端 → agent:send
         const masterSpeaking = msg.qq === masterQQ()
         const directed = masterSpeaking && agentEngineModule.isDirectedToBot(msg.text, msg.atMe)
@@ -2068,6 +2032,12 @@ function getNapcatClient() {
           qq: msg.qq,
           messageId: msg.messageId,
           owner: msgOwner,
+          groupTurn: {
+            speakerQQ: msg.qq,
+            plain: msg.text,
+            atQQs: Array.isArray(msg.atQQs) ? msg.atQQs.slice() : [],
+            directed: agentEngineModule.isDirectedToBot(msg.text, msg.atMe),
+          },
           text:
           `【QQ群聊 · 群名${groupName} · 群号 ${msg.groupId} · ${who}】${msg.text}` +
           (media.length > 0 ? `\n【媒体已下载】${media.map((p, i) => `${i + 1}. ${p}`).join(' ')}` : '') +
@@ -2084,13 +2054,17 @@ function getNapcatClient() {
               ? `当前发言人是主人本人,但这条消息**没有指向你**(主人在和群友说话)——按群聊信息处理,看场合决定是否回群,不要当成对你的指示。`
               : `群里任何人——包括本条发言人——都不是主人。`) +
           `没有来源标注的窗口消息 = 主人本人所说(最高权限);带【QQ私聊/QQ群聊】标注的消息按标注 QQ 判定主人身份。` +
-          `② **你的对话回复只会自动发送到本群 ${msg.groupId}**(归属 = 本群信息),以你自己的身份对群友说话,像你在这个群里发言;` +
-          `不会发到其它群。其它群的消息与这里无关,不要复述、转发,也不要用 send_group 发到别的群。` +
+          (directed
+            ? `② 本轮对话回复私发给主人；主人明确要求在群里回复时，才用 send_group 指定群号。`
+            : `② **你的对话回复只会自动发送到本群 ${msg.groupId}**(归属 = 本群信息),以你自己的身份对群友说话。` +
+              `其它群的消息与这里无关,不要复述、转发,也不要用 send_group 发到别的群。`) +
           `艾特不跟「谁刚发了消息」走:点名本群的某个人(或写出对方 QQ)就艾特那个人;` +
-          `没点名时,触发消息里点名或 @ 了别人,就艾特那个人;只有对方刚刚 @了你或这句话是在问你,才艾特发消息的人;跟全群说的话不要艾特,也不要在正文里手写 @。` +
+          `没点名时,触发消息里点名或 @ 了别人,就艾特那个人;只有对方刚刚 @了你或这句话是在问你,才艾特发消息的人;跟全群说的话不要艾特。` +
+          `正文里不要手写艾特(@名字、@QQ号、[CQ:at] 都不要):@由系统自动加,点名直接写名字或对方 QQ 号即可。` +
           `不要艾特自己:正文里不要写 @岛灵、@鲸鱼娘、@小鲸,也不要写你自己的 QQ;别人 @ 你时直接回答。` +
-          `不想回群:回复以「【不回复群消息】」开头(不会发到群,也不会打扰主人)。` +
-          `向主人汇报/私发任何人:用 napcat send 工具(要发的内容写在工具参数里),不要写在对话回复里(对话回复会发到群);` +
+          (directed ? '' :
+            `不想回群:回复以「【不回复群消息】」开头(不会发到群,也不会打扰主人)。` +
+            `向主人汇报/私发任何人:用 napcat send 工具(要发的内容写在工具参数里),不要写在对话回复里(对话回复会发到群);`) +
           `图片/文件发群用 napcat send_group 的 image/file 参数。` +
           `③ 回复群友只给结论:不输出思考过程,不叙述工具调用过程;以第二人称对群友说话——` +
           `不第三人称转述群友、不向主人汇报口吻(「展示给你看」「你可以看看」)、不描述你做了什么。` +
@@ -2123,44 +2097,17 @@ function getNapcatClient() {
   return state
 }
 
-// 引擎消息落定后的 NapCat 回发(经 onEvent 接线,见 getAgentEngine):
-// message 事件转发时检查 lastSendSource —— 'qq' 触发的本轮回复发回
-// 私聊 QQ,'group' 触发的发回群;**本地轮(用户指示)若有待回复的
-// 陌生人消息(非白名单),该轮回复也发回(2026-08-12 二轮:LLM 询问
-// 主人后,主人指示轮的回复落定即发回对方)**
-// **防重发检查(2026-08-13 用户实测"对方收到 2-3 条")**:本轮开始前
-// (agent:send 快照 pendingTurnSentBefore)到落定之间,LLM 是否已用
-// send 工具给该陌生人发过私聊消息——发过则跳过 pending 路由
-/** 执行回复标记(2026-08-13 串台根治,用户实测"串台后陌生人收不到
- * 消息"):主人指示轮的回复必须以「【回复对方】」开头——**只有带标记的
- * 回复才会路由给待回复陌生人**;无标记的回复(主人"嗯/让我想想"这类
- * 应答、日常闲聊)留在主人侧且**不消耗 pending**,等真正的指示轮。
- * 此前任何主人 QQ/窗口轮都会消费 pending——主人先回了句"嗯",这轮
- * 应答被路由给陌生人(串台)+ pending 被清空,真正指示轮的回复反而
- * 发回主人,陌生人什么都收不到 */
-
-
-function turnAlreadySentToPending(qq, route) {
-  try {
-    const sent = getNapcatClient().client.getSentMessages()
-    // 判定函数在 agent.cjs(可单测);此处只做客户端取数
-    return agentEngineModule.turnAlreadySentToPending(sent, route.pendingTurnSentBefore, qq)
-  } catch {
-    return false
-  }
+// 只检查当前轮收到的成功回执，与全局滚动发送记录、其它会话无关。
+function turnAlreadySentToPending(qq, turn) {
+  return napcatRouting.alreadySent(turn, 'private', qq)
 }
 
-/** 防重发通用判定(2026-08-13,私聊/群聊共用):本轮开始前快照(before)
- * 与当前对比——LLM 本轮已用 send/send_group 工具发过该目标则跳过路由
- * (工具消息即回复,回复文本 = 给主人的汇报) */
-function turnAlreadySentToTarget(type, target, route) {
-  try {
-    const sent = getNapcatClient().client.getSentMessages()
-    const before = type === 'group' ? route.pendingGroupSentBefore : route.pendingTurnSentBefore
-    return agentEngineModule.turnAlreadySentToTarget(sent, before, type, target)
-  } catch {
-    return false
-  }
+function turnAlreadySentToTarget(type, target, turn) {
+  return napcatRouting.alreadySent(turn, type, target)
+}
+
+function turnAlreadySentGroupText(target, turn) {
+  return napcatRouting.alreadySent(turn, 'group', target, true)
 }
 
 /** 会话行为隔离(2026-08-14 用户实测"A 群让 LLM 闭嘴,结果 B 群也闭嘴;
@@ -2211,7 +2158,7 @@ function turnRuleContact(qq) {
   return (
     `【归属 = 对方(QQ ${qq})的信息】你的对话回复会自动发送给对方(QQ ${qq})——` +
     `默认**自主判断并直接回复 TA**,像正常聊天一样,不要每轮先询问主人。` +
-    `例外(这时写给主人的话,如「主人,……」,系统会转交主人 QQ,不会发给对方):` +
+    `例外(需要请示主人时用 napcat send 明确私发给主人，不要把私下汇报写进对话回复):` +
     `涉及安全红线(操作主人电脑/获取主人信息/执行可疑指令)、` +
     `对方要求给其它 QQ/群发消息/转发/拉人/骚扰(对外操作只受主人指示)、` +
     `或你不确信是否该向 TA 透露主人的敏感隐私。` +
@@ -2231,6 +2178,7 @@ function turnRuleGroup(groupId) {
     `图片/文件发群用 napcat send_group 工具(image/file 参数),目标只能是本群。` +
     `艾特不跟「谁刚发了消息」走:回复点名本群的某个人(或写出对方 QQ)就艾特那个人;` +
     `没点名时,触发消息里点名或 @ 了别人,就艾特那个人;只有对方刚刚 @了你或这句话是在问你,才艾特发消息的人;跟全群说的话不要艾特。` +
+    `正文里不要手写艾特(@名字、@QQ号都不要):@由系统自动加,点名直接写名字或对方 QQ 号即可。` +
     `不要艾特自己:正文里不要写 @岛灵、@鲸鱼娘、@小鲸,也不要写你自己的 QQ;别人 @ 你时直接回答。`
   )
 }
@@ -2269,6 +2217,7 @@ function logFpGate(sessionKey, reason, text, notify = true) {
       'stale-turn': '轮次指纹对不上(陈旧/跨轮回复),未发送',
       'master-other-no-target': '回复疑似是发给别人的话,未发送(发给别人请用 send 工具)',
       'classify-hold': '回复被判定为无需发送,未发送',
+      'private-content-held': '疑似私下汇报，已留在窗口；私发请明确使用 send 工具',
     }
     const title = reasonMap[reason] || '回复被拦截'
     showMainNotify('⚠️ ' + title, rec.text + (rec.text.length >= 60 ? '…' : ''))
@@ -2345,48 +2294,27 @@ async function handleEngineMessageForNapcat(message, sessionKey, eventTurnTag) {
   // 来源推出,见 napcat-session.classifyTurn)决定的**默认落点**——窗口/
   // 主人QQ私聊/主人QQ群聊指向LLM = 主人信息 → 给主人;其余 = 别人的信息
   // → 给对方;LLM 不写任何文本标记,跨归属外发只走 send 工具,判定器仅做
-  // 错配安全网。async:安全网可能 await 意图判定 Sub Agent,路由状态在
-  // 函数开头同步消费清零,await 期间不产生重复路由
-  const route = routeFor(sessionKey)
-  // 轮次状态同步消费(与 turnTag 同刻清零,防陈旧状态串到下一轮)
-  const routeTag = route.turnTag ?? null
+  // 错配安全网。先校验并领取固定轮次，再做异步审核；不会消费后续轮状态。
+  const sessionRoute = !sessionKey || sessionKey === 'main' ? mainRoute : sessionEngines.get(sessionKey)?.route
+  const route = napcatRouting.take(sessionRoute, eventTurnTag)
+  let text = (message?.parts ?? [])
+    .filter((p) => p && p.type === 'text')
+    .map((p) => String(p.text))
+    .join('\n').trim()
+  if (!route) {
+    if (text) logFpGate(sessionKey, 'stale-turn', text, false)
+    return
+  }
   const kind = route.turnKind
   const owner = route.turnOwner
   const source = route.lastSendSource
   const target = route.lastSendTarget
   const triggerText = route.lastTriggerText
-  route.turnTag = null
-  route.turnKind = null
-  route.turnOwner = null
-  route.lastSendSource = null
-  route.lastSendTarget = null
-  route.lastTriggerText = null
   const turnSpeaker = route.turnGroupSpeakerQQ
-  const turnDirected = !!route.turnGroupDirected
-  const turnPlain = String(route.turnGroupPlain ?? '')
-  const turnAtQQs = Array.isArray(route.turnGroupAtQQs) ? route.turnGroupAtQQs.slice() : []
-  route.turnGroupSpeakerQQ = null
-  route.turnGroupDirected = false
-  route.turnGroupPlain = ''
-  route.turnGroupAtQQs = []
-  if (process.env.WIDGET_SCREENSHOT_MODE === 'session-debug') {
-    console.log('[session-debug] handleEngineMessage key=', sessionKey, 'kind=', kind, 'owner=', owner, 'source=', source, 'target=', target, 'tagMatch=', (eventTurnTag ?? null) === routeTag, 'clientActive=', !!napcatClientState?.active)
-  }
-  let text = (message?.parts ?? [])
-    .filter((p) => p && p.type === 'text')
-    .map((p) => String(p.text))
-    .join('\n')
-    .trim()
-  if (!text) return
-  // **轮次指纹核对(2026-09-22 归属指纹,「指纹对不上就不发送」语义的
-  // 程序侧实现)**:事件元数据的 turnTag(引擎 emit 附上)必须等于本轮
-  // route.turnTag——陈旧/跨轮投递(abort 后迟到落定、双通道重复)对不上
-  // 一律不发送;LLM 不写不读标记,服从性归零
-  if ((eventTurnTag ?? null) !== routeTag) {
-    logFpGate(sessionKey, 'stale-turn', text)
-    return
-  }
-  if (!kind || kind === 'silent') return
+  const turnDirected = route.turnGroupDirected
+  const turnPlain = route.turnGroupPlain
+  const turnAtQQs = route.turnGroupAtQQs
+  if (!text || kind === 'silent') return
   // **剥离思考腔(2026-08-12,用户实测 QQ 私聊收到的回复带思考过程)**:
   // LLM 思考模式输出常以「好的,我先梳理一下…」开头再给结论,QQ 客户端
   // 看到的就是思考过程——发回前剥掉第一段思考腔(正常回复不受影响;
@@ -2426,7 +2354,7 @@ async function handleEngineMessageForNapcat(message, sessionKey, eventTurnTag) {
     }
   }
   // 安全网共用判定(2026-09-22 归属指纹):询问式/对主人称呼式回复 = 给
-  // 主人的话,别人轮默认发对方前要转交主人(防泄露)
+  // 主人的话，别人轮命中后扣留；跨对象发送必须明确调用工具。
   const isAsk = agentEngineModule.isAskTurnToMaster(text)
   // **触发消息原始正文**:QQ/群消息的触发文本是注入后的完整模板(含
   // 【档案卡】/【回复规则】——模板里"回复对方/发给"等字样会让触发侧
@@ -2436,35 +2364,38 @@ async function handleEngineMessageForNapcat(message, sessionKey, eventTurnTag) {
     .replace(/^【QQ(?:私聊|群聊)[^】]*】/, '')
     .replace(/^【主人窗口】\s*/, '')
     .trim()
-  const master = masterQQ()
-  const pend = mainRoute.pendingQQReply
+  const master = route.masterQQ
+  const pend = route.pendingReply
   const pendLive = pend && Date.now() - pend.at < PENDING_QQ_TIMEOUT_MS
   // QQ/群触发轮标记(summarize 时强制记忆提取——用户发现长期记忆没有
   // QQ 聊天记录,提取原来只在 proactiveEnabled 开启时跑)
   if (kind === 'ask' || source === 'qq' || source === 'group') lastQQTurnAt = Date.now()
   // 发送统一出口:剥残留标记(旧双指纹协议兼容)+ 补标 UI + 通知
-  const deliver = (to, tgt, content, title, sendOpts) => {
+  const deliver = async (to, tgt, content, title, sendOpts) => {
+    if (route.cancelled) return false
     const body = agentEngineModule.stripFingerprintMarks(content)
-    const short = body.length > 60 ? body.slice(0, 60) + '…' : body
-    if (to === 'master') {
-      if (!master) return
-      notifyRouted('master')
-      c.sendToQQ(master, body).catch((err) => handleNapcatSendError(err, master))
-    } else if (to === 'group') {
-      notifyRouted('group')
-      c.sendToGroup(tgt, body, sendOpts).catch((err) => handleNapcatSendError(err, tgt, '群'))
-    } else {
-      notifyRouted('peer')
-      c.sendToQQ(tgt, body).catch((err) => handleNapcatSendError(err, tgt))
+    if (!body.trim()) return false
+    const recipient = to === 'master' ? master : tgt
+    if (!recipient) return false
+    try {
+      if (to === 'group') await c.sendToGroup(recipient, body, sendOpts)
+      else await c.sendToQQ(recipient, body)
+      // 收到 NapCat 成功回执后才补标。失败不消费待办，不声称已送达。
+      notifyRouted(to === 'group' ? 'group' : to === 'master' ? 'master' : 'peer')
+      if (to === 'peer' && pend?.qq === recipient) napcatRouting.consumePending(pend)
+      showMainNotify(title, body.length > 60 ? body.slice(0, 60) + '…' : body, 'low')
+      return true
+    } catch (err) {
+      handleNapcatSendError(err, recipient, to === 'group' ? '群' : 'QQ')
+      return false
     }
-    showMainNotify(title, short, 'low')
   }
 
   // ========== 询问轮(kind='ask',陌生人消息策略):回复 = 询问主人 ==========
   // 陌生人信息(规则③别人的信��)但策略上先问主人——询问内容 = 给主人的
   // 话,直发主人 QQ;pendingQQReply 收信时已记录,等主人指示
   if (kind === 'ask') {
-    deliver('master', master, text, '🐳 已向主人同步询问')
+    await deliver('master', master, text, '🐳 已向主人同步询问')
     return
   }
 
@@ -2482,7 +2413,7 @@ async function handleEngineMessageForNapcat(message, sessionKey, eventTurnTag) {
         const qq = priv[1]
         // 工具已发过 → 回复 = 汇报,留窗口;顺带消费该对象的 pending
         if (turnAlreadySentToTarget('private', qq, route)) {
-          if (pendLive && pend.qq === qq) mainRoute.pendingQQReply = null
+          if (pendLive && pend.qq === qq) napcatRouting.consumePending(pend)
           return
         }
         // 安全网:主人明确指示发给对方(忘调工具的执行内容兜底,判定确认)
@@ -2490,9 +2421,8 @@ async function handleEngineMessageForNapcat(message, sessionKey, eventTurnTag) {
           const panelIntent = await classifyReplyIntent('panel', '会话面板执行轮', text, triggerRaw, `QQ ${qq}`)
           if (panelIntent === 'other') {
             if (!turnAlreadySentToPending(qq, route)) {
-              deliver('peer', qq, text, '🐳 已回复对方(意图判定)')
+              await deliver('peer', qq, text, '🐳 已回复对方(意图判定)')
             }
-            if (pendLive && pend.qq === qq) mainRoute.pendingQQReply = null
             return
           }
         }
@@ -2516,7 +2446,7 @@ async function handleEngineMessageForNapcat(message, sessionKey, eventTurnTag) {
           // 面板发出去的是主人要说的话,不顺手 @ 最后一个发言的人。
           // 正文点了谁,才 @ 谁。
           const atOpts = await groupMentionOpts(groupId, text, null, false, '', [])
-          deliver(
+          await deliver(
             'group',
             groupId,
             text,
@@ -2543,12 +2473,11 @@ async function handleEngineMessageForNapcat(message, sessionKey, eventTurnTag) {
       const qq = pend.qq
       if (turnAlreadySentToPending(qq, route)) {
         // 工具已发对方:回复 = 执行汇报,消费 pending 后走默认给主人
-        mainRoute.pendingQQReply = null
+        napcatRouting.consumePending(pend)
       } else {
         const execIntent = await classifyReplyIntent('exec', '主人指示执行轮', text, triggerRaw, `待回复对象 QQ ${qq}`)
         if (execIntent === 'other') {
-          mainRoute.pendingQQReply = null
-          deliver('peer', qq, text, '🐳 已回复对方(意图判定)')
+          await deliver('peer', qq, text, '🐳 已回复对方(意图判定)')
           return
         }
         if (execIntent === 'master') {
@@ -2569,10 +2498,10 @@ async function handleEngineMessageForNapcat(message, sessionKey, eventTurnTag) {
     // 默认落点:master-qq/master-group → 主人 QQ;window/panel → 留窗口
     // (2026-09-22 用户定案 Q2:窗口 = 主人信息严格一致,回复只给主人看)
     if (kind === 'master-qq' || kind === 'master-group') {
-      deliver('master', master, text, kind === 'master-group' ? '🐳 群聊点名(已私发主人)' : '🐳 已回复 QQ')
-    } else if (mainRoute.pendingQQReply === pend && pendLive && turnAlreadySentToPending(pend.qq, route)) {
+      await deliver('master', master, text, kind === 'master-group' ? '🐳 群聊点名(已私发主人)' : '🐳 已回复 QQ')
+    } else if (pendLive && turnAlreadySentToPending(pend.qq, route)) {
       // 窗口轮工具已发 pending 对象:消费 pending,回复留窗口
-      mainRoute.pendingQQReply = null
+      napcatRouting.consumePending(pend)
     }
     // window/panel:留在窗口(渲染端已显示),无需发送
     return
@@ -2590,20 +2519,19 @@ async function handleEngineMessageForNapcat(message, sessionKey, eventTurnTag) {
       logFpGate(sessionKey, 'group-no-reply', text, false)
       return
     }
-    // 安全网:询问主人/对主人说话 → 转交主人(防发到群里泄露)
-    if (isAsk || agentEngineModule.looksLikeMasterAddressed(text)) {
-      deliver('master', master, text, isAsk ? '🐳 已向主人询问(群聊)' : '🐳 已向主人汇报(群聊)')
+    // 疑似私下汇报只扣留，不根据「大家/你们」等词放行，也不自动改收件人。
+    if (agentEngineModule.shouldHandGroupReplyToMaster(text)) {
+      logFpGate(sessionKey, 'private-content-held', text)
       return
     }
-    // 防重发:本轮已用 send_group 发过本群(工具消息即回复)→ 回复文本 =
-    // 给主人的汇报,私发主人(不再静默丢弃——2026-09-22:丢弃 = 汇报丢失)
-    if (turnAlreadySentToTarget('group', pinnedGroup, route)) {
-      deliver('master', master, text, '🐳 已向主人汇报(群聊)')
+    // 本轮成功发送过文字则留窗口；纯媒体不抑制正文，绝不据此转给主人。
+    if (turnAlreadySentGroupText(pinnedGroup, route)) {
+      logFpGate(sessionKey, 'peer-already-sent', text, false)
       return
     }
     // 点名了谁就 @ 谁;没点名时,只有对方在叫机器人,才 @ 发消息的那个人。
     const atOpts = await groupMentionOpts(pinnedGroup, text, turnSpeaker, turnDirected, turnPlain, turnAtQQs)
-    deliver('group', pinnedGroup, text, '🐳 已回复群友', atOpts)
+    await deliver('group', pinnedGroup, text, '🐳 已回复群友', atOpts)
     return
   }
   if (source === 'qq' && target) {
@@ -2614,10 +2542,10 @@ async function handleEngineMessageForNapcat(message, sessionKey, eventTurnTag) {
       logFpGate(sessionKey, 'private-no-reply', text, false)
       return
     }
-    // 安全网:询问主人/对主人说话 → 转交主人 + 记 pending(等主人指示)
+    // 疑似请示留在窗口并记录待办；私发主人须用 send 明确指定。
     if (isAsk || agentEngineModule.looksLikeMasterAddressed(text)) {
-      mainRoute.pendingQQReply = { qq: target, text: text.slice(0, 200), at: Date.now() }
-      deliver('master', master, text, isAsk ? '🐳 已向主人询问' : '🐳 已向主人汇报')
+      napcatRouting.rememberPending(target, text.slice(0, 200))
+      logFpGate(sessionKey, 'private-content-held', text)
       return
     }
     // 本轮工具已经把私聊发给对方。对话回复留在会话窗口,
@@ -2628,7 +2556,7 @@ async function handleEngineMessageForNapcat(message, sessionKey, eventTurnTag) {
       return
     }
     // 默认落点:回对方
-    deliver('peer', target, text, '🐳 已回复对方')
+    await deliver('peer', target, text, '🐳 已回复对方')
     return
   }
   // (panel 分支已并入上方主人信息轮,2026-09-22 归属指纹——panel = 主人信息
@@ -2665,22 +2593,8 @@ function startNapcatMaintenance() {
   // 每 60 秒清理一次过期 pending
   setInterval(() => {
     try {
-      const now = Date.now()
-      // 清理所有路由(主会话+外部会话)的过期 pendingQQReply
-      const allRoutes = [mainRoute]
-      for (const [, entry] of sessionEngines) {
-        allRoutes.push(entry.route)
-      }
-      let cleanedPending = 0
-      for (const route of allRoutes) {
-        if (route.pendingQQReply && now - route.pendingQQReply.at > PENDING_QQ_TIMEOUT_MS) {
-          route.pendingQQReply = null
-          cleanedPending++
-        }
-      }
-      if (cleanedPending > 0) {
-        console.log('[napcat] cleaned', cleanedPending, 'expired pendingQQReply')
-      }
+      const cleanedPending = napcatRouting.prunePending()
+      if (cleanedPending > 0) console.log('[napcat] cleaned', cleanedPending, 'expired pending replies')
       // 清理 knownSessions LRU(超过 100 条时淘汰最旧的)
       const MAX_SESSIONS = 100
       if (knownSessions.size > MAX_SESSIONS) {
@@ -3129,14 +3043,8 @@ function createWindow() {
       startProactiveTurn: (history, opts) => {
         // **主动陪伴轮永不路由 QQ(2026-08-13 泄露修复)**:清掉上一次
         // send 的残留路由状态——否则主动回复落定会被当上一轮 QQ 轮发出去。
-        // (2026-09-22 归属指纹:原裸赋值 lastAskTurn=… 是 sloppy-mode
-        // 隐式全局,根本没清到 mainRoute——改为显式清路由字段)
-        mainRoute.turnTag = null
-        mainRoute.turnKind = null
-        mainRoute.turnOwner = null
-        mainRoute.lastSendSource = null
-        mainRoute.lastSendTarget = null
-        mainRoute.lastTriggerText = null
+        // 忙碌时不撤销现有轮次；主动轮本身不带外发标签。
+        if (!getAgentEngine().busy) napcatRouting.cancel(mainRoute)
         return getAgentEngine().proactiveTurn(history, opts)
       },
       // 主动陪伴 tick 最近结果(巡检轮询:判定调度器按 10s 真实触发,
@@ -3560,7 +3468,7 @@ function asArray(value, fallback = []) {
 // msgOwner = 消息归属(2026-09-22 归属指纹,规则归属指纹,规则①②③在入口判定随消息传递):
 // 'master' = 主人信息(窗口/主人QQ私聊/主人QQ群聊指向LLM)/'peer' = 别人的
 // 信息(其余;主人群聊未指向 LLM 的闲聊也按别人处理)
-ipcMain.on('agent:send', (_event, text, history, sessionId, source, target, sessionKey, noteText, msgOwner) => {
+ipcMain.on('agent:send', (_event, text, history, sessionId, source, target, sessionKey, noteText, msgOwner, groupTurn) => {
   if (typeof text !== 'string') return
   const key = typeof sessionKey === 'string' && sessionKey ? sessionKey : 'main'
   if (process.env.WIDGET_SCREENSHOT_MODE === 'session-debug') {
@@ -3586,80 +3494,23 @@ ipcMain.on('agent:send', (_event, text, history, sessionId, source, target, sess
   // 回复被扣留(实测 E1/F 轮全部扣留)。busy = 本轮已在进行,重复发送
   // 静默丢弃(渲染端自己会出"运行中"提示,无需重复报错)
   if (engine.busy) return
-  // 询问轮(2026-08-13 八轮):路由状态**锚定 mainRoute**——询问显示在
-  // 当前查看的会话窗口(引擎实例 = 该会话),但 lastAskTurn/pending
-  // 全在主对话路由上,主人任何窗口指示都能正确路由
-  const route = source === 'ask' || key === 'main' ? mainRoute : entry.route
-  // **来源三分类(2026-08-13 泄露修复,per-session 化)**:'qq'/'group'
-  // = QQ 触发;'window' = 主人窗口直发(唯一可消费陌生人 pending 的
-  // 窗口轮);'system'/缺省 = 系统通知轮(回复永不路由 QQ)。
-  // getTurnSource(set_owner_qq 工具)读此字段
-  route.lastSendSource = source === 'qq' || source === 'group' || source === 'window' ? source : null
-  route.lastSendTarget = (route.lastSendSource === 'qq' || route.lastSendSource === 'group') && typeof target === 'string' ? target : null
-  // **触发消息原文(触发侧指令判定/判定器安全网用)**,随 turnTag 同刻清零
-  route.lastTriggerText = route.lastSendSource || source === 'ask' ? text : null
-  // 群触发轮把「当时是谁、那句话是不是在叫机器人」抄进本轮。
-  // 之后再来的群消息只改 last*,不改这份抄本。
-  if (source === 'group') {
-    route.turnGroupSpeakerQQ = route.lastGroupSpeakerQQ
-    route.turnGroupDirected = !!route.lastGroupDirected
-    route.turnGroupPlain = String(route.lastGroupPlain ?? '')
-    route.turnGroupAtQQs = Array.isArray(route.lastGroupAtQQs) ? route.lastGroupAtQQs.slice() : []
-  } else {
-    route.turnGroupSpeakerQQ = null
-    route.turnGroupDirected = false
-    route.turnGroupPlain = ''
-    route.turnGroupAtQQs = []
-  }
-  // **防重发快照(2026-08-13 用户实测"对方收到 2-3 条")**
-  route.pendingTurnSentBefore = 0
-  route.pendingGroupSentBefore = 0
-  try {
-    const sent = getNapcatClient().client.getSentMessages()
-    // pending 锚定 mainRoute(2026-08-13 八轮):快照也看 mainRoute
-    if (mainRoute.pendingQQReply && (source === 'window' || source === 'qq')) {
-      mainRoute.pendingTurnSentBefore = sent.filter((s) => s.type === 'private' && s.target === mainRoute.pendingQQReply.qq).length
-    }
-    // 外部会话面板输入轮(2026-08-13 泄露根治):快照按面板目标(私聊/
-    // 群聊)——LLM 本轮已用 send/send_group 工具发过则该回复文本 = 给
-    // 主人的汇报,落定时不再自动发回对方
-    if (source === 'window' && key !== 'main') {
-      const pm = /^private:(\d+)$/.exec(key)
-      if (pm) route.pendingTurnSentBefore = sent.filter((s) => s.type === 'private' && s.target === pm[1]).length
-      const gm = /^group:(\d+)$/.exec(key)
-      if (gm) route.pendingGroupSentBefore = sent.filter((s) => s.type === 'group' && s.target === gm[1]).length
-    }
-    // QQ 触发轮(扩展信任,2026-08-14 修复):快照同样按目标锚定——此前
-    // qq 轮快照恒为 0,防重发判定退化为"历史上只要给该目标发过任意消息
-    // 即 true":带指纹回复被静默跳过(对方永远收不到),无指纹静默放行
-    // 判定也依赖该快照
-    if (source === 'qq' && typeof target === 'string') {
-      route.pendingTurnSentBefore = sent.filter((s) => s.type === 'private' && s.target === target).length
-    }
-    // 群触发轮快照(2026-08-14):带指纹的群友话路由发群时防重发判定——
-    // 本轮已用 send_group 工具发过则跳过(工具消息即回复)。
-    // 计数锚在会话键里的群号上,和落点同一目标,不跟可能串掉的 target。
-    if (source === 'group' && typeof target === 'string') {
-      const pinned = agentEngineModule.pinGroupReplyTarget(key, target)
-      route.pendingGroupSentBefore = sent.filter((s) => s.type === 'group' && s.target === pinned).length
-    }
-  } catch {
-    // 客户端未就绪:快照保持 0(防重发退化为放行,风险 = 重复发送一次)
-  }
-  // **归属指纹(2026-09-22,用户定案四规则)**:消息归属由入口判定随消息
-  // 传递(msgOwner),classifyTurn 推轮次种类与回复默认落点——LLM 不写
-  // 任何文本标记;轮次认证标签 turnTag 程序签发(随 engine.send 附本轮
-  // 事件元数据,落定核对:对不上 = 陈旧/跨轮投递,不发送)
-  const cls = agentEngineModule.classifyTurn({
-    source,
-    target,
+  // 每一轮（包括 ask）都归实际执行的会话；主对话不借给其它会话。
+  const sessionRoute = key === 'main' ? mainRoute : entry.route
+  const cls = agentEngineModule.classifyTurn({ source, target, sessionKey: key,
+    owner: typeof msgOwner === 'string' ? msgOwner : null, masterQQ: masterQQ() })
+  const triggerRaw = String(text).split('【档案卡】')[0]
+    .replace(/^【QQ(?:私聊|群聊)[^】]*】/, '').replace(/^【主人窗口】\s*/, '').trim()
+  const route = napcatRouting.begin(sessionRoute, {
     sessionKey: key,
-    owner: typeof msgOwner === 'string' ? msgOwner : null,
+    turnKind: cls.kind,
     masterQQ: masterQQ(),
+    turnOwner: cls.replyOwner,
+    lastSendSource: source === 'qq' || source === 'group' || source === 'window' ? source : null,
+    lastSendTarget: source === 'qq' || source === 'group' ? String(target ?? '') : null,
+    lastTriggerText: text,
+    triggerRaw,
+    groupTurn: source === 'group' && groupTurn && typeof groupTurn === 'object' ? groupTurn : null,
   })
-  route.turnKind = cls.kind
-  route.turnOwner = cls.replyOwner
-  route.turnTag = cls.kind === 'silent' ? null : agentEngineModule.newTurnFingerprint()
   const hist = asArray(history)
   // **会话情况记录注入(2026-08-13,用户要求"给单个会话加上情况记录")**:
   // 主人为单个会话写的上下文备忘(localStorage widget-agent-session-note:<key>,
@@ -3755,15 +3606,17 @@ ipcMain.on('agent:send', (_event, text, history, sessionId, source, target, sess
   // **归属轮次规则注入(2026-09-22 归属指纹)**:按轮次种类注入当轮规则
   // (历史的【回复规则】段已被剥离双通道剥掉,每轮刷新)——只讲"回复会去
   // 哪 + 跨归属外发走工具",零指纹;主人指示轮另补执行指引
-  const pendNow = mainRoute.pendingQQReply
+  const pendNow = route.pendingReply
   const pendNowLive = pendNow && Date.now() - pendNow.at < PENDING_QQ_TIMEOUT_MS
   const pmPeer = /^private:(\d+)$/.exec(key)
   const gmPeer = /^group:(\d+)$/.exec(key)
   const peerLabel = gmPeer ? `群 ${gmPeer[1]}` : pmPeer ? `QQ ${pmPeer[1]}` : '对方'
   const execHint =
-    pendNowLive && cls.kind !== 'ask' && cls.kind !== 'silent'
+    pendNowLive && agentEngineModule.isMasterTurnKind(cls.kind)
       ? `当前有等待主人指示的对方(QQ ${pendNow.qq}):主人指示回复 TA 时,把要发给 TA 的话用 napcat send(user_id=${pendNow.qq})真实发出,对话回复 = 给主人的执行汇报。`
-      : ''
+      : agentEngineModule.isMasterTurnKind(cls.kind) && napcatRouting.pendingList().length > 1
+        ? '当前有多个待回复对象；回复指令必须明确 QQ 或对象，不能把「他」猜成最近来信的人。对象不明确先询问主人。'
+        : ''
   let ruleText = ''
   if (cls.kind === 'ask') ruleText = turnRuleAsk(typeof target === 'string' ? target : '')
   else if (cls.kind === 'contact') ruleText = turnRuleContact(typeof target === 'string' ? target : '')
@@ -3785,15 +3638,15 @@ ipcMain.on('agent:send', (_event, text, history, sessionId, source, target, sess
   // 直接 .send 是 undefined → IPC handler 抛 uncaughtException,引擎
   // 从未收到消息、渲染端永远等不到回复(主对话路径 getAgentEngine
   // 返回引擎本体所以正常,外部会话全灭)
-  engine.send(
+  napcatRouting.run(route, () => engine.send(
     sendText,
     hist,
     typeof sessionId === 'string' ? sessionId : undefined,
     key,
     // 轮次认证标签(2026-09-22 归属指纹):引擎附本轮事件元数据,
     // 落定核对 event.turnTag === route.turnTag(对不上不发送)
-    route.turnTag || undefined,
-  )
+    route.turnTag,
+  ))
 })
 
 // exec_command 确认门回执(渲染端用户点允许/拒绝)
@@ -3812,6 +3665,7 @@ ipcMain.on('agent:abort', (_event, sessionKey) => {
   const key = typeof sessionKey === 'string' && sessionKey ? sessionKey : 'main'
   if (key === 'main') getAgentEngine().abort()
   else sessionEngines.get(key)?.engine.abort()
+  napcatRouting.cancel(key === 'main' ? mainRoute : sessionEngines.get(key)?.route)
 })
 
 // ==================== 撤销快照(2026-08-14 停止与撤销分离) ====================
@@ -4992,8 +4846,10 @@ safeHandle('napcat:session-delete', async (key) => {
   // 持久删除标记:写入后该会话被主进程忽略(消息转发前过滤),重启后仍生效
   deletedSessionsSet.add(key)
   saveNapcatSessions()
-  // 1. 会话引擎实例(LRU 缓存)dispose 并移除(引擎在忙则中断其回合)
+  // 1. 撤销在途回复和该对象待办，再关闭引擎。
   const entry = sessionEngines.get(key)
+  napcatRouting.cancel(entry?.route)
+  if (kind === 'private') napcatRouting.forgetPending(id)
   if (entry && entry.engine && typeof entry.engine.dispose === 'function') {
     try { entry.engine.dispose() } catch { /* already gone */ }
   }

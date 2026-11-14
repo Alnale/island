@@ -341,6 +341,7 @@ export function createRunTurn(ctx: AgentContext) {
         // 人格卡出站清洗(2026-10-26):激活卡存在时去 AI 腔;代码/表格
         // 走 task 模式只清边界客套,闲聊走 chat 模式去分点与客套。
         await applyPersonaStyleToParts(msgParts, config, ctx)
+        if (signal.aborted) return
         const msgId = randomUUID()
         const landed = {
           id: msgId,
@@ -362,6 +363,7 @@ export function createRunTurn(ctx: AgentContext) {
           config,
           ctx,
         )
+        if (signal.aborted) return
         ctx.emit(ASSISTANT_SETTLED, {
           message: landed,
           history: [...historyIn, landed],

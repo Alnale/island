@@ -294,10 +294,13 @@ V2.0 把提示词当作**工程对象**管理——分层拼装、逐条身份�
 3. 私聊/群聊消息会以系统通知提示,并进入对话窗口(气泡带来源与档案卡),
    岛灵按上文分级规则自主回复;
 4. 对话中可指挥:"只回复我自己的 QQ""帮我回魔精说…";napcat 工具支持
-   主动发消息/发图/发文件/撤回/查成员/查好友/群管理/看 QQ 空间动态。
+   主动发消息/发图/发文件/撤回/查成员/查好友/群管理/看 QQ 空间动态、
+   发说说(文字/带图/可见范围,需主人确认)。
 
 主人 QQ(privacy.json 的 masterQQ 配置)消息 = 最高权限,可直接远程控制
 (如"暂停音乐""打开B站")。
+
+群里要给岛灵下指令，请 @机器人或在句首叫它的名字。普通「你觉得呢」「帮我…」不会自动当成主人指令。回复目标随消息固定；给其它 QQ/群发消息使用明确的发送工具。多人等待回复时请指定对象，避免含糊的「回他」。发送失败会提示，只有成功回执才显示已发送。
 
 ### 隐私配置(2026-08-17 起,安装器不携带任何个人 QQ)
 
@@ -413,6 +416,7 @@ npx electron manager/main.cjs                              # 开发期直接运�
 dev.bat                # 一键构建 + 启动(自动应用 HEVC 补丁)
 pnpm dev               # 仅 Web 演示版
 pnpm build             # 类型检查 + Web 版构建
+pnpm build:widget      # 桌面挂件前端构建
 pnpm build:electron    # esbuild 打包 Agent 引擎(入口 engine/engine.ts)/SMTC 桥/图标
 pnpm lint              # oxlint
 pnpm test:markdown     # Markdown 解析器测试
@@ -420,6 +424,10 @@ node tests/test-agent-core.mjs   # 引擎核心测试(247 用例,含插件内核
 node scripts/build-release.mjs   # ① 打包绿色发布目录 release/灵动岛
 node scripts/build-manager.mjs   # ② 打包安装管理器 release/灵动岛安装管理器(需先跑 ①)
 ```
+
+Web 与挂件构建通过 `scripts/vite-build.mjs` 将临时文件放在项目内的
+`.tmp/vite-build`（已忽略），避免 Windows 下 esbuild 删除系统临时文件时出现
+`Access is denied`。这些临时目录设置只对构建进程及其子进程生效。
 
 验证基线(V3.1 实测):`tsc -b` 0 错、核心测试 247 用例(244 通过,3 失败
 为 QQ 空间工具本机环境相关,非回归)、`pnpm build:electron` 与冒烟会话

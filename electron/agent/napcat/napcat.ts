@@ -131,12 +131,12 @@ export function createNapcatTools(deps: NapcatToolDeps): AgentTool[] {
     {
       name: 'napcat',
       description:
-        'NapCat QQ 机器人(2026-08-14):查询连接状态 / 最近 QQ 消息 / **机器人发出的消息(带 ID 可撤回)** / 联系人档案 / **聊天记录备份(工具记忆)** / 主动发私聊或群消息 / **图片收发** / 群成员好友查询 / 撤回消息 / 群管理(需主人确认) / **查看 QQ 空间动态** / 会话管理 / **QQ 扫码登录**。' +
+        'NapCat QQ 机器人(2026-08-14):查询连接状态 / 最近 QQ 消息 / **机器人发出的消息(带 ID 可撤回)** / 联系人档案 / **聊天记录备份(工具记忆)** / 主动发私聊或群消息 / **图片收发** / 群成员好友查询 / 撤回消息 / 群管理(需主人确认) / **QQ 空间动态(查看/发说说/删说说)** / 会话管理 / **QQ 扫码登录**。' +
         '**QQ 消息自动回复是系统链路**(收到私聊/群聊自动进入对话并回复——无需调用本工具);' +
         '**收到图片自动下载保存并进对话**(主人窗口可见图片,文本标注路径);' +
         '本工具适合:用户问"QQ 那边有消息吗""NapCat 连上没""之前和谁聊过什么""看看我的 QQ 动态"时查询;' +
         '**交流中认识新联系人/群成员时,用 contact_update 记录对方信息**;' +
-        '或需要**主动**发消息时(action=send/send_group)。' +
+        '或需要**主动**发消息/发 QQ 动态说说时(action=send/send_group/zone_post)。' +
         'action=login **打开 QQ 扫码登录窗口**(未登录/掉线时用:实时二维码自动换新,手机 QQ 扫码确认即登录);' +
         'action=status 查连接状态;action=reconnect **立即重连 OneBot WS**(熔断冷却中/未连接时用,不必等冷却、不必重启应用);' +
         'action=recent 最近收到的消息;action=sent 已发出消息(可撤回);' +
@@ -145,7 +145,8 @@ export function createNapcatTools(deps: NapcatToolDeps): AgentTool[] {
         'voice 发语音条(本地音频路径或 URL,mp3/wav/amr/silk 均可,NapCat 自动转 QQ 语音编码);' +
         'send_group 成功后自动把该群加入监听名单,才能收到群友回复——未监听的群消息会被丢掉;' +
         '群会话里的 send_group 只能发当前群,不能把本群的内容发到别的群,recent/chats 也只返回本群——主人在自己的窗口里指定群号才可以跨群);action=recall 撤回;' +
-        'action=zone QQ空间动态;action=members/friends/profile/group_info 查询;' +
+        'action=zone 查看 QQ空间动态;action=zone_post **发表说说**(content 正文;images 图片列表自动上传空间相册;ugc_right 可见范围 1所有人/4好友/16部分好友可见/64仅自己/128部分好友不可见,16/128 配 target_uins;需主人确认);action=zone_delete 按 tid 删除说说(需主人确认);' +
+        'action=members/friends/profile/group_info 查询;' +
         'action=groups 列出机器人已加入的所有群(群号+群名)——**监听/接入某群前先调它拿真实群号**,不要凭群名猜群号;' +
         'action=group_manage 群管理(踢人/禁言/全员禁言,需要主人确认);' +
         'action=sessions/session_mute/session_bind 会话管理。' +
@@ -165,7 +166,7 @@ export function createNapcatTools(deps: NapcatToolDeps): AgentTool[] {
             type: 'string',
             enum: [
               'login', 'status', 'reconnect', 'recent', 'sent', 'contacts', 'contact_update', 'chats', 'persona', 'persona_set', 'send',
-              'send_group', 'recall', 'zone', 'members', 'friends', 'profile', 'group_info', 'group_manage',
+              'send_group', 'recall', 'zone', 'zone_post', 'zone_delete', 'members', 'friends', 'profile', 'group_info', 'group_manage',
               'sessions', 'session_mute', 'session_bind', 'groups',
               'requests', 'request_handle', 'group_file', 'group_admin', 'react', 'poke', 'account',
               'friend_manage', 'forward', 'msg', 'raw',
@@ -175,12 +176,16 @@ export function createNapcatTools(deps: NapcatToolDeps): AgentTool[] {
           user_id: { type: 'string', description: 'send:目标QQ号(发给别人必填;只有正在和对方私聊的会话里可以省略。主人自己的会话里省略不会发给主人)' },
           group_id: { type: 'string', description: 'send_group:目标群号(群会话里省略=当前群,不能改发到别的群);chats:按群过滤;members/group_info/group_manage:目标群' },
           message: { type: 'string', description: 'send/send_group:消息文本' },
-          image: { type: 'string', description: 'send/send_group:图片路径或URL(真正发图)' },
+          image: { type: 'string', description: 'send/send_group:图片路径或URL(真正发图);zone_post:单张图片(多张用 images)' },
           file: { type: 'string', description: 'send/send_group:本地文件路径(真正上传文件/视频,如 .mp4)' },
           voice: { type: 'string', description: 'send/send_group:语音文件路径或URL(真正发语音条,如 .mp3/.wav/.amr,自动转 QQ silk)' },
           message_id: { type: 'string', description: 'recall:要撤回的消息ID' },
           qq: { type: 'string', description: 'contact_update:联系人QQ;zone:查看谁的动态(缺省主人)' },
           num: { type: 'number', description: 'zone:条数(1-20,缺省10)' },
+          images: { type: 'array', items: { type: 'string' }, description: 'zone_post:图片列表(本地路径/URL/base64://,自动上传 QQ 空间相册;单张也可用 image)' },
+          ugc_right: { type: 'number', description: 'zone_post:可见范围 1所有人可见(缺省)/4好友可见/16部分好友可见/64仅自己可见/128部分好友不可见' },
+          target_uins: { type: 'array', items: { type: 'string' }, description: 'zone_post:ugc_right 为 16/128 时权限作用的 QQ 号列表' },
+          tid: { type: 'string', description: 'zone_delete:要删除的说说 tid(zone_post 返回)' },
           name: { type: 'string', description: 'contact_update:备注名' },
           info: { type: 'string', description: 'contact_update:已知信息' },
           source: { type: 'string', enum: ['private', 'group'], description: 'contact_update:认识来源' },
@@ -205,7 +210,7 @@ export function createNapcatTools(deps: NapcatToolDeps): AgentTool[] {
           emoji: { type: 'string', description: 'react:表情 ID(如 76)或表情名' },
           emoji_set: { type: 'boolean', description: 'react:true 添加(默认)/false 取消' },
           notice_id: { type: 'string', description: 'group_admin notice_delete:公告 ID' },
-          content: { type: 'string', description: 'group_admin notice_send:公告内容' },
+          content: { type: 'string', description: 'group_admin notice_send:公告内容;zone_post:说说正文(可与 images 至少给一个)' },
           title: { type: 'string', description: 'group_admin set_title:专属头衔' },
           card: { type: 'string', description: 'group_admin set_card:群名片' },
           honor_type: { type: 'string', description: 'group_admin honor:talkative/performer/legend/strong_newbie/emotion/all(缺省 all)' },
@@ -314,6 +319,52 @@ export function createNapcatTools(deps: NapcatToolDeps): AgentTool[] {
               `${i + 1}. ${new Date(f.createTime * 1000).toLocaleString('zh-CN')} ${(f.content || '(无文字)').slice(0, 100)}` +
               `${f.picnum > 0 ? ` [图片×${f.picnum}]` : ''}${f.likenum > 0 ? ` 👍${f.likenum}` : ''}${f.commentnum > 0 ? ` 💬${f.commentnum}` : ''}`
             ).join('\n')
+        }
+        if (action === 'zone_post') {
+          // 发表 QQ 空间说说(2026-10-28 接入 NapCat send_qzone_msg):公开发动态
+          // 是对外动作,与群公告同级走主人确认门
+          const content = String(params.content ?? params.message ?? '').trim()
+          const images = [
+            ...(Array.isArray(params.images) ? params.images.map((x) => String(x).trim()) : []),
+            String(params.image ?? '').trim(),
+          ].filter(Boolean)
+          if (!content && images.length === 0) throw new Error('zone_post 需要 content(说说正文)或 images(图片)至少一个')
+          for (const img of images) {
+            if (!/^https?:|^data:image\/|^base64:/.test(img) && !existsSync(img)) {
+              throw new Error(`图片不存在:${img}`)
+            }
+          }
+          const ugcRight = params.ugc_right !== undefined ? Math.floor(Number(params.ugc_right)) : 1
+          if (![1, 4, 16, 64, 128].includes(ugcRight)) {
+            throw new Error('ugc_right 仅支持 1(所有人可见)/4(好友可见)/16(部分好友可见)/64(仅自己可见)/128(部分好友不可见)')
+          }
+          const targetUins = (Array.isArray(params.target_uins) ? params.target_uins.map((x) => String(x).trim()) : []).filter(Boolean)
+          if ((ugcRight === 16 || ugcRight === 128) && targetUins.length === 0) {
+            throw new Error('ugc_right 为 16/128 时需要 target_uins(权限作用的 QQ 号列表)')
+          }
+          const scopeText = ({ 1: '所有人可见', 4: '好友可见', 16: '部分好友可见', 64: '仅自己可见', 128: '部分好友不可见' } as Record<number, string>)[ugcRight] ?? String(ugcRight)
+          if (confirmDangerous) {
+            const ok = await confirmDangerous(
+              'zone_post',
+              `确认发表 QQ 空间说说(${scopeText}${images.length ? `,含图片×${images.length}` : ''}):${(content || '(纯图片)').slice(0, 50)}`,
+            )
+            if (!ok) return '操作已取消(主人未确认)'
+          }
+          const r = await client.sendQzoneMsg(content, { images, ugcRight, targetUins })
+          return (
+            `已发表 QQ 空间说说(tid ${r.tid},${scopeText}${images.length ? `,含图片×${images.length}` : ''})` +
+            `;删除该说说用 action=zone_delete, tid=${r.tid}`
+          )
+        }
+        if (action === 'zone_delete') {
+          const tid = String(params.tid ?? '').trim()
+          if (!tid) throw new Error('zone_delete 需要 tid(zone_post 返回的说说 ID)')
+          if (confirmDangerous) {
+            const ok = await confirmDangerous('zone_delete', `确认删除 QQ 空间说说(tid ${tid})?`)
+            if (!ok) return '操作已取消(主人未确认)'
+          }
+          await client.deleteQzoneMsg(tid)
+          return `已删除说说 ${tid}`
         }
         if (action === 'sessions') {
           // 列表直接可查(2026-08-14);增删监听/屏蔽/绑定走 manage_sessions

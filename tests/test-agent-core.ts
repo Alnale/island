@@ -128,6 +128,7 @@ import {
   createNapcatTools,
   buildOutgoingMessage,
   extractImageRefs,
+  stripMentionMarkup,
   stripSelfMentions,
   classifyTurn,
   gtkFromCookie,
@@ -158,6 +159,9 @@ import {
   stripToolNarration,
   turnAlreadySentToPending,
   turnAlreadySentToTarget,
+  turnAlreadySentGroupText,
+  sentMessageIsText,
+  shouldHandGroupReplyToMaster,
   looksLikeForwardInstruction,
   looksLikeGroupSendInstruction,
   shouldSendGroupPanelReply,
@@ -3112,10 +3116,10 @@ await test('isDirectedToBot:主人群聊消息意图识别(2026-09-22 规则②,
   assert(isDirectedToBot('帮我查下天气', true) === true, '@机器人 显式指向')
   assert(isDirectedToBot('岛灵在吗') === true, '称呼岛灵 = 指向')
   assert(isDirectedToBot('鲸鱼娘看看这个') === true, '称呼鲸鱼娘 = 指向')
-  assert(isDirectedToBot('你觉得呢?') === true, '第二人称疑问 = 指向')
-  assert(isDirectedToBot('你说好不好') === true, '第二人称+好不好 = 指向')
-  assert(isDirectedToBot('帮我查一下B站排名') === true, '对助手式祈使 = 指向')
-  assert(isDirectedToBot('给我看看你的图') === true, '给我+动词 = 指向')
+  assert(isDirectedToBot('你觉得呢?') === false, '第二人称疑问不足以确定在叫机器人')
+  assert(isDirectedToBot('你说好不好') === false, '群聊第二人称不升级主人指令')
+  assert(isDirectedToBot('帮我查一下B站排名') === false, '祈使句没有称呼时可能在叫群友')
+  assert(isDirectedToBot('给我看看你的图') === false, '没有称呼的祈使句不升级权限')
   // 未指向(主人与群友闲聊 → 别人的信息)
   assert(isDirectedToBot('哈哈今天好累') === false, '日常感慨未指向')
   assert(isDirectedToBot('晚上开黑吗') === false, '问群友未指向(无疑问对象你)')
@@ -3512,6 +3516,42 @@ await test('looksLikeMasterAddressed:别人轮对主人说话安全网(2026-09-2
   assert(looksLikeMasterAddressed('我跟主人说了你明天有空,你再跟他确认') === false, '句中跟主人说是讲给对方听的,不整段改投主人')
   assert(looksLikeMasterAddressed('好的主人') === false, '非开头称呼(保守,宁漏)')
   assert(looksLikeMasterAddressed('') === false, '空输入')
+})
+
+await test('shouldHandGroupReplyToMaster:群聊轮转交主人判定(2026-10-28 群路由优化——修「回复群友的发给主人 QQ」)', () => {
+  // 明确私下对主人请示/汇报 → 主人
+  assert(shouldHandGroupReplyToMaster('主人,魔精问你明天有没有空?') === true, '「主人,」私下问主人 = 转主人')
+  assert(shouldHandGroupReplyToMaster('向主人汇报一下,图已经发群里了') === true, '向主人汇报 = 转主人')
+  assert(shouldHandGroupReplyToMaster('给主人请示要不要答应他') === true, '给主人请示 = 转主人')
+  // 含「主人，」的混合措辞保守扣留，不能凭群称呼放行私下内容。
+  assert(shouldHandGroupReplyToMaster('主人,你们别乱说!') === true, '「主人,你们别乱说」含主人称呼时保守扣留，不按正文改收件人')
+  assert(shouldHandGroupReplyToMaster('主人,大家别误会呀') === true, '「主人,大家…」群称呼不能使私下内容放行')
+  assert(shouldHandGroupReplyToMaster('主人,各位评评理~') === true, '「主人,各位…」群称呼不能使私下内容放行')
+  // 对群转达/公开回应(非主人前缀)→ 发群(旧 isAsk 会误转主人)
+  assert(shouldHandGroupReplyToMaster('我去问主人哈~') === false, '「我去问主人哈」对群转达 = 发群,不转主人')
+  assert(shouldHandGroupReplyToMaster('你们别乱说,主人不是那样的人!') === false, '公开维护(非主人前缀)= 发群')
+  assert(shouldHandGroupReplyToMaster('哈哈确实拉胯,心疼你一秒') === false, '普通群回复 = 发群')
+  assert(shouldHandGroupReplyToMaster('主人最好了!') === false, '「主人最」后跟非标点 = 公开夸主人,发群')
+  // 空输入
+  assert(shouldHandGroupReplyToMaster('') === false && shouldHandGroupReplyToMaster('   ') === false, '空输入')
+})
+
+await test('turnAlreadySentGroupText/sentMessageIsText:媒体发送不算「已文字回复」(2026-10-28 修发图+文字回复误转主人)', () => {
+  const mediaOnly = { type: 'group', target: '111', text: '(图片/文件/语音)' }
+  const textSend = { type: 'group', target: '111', text: '你好呀' }
+  assert(sentMessageIsText(textSend) === true, '文字发送算文字回复')
+  assert(sentMessageIsText(mediaOnly) === false, '纯媒体占位不算文字回复')
+  assert(sentMessageIsText({ type: 'group', target: '111', text: '' }) === false, '空正文不算文字回复')
+  // 本轮发过图(mediaOnly),轮前文字基线 0:turnAlreadySentGroupText 应为 false(不误转主人)
+  assert(turnAlreadySentGroupText([mediaOnly], 0, '111') === false, '只发过媒体 → 不算已文字回复,对话文本发群')
+  // 本轮发过文字(textSend),轮前文字基线 0:应为 true(对话文本=给主人的汇报)
+  assert(turnAlreadySentGroupText([textSend], 0, '111') === true, '发过文字 → 已文字回复,对话文本转主人')
+  // 媒体 + 文字:有文字即算
+  assert(turnAlreadySentGroupText([mediaOnly, textSend], 0, '111') === true, '媒体+文字有文字即算')
+  // 轮前已有 1 条文字(基线 1),本轮未新增文字:不应误判
+  assert(turnAlreadySentGroupText([textSend], 1, '111') === false, '未超基线不算本轮已发')
+  // 别的群不串
+  assert(turnAlreadySentGroupText([textSend], 0, '222') === false, '别的群不算')
 })
 
 await test('parseClassifierJson:意图判定解析(2026-08-16)', () => {
@@ -6133,7 +6173,7 @@ await test('napcat 工具:send/send_group 缺省目标 = 当前会话对象(2026
       getContacts: async () => ({}),
       updateContact: async (p) => ({ qq: p.qq, updatedAt: 0 }),
     },
-    { getSessionKey: () => sessionKey },
+    { getSessionKey: () => sessionKey, getTurnKind: () => 'panel' },
   )
   const tool = tools.find((t) => t.name === 'napcat')!
   // 私聊会话:send 不传 user_id → 默认发给当前会话对象("发消息给他"直落到位)
@@ -6169,7 +6209,7 @@ await test('napcat 工具:send/send_group 缺省目标 = 当前会话对象(2026
       getContacts: async () => ({}),
       updateContact: async (p) => ({ qq: p.qq, updatedAt: 0 }),
     },
-    { getSessionKey: () => 'private:10000', getMasterQQ: () => '10000' },
+    { getSessionKey: () => 'private:10000', getMasterQQ: () => '10000', getTurnKind: () => 'master-qq' },
   )
   const masterTool = masterTools.find((t) => t.name === 'napcat')!
   await assertRejects(() => masterTool.execute({ action: 'send', message: '周末见' }), '主人自己的会话')
@@ -6349,6 +6389,43 @@ await test('群艾特按回复对象,不总是艾特发消息的人', () => {
   assert(both.includes('10002') && both.includes('10001'), `点到的两个人都要艾特,实际:${both.join(',')}`)
   const qq = resolveGroupMention({ reply: 'QQ10002 你说得对', speakerQQ: '10001', directed: true, participants: people })
   assert(qq.length === 1 && qq[0] === '10002', '写出本群 QQ 就艾特那个人')
+})
+
+await test('群回复正文的手写艾特剥离:不重复艾特、不露对方 QQ 号', () => {
+  // @+QQ号(模型抄入站 @号码 的惯用写法):连 @ 带号删掉
+  assert(stripMentionMarkup('@10002 你说得对', ['10002']) === '你说得对', `@QQ号整段删,实际:${stripMentionMarkup('@10002 你说得对', ['10002'])}`)
+  assert(stripMentionMarkup('@QQ:10002 你说得对', ['10002']) === '你说得对', `@QQ:号同删,实际:${stripMentionMarkup('@QQ:10002 你说得对', ['10002'])}`)
+  assert(stripMentionMarkup('＠10002你好', ['10002']) === '你好', `全角 @ 同款,实际:${stripMentionMarkup('＠10002你好', ['10002'])}`)
+  // 写 QQ 号点名:号码被 at 段艾特了才删
+  assert(stripMentionMarkup('QQ10002 你说得对', ['10002']) === '你说得对', `QQ号点名删号码,实际:${stripMentionMarkup('QQ10002 你说得对', ['10002'])}`)
+  assert(stripMentionMarkup('张三(QQ:10002)你说得对', ['10002']) === '张三你说得对', `括号备注的 QQ 号也删,实际:${stripMentionMarkup('张三(QQ:10002)你说得对', ['10002'])}`)
+  assert(stripMentionMarkup('张三(10002)你说得对', ['10002']) === '张三你说得对', `纯括号 QQ 号也删,实际:${stripMentionMarkup('张三(10002)你说得对', ['10002'])}`)
+  assert(stripMentionMarkup('他QQ是10002', ['10002']) === '他QQ是10002', '「QQ是号码」是内容不是点名')
+  assert(stripMentionMarkup('工号QQ20002报到', ['10002']) === '工号QQ20002报到', '没艾特的号码可能是内容,留着')
+  // @+名字:只删 @ 符号,名字留着当称呼
+  assert(stripMentionMarkup('@张三 你说得对', ['10002']) === '张三 你说得对', `@名字删符号留名字,实际:${stripMentionMarkup('@张三 你说得对', ['10002'])}`)
+  // CQ 码艾特整段删(at 段已发,正文里会裸露成 [CQ:at,qq=…])
+  assert(stripMentionMarkup('好[CQ:at,qq=10002]你看', ['10002']) === '好你看', `CQ at 码删掉,实际:${stripMentionMarkup('好[CQ:at,qq=10002]你看', ['10002'])}`)
+  // 邮箱/网址里的 @ 不能动
+  assert(stripMentionMarkup('发我 user@163.com', []) === '发我 user@163.com', '邮箱 @ 保留')
+  assert(stripMentionMarkup('https://x.com/@user 看这个', []) === 'https://x.com/@user 看这个', '网址 @ 保留')
+  assert(stripMentionMarkup('   ', ['10002']) === '   ', '空白原样')
+  // 同号艾特去重:at 名单重复时不能连发两个真艾特
+  const dup = buildOutgoingMessage('在吗', [], undefined, { at: ['10002', '10002', 'all'] }) as Array<{
+    type: string
+    data: Record<string, unknown>
+  }>
+  const atSegs = dup.filter((s) => s.type === 'at')
+  assert(atSegs.length === 2 && atSegs[0].data.qq === '10002' && atSegs[1].data.qq === 'all', `艾特段同号去重,实际:${JSON.stringify(dup)}`)
+  // CQ at 码点名也认(正文会被剥掉,艾特改由 at 段发)
+  const people = [
+    { qq: '10001', name: '李四' },
+    { qq: '10002', name: '张三' },
+  ]
+  const cq = resolveGroupMention({ reply: '[CQ:at,qq=10002] 你说得对', speakerQQ: '10001', directed: true, participants: people })
+  assert(cq.length === 1 && cq[0] === '10002', `CQ at 码也认作点名,实际:${cq.join(',')}`)
+  const full = resolveGroupMention({ reply: '＠10002 你说得对', speakerQQ: '10001', directed: true, participants: people })
+  assert(full.length === 1 && full[0] === '10002', `全角 @ 点名也认,实际:${full.join(',')}`)
 })
 
 await test('群会话的私聊和戳一戳不能送到别的对象', async () => {
@@ -6612,6 +6689,73 @@ await test('napcat 工具:recall / members(自动补档案) / friends / profile 
   await assertRejects(() => tool.execute({ action: 'group_manage', group_id: '1', op: 'nope' }), 'op 仅支持')
   await assertRejects(() => tool.execute({ action: 'group_manage', group_id: '1' }), 'group_manage 需要 op')
   await assertRejects(() => tool.execute({ action: 'group_manage', group_id: '1', op: 'whole_ban' }), 'whole_ban 需要 enable')
+})
+
+await test('napcat 工具:zone_post/zone_delete 发说说(可见范围校验+主人确认门,2026-10-28)', async () => {
+  const posted: Array<{ content: string; images?: string[]; ugcRight?: number; targetUins?: string[] }> = []
+  const deleted: string[] = []
+  let confirmed = true
+  const tools = napcatTools({
+    status: () => ({ connected: true, url: 'ws://127.0.0.1:3001', lastError: '', receivedCount: 0, repliedCount: 0 }),
+    sendToQQ: async () => '',
+    sendToGroup: async () => '',
+    getRecentMessages: () => [],
+    getContacts: async () => ({}),
+    updateContact: async (p) => ({ qq: p.qq, source: p.source, updatedAt: 0 }),
+    sendQzoneMsg: async (content, opts) => {
+      posted.push({ content, images: opts?.images, ugcRight: opts?.ugcRight, targetUins: opts?.targetUins })
+      return { tid: 'tid-42' }
+    },
+    deleteQzoneMsg: async (tid) => {
+      deleted.push(tid)
+    },
+  }, { confirmDangerous: async () => confirmed })
+  const tool = tools.find((t) => t.name === 'napcat')!
+  // 纯文字 + 可见范围透传 + 回显 tid/删除提示
+  // (注:assert 是 asserts 守卫,直接比 length 会把后续收窄成字面量报 2367——
+  //  与 sent 用例同款,先取 number 局部量再比)
+  const r1 = String(await tool.execute({ action: 'zone_post', content: '今天天气真好', ugc_right: 4 }))
+  const n1: number = posted.length
+  assert(n1 === 1 && posted[0].content === '今天天气真好' && posted[0].ugcRight === 4, 'zone_post 应透传正文与可见范围')
+  assert(r1.includes('tid-42') && r1.includes('好友可见') && r1.includes('zone_delete'), `zone_post 应回显 tid 与删除提示,实际:${r1}`)
+  // 图片列表(images 与单张 image 并集)+ target_uins(16 部分好友可见)
+  const r2 = String(
+    await tool.execute({
+      action: 'zone_post', content: '带图动态', images: ['https://img.example/a.png'], image: 'https://img.example/b.png',
+      ugc_right: 16, target_uins: ['10001', '10002'],
+    }),
+  )
+  const n2: number = posted.length
+  assert(
+    n2 === 2 && posted[1].images?.length === 2 && posted[1].ugcRight === 16 && posted[1].targetUins?.join(',') === '10001,10002',
+    `zone_post 应透传图片与权限对象,实际:${JSON.stringify(posted[1])}`,
+  )
+  assert(r2.includes('部分好友可见') && r2.includes('含图片×2'), `zone_post 应回显可见范围与图片数,实际:${r2}`)
+  // 纯图片说说(message 作为正文别名)
+  const r3 = String(await tool.execute({ action: 'zone_post', message: '只发图', image: 'https://img.example/c.png' }))
+  const n3: number = posted.length
+  assert(n3 === 3 && posted[2].content === '只发图' && posted[2].ugcRight === 1, `zone_post 应收 message 别名并缺省所有人可见,实际:${r3}`)
+  // 参数校验:正文/图片至少一个、图片存在性、ugc_right 合法域、16/128 必须给 target_uins
+  await assertRejects(() => tool.execute({ action: 'zone_post' }), '至少一个')
+  await assertRejects(() => tool.execute({ action: 'zone_post', content: 'x', image: 'D:/nope/not-exist.png' }), '图片不存在')
+  await assertRejects(() => tool.execute({ action: 'zone_post', content: 'x', ugc_right: 2 }), 'ugc_right 仅支持')
+  await assertRejects(() => tool.execute({ action: 'zone_post', content: 'x', ugc_right: 128 }), 'target_uins')
+  // 主人确认门:拒绝则不发
+  confirmed = false
+  const cancelled = String(await tool.execute({ action: 'zone_post', content: '不该发出去' }))
+  const n4: number = posted.length
+  assert(cancelled.includes('已取消') && n4 === 3, `主人未确认不应发表,实际:${cancelled}`)
+  // zone_delete:透传 tid + 确认门 + 缺参拒绝
+  confirmed = true
+  const rDel = String(await tool.execute({ action: 'zone_delete', tid: 'tid-42' }))
+  const d1: number = deleted.length
+  assert(d1 === 1 && deleted[0] === 'tid-42', 'zone_delete 应透传 tid')
+  assert(rDel.includes('已删除'), `zone_delete 应回显,实际:${rDel}`)
+  await assertRejects(() => tool.execute({ action: 'zone_delete' }), 'zone_delete 需要 tid')
+  confirmed = false
+  const delCancelled = String(await tool.execute({ action: 'zone_delete', tid: 'tid-42' }))
+  const d2: number = deleted.length
+  assert(delCancelled.includes('已取消') && d2 === 1, `主人未确认不应删除,实际:${delCancelled}`)
 })
 
 await test('napcatMessageImages:图片段提取(收图链路)', () => {
@@ -6948,6 +7092,10 @@ await test('napcatMessageText:群消息 @ 与图片/回复段解析', () => {
   assert(
     napcatMessageText([{ type: 'at', data: { qq: '123' } }, { type: 'text', data: { text: ' hi' } }], '30000') === '@123 hi',
     '@ 他人标注 QQ 号',
+  )
+  assert(
+    napcatMessageText([{ type: 'at', data: { qq: '123', name: '张三' } }, { type: 'text', data: { text: ' hi' } }], '30000') === '@张三 hi',
+    '@ 他人有名字时用名字,不露 QQ 号',
   )
 })
 
